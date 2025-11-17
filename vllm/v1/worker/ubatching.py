@@ -7,7 +7,7 @@ import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
-from vllm.utils import current_stream
+from vllm.utils.torch_utils import current_stream
 
 _THREAD_ID_TO_CONTEXT: dict = {}
 _CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = [None, None]
@@ -183,6 +183,15 @@ def dbo_register_recv_hook(recv_hook):
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
         next_ctx.recv_hook = recv_hook
+
+
+def dbo_get_previous_event(func, *args, **kwargs):
+    if len(_THREAD_ID_TO_CONTEXT) > 0:
+        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        ctx = _CURRENT_CONTEXTS[ctx_idx]
+        # execute callable on the ubatch compute stream to record/wait events there
+        with torch.cuda.stream(ctx.compute_stream):
+            return func(*args, **kwargs)
 
 
 def make_ubatch_contexts(

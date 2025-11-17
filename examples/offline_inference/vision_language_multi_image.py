@@ -18,22 +18,22 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/flycatcher.jpeg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/somefish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/starfish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/snail.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/thistle.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/husky.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/orangetabbycat.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/guineapig.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/rabbit.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/horsepony.jpg",
 ]
 
 
@@ -44,6 +44,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: list[int] | None = None
     chat_template: str | None = None
     lora_requests: list[LoRARequest] | None = None
+    sampling_params: SamplingParams | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -95,6 +96,41 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_bee(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Open-Bee/Bee-8B-RL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        trust_remote_code=True,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -163,6 +199,46 @@ def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    model_name = "deepseek-ai/DeepSeek-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    placeholder = "<image>\n" * len(image_urls)
+    prompt = placeholder + question
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=8192,
+        # ngram logit processor args
+        extra_args=dict(
+            ngram_size=30,
+            window_size=90,
+            # whitelist: <td>, </td>
+            whitelist_token_ids={128821, 128822},
+        ),
+        skip_special_tokens=False,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+        sampling_params=sampling_params,
     )
 
 
@@ -725,6 +801,27 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>" * len(image_urls)
+    prompt = f"<|begin_of_sentence|>User: {question}{placeholders}\nAssistant: "
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
@@ -1215,8 +1312,10 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
+    "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
+    "deepseek_ocr": load_deepseek_ocr,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
@@ -1234,6 +1333,7 @@ model_example_map = {
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
+    "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "phi4_multimodal": load_phi4_multimodal,
@@ -1289,8 +1389,12 @@ def run_chat(model: str, question: str, image_urls: list[str], seed: int | None)
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
     llm = LLM(**engine_args)
 
-    sampling_params = SamplingParams(
-        temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
     outputs = llm.chat(
         [

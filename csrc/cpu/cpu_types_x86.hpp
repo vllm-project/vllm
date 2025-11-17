@@ -40,6 +40,23 @@ namespace vec_op {
 
 #define FORCE_INLINE __attribute__((always_inline)) inline
 
+// Function to get the timestamp using RDTSCP
+FORCE_INLINE uint64_t bench_timestamp() {
+  unsigned int cycles_low, cycles_high;
+  asm volatile(
+      ".intel_syntax noprefix\n\t"
+      "CPUID\n\t"        // Serialize instruction stream to ensure previous
+                         // instructions complete
+      "RDTSCP\n\t"       // Read TSC and core ID
+      "mov %0, edx\n\t"  // Store high 32 bits of TSC
+      "mov %1, eax\n\t"  // Store low 32 bits of TSC
+      ".att_syntax"
+      : "=r"(cycles_high), "=r"(cycles_low)::"rax", "rbx", "rcx",
+        "rdx"  // Clobbered registers
+  );
+  return (uint64_t)cycles_high << 32 | cycles_low;
+}
+
 namespace {
 template <typename T, T... indexes, typename F>
 constexpr void unroll_loop_item(std::integer_sequence<T, indexes...>, F&& f) {
@@ -407,6 +424,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   float reduce_min() const { return _mm512_reduce_min_ps(reg); }
 
+  float get_last_elem() const { return _mm512_cvtss_f32(reg); }
+
   template <int group_size>
   float reduce_sub_sum(int idx) {
     static_assert(VEC_ELEM_NUM % group_size == 0);
@@ -445,9 +464,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
       : reg_low(_mm256_loadu_ps(ptr)), reg_high(_mm256_loadu_ps(ptr + 8)) {}
 
   explicit FP32Vec16(__m256 low, __m256 high) : reg_low(low), reg_high(high) {}
-
-  explicit FP32Vec16(const FP32Vec16& data)
-      : reg_low(data.reg_low), reg_high(data.reg_high) {}
 
   explicit FP32Vec16(const FP32Vec4& data)
       : reg_low((__m256)_mm256_inserti128_si256(
@@ -502,6 +518,32 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 operator/(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_div_ps(reg_low, b.reg_low),
                      _mm256_div_ps(reg_high, b.reg_high));
+  }
+
+  FP32Vec16 max(const FP32Vec16& b) const {
+    return FP32Vec16(_mm256_max_ps(reg_low, b.reg_low),
+                     _mm256_max_ps(reg_high, b.reg_high));
+  }
+
+  float reduce_max() const {
+    __m256 v = _mm256_max_ps(reg_low, reg_high);
+    // Permute to compare elements within 128-bit lanes
+    __m256 v_shuffled = _mm256_permute_ps(
+        v, 0b00001011);  // Swap halves within each 128-bit lane
+    __m256 v_max = _mm256_max_ps(v, v_shuffled);
+
+    v_shuffled = _mm256_permute_ps(
+        v_max, 0b00000001);  // Shuffle elements within each 128-bit lane
+    v_max = _mm256_max_ps(v_max, v_shuffled);
+
+    // Permute to compare elements between 128-bit lanes
+    v_shuffled =
+        _mm256_permute2f128_ps(v_max, v_max, 0b00000001);  // Swap 128-bit lanes
+    v_max = _mm256_max_ps(v_max, v_shuffled);
+
+    // At this point, the maximum value is present in all elements of v_max.
+    // Extract the first element for the scalar result.
+    return _mm256_cvtss_f32(v_max);  // Extract the lowest 32-bit float
   }
 
   float reduce_sum() const {
@@ -642,7 +684,7 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v)
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v)
     : reg(_mm256_insertf128_si256(
           _mm256_castsi128_si256(FP16Vec8(FP32Vec8(v.reg_low)).reg),
-          FP16Vec8(FP32Vec8(v.reg_low)).reg, 1)) {}
+          FP16Vec8(FP32Vec8(v.reg_high)).reg, 1)) {}
 #endif
 
 #ifdef __AVX512BF16__

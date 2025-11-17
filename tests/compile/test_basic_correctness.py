@@ -5,7 +5,7 @@ import dataclasses
 import pytest
 
 from vllm.config import CompilationMode
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
 
@@ -127,7 +127,9 @@ def test_compile_correctness(
             CompilationMode.VLLM_COMPILE,
         ]:
             for mode in [CompilationMode.NONE, comp_mode]:
-                all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=inductor"])
+                all_args.append(
+                    final_args + [f"-O.mode={mode.name}", "-O.backend=inductor"]
+                )
 
             # inductor will change the output, so we only compare if the output
             # is close, not exactly the same.
@@ -146,7 +148,7 @@ def test_compile_correctness(
             CompilationMode.DYNAMO_TRACE_ONCE,
             CompilationMode.VLLM_COMPILE,
         ]:
-            all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=eager"])
+            all_args.append(final_args + [f"-O.mode={mode.name}", "-O.backend=eager"])
             all_envs.append({})
             all_envs.append({})
 

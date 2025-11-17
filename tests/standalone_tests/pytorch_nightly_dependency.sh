@@ -37,6 +37,6 @@ if diff before.txt after.txt; then
 else
   echo "torch version overridden by nightly_torch_test.txt, \
   if the dependency is not triggered by the pytroch nightly test,\
-  please add the dependency to the list 'white_list'  in tools/generate_nightly_torch_test.py"
+  please add the dependency to the list 'white_list' in tools/pre_commit/generate_nightly_torch_test.py"
   exit 1
 fi

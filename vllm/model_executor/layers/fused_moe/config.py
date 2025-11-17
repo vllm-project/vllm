@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Optional, Union
 
 import torch
@@ -14,8 +15,9 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -88,6 +90,26 @@ def _quant_flags_to_group_shape(
             w_shape = GroupShape.PER_TOKEN
 
     return a_shape, w_shape
+
+
+# The type of method in top-K routing
+# Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
+class RoutingMethodType(IntEnum):
+    # Default: Softmax -> TopK
+    Default = (0,)
+    # Renormalize: TopK -> Softmax
+    Renormalize = (1,)
+    # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
+    # -> Top8 experts from the Top4 groups
+    DeepSeekV3 = (2,)
+    # Llama4: Top1 -> Sigmoid
+    Llama4 = (3,)
+    # RenormalizeNaive: Softmax -> TopK -> Renormalize
+    RenormalizeNaive = (4,)
+    # TopK: TopK (no softmax)
+    TopK = (5,)
+    # Unspecified
+    Unspecified = 6.0
 
 
 @dataclass
@@ -462,6 +484,10 @@ def fp8_w8a8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
+    g1_alphas: torch.Tensor | None = None,
+    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
@@ -469,9 +495,13 @@ def fp8_w8a8_moe_quant_config(
     return FusedMoEQuantConfig.make(
         torch.float8_e4m3fn,
         w1_scale=w1_scale,
+        g1_alphas=g1_alphas,
         w2_scale=w2_scale,
+        g2_alphas=g2_alphas,
         a1_scale=a1_scale,
+        a1_gscale=a1_gscale,
         a2_scale=a2_scale,
+        a2_gscale=a2_gscale,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
@@ -512,6 +542,26 @@ def mxfp4_w4a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
+def mxfp4_mxfp8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("mxfp8"),
+        _a2=FusedMoEQuantDesc("mxfp8"),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
@@ -663,6 +713,17 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
+    def flatten_tp_across_dp(
+        tp_size: int, dp_size: int, dp_rank: int
+    ) -> tuple[int, int]:
+        tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
+        # There are actually dp_size * tp_size devices. Update tp_size
+        # and tp_rank so we shard across all devices.
+        flatten_tp_size = dp_size * tp_size
+        flatten_tp_rank = dp_rank * tp_size + tp_rank
+        return flatten_tp_size, flatten_tp_rank
+
+    @staticmethod
     def make(
         tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
     ) -> "FusedMoEParallelConfig":
@@ -737,19 +798,13 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        def flatten_tp_across_dp(dp_rank: int):
-            tp_rank = 0 if tp_size_ == 1 else get_tensor_model_parallel_rank()
-            # There are actually dp_size_ * tp_size_ devices. Update tp_size
-            # and tp_rank so we shard across all devices.
-            tp_size = dp_size_ * tp_size_
-            tp_rank = dp_rank * tp_size_ + tp_rank
-            return tp_size, tp_rank
-
         use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+            tp_size_, dp_size_, dp_rank
+        )
 
         if not use_ep:
             return FusedMoEParallelConfig(
@@ -796,6 +851,10 @@ class FusedMoEConfig:
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
+
+    is_act_and_mul: bool = True
+
+    is_lora_enabled: bool = False
 
     def __post_init__(self):
         if self.dp_size > 1:

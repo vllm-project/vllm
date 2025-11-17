@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     count_expert_num_tokens,
     disable_inplace,
 )
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -149,6 +149,15 @@ class FusedMoEPrepareAndFinalize(ABC):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
+
+    def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermute"):
+        """
+        Initialize FusedMoEPrepareAndFinalize settings that depend on
+        FusedMoEPermuteExpertsUnpermute experts object.
+        The FusedMoEPrepareAndFinalize implementations that have such
+        dependencies may choose to override this function.
+        """
+        return
 
     @abstractmethod
     def prepare(
@@ -504,6 +513,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    def supports_packed_ue8m0_act_scales(self) -> bool:
+        """
+        A flag indicating whether or not this class can process packed ue8m0
+        activation scales.
+        """
+        return False
+
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """
         Workspace type: The dtype to use for the workspace tensors.
@@ -558,6 +574,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             torch.ops._C.silu_and_mul(output, input)
         elif activation == "gelu":
             torch.ops._C.gelu_and_mul(output, input)
+        elif activation == "swigluoai":
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(output, input)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
@@ -661,6 +680,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+
+        self._post_init_setup()
         assert (
             prepare_finalize.activation_format == fused_experts.activation_formats[0]
         ), (
@@ -669,6 +690,19 @@ class FusedMoEModularKernel(torch.nn.Module):
             f"{fused_experts.__class__.__name__}."
             f"{fused_experts.activation_formats[0]}"
         )
+
+    def _post_init_setup(self):
+        """
+        Resolve any leftover setup dependencies between self.prepare_finalize
+        and self.fused_experts here.
+        """
+        self.prepare_finalize.post_init_setup(self.fused_experts)
+
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps.
+        """
+        return self.fused_experts.supports_expert_map()
 
     def output_is_reduced(self) -> bool:
         """
@@ -1031,7 +1065,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 a1q_scale=_slice_scales(a1q_scale, s, e),
-                a2_scale=_slice_scales(self.fused_experts.a2_scale, e, e),
+                a2_scale=_slice_scales(self.fused_experts.a2_scale, s, e),
                 workspace13=workspace13,
                 workspace2=workspace2,
                 expert_tokens_meta=c_expert_tokens_meta,

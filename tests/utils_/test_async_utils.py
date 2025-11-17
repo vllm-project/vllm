@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
 
 
 async def _mock_async_iterator(idx: int):

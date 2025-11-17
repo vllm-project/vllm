@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import os
 import queue
 import signal
@@ -12,14 +11,13 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import msgspec
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -28,14 +26,13 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import (
-    decorate_logs,
-    get_hash_fn_by_name,
-    make_zmq_socket,
-    set_process_title,
+from vllm.utils.gc_utils import (
+    freeze_gc_heap,
+    maybe_attach_gc_debug_callback,
 )
-from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -45,7 +42,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -60,13 +56,14 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     get_device_indices,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -93,7 +90,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if is_global_first_rank():
+        if vllm_config.parallel_config.data_parallel_rank == 0:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -121,29 +118,13 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
-            Scheduler = resolve_obj_by_qualname(
-                vllm_config.scheduler_config.scheduler_cls
-            )
-        else:
-            Scheduler = vllm_config.scheduler_config.scheduler_cls
-
-        # This warning can be removed once the V1 Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
-        if Scheduler is not V1Scheduler:
-            logger.warning(
-                "Using configured V1 scheduler class %s. "
-                "This scheduler interface is not public and "
-                "compatibility may not be maintained.",
-                vllm_config.scheduler_config.scheduler_cls,
-            )
+        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
             logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
@@ -160,14 +141,33 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
-            self.model_executor.init_kv_output_aggregator(
-                self.scheduler.connector.get_finished_count()  # type: ignore
-            )
+            self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry
         )
+
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
+
+            if xfer_handshake_metadata:
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {tp_rank: metadata}
+                # Merge all worker dicts into a single dict
+                content: dict[int, Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                kv_connector.set_xfer_handshake_metadata(content)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -184,7 +184,7 @@ class EngineCore:
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
             self.vllm_config.cache_config.enable_prefix_caching
-            or self.scheduler.get_kv_connector() is not None
+            or kv_connector is not None
         ):
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
@@ -198,6 +198,11 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        freeze_gc_heap()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -240,9 +245,10 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(
+        logger.info_once(
             ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
             elapsed,
+            scope="local",
         )
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
@@ -317,20 +323,29 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
+        with record_function_or_nullcontext("core step: schedule"):
+            scheduler_output = self.scheduler.schedule()
 
-        with self.log_error_detail(scheduler_output):
-            model_output = self.model_executor.execute_model(scheduler_output)
+        with record_function_or_nullcontext("core step: execute_model"):
+            future = self.model_executor.execute_model(scheduler_output, non_block=True)
+            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+            with self.log_error_detail(scheduler_output):
+                model_output = future.result()
+                if model_output is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
 
-        assert isinstance(model_output, ModelRunnerOutput)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        with record_function_or_nullcontext("core step: update_from_output"):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
-        if self.use_spec_decode and model_executed:
+        # When using async scheduling we can't get draft token ids in advance,
+        # so we update draft token ids in the worker process and don't
+        # need to update draft token ids here.
+        if not self.async_scheduling and self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
@@ -361,35 +376,99 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
+        deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule()
-            future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            batch_queue.appendleft((future, scheduler_output))  # type: ignore[arg-type]
-
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            if (
-                model_executed
-                and len(batch_queue) < self.batch_queue_size
-                and not batch_queue[-1][0].done()
+            with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
+                scheduler_output = self.scheduler.schedule()
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: execute_model"
             ):
-                # Don't block on next worker response unless the queue is full
-                # or there are no more requests to schedule.
-                return None, True
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+
+            if scheduler_output.pending_structured_output_tokens:
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: pending_structured_output_tokens"
+                ):
+                    # We need to defer sampling until we have processed the model output
+                    # from the prior step.
+                    deferred_scheduler_output = scheduler_output
+                    # Block-wait for execute to return
+                    # (continues running async on the GPU).
+                    with self.log_error_detail(scheduler_output):
+                        exec_result = exec_future.result()
+                        assert exec_result is None
+            else:
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: get_grammar_bitmask"
+                ):
+                    # We aren't waiting for any tokens, get any grammar
+                    # output immediately.
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
+                # Block-wait for execute to return (continues running async on the GPU).
+                with self.log_error_detail(scheduler_output):
+                    exec_result = exec_future.result()
+
+                if exec_result is None:
+                    with record_function_or_nullcontext(
+                        "core step_with_batch_queue: sample_tokens"
+                    ):
+                        # Call sample tokens.
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                else:
+                    # No sampling required (e.g. all requests finished).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
+                # Add this step's future to the queue.
+                batch_queue.appendleft((future, scheduler_output))
+                if (
+                    model_executed
+                    and len(batch_queue) < self.batch_queue_size
+                    and not batch_queue[-1][0].done()
+                ):
+                    # Don't block on next worker response unless the queue is full
+                    # or there are no more requests to schedule.
+                    return None, True
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
+        with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
+            # Block until the next result is available.
+            future, scheduler_output = batch_queue.pop()
+            with self.log_error_detail(scheduler_output):
+                model_output = future.result()
+        with record_function_or_nullcontext(
+            "core step_with_batch_queue: update_from_output"
+        ):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
 
-        # Block until the next result is available.
-        future, scheduler_output = batch_queue.pop()
-        with self.log_error_detail(scheduler_output):
-            model_output = future.result()
+        # NOTE(nick): We can either handle the deferred tasks here or save
+        # in a field and do it immediately once step_with_batch_queue is
+        # re-called. The latter slightly favors TTFT over TPOT/throughput.
+        if deferred_scheduler_output:
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: deferred_scheduler_output"
+            ):
+                # We now have the tokens needed to compute the bitmask for the
+                # deferred request. Get the bitmask and call sample tokens.
+                grammar_output = self.scheduler.get_grammar_bitmask(
+                    deferred_scheduler_output
+                )
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
+                batch_queue.appendleft((future, deferred_scheduler_output))
 
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
         return engine_core_outputs, model_executed
 
     def shutdown(self):
@@ -462,14 +541,6 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config,
-    ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
@@ -589,11 +660,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
@@ -727,7 +793,7 @@ class EngineCoreProc(EngineCore):
         )
 
         # Receive initialization message.
-        logger.info("Waiting for init message from front-end.")
+        logger.debug("Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError(
                 "Did not receive response from front-end "
@@ -1089,6 +1155,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
+        assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         if vllm_config.kv_transfer_config is not None:

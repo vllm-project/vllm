@@ -34,21 +34,21 @@ def llm():
 
 
 def test_pooling_params(llm: LLM):
-    def get_outputs(activation):
+    def get_outputs(use_activation):
         text_1 = "What is the capital of France?"
         text_2 = "The capital of France is Paris."
 
         outputs = llm.score(
             text_1,
             text_2,
-            pooling_params=PoolingParams(activation=activation),
+            pooling_params=PoolingParams(use_activation=use_activation),
             use_tqdm=False,
         )
         return torch.tensor([x.outputs.score for x in outputs])
 
-    default = get_outputs(activation=None)
-    w_activation = get_outputs(activation=True)
-    wo_activation = get_outputs(activation=False)
+    default = get_outputs(use_activation=None)
+    w_activation = get_outputs(use_activation=True)
+    wo_activation = get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_activation, atol=1e-2), (
         "Default should use activation."

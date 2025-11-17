@@ -67,11 +67,24 @@ class StructuredOutputManager:
             reasoning_parser = (
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
+            reasoning_parser_plugin = (
+                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
+            )
+            if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+                ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
             if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
                 )
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+
+        self.enable_in_reasoning = (
+            self.vllm_config.structured_outputs_config.enable_in_reasoning
+        )
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
@@ -256,9 +269,10 @@ class StructuredOutputManager:
                         and token is not None
                         and not structured_output_request.grammar.is_terminated()
                     ):
-                        assert structured_output_request.grammar.accept_tokens(
+                        accepted = structured_output_request.grammar.accept_tokens(
                             req_id, [token]
                         )
+                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
@@ -274,7 +288,13 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_fill_bitmask(self, request: Request) -> bool:
+        # NOTE (Hanchen) if enable_in_reasoning is True, it means that
+        # the model needs to be constrained in reasoning. So we should always
+        # enable the bitmask filling.
+
         if self.reasoner is not None:
+            if self.enable_in_reasoning:
+                return True
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = (
@@ -295,6 +315,10 @@ class StructuredOutputManager:
         # by default, we should always advance
         # for cases that don't use thinking mode.
         if self.reasoner is None:
+            return True
+
+        # if the model needs structured in reasoning, we should advance
+        if self.enable_in_reasoning:
             return True
 
         structured_req = request.structured_output_request
