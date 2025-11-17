@@ -5684,6 +5684,7 @@ class GPUModelRunner(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.model_config,
+            instance_id=self.vllm_config.instance_id,
             enable_shared_memory=get_tensor_model_parallel_rank() == 0,
         )
 

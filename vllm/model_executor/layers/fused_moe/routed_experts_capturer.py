@@ -14,7 +14,8 @@ from vllm.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
-LOCK_FILE = "/tmp/vllm_routed_experts.lock"  # Shared lock file path
+LOCK_FILE_PREFIX = "/tmp/vllm_routed_experts"  # Shared lock file path
+BUFFER_PREFIX = "vllm_routed_experts_buffer"
 
 
 def lock_file(fp):
@@ -48,8 +49,6 @@ class RoutedExpertsCapturer(ABC):
 
     @staticmethod
     def get_instance() -> Optional["RoutedExpertsCapturer"]:
-        if _global_experts_capturer is None:
-            logger.info("Experts capturer not initialized.")
         return _global_experts_capturer
 
     @abstractmethod
@@ -58,6 +57,7 @@ class RoutedExpertsCapturer(ABC):
         max_num_batched_tokens: int,
         max_num_kv_tokens: int,
         model_config: ModelConfig,
+        instance_id: str,
         enable_shared_memory: bool,
     ) -> None:
         raise NotImplementedError
@@ -88,6 +88,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         max_num_batched_tokens: int,
         max_num_kv_tokens: int,
         model_config: ModelConfig,
+        instance_id: str,
         enable_shared_memory: bool,
     ) -> None:
         if (
@@ -112,9 +113,10 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_experts_per_tok,
                 )
                 nbytes = int(np.prod(shape)) * np.dtype(np.int32).itemsize
+                self.lock_file = f"{LOCK_FILE_PREFIX}.{instance_id}.lock"
 
                 # 创建共享内存
-                with open(LOCK_FILE, "wb") as fp:
+                with open(self.lock_file, "wb") as fp:
                     lock_file(fp)
                     try:
                         # If already exists, SharedMemory(create=True) would raise.
@@ -122,7 +124,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                         self._shm = shared_memory.SharedMemory(
                             create=True,
                             size=nbytes,
-                            name="vllm_routed_experts_buffer",
+                            name=f"{BUFFER_PREFIX}_{instance_id}",
                         )
 
                         # 创建 numpy array 视图
@@ -157,7 +159,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
 
     def save_captured_experts(self, indices: np.ndarray) -> None:
         # Copy the entire batch from GPU to shared memory (via numpy view)
-        with open(LOCK_FILE, "wb+") as fp:
+        with open(self.lock_file, "wb+") as fp:
             lock_file(fp)
             try:
                 if self._host_buffer_view is not None:
@@ -193,6 +195,7 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
         max_num_batched_tokens: int,
         max_num_kv_tokens: int,
         model_config: ModelConfig,
+        instance_id: str,
         enable_shared_memory: bool,
     ) -> None:
         return None
@@ -230,7 +233,7 @@ class RoutedExpertsReader(ABC):
         return _global_experts_reader
 
     @abstractmethod
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig) -> None:
+    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -245,7 +248,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
         self._shm: shared_memory.SharedMemory | None = None
         self._host_buffer_view: np.ndarray | None = None
 
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig) -> None:
+    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
         if self._shm is None:
             shape = (
                 max_num_kv_tokens,
@@ -253,8 +256,10 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
                 model_config.hf_text_config.num_experts_per_tok,
             )
 
+            self.lock_file = f"{LOCK_FILE_PREFIX}.{instance_id}.lock"
+
             # Attach to existing shared memory
-            with open(LOCK_FILE, "rb+") as fp:
+            with open(self.lock_file, "rb+") as fp:
                 lock_file(fp)
                 try:
                     # avoid resource_tracker registering the shared memory
@@ -264,7 +269,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
                     ):
                         # This will raise if the shared memory doesn't exist
                         self._shm = shared_memory.SharedMemory(
-                            name="vllm_routed_experts_buffer"
+                            name=f"{BUFFER_PREFIX}_{instance_id}"
                         )
 
                     self._host_buffer_view = np.ndarray(
@@ -278,7 +283,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
         Read routed expert data from shared memory for the given request.
         """
 
-        with open(LOCK_FILE, "rb+") as fp:
+        with open(self.lock_file, "rb+") as fp:
             lock_file(fp)
             try:
                 if self._host_buffer_view is None:
@@ -298,7 +303,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
 
 
 class _RoutedExpertsReaderNoop(RoutedExpertsReader):
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig) -> None:
+    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
         return None
 
     def get_routed_experts(self, indices: np.ndarray) -> np.ndarray | None:
