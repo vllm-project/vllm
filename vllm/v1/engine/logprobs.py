@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
@@ -81,14 +82,15 @@ class LogprobsProcessor:
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
             # Detokenize (non-incrementally).
-            decoded_tokens = (
-                NONES
-                if self.tokenizer is None
-                else (convert_ids_list_to_tokens(self.tokenizer, token_ids))
-            )
-            if self.tokenizer is not None:
+            decoded_tokens: list[str] | Iterable[None]
+            if self.tokenizer is None:
+                decoded_tokens = NONES
+            else:
+                decoded_tokens_list = convert_ids_list_to_tokens(
+                    self.tokenizer, token_ids
+                )
                 decoded_tokens = self._verify_tokens(
-                    decoded_tokens=decoded_tokens, tokens=token_ids
+                    decoded_tokens_list=decoded_tokens_list, tokens=token_ids
                 )
 
             # Sampler puts the sampled logprob in first.
@@ -185,23 +187,32 @@ class LogprobsProcessor:
             raise RuntimeError("self.tokenizer should not be None")
 
         # try with prev token id in same list
-        possible_decoded_token = self.tokenizer.decode(tokens[idx - 1 : idx + 1])
-        if not possible_decoded_token.endswith("�"):
-            return possible_decoded_token
+        if idx > 0:
+            possible_decoded_token = self.tokenizer.decode(tokens[idx - 1 : idx + 1])
+            if not possible_decoded_token.endswith("�"):
+                return possible_decoded_token
         # try with previous logprob token id
         if self.logprobs:
             latest_token_id = next(iter(self.logprobs[-1]))
-            possible_decoded_token = self.tokenizer.decode(
-                [latest_token_id] + tokens[idx - 1 : idx + 1]
-            )
+
+            decode_ids = [latest_token_id]
+            if idx > 0:
+                decode_ids.extend(tokens[idx - 1 : idx + 1])
+            else:
+                decode_ids.extend(tokens[idx : idx + 1])
+
+            possible_decoded_token = self.tokenizer.decode(decode_ids)
             if not possible_decoded_token.endswith("�"):
                 return possible_decoded_token
 
+        # by default return empty string
         return ""
 
-    def _verify_tokens(self, decoded_tokens: list[str], tokens: list[int]) -> list[str]:
+    def _verify_tokens(
+        self, decoded_tokens_list: list[str], tokens: list[int]
+    ) -> list[str]:
         corrected_decoded_token_map = dict()
-        for idx, text in enumerate(decoded_tokens):
+        for idx, text in enumerate(decoded_tokens_list):
             if text.endswith("�"):
                 # utf-8 char at the end means it's a potential unfinished byte sequence
                 # from byte fallback tokenization.
@@ -210,9 +221,9 @@ class LogprobsProcessor:
                 )
 
         for idx, text in corrected_decoded_token_map.items():
-            decoded_tokens[idx] = text
+            decoded_tokens_list[idx] = text
 
-        return decoded_tokens
+        return decoded_tokens_list
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         if output.new_logprobs is not None:
