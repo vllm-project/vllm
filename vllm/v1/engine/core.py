@@ -312,6 +312,10 @@ class EngineCore:
             )
             raise err
 
+    def _maybe_publish_request_counts(self):
+        # implemented by subclasses
+        return
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -322,9 +326,11 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            self._maybe_publish_request_counts()
             return {}, False
         with record_function_or_nullcontext("core step: schedule"):
             scheduler_output = self.scheduler.schedule()
+        self._maybe_publish_request_counts()
 
         with record_function_or_nullcontext("core step: execute_model"):
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -440,6 +446,9 @@ class EngineCore:
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
+
+        self._maybe_publish_request_counts()
+
         with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
             # Block until the next result is available.
             future, scheduler_output = batch_queue.pop()
@@ -1228,7 +1237,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
             # 2) Step the engine core.
             executed = self._process_engine_step()
-            self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
