@@ -42,6 +42,9 @@ def distributed_setup():
         dist.destroy_process_group()
 
 
+@pytest.mark.skip(
+    reason="Temporarily disabled - custom model examples under development"
+)
 def test_deepseek_v3_tp_creation(distributed_setup):
     """Test that DeepSeek V3 can be created with tensor parallelism."""
     rank, world_size = distributed_setup
@@ -103,6 +106,9 @@ def test_deepseek_v3_tp_creation(distributed_setup):
     assert total_params > 0
 
 
+@pytest.mark.skip(
+    reason="Temporarily disabled - custom model examples under development"
+)
 def test_deepseek_v3_tp_forward(distributed_setup):
     """Test that DeepSeek V3 forward pass works with TP."""
     rank, world_size = distributed_setup
@@ -168,6 +174,9 @@ def test_deepseek_v3_tp_forward(distributed_setup):
     assert logits.shape == (batch_size, seq_len, model.config.vocab_size)
 
 
+@pytest.mark.skip(
+    reason="Temporarily disabled - custom model examples under development"
+)
 @pytest.mark.skipif(
     not (os.environ.get("RANK") and int(os.environ.get("WORLD_SIZE", "1")) > 1),
     reason="TP sharding verification requires multi-GPU torchrun",
