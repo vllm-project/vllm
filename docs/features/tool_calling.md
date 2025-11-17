@@ -158,12 +158,25 @@ Known issues:
 
 Recommended flags:
 
-1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+1. To use the official Mistral AI's format:
 
     `--tool-call-parser mistral`
 
-2. To use the default Transformers tokenization backend:
+2. To use the Transformers format when available:
+
     `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+!!! note 
+    Models officially released by Mistral AI have two possible formats:
+    
+    1. The official format that is used by default with `auto` or `mistral` arguments:
+        
+        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        This format uses `[mistral-common](https://github.com/mistralai/mistral-common)`, the Mistral AI's tokenizer backend.
+    
+    2. The Transformers format, when available, that is used with `hf` arguments:
+        
+        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
