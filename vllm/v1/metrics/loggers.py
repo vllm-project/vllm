@@ -118,12 +118,14 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens: int = 0
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
+        self.num_preemptions: int = 0
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
         self.num_prompt_tokens += iteration_stats.num_prompt_tokens
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
+        self.num_preemptions += iteration_stats.num_preempted_reqs
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -196,17 +198,30 @@ class LoggingStatLogger(StatLoggerBase):
             "Avg generation throughput: %.1f tokens/s",
             "Running: %d reqs",
             "Waiting: %d reqs",
-            "GPU KV cache usage: %.1f%%",
-            "Prefix cache hit rate: %.1f%%",
         ]
         log_args = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
             self.last_scheduler_stats.num_waiting_reqs,
-            self.last_scheduler_stats.kv_cache_usage * 100,
-            self.prefix_caching_metrics.hit_rate * 100,
         ]
+
+        if self.num_preemptions > 0:
+            log_parts.append("Preemptions: %d")
+            log_args.append(self.num_preemptions)
+
+        log_parts.extend(
+            [
+                "GPU KV cache usage: %.1f%%",
+                "Prefix cache hit rate: %.1f%%",
+            ]
+        )
+        log_args.extend(
+            [
+                self.last_scheduler_stats.kv_cache_usage * 100,
+                self.prefix_caching_metrics.hit_rate * 100,
+            ]
+        )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
@@ -479,6 +494,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
             documentation="KV-cache usage. 1 means 100 percent usage.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
         self.gauge_kv_cache_usage = make_per_engine(
@@ -989,6 +1005,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
+            if self.gauge_lora_info is not None:
+                running_lora_adapters = ",".join(
+                    scheduler_stats.running_lora_adapters.keys()
+                )
+                waiting_lora_adapters = ",".join(
+                    scheduler_stats.waiting_lora_adapters.keys()
+                )
+                lora_info_labels = {
+                    self.labelname_running_lora_adapters: running_lora_adapters,
+                    self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                    self.labelname_max_lora: self.max_lora,
+                }
+                self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
             self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
@@ -1054,20 +1084,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
-
-        if self.gauge_lora_info is not None:
-            running_lora_adapters = ",".join(
-                iteration_stats.running_lora_adapters.keys()
-            )
-            waiting_lora_adapters = ",".join(
-                iteration_stats.waiting_lora_adapters.keys()
-            )
-            lora_info_labels = {
-                self.labelname_running_lora_adapters: running_lora_adapters,
-                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
-                self.labelname_max_lora: self.max_lora,
-            }
-            self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
