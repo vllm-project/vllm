@@ -3099,11 +3099,12 @@ class GPUModelRunner(
             if isinstance(e, torch.cuda.OutOfMemoryError) or "out of memory" in err_str:
                 msg = (
                     "Failed to load model - not enough GPU memory. "
-                    "Try reducing --gpu-memory-utilization, increasing "
-                    "--tensor-parallel-size, or using --quantization."
+                    "Try lowering --gpu-memory-utilization to free memory for weights, "
+                    "increasing --tensor-parallel-size, or using --quantization."
                 )
-                logger.error("init_failed msg=%s", msg)
-                raise RuntimeError(msg) from e
+                combined_msg = f"{msg} (original error: {e})"
+                logger.error("init_failed msg=%s", combined_msg)
+                raise RuntimeError(combined_msg) from e
             raise
         logger.info_once(
             "Model loading took %.4f GiB memory and %.6f seconds",

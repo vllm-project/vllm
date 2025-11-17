@@ -24,7 +24,7 @@ def test_model_load_oom_error_message():
                 "--tensor-parallel-size, or using --quantization."
             )
             # Verify the error message contains expected guidance
-            assert "not enough GPU memory" in msg.lower()
+            assert "not enough gpu memory" in msg.lower()
             assert "--gpu-memory-utilization" in msg
             assert "--tensor-parallel-size" in msg
             assert "--quantization" in msg
@@ -48,7 +48,7 @@ def test_model_load_runtime_oom_error_message():
         exc = RuntimeError(msg)
 
         # Verify the error message
-        assert "GPU memory" in str(exc)
+        assert "gpu memory" in str(exc).lower()
         assert "--gpu-memory-utilization" in str(exc)
         assert "--tensor-parallel-size" in str(exc)
         return
