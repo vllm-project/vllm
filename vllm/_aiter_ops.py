@@ -402,6 +402,42 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,
+    scale_b: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # This AITER function can be used for
+    # - per-token activations + per-channel weights
+    # accept the weight as # keep the weight as (N, K)
+    # NOTE: The weight has to be shuffled in the
+    # process_weights_after_loading of the CompressedTensorsW8A8Fp8 class
+
+    from aiter import gemm_a8w8_bpreshuffle_ck
+
+    m = input.shape[0]
+    n = weight.shape[0]
+    Y = torch.empty(m, n, dtype=out_dtype, device=input.device)
+    gemm_a8w8_bpreshuffle_ck(input, weight, scale_a, scale_b, Y)
+    return Y
+
+
+def _rocm_aiter_gemm_a8w8_bpreshuffle_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,
+    scale_b: torch.Tensor | None = None,
+) -> torch.Tensor:
+    m = input.shape[0]
+    n = weight.shape[0]
+    if out_dtype is None:
+        out_dtype = input.dtype
+    return torch.empty((m, n), dtype=out_dtype, device=input.device)
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -592,6 +628,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
+                op_func=_rocm_aiter_gemm_a8w8_bpreshuffle_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_a8w8_bpreshuffle_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -633,6 +677,18 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
+    def gemm_a8w8_bpreshuffle(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,
+        scale_b: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_bpreshuffle(
+            input, weight, out_dtype, scale_a, scale_b
         )
 
     @staticmethod
