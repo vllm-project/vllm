@@ -630,16 +630,6 @@ class GPUModelRunner(
             return
 
         if self.reorder_batch_threshold is not None:
-            # NOTE(lucas): currently no backend supports the custom masking
-            #  required for DCP with q_len > 1, so we assert here. Remove this
-            #  assert once the custom mask is support is added to FA3.
-            if (
-                self.dcp_world_size > 1
-                and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
-            ):
-                assert self.reorder_batch_threshold == 1, (
-                    "DCP not support reorder_batch_threshold > 1 now."
-                )
             reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
@@ -2871,7 +2861,7 @@ class GPUModelRunner(
             "gpu_model_runner: set_async_sampled_token_ids"
         ):
             # Save ref of sampled_token_ids CPU tensor if the batch contains
-            # any requests with sampling params that that require output ids.
+            # any requests with sampling params that require output ids.
             self.input_batch.set_async_sampled_token_ids(
                 async_output.sampled_token_ids_cpu,
                 async_output.async_copy_ready_event,
@@ -4341,6 +4331,22 @@ class GPUModelRunner(
                 "; please try cudagraph_mode=PIECEWISE, "
                 "and make sure compilation mode is VLLM_COMPILE"
             )
+
+        # if we have dedicated decode cudagraphs, and spec-decode is enabled,
+        # we need to adjust the cudagraph sizes to be a multiple of the uniform
+        # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
+        # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # Will be removed in the near future when we have seperate cudagraph capture
+        # sizes for decode and mixed prefill-decode.
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode.separate_routine()
+            and self.uniform_decode_query_len > 1
+        ):
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
+            )
+            self.cudagraph_batch_sizes = self.compilation_config.cudagraph_capture_sizes
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
