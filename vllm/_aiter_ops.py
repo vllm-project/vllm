@@ -753,9 +753,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
-                dispatch_key=current_platform.dispatch_key,
+            fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
             )
 
             direct_register_custom_op(
