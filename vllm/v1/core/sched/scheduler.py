@@ -653,9 +653,6 @@ class Scheduler(SchedulerInterface):
                 )
 
         # Construct the scheduler output.
-        scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
-        scheduled_resumed_reqs = []
-
         new_reqs_data = [
             NewRequestData.from_request(
                 req, req_to_new_blocks[req.request_id].get_block_ids()
@@ -683,7 +680,6 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -758,8 +754,9 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
-        resumed_req_ids = set[str]()
+        resumed_req_ids = set()
 
+        num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
@@ -776,6 +773,12 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
+            scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
+            if idx >= num_running_reqs:
+                assert not scheduled_in_prev_step
+                resumed_req_ids.add(req_id)
+            if not scheduled_in_prev_step:
+                all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -992,8 +995,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        for req_index, req_id in enumerate(model_runner_output.req_ids):
-            num_tokens_scheduled = num_scheduled_tokens[req_id]
+        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # Skip requests that were recovered from KV load failure
