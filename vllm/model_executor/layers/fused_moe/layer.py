@@ -1417,7 +1417,6 @@ class FusedMoE(CustomOp):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
-                indices_type=None,
             )
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
