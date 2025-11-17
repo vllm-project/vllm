@@ -2515,8 +2515,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # save model_output to a csv file
                 # import pandas as pd
-                # print(f"vLLM model_output shape: {model_output.shape}")
-                # print(f"vLLM model_output first few values: {model_output[0, :5]}")
+                # # print(f"vLLM model_output shape: {model_output.shape}")
+                # # print(f"vLLM model_output first few values: {model_output[0, :5]}")
                 # df = pd.DataFrame({
                 #     "model_output": model_output.flatten().tolist(),
                 # })
@@ -2545,6 +2545,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Compute logits for loss calculation
                 # For training, we need logits for all tokens (achieved via logits_indices)
                 logits = self.model.compute_logits(hidden_states, None)
+
+                # # save logits to a csv file
+                # import pandas as pd
+                # df = pd.DataFrame({
+                #     "logits": logits.flatten().tolist(),
+                # })
+                # df.to_csv(f"vllm_logits.csv", index=False)
+                # ss
 
                 per_req_logits = {}
                 all_logits = []
@@ -2655,6 +2663,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # Backward pass
                     tr_loss.backward()
                     cur_loss = tr_loss.detach()
+
+                    # import torchviz
+                    # torchviz.make_dot(tr_loss, params=dict(self.model.named_parameters())).render("vllm_loss_computation_graph", format="png")
+                    # ss
 
                     # import csv
                     # with open('vllm_gradients.csv', 'w') as f:

@@ -614,7 +614,7 @@ class LLM:
         total_steps = 0
         train_losses = []
         eval_losses = [loss for loss in final_eval_losses] if final_eval_losses else []
-        
+
         return {
             'train_losses': train_losses,
             'eval_losses': eval_losses,

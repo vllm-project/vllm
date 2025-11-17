@@ -296,7 +296,7 @@ class LlamaAttention(nn.Module):
         #     print(f"vLLM positions: {positions_flat[:10]}")
 
         # TODO(girfan): HACK!!
-        q, k = self.rotary_emb(positions, q, k)
+        # q, k = self.rotary_emb(positions, q, k)
         # HACK END
 
         # cos, sin = positions
@@ -558,15 +558,14 @@ class LlamaModel(nn.Module):
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
             # if IS_TRAINING:
-            #     print(f"vLLM hidden_states shape: {hidden_states.shape}")
-            #     print(residual)
+            #     # print(f"vLLM hidden_states shape: {hidden_states.shape}")
+            #     # print(residual)
             #     # save hidden_states to a csv file
             #     import pandas as pd
             #     df = pd.DataFrame({
             #         "hidden_states": hidden_states.flatten().tolist(),
             #     })
             #     df.to_csv(f"vllm_hidden_states_{idx}.csv", index=False)
-            #     ss
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -591,15 +590,6 @@ class LlamaModel(nn.Module):
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
-
-        # if IS_TRAINING:
-        #     # save hidden_states to a csv file
-        #     import pandas as pd
-        #     df = pd.DataFrame({
-        #         "hidden_states": hidden_states.flatten().tolist(),
-        #     })
-        #     df.to_csv(f"vllm_model_output.csv", index=False)
-        #     ss
 
         return hidden_states
 

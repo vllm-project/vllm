@@ -489,8 +489,8 @@ class TrainingManager:
             # trainable_params only?
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                # trainable_params,
-                all_params,
+                trainable_params,
+                # all_params,
                 max_norm=self.max_grad_norm,
             )
             self.grad_norm = grad_norm
