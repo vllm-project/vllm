@@ -700,18 +700,24 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
     # Use the global optimization level defaults
     default_config = OPTIMIZATION_LEVEL_TO_CONFIG[optimization_level]
 
-    # Verify pass_config defaults
-    for pass_k, pass_v in default_config["pass_config"].items():
+    # Verify pass_config defaults (nested under compilation_config)
+    pass_config_dict = default_config["compilation_config"]["pass_config"]
+    for pass_k, pass_v in pass_config_dict.items():
         actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
         expected = pass_v(vllm_config) if callable(pass_v) else pass_v
-        assert actual == expected
+        assert actual == expected, (
+            f"pass_config.{pass_k}: expected {expected}, got {actual}"
+        )
 
-    # Verify other config defaults
-    for k, v in default_config.items():
+    # Verify other compilation_config defaults
+    compilation_config_dict = default_config["compilation_config"]
+    for k, v in compilation_config_dict.items():
         if k != "pass_config":
             actual = getattr(vllm_config.compilation_config, k)
             expected = v(vllm_config) if callable(v) else v
-            assert actual == expected
+            assert actual == expected, (
+                f"compilation_config.{k}: expected {expected}, got {actual}"
+            )
 
 
 def test_vllm_config_callable_defaults():

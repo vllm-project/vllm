@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -90,52 +90,60 @@ def enable_fusion(cfg):
 
 
 OPTIMIZATION_LEVEL_00 = {
-    "pass_config": {
-        "enable_noop": False,
-        "enable_fusion": False,
-        "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": False,
-        "enable_sequence_parallelism": False,
-        "enable_async_tp": False,
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": False,
+            "enable_fusion": False,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": False,
+            "enable_sequence_parallelism": False,
+            "enable_async_tp": False,
+        },
+        "cudagraph_mode": CUDAGraphMode.NONE,
+        "use_inductor_graph_partition": False,
     },
-    "cudagraph_mode": CUDAGraphMode.NONE,
-    "use_inductor_graph_partition": False,
 }
 OPTIMIZATION_LEVEL_01 = {
-    "pass_config": {
-        "enable_noop": True,
-        "enable_fusion": enable_fusion,
-        "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": False,
-        "enable_sequence_parallelism": False,
-        "enable_async_tp": False,
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": False,
+            "enable_sequence_parallelism": False,
+            "enable_async_tp": False,
+        },
+        "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+        "use_inductor_graph_partition": False,
     },
-    "cudagraph_mode": CUDAGraphMode.PIECEWISE,
-    "use_inductor_graph_partition": False,
 }
 OPTIMIZATION_LEVEL_02 = {
-    "pass_config": {
-        "enable_noop": True,
-        "enable_fusion": enable_fusion,
-        "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": IS_QUANTIZED,
-        "enable_sequence_parallelism": IS_DENSE,
-        "enable_async_tp": IS_DENSE,
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": IS_QUANTIZED,
+            "enable_sequence_parallelism": IS_DENSE,
+            "enable_async_tp": IS_DENSE,
+        },
+        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "use_inductor_graph_partition": False,
     },
-    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-    "use_inductor_graph_partition": False,
 }
 OPTIMIZATION_LEVEL_03 = {
-    "pass_config": {
-        "enable_noop": True,
-        "enable_fusion": enable_fusion,
-        "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": IS_QUANTIZED,
-        "enable_sequence_parallelism": IS_DENSE,
-        "enable_async_tp": IS_DENSE,
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": IS_QUANTIZED,
+            "enable_sequence_parallelism": IS_DENSE,
+            "enable_async_tp": IS_DENSE,
+        },
+        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "use_inductor_graph_partition": False,
     },
-    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-    "use_inductor_graph_partition": False,
 }
 
 OPTIMIZATION_LEVEL_TO_CONFIG = {
@@ -402,30 +410,29 @@ class VllmConfig:
         if getattr(config_obj, key) is None:
             setattr(config_obj, key, value(self) if callable(value) else value)
 
-    def _apply_optimization_level_defaults(self, default_config: dict) -> None:
-        """Apply optimization level defaults (O0-O3) to compilation config.
+    def _apply_optimization_level_defaults(self, defaults: dict[str, Any]) -> None:
+        """Apply optimization level defaults using self as root.
 
-        Configures defaults based on optimization level. Only sets values
-        not explicitly configured by the user. Supports callable defaults
-        (lambdas/functions) that take VllmConfig as input and return the
-        appropriate value.
+        Recursively applies values from defaults into nested config objects.
+        Only fields present in defaults are overwritten.
 
-        Optimization Levels:
-            - (None): No optimization, fast startup, eager execution
-            - (STOCK_TORCH_COMPILE): Fast compilation
-            - (DYNAMO_TRACE_ONCE): Full optimization
-            - (VLLM_COMPILE): Maximum optimization with autotuning
+        Args:
+            defaults: Dictionary of default values to apply.
         """
-        for k, v in default_config.items():
-            if k == "pass_config":
-                for pass_k, pass_v in default_config["pass_config"].items():
-                    self._set_config_default(
-                        self.compilation_config.pass_config, pass_k, pass_v
-                    )
-            else:
-                self._set_config_default(self.compilation_config, k, v)
 
-        assert self.optimization_level is not None
+        def apply_recursive(config_obj: Any, config_defaults: dict[str, Any]) -> None:
+            """Recursively apply defaults to config_obj, using self as root."""
+            for key, value in config_defaults.items():
+                if not hasattr(config_obj, key):
+                    continue
+
+                current = getattr(config_obj, key)
+                if isinstance(value, dict) and is_dataclass(current):
+                    apply_recursive(current, value)
+                else:
+                    self._set_config_default(config_obj, key, value)
+
+        apply_recursive(self, defaults)
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
