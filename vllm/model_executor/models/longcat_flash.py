@@ -293,6 +293,12 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Slice e_score_correction_bias to only include real experts (not zero_experts)
+        # FusedMoE only works with real experts, so we need to slice the bias
+        e_score_correction_bias_for_experts = self.router.e_score_correction_bias[
+            :num_experts
+        ]
+
         self.experts = FusedMoE(
             num_experts=num_experts,
             top_k=top_k,
@@ -300,7 +306,7 @@ class LongcatMoe(nn.Module):
             intermediate_size=intermediate_size,
             reduce_results=True,
             params_dtype=params_dtype,
-            e_score_correction_bias=self.router.e_score_correction_bias,
+            e_score_correction_bias=e_score_correction_bias_for_experts,
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
