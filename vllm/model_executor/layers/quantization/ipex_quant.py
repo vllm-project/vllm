@@ -207,7 +207,6 @@ class IPEXConfig(QuantizationConfig):
                 return get_linear_quant_method(
                     self, layer, prefix, IPEXGPTQLinearMethod
                 )
-                # return IPEXGPTQLinearMethod(self)
         if isinstance(layer, FusedMoE) and self.method == "gptq":
             return XPUGPTQMarlinMoEMethod(self, layer.moe_config)
         return None
