@@ -289,11 +289,9 @@ def __init__(self, vllm_config, **kwargs):
 
     self.model = Qwen3Model(...)
 ```
-
 2. **TP Application Order**:
     - ✅ Model creation → Attention replacement → TP → dtype conversion
     - ❌ Attention replacement → TP → Model creation (breaks weight sharding)
-
 3. **Process Group Management**: Use `parallel_context` to get vLLM's process groups:
 
 ```python
