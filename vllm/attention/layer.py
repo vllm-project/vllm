@@ -311,7 +311,11 @@ class Attention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         backend_name = self.attn_backend.get_name()
-        self.backend = AttentionBackendEnum.__members__.get(backend_name, None)
+        self.backend = AttentionBackendEnum.__members__.get(backend_name)
+        if self.backend is None:
+            logger.warning(
+                f"Attention backend '{backend_name}' not found in "
+                f"AttentionBackendEnum. Setting self.backend to None.")
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
