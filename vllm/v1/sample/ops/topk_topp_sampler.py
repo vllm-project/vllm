@@ -401,7 +401,7 @@ def _topk_triton_kernel(
         sq_avg_logit = tl.sum(logits_blk * logits_blk) / num_valid
         std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
 
-        percentile = tl.cast(k * 2.0 / VOCAB_SIZE * 100, tl.uint32) + 1
+        percentile = tl.cast(k * 1.6 / VOCAB_SIZE * 100 + 1, tl.uint32)
         percentile = tl.minimum(percentile, 99)
         sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
         outlier_pivot = avg_logit + sigma * std_logit
@@ -489,7 +489,7 @@ def _topk_triton_kernel(
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < VOCAB_SIZE
                 logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n)
-                mask = logits_blk > k_pivot
+                mask = (logits_blk > k_pivot) & mask_n
                 logits_blk = tl.where(mask, logits_blk, -float("inf"))
                 tl.store(OUTPUT_ROW + offs_n, logits_blk, mask=mask_n)
 
@@ -542,6 +542,7 @@ def top_k_top_p_filter(
     FILTERED_LOGITS,
     FILTERED_INDICES,
     FILTERED_PROBS,
+    NUM_FILTERED,
     PERCENTILE_TO_STD_TABLE,
     VOCAB_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -570,7 +571,7 @@ def top_k_top_p_filter(
         sq_avg_logit = tl.sum(logits_blk * logits_blk) / num_mask
         std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
 
-        percentile = tl.cast(P_FIL * 2.0 / VOCAB_SIZE * 100 + 4, tl.uint32)
+        percentile = tl.cast(P_FIL * 1.6 / VOCAB_SIZE * 100 + 1, tl.uint32)
         percentile = tl.minimum(percentile, 99)
         sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
         outlier_pivot = avg_logit + sigma * std_logit
@@ -752,7 +753,7 @@ def top_k_top_p_filter(
             f_mask = keep_mask & (cpos < P_FIL)
             write_idx = tl.where(f_mask, cpos, 0)
 
-            top_k_mask = logits_blk > k_pivot
+            top_k_mask = (logits_blk > k_pivot) & mask_n
             logits_blk = tl.where(top_k_mask, logits_blk, -float("inf"))
 
             # Gather filtered values
@@ -763,6 +764,7 @@ def top_k_top_p_filter(
             sum_excluded_probs += tl.sum(probs_blk * ((~f_mask) & mask_n))
             write_pos += tl.sum(f_mask, dtype=tl.int32)
         tl.store(SUM_EXCLUDED_PROBS + row_id, sum_excluded_probs)
+        tl.store(NUM_FILTERED + row_id, write_pos)
 
 
 def apply_top_k_top_p_filtered(
@@ -777,11 +779,7 @@ def apply_top_k_top_p_filtered(
 
     # If k is too large, speedup is not significant as the filtered set is large.
     max_k = k.max().item() if k is not None else 0
-    # Probability value is not guaranteed to be equivalent to the PyTorch implementation
-    # in the distribution tail due to floating point non-associativity.
-    # We avoid high p values to avoid this accuracy issue.
-    max_p = p.max().item() if p is not None else 0
-    if max_k > vocab_size / 10 or max_p > 0.95:
+    if max_k > vocab_size / 10:
         return apply_top_k_top_p(logits, k, p)
 
     BLOCK_SIZE = 8192
@@ -807,6 +805,7 @@ def apply_top_k_top_p_filtered(
     sum_excluded_probs = torch.zeros(
         (batch_size,), device=logits.device, dtype=torch.float32
     )
+    num_filtered = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
     PERCENTILE_TO_STD_TABLE = torch.tensor(
         _PERCENTILE_TO_STD_TABLE, device=logits.device
     )
@@ -822,6 +821,7 @@ def apply_top_k_top_p_filtered(
         filtered_logits,
         filtered_indices,
         filtered_probs,
+        num_filtered,
         PERCENTILE_TO_STD_TABLE,
         VOCAB_SIZE=vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
@@ -829,7 +829,7 @@ def apply_top_k_top_p_filtered(
         num_stages=NUM_STAGES,
     )
 
-    if torch.any(sum_excluded_probs >= p):
+    if torch.any(sum_excluded_probs >= p) or torch.any(num_filtered != p_filter):
         return apply_top_k_top_p(logits, k, p)
 
     logits_sort, sort_indices = filtered_logits.sort(dim=-1, descending=False)
