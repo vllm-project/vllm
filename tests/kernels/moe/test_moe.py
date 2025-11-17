@@ -74,11 +74,12 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
         "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
-    # # GPTQ-INT8
-    # {
-    #     "b_type": scalar_types.uint8b128,
-    #     "group_blocks": [-1, 2, 4, 8],
-    # },
+    # GPTQ-INT8
+    {
+        "b_type": scalar_types.uint8b128,
+        "support_act_order": True,
+        "group_blocks": [-1, 2, 4, 8],
+    },
     # FP8
     {"b_type": scalar_types.float8_e4m3fn, "group_blocks": [-1, 8]},
     # NVFP4
