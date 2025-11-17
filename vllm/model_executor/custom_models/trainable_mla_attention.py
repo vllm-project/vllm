@@ -12,6 +12,7 @@ Reference: https://github.com/deepseek-ai/DeepSeek-V3
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -367,7 +368,7 @@ class TrainableMLA(nn.Module):
         freqs_cis: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,  # vLLM provides positions
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Forward pass for Multi-Head Latent Attention.

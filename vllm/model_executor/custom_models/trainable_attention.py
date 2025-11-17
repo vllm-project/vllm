@@ -9,6 +9,7 @@ use cases.
 """
 
 import itertools
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -223,7 +224,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         freqs_cis: torch.Tensor
         | None = None,  # RoPE frequencies (TorchTitan compatibility)
         attention_mask: torch.Tensor | None = None,
-        **kwargs,  # Accept any additional vLLM-specific kwargs
+        **kwargs: Any,  # Accept any additional vLLM-specific kwargs
     ) -> torch.Tensor:
         """
         Forward pass with flash attention.

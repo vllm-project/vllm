@@ -36,6 +36,8 @@ Example usage:
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -77,7 +79,7 @@ class VLLMModelForCausalLM(nn.Module, ABC):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Forward pass through the model.
@@ -97,7 +99,7 @@ class VLLMModelForCausalLM(nn.Module, ABC):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata=None,
+        sampling_metadata: Any = None,
     ) -> torch.Tensor:
         """
         Compute logits from hidden states.
@@ -112,7 +114,7 @@ class VLLMModelForCausalLM(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def load_weights(self, weights_iter):
+    def load_weights(self, weights_iter: Iterator[tuple[str, torch.Tensor]]) -> None:
         """
         Load weights from HuggingFace checkpoint.
 

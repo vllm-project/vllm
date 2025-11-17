@@ -21,8 +21,12 @@ Example usage:
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed import parallel_state
+
+if TYPE_CHECKING:
+    import torch.distributed as dist
 
 
 @dataclass
@@ -96,7 +100,7 @@ class ParallelContext:
         """
         return self.data_parallel_size
 
-    def get_tp_process_group(self):
+    def get_tp_process_group(self) -> "dist.ProcessGroup | None":
         """
         Get the tensor parallel process group (PyTorch ProcessGroup).
 
@@ -129,7 +133,7 @@ class ParallelContext:
             # Parallel state not initialized
             return None
 
-    def get_pp_process_group(self):
+    def get_pp_process_group(self) -> "dist.ProcessGroup | None":
         """
         Get the pipeline parallel process group (PyTorch ProcessGroup).
 
@@ -145,7 +149,7 @@ class ParallelContext:
             return None
 
     @staticmethod
-    def from_config(parallel_config) -> "ParallelContext":
+    def from_config(parallel_config: Any) -> "ParallelContext":
         """
         Create a ParallelContext from vLLM's ParallelConfig.
 

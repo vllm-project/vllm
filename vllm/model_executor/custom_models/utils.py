@@ -28,6 +28,9 @@ Example usage:
     ```
 """
 
+from collections.abc import Iterator
+from typing import Any
+
 import torch
 import torch.nn as nn
 
@@ -90,7 +93,7 @@ def create_mla_kv_cache_spec(
     qk_rope_head_dim: int,
     block_size: int,
     dtype: torch.dtype,
-):
+) -> Any:
     """
     Create KV cache specification for Multi-Head Latent Attention (MLA).
 
@@ -121,7 +124,7 @@ def create_mla_kv_cache_spec(
 
 def load_external_weights(
     model: nn.Module,
-    weights_iter,
+    weights_iter: Iterator[tuple[str, torch.Tensor]],
     name_mapping: dict[str, str],
     verbose: bool = False,
 ) -> tuple[int, int]:
