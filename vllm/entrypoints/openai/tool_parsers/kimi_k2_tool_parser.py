@@ -42,7 +42,8 @@ class KimiK2ToolParser(ToolParser):
 
         self.tool_call_regex = re.compile(
             r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^<]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)\s*<\|tool_call_end\|>",
-            re.DOTALL)
+            re.DOTALL,
+        )
 
         self.stream_tool_call_portion_regex = re.compile(
             r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"

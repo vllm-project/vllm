@@ -122,82 +122,94 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
         (
             """I'll get the weather and news for LA today. First, let me get the weather using Los Angeles coordinates, and then get the latest news. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"latitude": 34.0522, "longitude": -118.2437}<|tool_call_end|><|tool_call_begin|>functions.get_news:1<|tool_call_argument_begin|>{"content": "Los Angeles today"}<|tool_call_end|><|tool_calls_section_end|>""",
             [
-                ToolCall(id='functions.get_weather:0',
-                         function=FunctionCall(
-                             name="get_weather",
-                             arguments=json.dumps({
-                                 "latitude": 34.0522,
-                                 "longitude": -118.2437
-                             }),
-                         ),
-                         type='function'),
-                ToolCall(id='functions.get_news:1',
-                         function=FunctionCall(
-                             name="get_news",
-                             arguments=json.dumps(
-                                 {"content": "Los Angeles today"}),
-                         ),
-                         type='function')
+                ToolCall(
+                    id="functions.get_weather:0",
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {"latitude": 34.0522, "longitude": -118.2437}
+                        ),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.get_news:1",
+                    function=FunctionCall(
+                        name="get_news",
+                        arguments=json.dumps({"content": "Los Angeles today"}),
+                    ),
+                    type="function",
+                ),
             ],
             "I'll get the weather and news for LA today. First, let me get the weather using Los Angeles coordinates, and then get the latest news. ",
         ),
         (
             """I'll help you with multiple tasks. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "New York"}<|tool_call_end|><|tool_call_begin|>functions.get_news:1<|tool_call_argument_begin|>{"topic": "technology"}<|tool_call_end|><|tool_call_begin|>functions.send_email:2<|tool_call_argument_begin|>{"to": "user@example.com", "subject": "Daily Update"}<|tool_call_end|><|tool_calls_section_end|>""",
             [
-                ToolCall(id='functions.get_weather:0',
-                         function=FunctionCall(
-                             name="get_weather",
-                             arguments=json.dumps({"city": "New York"}),
-                         ),
-                         type='function'),
-                ToolCall(id='functions.get_news:1',
-                         function=FunctionCall(
-                             name="get_news",
-                             arguments=json.dumps({"topic": "technology"}),
-                         ),
-                         type='function'),
-                ToolCall(id='functions.send_email:2',
-                         function=FunctionCall(
-                             name="send_email",
-                             arguments=json.dumps({
-                                 "to": "user@example.com",
-                                 "subject": "Daily Update"
-                             }),
-                         ),
-                         type='function')
+                ToolCall(
+                    id="functions.get_weather:0",
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps({"city": "New York"}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.get_news:1",
+                    function=FunctionCall(
+                        name="get_news",
+                        arguments=json.dumps({"topic": "technology"}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.send_email:2",
+                    function=FunctionCall(
+                        name="send_email",
+                        arguments=json.dumps(
+                            {"to": "user@example.com", "subject": "Daily Update"}
+                        ),
+                    ),
+                    type="function",
+                ),
             ],
             "I'll help you with multiple tasks. ",
         ),
         (
             """Mixed spacing test. <|tool_calls_section_begin|> <|tool_call_begin|> functions.test:0 <|tool_call_argument_begin|> {} <|tool_call_end|><|tool_call_begin|>functions.test2:1<|tool_call_argument_begin|>{}<|tool_call_end|> <|tool_calls_section_end|>""",
             [
-                ToolCall(id='functions.test:0',
-                         function=FunctionCall(
-                             name="test",
-                             arguments=json.dumps({}),
-                         ),
-                         type='function'),
-                ToolCall(id='functions.test2:1',
-                         function=FunctionCall(
-                             name="test2",
-                             arguments=json.dumps({}),
-                         ),
-                         type='function')
+                ToolCall(
+                    id="functions.test:0",
+                    function=FunctionCall(
+                        name="test",
+                        arguments=json.dumps({}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.test2:1",
+                    function=FunctionCall(
+                        name="test2",
+                        arguments=json.dumps({}),
+                    ),
+                    type="function",
+                ),
             ],
             "Mixed spacing test. ",
         ),
         (
             """I need to process HTML content. <|tool_calls_section_begin|><|tool_call_begin|>functions.process_html:0<|tool_call_argument_begin|>{"html": "<div>content</div>", "text": "normal text"}<|tool_call_end|><|tool_calls_section_end|>""",
             [
-                ToolCall(id='functions.process_html:0',
-                         function=FunctionCall(
-                             name="process_html",
-                             arguments=json.dumps({
-                                 "html": "<div>content</div>",
-                                 "text": "normal text"
-                             }),
-                         ),
-                         type='function')
+                ToolCall(
+                    id="functions.process_html:0",
+                    function=FunctionCall(
+                        name="process_html",
+                        arguments=json.dumps(
+                            {"html": "<div>content</div>", "text": "normal text"}
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             "I need to process HTML content. ",
         ),
@@ -210,20 +222,17 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
   }
 }<|tool_call_end|><|tool_calls_section_end|>""",
             [
-                ToolCall(id='functions.process_data:0',
-                         function=FunctionCall(
-                             name="process_data",
-                             arguments=json.dumps(
-                                 {
-                                     "name": "test",
-                                     "value": 123,
-                                     "nested": {
-                                         "key": "value"
-                                     }
-                                 },
-                                 indent=2),
-                         ),
-                         type='function')
+                ToolCall(
+                    id="functions.process_data:0",
+                    function=FunctionCall(
+                        name="process_data",
+                        arguments=json.dumps(
+                            {"name": "test", "value": 123, "nested": {"key": "value"}},
+                            indent=2,
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             "I need to process formatted JSON. ",
         ),
