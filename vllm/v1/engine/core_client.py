@@ -519,7 +519,7 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(timeout=1_200_000):
                     raise TimeoutError(
                         "Timed out waiting for engines to send"
                         "initial message on input socket."
