@@ -71,6 +71,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--max-num-seqs", type=int, default=512)
     return parser.parse_args()
 
 
@@ -137,6 +138,7 @@ def main(args):
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )

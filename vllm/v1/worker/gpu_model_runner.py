@@ -2942,6 +2942,7 @@ class GPUModelRunner(
                     "sampled_token_ids should be a python list when"
                     "padded-batch is disabled."
                 )
+                valid_sampled_tokens_count = None
                 next_token_ids = self.drafter.prepare_next_token_ids_cpu(
                     sampled_token_ids,
                     self.requests,
@@ -2970,6 +2971,7 @@ class GPUModelRunner(
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
+                num_rejected_tokens_gpu = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                 target_positions = self._get_positions(num_scheduled_tokens)
@@ -2983,18 +2985,22 @@ class GPUModelRunner(
             else:
                 if self.speculative_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
+                    num_rejected_tokens_gpu = None
                     common_attn_metadata, token_indices = self.drafter.prepare_inputs(
                         common_attn_metadata,
                         sampled_token_ids,
                         spec_decode_metadata.num_draft_tokens,
                     )
                 else:
-                    common_attn_metadata, token_indices, token_indices_to_sample = (
-                        self.drafter.prepare_inputs_padded(
-                            common_attn_metadata,
-                            spec_decode_metadata,
-                            valid_sampled_tokens_count,
-                        )
+                    (
+                        common_attn_metadata,
+                        token_indices,
+                        token_indices_to_sample,
+                        num_rejected_tokens_gpu,
+                    ) = self.drafter.prepare_inputs_padded(
+                        common_attn_metadata,
+                        spec_decode_metadata,
+                        valid_sampled_tokens_count,
                     )
 
                 target_token_ids = self.input_ids.gpu[token_indices]
@@ -3024,6 +3030,7 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
 
         return draft_token_ids
