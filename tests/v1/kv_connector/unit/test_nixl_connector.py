@@ -11,6 +11,7 @@ import uuid
 from collections import defaultdict
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import ray
 import torch
@@ -826,7 +827,7 @@ def test_kv_connector_stats_aggregation():
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
             req_id_to_index={f"req_{i}": 0},
-            sampled_token_ids=[[123]],  # dummy token
+            sampled_token_ids=[np.array([123])],  # dummy token
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[None],
@@ -907,7 +908,7 @@ def test_multi_kv_connector_stats_aggregation():
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
             req_id_to_index={f"req_{i}": 0},
-            sampled_token_ids=[[123]],
+            sampled_token_ids=[np.array([123])],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[None],
@@ -965,7 +966,7 @@ def test_scheduler_kv_connector_stats_aggregation():
     model_output = ModelRunnerOutput(
         req_ids=["req_0"],
         req_id_to_index={"req_0": 0},
-        sampled_token_ids=[[123]],
+        sampled_token_ids=[np.array([123])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[None],
