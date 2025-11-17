@@ -151,30 +151,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         # Fallback for older versions that don't support this method
         return set()
 
-    def get_kv_connector_kv_cache_events(self) -> Optional["KVEventBatch"]:
-        """
-        Get the KV connector kv cache events collected during the last interval.
-        """
-        events = self._lmcache_engine.get_kv_events()
-        if not events:
-            return None
-
-        lmcache_kv_events: KVEventBatch | None = None
-        for event in events:
-            if lmcache_kv_events is None:
-                lmcache_kv_events = KVEventBatch(ts=time.time(), events=[])
-            block = BlockStored(
-                block_hashes=event.block_hashes,
-                parent_block_hash=event.parent_block_hash,
-                token_ids=event.token_ids,
-                lora_id=event.lora_id,
-                block_size=event.block_size,
-                medium=event.medium,
-            )
-            lmcache_kv_events.events.append(block)
-
-        return lmcache_kv_events
-
     # ==============================
     # Scheduler-side methods
     # ==============================
