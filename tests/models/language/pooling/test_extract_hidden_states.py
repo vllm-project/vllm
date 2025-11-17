@@ -29,9 +29,6 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
 
         for n, output in zip(n_prompt_tokens, pooling_outputs):
             assert len(output.prompt_token_ids) == n
-            # We should ensure that all pooling task output.num_cached_tokens == 0
-            # even if prefix caching is enabled
-            assert output.num_cached_tokens >= 0
             assert len(output.outputs.data) == n
             assert output.num_cached_tokens == 0
 
