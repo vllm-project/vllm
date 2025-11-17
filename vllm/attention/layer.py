@@ -904,8 +904,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
                     allgatered_kv_c_normed, allgatered_k_pe = (
                         cur_allgather_kvcache.unsqueeze(1).split(
-                            [self.impl.kv_lora_rank, self.qk_rope_head_dim],
-                            dim=-1,  # type: ignore[attr-defined]
+                            [self.impl.kv_lora_rank, self.qk_rope_head_dim],  # type: ignore[attr-defined]
+                            dim=-1,
                         )
                     )
 
