@@ -578,23 +578,23 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
         self.norm1 = torch.nn.GroupNorm(
             num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
         )
-        self.conv1 = torch.Conv2dLayer(
+        self.conv1 = Conv2dLayer(
             in_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
         self.norm2 = torch.nn.GroupNorm(
             num_groups=32, num_channels=out_channels, eps=1e-6, affine=True
         )
         self.dropout = torch.nn.Dropout(config.dropout)
-        self.conv2 = torch.Conv2dLayer(
+        self.conv2 = Conv2dLayer(
             out_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
-                self.conv_shortcut = torch.Conv2dLayer(
+                self.conv_shortcut = Conv2dLayer(
                     in_channels, out_channels, kernel_size=3, stride=1, padding=1
                 )
             else:
-                self.nin_shortcut = torch.Conv2dLayer(
+                self.nin_shortcut = Conv2dLayer(
                     in_channels, out_channels, kernel_size=1, stride=1, padding=0
                 )
 
@@ -627,16 +627,16 @@ class ChameleonVQVAEEncoderAttnBlock(nn.Module):
         self.norm = torch.nn.GroupNorm(
             num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
         )
-        self.q = torch.Conv2dLayer(
+        self.q = Conv2dLayer(
             in_channels, in_channels, kernel_size=1, stride=1, padding=0
         )
-        self.k = torch.Conv2dLayer(
+        self.k = Conv2dLayer(
             in_channels, in_channels, kernel_size=1, stride=1, padding=0
         )
-        self.v = torch.Conv2dLayer(
+        self.v = Conv2dLayer(
             in_channels, in_channels, kernel_size=1, stride=1, padding=0
         )
-        self.proj_out = torch.Conv2dLayer(
+        self.proj_out = Conv2dLayer(
             in_channels, in_channels, kernel_size=1, stride=1, padding=0
         )
 
@@ -682,7 +682,7 @@ class ChameleonVQVAEEncoder(nn.Module):
         latent_channels = config.latent_channels
         channel_multiplier = config.channel_multiplier
 
-        self.conv_in = torch.Conv2dLayer(
+        self.conv_in = Conv2dLayer(
             in_channels, base_channels, kernel_size=3, stride=1, padding=1
         )
 
@@ -739,7 +739,7 @@ class ChameleonVQVAEEncoder(nn.Module):
         self.norm_out = torch.nn.GroupNorm(
             num_groups=32, num_channels=block_in, eps=1e-6, affine=True
         )
-        self.conv_out = torch.Conv2dLayer(
+        self.conv_out = Conv2dLayer(
             block_in,
             2 * latent_channels if double_latent else latent_channels,
             kernel_size=3,
@@ -780,10 +780,8 @@ class ChameleonVQVAE(nn.Module):
         super().__init__()
         self.encoder = ChameleonVQVAEEncoder(config)
         self.quantize = ChameleonVQVAEVectorQuantizer(config)
-        self.quant_conv = torch.Conv2dLayer(config.latent_channels, config.embed_dim, 1)
-        self.post_quant_conv = torch.Conv2dLayer(
-            config.embed_dim, config.latent_channels, 1
-        )
+        self.quant_conv = Conv2dLayer(config.latent_channels, config.embed_dim, 1)
+        self.post_quant_conv = Conv2dLayer(config.embed_dim, config.latent_channels, 1)
         self.eval()  # Chameleon's VQ model is frozen
 
     def encode(
