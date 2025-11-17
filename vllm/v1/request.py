@@ -96,6 +96,9 @@ class Request:
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        #TODO (cake): 
+        # self.num_external_load_tokens (how many tokens are loaded from external KV cache)
+        # self.num_external_computed_tokens (longest cache hit length from external KV cache)
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related
@@ -226,6 +229,8 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    #TODO (cake): WAITING_FOR_BACKWARD_KVS: waiting but can be fired if fit
+    #TODO (cake): RUNNING_WITH_PARALLEL_IO: running but can be paused if fit
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
