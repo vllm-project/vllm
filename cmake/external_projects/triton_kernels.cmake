@@ -2,17 +2,18 @@
 
 set(DEFAULT_TRITON_KERNELS_TAG "v3.5.0")
 
-# Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM.
+# Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM. We expect TRITON_KERNELS_SRC_DIR to
+# be directly set to the triton_kernels python directory. 
 if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
-  set(TRITON_KERNELS_SRC_DIR $ENV{TRITON_KERNELS_SRC_DIR})
-endif()
-
-if(TRITON_KERNELS_SRC_DIR)
+  message(STATUS "[triton_kernels] Fetch from $ENV{TRITON_KERNELS_SRC_DIR}")
   FetchContent_Declare(
           triton_kernels
-          SOURCE_DIR ${TRITON_KERNELS_SRC_DIR}
+          SOURCE_DIR $ENV{TRITON_KERNELS_SRC_DIR}
   )
+
 else()
+  set(TRITON_GIT "https://github.com/triton-lang/triton.git")
+  message (STATUS "[triton_kernels] Fetch from ${TRITON_GIT}:${DEFAULT_TRITON_KERNELS_TAG}")
   FetchContent_Declare(
           triton_kernels
           # TODO (varun) : Fetch just the triton_kernels directory from Triton
@@ -30,11 +31,9 @@ if (NOT triton_kernels_SOURCE_DIR)
   message (FATAL_ERROR "[triton_kernels] Cannot resolve triton_kernels_SOURCE_DIR")
 endif()
 
-if (TRITON_KERNELS_SRC_DIR)
-  # When passed in explicitly we expect TRITON_KERNELS_SRC_DIR to point to the python directory directly.
+if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
   set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}")
 else()
-  # Triton kernels lives in the python directory
   set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}/python/triton_kernels/triton_kernels/")
 endif()
 
