@@ -907,8 +907,8 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
-    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
-        return (n, k) in []
+    def is_triton_gemm_afp4wfp4_presh_ws_tuned(m: int, n: int, k: int) -> bool:
+        return (m, n, k) in []
 
     @staticmethod
     def shuffle_weight(
