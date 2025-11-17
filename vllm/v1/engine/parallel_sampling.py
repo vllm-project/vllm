@@ -97,12 +97,21 @@ class ParentRequest:
         child_request_id: str,
         completion_output: CompletionOutput,
     ) -> tuple[str, list[CompletionOutput], bool]:
+        already_finished_and_returned: bool = False
         if completion_output.finished():
-            self.child_requests.remove(child_request_id)
+            if child_request_id in self.child_requests:
+                self.child_requests.remove(child_request_id)
+            else:
+                # child request ID is not available in child_requests
+                # which means the request had finished in previous
+                # batch step and returned to the client earlier
+                already_finished_and_returned = True
 
         if self.sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
-            # If streaming, just return the current output.
-            outputs = [completion_output]
+            # If streaming, just return the current output
+            #
+            # DO NOT output finished and already returned child request to client again
+            outputs = [] if already_finished_and_returned else [completion_output]
         else:
             # If not streaming, aggregate the n final outputs.
             self.output_aggregator[completion_output.index] = completion_output

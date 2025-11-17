@@ -34,6 +34,9 @@ class MockConversationContext(ConversationContext):
     def append_output(self, output) -> None:
         pass
 
+    def append_tool_output(self, output) -> None:
+        pass
+
     async def call_tool(self):
         return []
 

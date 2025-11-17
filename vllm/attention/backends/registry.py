@@ -3,108 +3,193 @@
 """Attention backend registry"""
 
 import enum
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
+from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
-class _Backend(enum.Enum):
-    FLASH_ATTN = enum.auto()
-    TRITON_ATTN = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_ATTN = enum.auto()
-    ROCM_AITER_MLA = enum.auto()
-    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
-    TORCH_SDPA = enum.auto()
-    FLASHINFER = enum.auto()
-    FLASHINFER_MLA = enum.auto()
-    TRITON_MLA = enum.auto()
-    CUTLASS_MLA = enum.auto()
-    FLASHMLA = enum.auto()
-    FLASHMLA_SPARSE = enum.auto()
-    FLASH_ATTN_MLA = enum.auto()
-    PALLAS = enum.auto()
-    IPEX = enum.auto()
-    NO_ATTENTION = enum.auto()
-    FLEX_ATTENTION = enum.auto()
-    TREE_ATTN = enum.auto()
-    ROCM_AITER_UNIFIED_ATTN = enum.auto()
+logger = init_logger(__name__)
 
 
-BACKEND_MAP = {
-    _Backend.FLASH_ATTN: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
-    _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
-    _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",  # noqa: E501
-    _Backend.ROCM_ATTN: "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend",  # noqa: E501
-    _Backend.ROCM_AITER_MLA: "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
-    _Backend.ROCM_AITER_FA: "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",  # noqa: E501
-    _Backend.TORCH_SDPA: "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend",  # noqa: E501
-    _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",  # noqa: E501
-    _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",  # noqa: E501
-    _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
-    _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
-    _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
-    _Backend.FLASHMLA_SPARSE: "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend",  # noqa: E501
-    _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
-    _Backend.PALLAS: "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
-    _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
-    _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",  # noqa: E501
-    _Backend.ROCM_AITER_UNIFIED_ATTN: "vllm.v1.attention.backends.rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",  # noqa: E501
-}
+class _AttentionBackendEnumMeta(enum.EnumMeta):
+    """Metaclass for AttentionBackendEnum to provide better error messages."""
+
+    def __getitem__(cls, name: str):
+        """Get backend by name with helpful error messages."""
+        try:
+            return super().__getitem__(name)
+        except KeyError:
+            members = cast("dict[str, AttentionBackendEnum]", cls.__members__).values()
+            valid_backends = ", ".join(m.name for m in members)
+            raise ValueError(
+                f"Unknown attention backend: '{name}'. "
+                f"Valid options are: {valid_backends}"
+            ) from None
 
 
-def register_attn_backend(backend: _Backend, class_path: str | None = None):
+class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
+    """Enumeration of all supported attention backends.
+
+    The enum value is the default class path, but this can be overridden
+    at runtime using register_backend().
+
+    To get the actual backend class (respecting overrides), use:
+        backend.get_class()
     """
-    Decorator: register a custom attention backend into BACKEND_MAPPING.
-    - If class_path is provided, use it.
-    - Otherwise, auto-generate from the class object.
-    Validation: only checks if 'backend' is a valid _Backend enum member.
-    Overwriting existing mappings is allowed. This enables other hardware
-    platforms to plug in custom out-of-tree backends.
-    """
-    if not isinstance(backend, _Backend):
-        raise ValueError(f"{backend} is not a valid _Backend enum value.")
 
-    def decorator(cls):
-        path = class_path or f"{cls.__module__}.{cls.__qualname__}"
-        BACKEND_MAP[backend] = path
+    FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+    TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    XFORMERS = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"
+    ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
+    ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
+    ROCM_AITER_FA = (
+        "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+    )
+    TORCH_SDPA = ""  # this tag is only used for ViT
+    FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+    FLASHINFER_MLA = (
+        "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
+    )
+    TRITON_MLA = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
+    CUTLASS_MLA = "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
+    FLASHMLA = "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend"
+    FLASHMLA_SPARSE = (
+        "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend"
+    )
+    FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    PALLAS = "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+    IPEX = "vllm.v1.attention.backends.ipex.IpexAttentionBackend"
+    NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
+    FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+    TREE_ATTN = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"
+    ROCM_AITER_UNIFIED_ATTN = (
+        "vllm.v1.attention.backends.rocm_aiter_unified_attn."
+        "RocmAiterUnifiedAttentionBackend"
+    )
+    CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    # Placeholder for third-party/custom backends - must be registered before use
+    CUSTOM = ""
+
+    def get_path(self, include_classname: bool = True) -> str:
+        """Get the class path for this backend (respects overrides).
+
+        Returns:
+            The fully qualified class path string
+
+        Raises:
+            ValueError: If Backend.CUSTOM is used without being registered
+        """
+        path = _OVERRIDES.get(self, self.value)
+        if not path:
+            raise ValueError(
+                f"Backend {self.name} must be registered before use. "
+                f"Use register_backend(Backend.{self.name}, 'your.module.YourClass')"
+            )
+        if not include_classname:
+            path = path.rsplit(".", 1)[0]
+        return path
+
+    def get_class(self) -> "type[AttentionBackend]":
+        """Get the backend class (respects overrides).
+
+        Returns:
+            The backend class
+
+        Raises:
+            ImportError: If the backend class cannot be imported
+            ValueError: If Backend.CUSTOM is used without being registered
+        """
+        return resolve_obj_by_qualname(self.get_path())
+
+    def is_overridden(self) -> bool:
+        """Check if this backend has been overridden.
+
+        Returns:
+            True if the backend has a registered override
+        """
+        return self in _OVERRIDES
+
+    def clear_override(self) -> None:
+        """Clear any override for this backend, reverting to the default."""
+        _OVERRIDES.pop(self, None)
+
+
+_OVERRIDES: dict[AttentionBackendEnum, str] = {}
+
+
+def register_backend(
+    backend: AttentionBackendEnum, class_path: str | None = None
+) -> Callable[[type], type]:
+    """Register or override a backend implementation.
+
+    Args:
+        backend: The AttentionBackendEnum member to register
+        class_path: Optional class path. If not provided and used as
+            decorator, will be auto-generated from the class.
+
+    Returns:
+        Decorator function if class_path is None, otherwise a no-op
+
+    Examples:
+        # Override an existing backend
+        @register_backend(AttentionBackendEnum.FLASH_ATTN)
+        class MyCustomFlashAttn:
+            ...
+
+        # Register a custom third-party backend
+        @register_backend(AttentionBackendEnum.CUSTOM)
+        class MyCustomBackend:
+            ...
+
+        # Direct registration
+        register_backend(
+            AttentionBackendEnum.CUSTOM,
+            "my.module.MyCustomBackend"
+        )
+    """
+
+    def decorator(cls: type) -> type:
+        _OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"
         return cls
+
+    if class_path is not None:
+        _OVERRIDES[backend] = class_path
+        return lambda x: x
 
     return decorator
 
 
-def backend_to_class_str(backend: _Backend) -> str:
-    """Get the backend class string
+# Backwards compatibility alias for plugins
+class _BackendMeta(type):
+    """Metaclass to provide deprecation warnings when accessing _Backend."""
 
-    Args:
-        backend: The backend enum value
+    def __getattribute__(cls, name: str):
+        if name not in ("__class__", "__mro__", "__name__"):
+            logger.warning(
+                "_Backend has been renamed to AttentionBackendEnum. "
+                "Please update your code to use AttentionBackendEnum instead. "
+                "_Backend will be removed in a future release."
+            )
+        return getattr(AttentionBackendEnum, name)
 
-    Returns:
-        The backend class string
+    def __getitem__(cls, name: str):
+        logger.warning(
+            "_Backend has been renamed to AttentionBackendEnum. "
+            "Please update your code to use AttentionBackendEnum instead. "
+            "_Backend will be removed in a future release."
+        )
+        return AttentionBackendEnum[name]
+
+
+class _Backend(metaclass=_BackendMeta):
+    """Deprecated: Use AttentionBackendEnum instead.
+
+    This class is provided for backwards compatibility with plugins
+    and will be removed in a future release.
     """
-    return BACKEND_MAP[backend]
 
-
-def backend_to_class(backend: _Backend) -> type:
-    """Get the backend class.
-
-    Args:
-        backend: The backend enum value
-
-    Returns:
-        The backend class
-    """
-    backend_class_name = backend_to_class_str(backend)
-    return resolve_obj_by_qualname(backend_class_name)
-
-
-def backend_name_to_enum(backend_name: str) -> _Backend | None:
-    """
-    Convert a string backend name to a _Backend enum value.
-
-    Returns:
-        _Backend: enum value if backend_name is a valid in-tree type
-        None: otherwise it's an invalid in-tree type or an out-of-tree platform
-              is loaded.
-    """
-    assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else None
+    pass

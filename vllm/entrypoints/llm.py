@@ -23,6 +23,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     is_init_field,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -31,7 +32,6 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -259,7 +259,9 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(mode=compilation_config)
+                compilation_config_instance = CompilationConfig(
+                    mode=CompilationMode(compilation_config)
+                )
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{
@@ -1496,8 +1498,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> None:
-        self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         """
