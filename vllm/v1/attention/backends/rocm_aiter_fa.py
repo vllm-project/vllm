@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -34,6 +35,9 @@ if current_platform.is_rocm():
     import aiter
 
     from vllm.triton_utils import tl, triton
+
+    if envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
@@ -637,6 +641,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with AiterFlashAttention.
 
@@ -675,25 +680,62 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(0)
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping
-            # is not padded. However, we don't need to do
-            # key[:num_actual_tokens] and value[:num_actual_tokens] because
-            # the reshape_and_cache_flash op uses the slot_mapping's shape
-            # to determine the number of actual tokens.
-
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+        if positions is not None and query.shape[0] <= 256:
+            assert self.kv_sharing_target_layer_name is None, (
+                "self.kv_sharing_target_layer_name cannot be None"
             )
+            assert hasattr(self, "rotary_emb"), f"rotary_emb not found in {self}"
+            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+            if is_fp8_kv_cache:
+                key_cache = key_cache.view(current_platform.fp8_dtype())
+                value_cache = value_cache.view(current_platform.fp8_dtype())
+
+            query, key, key_cache, value_cache, output = (
+                fused_qk_rope_reshape_and_cache(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    layer._v_scale,
+                    self.rotary_emb.is_neox_style,
+                    flash_layout=True,
+                    apply_scale=is_fp8_kv_cache,
+                    offs=None,
+                    q_out=query,
+                    k_out=key,
+                    output_zeros=True,
+                    zeros_out=output,
+                )
+            )
+        else:
+            if positions is not None:
+                query, key = self.rotary_emb(positions, query, key)
+
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # Skip this if sharing KV cache with an earlier attention layer.
+                # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+                # not padded. However, we don't need to do key[:num_actual_tokens]
+                # and value[:num_actual_tokens] because the reshape_and_cache_flash
+                # op uses the slot_mapping's shape to determine the number of
+                # actual tokens.
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
