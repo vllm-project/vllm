@@ -177,7 +177,7 @@ def correct_attn_out(
         cp_rank,
     )
     const_args = {"HEAD_DIM": D, "N_ROUNDED": N, "IS_BASE_E": is_lse_base_on_e}
-    ctx.call_kernel(correct_attn_kernel, grid, *regular_args, **const_args)
+    ctx.call_kernel(_correct_attn_cp_out_kernel, grid, *regular_args, **const_args)
     return out, lse
 
 
