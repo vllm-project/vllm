@@ -69,6 +69,8 @@ class LoRAConfig:
     """Target modules for LoRA training."""
     enable_lora_training: bool = False
     """Enable LoRA training."""
+    scheduler_type: str = "cosine"
+    """Scheduler type for LoRA training."""
 
     def compute_hash(self) -> str:
         """

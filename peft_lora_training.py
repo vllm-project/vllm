@@ -12,6 +12,7 @@ from datasets import load_dataset, Dataset
 
 # Configuration - MATCHES vLLM exactly
 BASE_MODEL_PATH = "/home/girfan/models/Llama-3.2-1B-Instruct"
+LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_random_lora"  # Starting LoRA adapter
 DTYPE = torch.bfloat16
 LORA_RANK = 8
 LORA_ALPHA = 16
@@ -35,6 +36,10 @@ print(f"Gradient accumulation: {GRADIENT_ACCUMULATION_STEPS}")
 print(f"Effective batch size: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
 print(f"Learning rate: {LEARNING_RATE}")
 print(f"Target modules: ['q_proj', 'v_proj']")
+print(f"Adapter path: {LORA_ADAPTER_PATH}")
+print(f"Rank: {LORA_RANK}")
+print(f"Alpha: {LORA_ALPHA}")
+print(f"Scaling: {LORA_ALPHA / LORA_RANK}")
 print("=" * 80)
 
 # Load dataset
@@ -105,17 +110,15 @@ model = AutoModelForCausalLM.from_pretrained(
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
 tokenizer.pad_token = tokenizer.eos_token
 
-# Configure LoRA for Q+V ONLY (matches vLLM)
-print("\n[3/5] Configuring LoRA (Q+V only)...")
-lora_config = LoraConfig(
-    r=LORA_RANK,
-    lora_alpha=LORA_ALPHA,
-    target_modules=["q_proj", "v_proj"],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
+# Load existing LoRA adapter (matches test_simple_batch.py and vLLM)
+print(f"\n[3/5] Loading LoRA adapter from {LORA_ADAPTER_PATH}...")
+from peft import PeftModel
+model = PeftModel.from_pretrained(
+    model,
+    LORA_ADAPTER_PATH,
+    autocast_adapter_dtype=False,
+    is_trainable=True,
 )
-model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # Prepare dataset
@@ -133,9 +136,60 @@ print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']
 print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
 print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
 
-# Data collator
+# TEMPORARY DEBUG: Save train dataset to CSV for comparison
+import pandas as pd
+import os
+debug_dir = "debug_batches"
+os.makedirs(debug_dir, exist_ok=True)
+
+# Save first 20 samples of train_dataset input_ids
+train_samples = []
+for i in range(min(20, len(train_dataset))):
+    train_samples.append(train_dataset[i]['input_ids'])
+df_train = pd.DataFrame(train_samples)
+df_train.to_csv(f"{debug_dir}/peft_train_dataset_first20_input_ids.csv", index=False)
+print(f"[DEBUG] Saved first 20 train samples to {debug_dir}/peft_train_dataset_first20_input_ids.csv")
+
+# Data collator with debugging
 from transformers import default_data_collator
-data_collator = default_data_collator
+import pandas as pd
+import os
+
+# TEMPORARY DEBUG: Create debug directory
+debug_dir = "debug_batches"
+os.makedirs(debug_dir, exist_ok=True)
+
+# Counter for batch numbering
+batch_counter = {"count": 0}
+
+def debug_data_collator(features):
+    """Wrapper around default_data_collator that logs batches to CSV."""
+    # Call the original collator
+    batch = default_data_collator(features)
+    
+    # Convert to numpy for CSV writing
+    batch_input_ids = batch['input_ids'].cpu().numpy()
+    batch_labels = batch['labels'].cpu().numpy()
+    batch_attention_mask = batch['attention_mask'].cpu().numpy()
+    
+    # Write to CSV with batch number
+    batch_num = batch_counter["count"]
+    df = pd.DataFrame(batch_input_ids)
+    df.to_csv(f"{debug_dir}/peft_batch_{batch_num:04d}_input_ids.csv", index=False)
+    
+    df_labels = pd.DataFrame(batch_labels)
+    df_labels.to_csv(f"{debug_dir}/peft_batch_{batch_num:04d}_labels.csv", index=False)
+    
+    df_attention = pd.DataFrame(batch_attention_mask)
+    df_attention.to_csv(f"{debug_dir}/peft_batch_{batch_num:04d}_attention_mask.csv", index=False)
+    
+    # print(f"[DEBUG] PEFT wrote batch {batch_num} to {debug_dir}/ (shape: {batch_input_ids.shape})")
+    
+    batch_counter["count"] += 1
+    
+    return batch
+
+data_collator = debug_data_collator
 
 # Training arguments
 training_args = TrainingArguments(
@@ -154,6 +208,8 @@ training_args = TrainingArguments(
     report_to="none",
     lr_scheduler_type="cosine",
     weight_decay=0.0,
+    seed=42,  # Set seed for reproducibility
+    data_seed=42,  # Set data_seed for deterministic sampling
 )
 
 

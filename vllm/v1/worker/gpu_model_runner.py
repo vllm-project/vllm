@@ -1047,7 +1047,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             else:
                                 # Truncate
                                 req_training_attention_mask = req_training_attention_mask[:num_tokens, :num_tokens]
-                    
+
                     training_attention_masks_per_req.append(req_training_attention_mask)
                     seq_lens_per_req.append(num_tokens)
                 else:
@@ -2634,6 +2634,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 #     "labels": labels.flatten().tolist(),
                 # })
                 # df.to_csv(f"vllm_labels.csv", index=False)
+                # ss
 
                 # # save loss to a csv file
                 # df = pd.DataFrame({

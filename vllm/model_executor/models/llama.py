@@ -297,6 +297,7 @@ class LlamaAttention(nn.Module):
 
         # TODO(girfan): HACK!!
         q, k = self.rotary_emb(positions, q, k)
+        # HACK END
 
         # cos, sin = positions
         # q, k = apply_rotary_pos_emb(q, k, cos, sin)
@@ -801,6 +802,12 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             # assert self.girfan_temp == False, "Girfan temp is already True"
             # self.girfan_temp = True
             IS_TRAINING = True
+            # import pandas as pd
+            # df = pd.DataFrame({
+            #     "input_ids": input_ids.flatten().tolist(),
+            # })
+            # df.to_csv(f"vllm_input_ids.csv", index=False)
+
 
         # if IS_TRAINING:
         #     # save input_ids to a csv file

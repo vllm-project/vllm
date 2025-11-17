@@ -12,6 +12,8 @@ import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
+from torch.utils.data import DataLoader
+from transformers import default_data_collator
 
 import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -66,6 +68,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+BATCH_NUM = 0
 
 
 def tokenize(tokenizer: AnyTokenizer, dataset: dict[str, Any], max_length: Optional[int]) -> dict[str, Any]:
@@ -453,6 +457,23 @@ class LLM:
             tokenized_train_dataset = Dataset.from_dict(train_dataset) if isinstance(train_dataset, dict) else Dataset.from_list(train_dataset)
             if eval_dataset is not None:
                 tokenized_eval_dataset = Dataset.from_dict(eval_dataset) if isinstance(eval_dataset, dict) else Dataset.from_list(eval_dataset)
+            
+            # TEMPORARY DEBUG: Save first 20 samples from converted dataset
+            import pandas as pd
+            import os
+            debug_dir = "debug_batches"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            train_samples = []
+            for i in range(min(20, len(tokenized_train_dataset))):
+                train_samples.append(tokenized_train_dataset[i]['input_ids'])
+            df_train = pd.DataFrame(train_samples)
+            df_train.to_csv(f"{debug_dir}/vllm_llm_train_converted_dataset_first20_input_ids.csv", index=False)
+            print(f"[DEBUG LLM.train] Saved first 20 converted train samples to {debug_dir}/vllm_llm_train_converted_dataset_first20_input_ids.csv")
+            print(f"[DEBUG LLM.train] Dataset columns: {tokenized_train_dataset.column_names}")
+            print(f"[DEBUG LLM.train] Dataset features: {tokenized_train_dataset.features}")
+            print(f"[DEBUG LLM.train] First sample keys: {list(tokenized_train_dataset[0].keys())}")
+            # END TEMPORARY DEBUG
         else:
             # Tokenize the dataset
             tokenizer = self.get_tokenizer()
@@ -465,22 +486,47 @@ class LLM:
             dataset = Dataset.from_list(data_list)
             tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
-            # # print the first 4 tokenized dataset
-            # print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
-            # print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
-            # print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
-            # print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
-
             # Split the tokenized dataset into train and eval
             tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
             if eval_dataset is not None:
                 tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
+        # Create DataLoaders with default_data_collator to match PEFT/Transformers behavior
+        # Use RandomSampler with seed to match PEFT Trainer behavior
+        import torch
+        from torch.utils.data import RandomSampler
+        
+        # Set seed for reproducible sampling (matches PEFT's data_seed=42)
+        generator = torch.Generator()
+        generator.manual_seed(42)
+        train_sampler = RandomSampler(tokenized_train_dataset, generator=generator)
+        
+        train_dataloader = DataLoader(
+            tokenized_train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,  # Use RandomSampler to match PEFT
+            collate_fn=default_data_collator,
+            drop_last=False,
+        )
+        
+        if eval_dataset is not None:
+            max_eval_batch_size = 8
+            eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
+            eval_dataloader = DataLoader(
+                tokenized_eval_dataset,
+                batch_size=eval_batch_size,
+                shuffle=False,  # Deterministic ordering
+                collate_fn=default_data_collator,
+                drop_last=False,
+            )
+        else:
+            eval_dataloader = None
+        
         # Check if this is eval-only mode (no training data)
-        is_eval_only = len(tokenized_train_dataset) == 0
+        is_eval_only = len(train_dataloader) == 0
         
         if not is_eval_only:
-            num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
+            num_steps_per_epoch = len(train_dataloader)  # Number of batches per epoch
             num_training_steps = num_steps_per_epoch * num_epochs
         else:
             # Eval-only mode: no training steps
@@ -501,23 +547,25 @@ class LLM:
         # step every batch, do_sync_step every gradient_accumulation_steps
         # tr_loss is always accumulated and reset after eval
 
-        def _run_batch(dataset_iter: Iterator, batch_size: int, lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
-            training_params = TrainingParams(is_eval=is_eval, gradient_accumulation_steps=gradient_accumulation_steps, num_training_steps=num_training_steps, num_warmup_steps=warmup_steps)
-            request_ids = self._add_training_requests_from_iter(dataset_iter, batch_size, training_params, lora_request)
+        def _run_batch(batch: dict[str, Any], lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
+            """Process a single batch from the DataLoader."""
+            training_params = TrainingParams(
+                is_eval=is_eval,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                num_training_steps=num_training_steps,
+                num_warmup_steps=warmup_steps
+            )
+            request_ids = self._add_training_requests_from_batch(batch, training_params, lora_request)
             outputs = self._run_engine(use_tqdm=use_tqdm)
             return outputs
 
         def _run_eval():
-            if eval_dataset is None:
+            if eval_dataloader is None:
                 return []
-            max_eval_batch_size = 8
-            eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
-            total_eval_steps = math.ceil(len(tokenized_eval_dataset) / eval_batch_size)
-            eval_iter = iter(tokenized_eval_dataset)
             eval_losses = []
-            with tqdm(total=total_eval_steps, desc="Evaluation Progress") as eval_pbar:
-                for _ in range(0, len(tokenized_eval_dataset), eval_batch_size):
-                    outputs = _run_batch(eval_iter, eval_batch_size, lora_request, is_eval=True)
+            with tqdm(total=len(eval_dataloader), desc="Evaluation Progress") as eval_pbar:
+                for batch in eval_dataloader:
+                    outputs = _run_batch(batch, lora_request, is_eval=True)
                     # Add the loss of each request to the eval losses.
                     for output in outputs:
                         eval_losses.append(output.loss)
@@ -535,10 +583,17 @@ class LLM:
 
             with tqdm(total=total_steps, desc="Training Progress") as pbar:
                 for _ in range(num_epochs):
-                    train_iter = iter(tokenized_train_dataset)  # Reset per epoch
-                    for _ in range(0, num_steps_per_epoch, gradient_accumulation_steps):
+                    # Iterate through batches from DataLoader
+                    batch_iter = iter(train_dataloader)
+                    for step in range(0, num_steps_per_epoch, gradient_accumulation_steps):
+                        # Process gradient_accumulation_steps batches
                         for _ in range(gradient_accumulation_steps):
-                            _run_batch(train_iter, batch_size, lora_request, is_eval=False)
+                            try:
+                                batch = next(batch_iter)
+                                _run_batch(batch, lora_request, is_eval=False)
+                            except StopIteration:
+                                # This can happen if num_steps_per_epoch is not divisible by gradient_accumulation_steps
+                                break
 
                         pbar.update(1)
                         completed_steps += 1
@@ -573,6 +628,73 @@ class LLM:
             'captured_labels': captured_labels,
         }
 
+    def _add_training_requests_from_batch(
+        self,
+        batch: dict[str, Any],
+        training_params: TrainingParams,
+        lora_request: LoRARequest,
+    ) -> list[str]:
+        """
+        Add training requests from a collated batch.
+        
+        The batch is a dictionary with keys like 'input_ids', 'attention_mask', 'labels',
+        where each value is a tensor of shape [batch_size, seq_len].
+        
+        We need to unbatch it and add individual requests.
+        """
+        global BATCH_NUM
+
+        # TEMPORARY DEBUG: Write batch input_ids to CSV
+        import pandas as pd
+        import os
+        
+        debug_dir = "debug_batches"
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # Convert batch input_ids to numpy for easier CSV writing
+        batch_input_ids = batch['input_ids'].cpu().numpy()
+        batch_labels = batch['labels'].cpu().numpy()
+        batch_attention_mask = batch['attention_mask'].cpu().numpy()
+        
+        # Count how many batches we've seen
+        batch_num = BATCH_NUM
+        BATCH_NUM += 1
+        
+        # Write to CSV with batch number
+        df = pd.DataFrame(batch_input_ids)
+        df.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_input_ids.csv", index=False)
+        
+        df_labels = pd.DataFrame(batch_labels)
+        df_labels.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_labels.csv", index=False)
+        
+        df_attention = pd.DataFrame(batch_attention_mask)
+        df_attention.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_attention_mask.csv", index=False)
+        
+        # print(f"[DEBUG] Wrote batch {batch_num} to {debug_dir}/ (shape: {batch_input_ids.shape})")
+        # END TEMPORARY DEBUG
+        
+        # Get batch size from the first tensor
+        batch_size = batch['input_ids'].shape[0]
+        
+        request_ids = []
+        for i in range(batch_size):
+            # Extract the i-th sample from the batch
+            # TODO(girfan): Can remove the tolist() calls and handle tensors.
+            sample = {
+                'input_ids': batch['input_ids'][i].tolist(),
+                'attention_mask': batch['attention_mask'][i].tolist(),
+                'labels': batch['labels'][i].tolist(),
+            }
+            
+            request_id = self._add_training_request(
+                sample=sample,
+                training_params=training_params,
+                lora_request=lora_request,
+            )
+            request_ids.append(request_id)
+
+        return request_ids
+    
     def _add_training_requests_from_iter(
         self,
         dataset_iter: Iterator,
@@ -580,6 +702,7 @@ class LLM:
         training_params: TrainingParams,
         lora_request: LoRARequest,
     ) -> list[str]:
+        """Legacy method for compatibility. Prefer _add_training_requests_from_batch."""
         request_ids = []
         for i in range(batch_size):
             try:

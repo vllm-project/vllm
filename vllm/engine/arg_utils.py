@@ -402,6 +402,7 @@ class EngineArgs:
     lora_alpha: int = LoRAConfig.lora_alpha
     lora_training_target_modules: List[str] = LoRAConfig.training_target_modules
     enable_lora_training: bool = LoRAConfig.enable_lora_training
+    lora_scheduler_type: str = LoRAConfig.scheduler_type
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[
@@ -1420,7 +1421,8 @@ class EngineArgs:
             and self.max_cpu_loras > 0 else None,
             lora_alpha=self.lora_alpha,
             training_target_modules=self.lora_training_target_modules,
-            enable_lora_training=self.enable_lora_training) if self.enable_lora else None
+            enable_lora_training=self.enable_lora_training if self.enable_lora else None,
+            scheduler_type=self.lora_scheduler_type)
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":

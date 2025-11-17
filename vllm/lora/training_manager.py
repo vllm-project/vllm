@@ -80,6 +80,7 @@ class TrainingManager:
         self.rank = lora_config.max_lora_rank
         self.alpha = lora_config.lora_alpha
         self.target_modules = lora_config.training_target_modules
+        self.scheduler_type = lora_config.scheduler_type
 
         self.trainable_lora_ids: Set[int] = set()
         self.in_prog_lora_ids: Set[int] = set()
@@ -224,6 +225,7 @@ class TrainingManager:
         Manually zero the gradients of all LoRA stacked tensors since they
         are not registered as nn.Parameters.
         """
+        self.model.zero_grad()
         for param_tensor in self.trainable_lora_params:
             if param_tensor.grad is not None:
                 param_tensor.grad.zero_()
@@ -421,11 +423,10 @@ class TrainingManager:
         optimizer: torch.optim.Optimizer,
         num_training_steps: int,
         num_warmup_steps: int,
-        scheduler_type: str,
     ):
         """Setup learning rate scheduler."""
         scheduler = get_scheduler(
-            scheduler_type,
+            self.scheduler_type,
             optimizer=optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps,
@@ -460,7 +461,7 @@ class TrainingManager:
 
 
     # TODO(girfan): Pass scheduler type as an argument from earlier.
-    def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4, scheduler_type: str = "constant"):
+    def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4):
         if self.optimizer is not None and self.scheduler is not None:
             return
 
@@ -472,7 +473,6 @@ class TrainingManager:
             optimizer=self.optimizer,
             num_training_steps=self.num_training_steps,
             num_warmup_steps=self.num_warmup_steps,
-            scheduler_type=scheduler_type,
         )
 
 
@@ -483,13 +483,14 @@ class TrainingManager:
             # This matches PEFT's TrainingArguments(max_grad_norm=1.0) default
             trainable_params = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
 
-            # TODO(girfan): HACK
+            # TODO(girfan): Confirm this?
             # combine model parameters and trainable parameters
-            # all_params = trainable_params + list(self.model.parameters())
+            all_params = trainable_params + list(self.model.parameters())
+            # trainable_params only?
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                trainable_params,
-                # all_params,
+                # trainable_params,
+                all_params,
                 max_norm=self.max_grad_norm,
             )
             self.grad_norm = grad_norm
