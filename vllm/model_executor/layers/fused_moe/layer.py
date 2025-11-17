@@ -1665,11 +1665,21 @@ class FusedMoE(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_native(hidden_states, router_logits)
 
+    @property
+    def has_separate_shared_experts(self) -> bool:
+        return (
+            not isinstance(self.quant_method, FusedMoEModularMethod)
+            and self.shared_experts is not None
+        )
+
+    @property
+    def has_zero_experts(self) -> bool:
+        return self.zero_expert_num is not None and self.zero_expert_num > 0
+
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
-        has_separate_shared_experts: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
@@ -1760,7 +1770,7 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            if has_separate_shared_experts:
+            if self.has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is not None
 
@@ -1770,10 +1780,15 @@ class FusedMoE(CustomOp):
                     shared_output[:num_tokens],
                     final_hidden_states[:num_tokens],
                 )
+            elif isinstance(final_hidden_states, tuple):
+                final_hidden_states = (
+                    final_hidden_states[0][:num_tokens],
+                    final_hidden_states[1][:num_tokens],
+                )
             else:
                 final_hidden_states = final_hidden_states[:num_tokens]
 
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
+            if self.has_zero_experts:
                 assert isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is None
                 final_hidden_states, zero_expert_result = final_hidden_states
@@ -1844,15 +1859,10 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
-        has_separate_shared_experts = (
-            not isinstance(self.quant_method, FusedMoEModularMethod)
-            and self.shared_experts is not None
-        )
-
         use_chunked_impl = self.use_dp_chunking
 
         use_shared_experts_stream = (
-            has_separate_shared_experts
+            self.has_separate_shared_experts
             and not use_chunked_impl
             and self.shared_experts_stream is not None
             and (
@@ -1889,9 +1899,7 @@ class FusedMoE(CustomOp):
             router_logits, _ = self.gate(hidden_states)
 
         if use_chunked_impl:
-            return self.forward_impl_chunked(
-                hidden_states, router_logits, has_separate_shared_experts
-            )
+            return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
             self.quant_method, FusedMoEModularMethod
@@ -1941,8 +1949,14 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            if has_separate_shared_experts:
+            def combine_output(states: torch.Tensor) -> torch.Tensor:
+                if do_naive_dispatch_combine:
+                    states = get_ep_group().combine(states, self.is_sequence_parallel)
+                return states
+
+            if self.has_separate_shared_experts:
                 assert self.shared_experts is not None
+                assert isinstance(final_hidden_states, torch.Tensor)
 
                 if use_shared_experts_stream:
                     # Run shared experts in parallel on a separate stream
@@ -1958,28 +1972,14 @@ class FusedMoE(CustomOp):
                 else:
                     shared_output = self.shared_experts(hidden_states)
 
-                final_hidden_states = (
-                    shared_output,
-                    final_hidden_states,
-                )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
+                return (shared_output, combine_output(final_hidden_states))
+            elif self.shared_experts is not None:
+                return (final_hidden_states[0], combine_output(final_hidden_states[1]))
+            elif self.has_zero_experts:
                 final_hidden_states, zero_expert_result = final_hidden_states
-
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
-                if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
-                return states
-
-            if self.shared_experts is not None:
-                return (
-                    final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
-                )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, torch.Tensor)
                 return (combine_output(final_hidden_states), zero_expert_result)
             else:
+                assert isinstance(final_hidden_states, torch.Tensor)
                 return combine_output(final_hidden_states)
 
     @classmethod
