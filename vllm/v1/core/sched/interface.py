@@ -159,9 +159,9 @@ class SchedulerInterface(ABC):
 
         Args:
             reset_running_requests: If True, all the running requests will be
-            preempted and moved to the waiting queue. Otherwise, this method
-            will only reset the KV prefix cache when there is no running request
-            taking KV cache.
+                preempted and moved to the waiting queue. Otherwise, this method
+                will only reset the KV prefix cache when there is no running request
+                taking KV cache.
         """
         raise NotImplementedError
 
