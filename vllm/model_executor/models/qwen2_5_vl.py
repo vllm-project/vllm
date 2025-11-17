@@ -65,10 +65,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import (
-    apply_rotary_emb_torch,
-    dispatch_rotary_emb_function,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.vision import should_torch_compile_mm_vit
@@ -104,6 +100,7 @@ from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
+    apply_rotary_pos_emb_vision,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -376,11 +373,24 @@ class Qwen2_5_VisionAttention(nn.Module):
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
+<<<<<<< HEAD
         qkv = einops.rearrange(
             x,
             "s b (three head head_dim) -> b s three head head_dim",
             three=3,
             head=self.num_attention_heads_per_partition,
+=======
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
+        q, k, v = self.split_qkv(x)
+        batch_size = q.shape[1]
+
+        q, k, v = (einops.rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
+
+        # [2 * b, s, heads, head_dim]
+        qk_concat = torch.cat([q, k], dim=0)
+        qk_rotated = apply_rotary_pos_emb_vision(
+            qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
+>>>>>>> 137e3e19b (Use cos and sin cache in Qwen2VL and Qwen3VL)
         )
 
         if rotary_pos_emb is not None:
