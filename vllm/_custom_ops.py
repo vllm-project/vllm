@@ -2513,9 +2513,9 @@ class CPUDNNLGEMMHandler:
         self.n = -1
         self.k = -1
 
-    # def __del__(self):
-    #     if self.handler is not None:
-    #         torch.ops._C.release_dnnl_matmul_handler(self.handler)
+    def __del__(self):
+        if self.handler is not None:
+            torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
 _supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
