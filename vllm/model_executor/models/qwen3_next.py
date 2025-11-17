@@ -10,8 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.attention import Attention, AttentionBackend, AttentionMetadata
-from vllm.attention.selector import get_mamba_attn_backend
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -217,14 +216,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
-        return "linear_attention"
-
-    @property
-    def linear_attn_type(self) -> str:
-        return "gdn"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
+        return "gdn_attention"
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
@@ -278,10 +270,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             self.speculative_config.num_speculative_tokens
             if self.speculative_config
             else 0
-        )
-
-        self.mamba_attn_backend = get_mamba_attn_backend(
-            self.mamba_type, self.linear_attn_type
         )
 
         # QKV

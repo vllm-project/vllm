@@ -16,7 +16,6 @@ import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
-from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar
@@ -489,23 +488,6 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Florence2ForConditionalGeneration": "0.10.2",
     "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
-}
-
-
-class _MambaBackend(Enum):
-    MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
-    MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
-    SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
-    LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
-    LINEAR_GDN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
-
-
-MAMBA_BACKEND_MAP = {
-    "mamba1": _MambaBackend.MAMBA1.value,  # noqa
-    "mamba2": _MambaBackend.MAMBA2.value,  # noqa
-    "short_conv": _MambaBackend.SHORT_CONV.value,  # noqa
-    "linear_attention": _MambaBackend.LINEAR.value,  # noqa
-    "linear_attention_gdn": _MambaBackend.LINEAR_GDN.value,  # noqa
 }
 
 

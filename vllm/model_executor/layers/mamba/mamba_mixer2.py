@@ -4,13 +4,12 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    pass
 
 import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -471,8 +470,6 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -896,9 +893,6 @@ class MambaMixer2(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "mamba2"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
 
 
 def mamba_mixer2(

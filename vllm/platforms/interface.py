@@ -228,26 +228,6 @@ class Platform:
         return ""
 
     @classmethod
-    def get_mamba_attn_backend_cls(
-        cls,
-        mamba_type: str,
-        linear_attn_type: str | None,
-    ) -> str:
-        """Get mamba attention backend class of a device."""
-        from vllm.model_executor.models.registry import MAMBA_BACKEND_MAP
-
-        assert mamba_type
-        if mamba_type == "linear_attention" and linear_attn_type:
-            assert isinstance(linear_attn_type, str)
-            mamba_type = "_".join([mamba_type, linear_attn_type])
-
-        if mamba_type not in MAMBA_BACKEND_MAP:
-            raise ValueError(
-                f"Invalid mamba type ({mamba_type}) for {cls.device_name}."
-            )
-        return MAMBA_BACKEND_MAP[mamba_type]
-
-    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,

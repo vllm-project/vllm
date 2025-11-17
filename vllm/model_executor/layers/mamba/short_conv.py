@@ -4,12 +4,11 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    pass
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -84,8 +83,6 @@ class ShortConv(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-
-        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
 
     def forward_native(
         self,
@@ -234,9 +231,6 @@ class ShortConv(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "short_conv"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
 
 
 def short_conv(

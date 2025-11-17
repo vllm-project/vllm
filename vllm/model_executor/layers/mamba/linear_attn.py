@@ -5,7 +5,7 @@ import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    pass
 
 from typing import TYPE_CHECKING
 
@@ -15,7 +15,6 @@ from einops import rearrange
 from torch import nn
 
 from vllm.attention import AttentionMetadata
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -39,7 +38,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    pass
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -123,9 +122,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
         return "linear_attention"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None
@@ -217,8 +213,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

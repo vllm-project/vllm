@@ -7,7 +7,7 @@ from itertools import islice
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    pass
 
 import torch
 from torch import nn
@@ -15,7 +15,6 @@ from transformers import PretrainedConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -205,8 +204,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         assert self.chunk_size != -1, "chunk_size must be set for v1"
 
         self.prefix = prefix
-
-        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
 
     def _project_ssm_parameters(self, hidden_states):
         ssm_parameters = self.bcdt_proj(hidden_states)
@@ -469,9 +466,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "mamba2"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
 
 
 def plamo2_mamba_mixer(

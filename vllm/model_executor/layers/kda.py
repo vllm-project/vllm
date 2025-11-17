@@ -5,9 +5,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.attention import AttentionBackend
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -84,14 +82,7 @@ direct_register_custom_op(
 class KimiDeltaAttention(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
-        return "linear_attention"
-
-    @property
-    def linear_attn_type(self) -> str:
-        return "gdn"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        return self.mamba_attn_backend
+        return "gdn_attention"
 
     def get_state_dtype(
         self,
@@ -138,10 +129,6 @@ class KimiDeltaAttention(nn.Module, MambaBase):
 
         projection_size = self.head_dim * self.num_heads
         self.conv_size = kda_config["short_conv_kernel_size"]
-
-        self.mamba_attn_backend = get_mamba_attn_backend(
-            self.mamba_type, self.linear_attn_type
-        )
 
         self.q_proj = ColumnParallelLinear(
             self.hidden_size,
