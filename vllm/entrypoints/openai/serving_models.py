@@ -248,6 +248,7 @@ class OpenAIServingModels:
             base_model_name = self.model_config.model
             unique_id = self.lora_id_counter.inc(1)
             found_adapter = False
+            reason = ""
 
             # Try to resolve using available resolvers
             for resolver in self.lora_resolvers:
@@ -274,13 +275,15 @@ class OpenAIServingModels:
                             resolver.__class__.__name__,
                             e,
                         )
+                        reason = str(e)
                         continue
 
             if found_adapter:
                 # An adapter was found, but all attempts to load it failed.
                 return create_error_response(
                     message=(
-                        f"LoRA adapter '{lora_name}' was found but could not be loaded."
+                        f"LoRA adapter '{lora_name}' was found "
+                        f"but could not be loaded: {reason}"
                     ),
                     err_type="BadRequestError",
                     status_code=HTTPStatus.BAD_REQUEST,
