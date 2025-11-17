@@ -1185,6 +1185,8 @@ class NixlConnectorWorker:
                         self.block_size // kernel_block_size
                     )
                     self.block_size = kernel_block_size
+                    self.kv_topo.block_size = self.block_size
+                    self._block_size[self.engine_id] = self.block_size
 
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
