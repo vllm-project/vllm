@@ -237,19 +237,17 @@ class TrainableMLA(nn.Module):
         Apply rotary positional embeddings to the input tensor.
 
         Args:
-            x: Input tensor [total_tokens, heads, qk_rope_head_dim] or [bsz, seq_len, heads, qk_rope_head_dim]
-            freqs_cis: Precomputed complex exponentials [max_seq_len, qk_rope_head_dim//2] (complex64/complex128)
+            x: Input tensor [total_tokens, heads, qk_rope_head_dim]
+                or [bsz, seq_len, heads, qk_rope_head_dim]
+            freqs_cis: Precomputed complex exponentials
+                [max_seq_len, qk_rope_head_dim//2] (complex64/complex128)
 
         Returns:
             Tensor with rotary embeddings applied
         """
         # Determine if batched or flattened
-        if x.dim() == 4:
-            seq_dim = 1  # [bsz, seq_len, heads, dim]
-            seq_len = x.size(1)
-        else:
-            seq_dim = 0  # [total_tokens, heads, dim]
-            seq_len = x.size(0)
+        # [bsz, seq_len, heads, dim] or [total_tokens, heads, dim]
+        seq_len = x.size(1) if x.dim() == 4 else x.size(0)
 
         # Slice freqs_cis to actual sequence length
         # freqs_cis is complex: [max_seq_len, qk_rope_head_dim//2]
@@ -262,12 +260,9 @@ class TrainableMLA(nn.Module):
         )  # [..., qk_rope_head_dim//2]
 
         # Reshape freqs for broadcasting
-        if x.dim() == 4:
-            # Batched: [bsz, seq_len, heads, dim] -> freqs [1, seq_len, 1, dim//2]
-            freqs = freqs.unsqueeze(0).unsqueeze(2)
-        else:
-            # Flattened: [total_tokens, heads, dim] -> freqs [seq_len, 1, dim//2]
-            freqs = freqs.unsqueeze(1)
+        # Batched: [bsz, seq_len, heads, dim] -> freqs [1, seq_len, 1, dim//2]
+        # Flattened: [total_tokens, heads, dim] -> freqs [seq_len, 1, dim//2]
+        freqs = freqs.unsqueeze(0).unsqueeze(2) if x.dim() == 4 else freqs.unsqueeze(1)
 
         # Apply rotation: multiply by complex exponential
         x_rotated = x_complex * freqs
@@ -289,10 +284,12 @@ class TrainableMLA(nn.Module):
             sin: Sine values [total_tokens, qk_rope_head_dim//2]
 
         Returns:
-            Tensor with rotary embeddings applied [total_tokens, heads, qk_rope_head_dim]
+            Tensor with rotary embeddings applied
+                [total_tokens, heads, qk_rope_head_dim]
         """
         # Expand cos/sin to match x's head dimension
-        # cos/sin: [total_tokens, qk_rope_head_dim//2] -> [total_tokens, 1, qk_rope_head_dim//2]
+        # cos/sin: [total_tokens, qk_rope_head_dim//2]
+        #       -> [total_tokens, 1, qk_rope_head_dim//2]
         cos = cos.unsqueeze(1)
         sin = sin.unsqueeze(1)
 
@@ -325,22 +322,26 @@ class TrainableMLA(nn.Module):
             freqs_for_tokens: Pre-indexed frequencies - complex or real format
 
         Returns:
-            Tensor with rotary embeddings applied [total_tokens, heads, qk_rope_head_dim]
+            Tensor with rotary embeddings applied
+                [total_tokens, heads, qk_rope_head_dim]
         """
         # Check if freqs_for_tokens is complex or already split into cos/sin
         if freqs_for_tokens.is_complex():
             # Extract cos and sin from complex frequencies
-            # freqs_for_tokens is complex exponentials: e^(i*theta) = cos(theta) + i*sin(theta)
+            # freqs_for_tokens is complex exponentials: e^(i*theta)
+            # = cos(theta) + i*sin(theta)
             cos = freqs_for_tokens.real  # [total_tokens, qk_rope_head_dim//2]
             sin = freqs_for_tokens.imag  # [total_tokens, qk_rope_head_dim//2]
         elif freqs_for_tokens.shape[-1] == x.shape[-1] // 2:
-            # Format: [total_tokens, qk_rope_head_dim//2] complex stored as real
+            # Format: [total_tokens, qk_rope_head_dim//2]
+            # complex stored as real
             # This happens after index_select on complex tensor
             # The tensor is complex data stored in real format
             # We need to extract real and imaginary parts
             # Actually this shouldn't happen, but handle it anyway
             print(
-                f"[DEBUG] freqs_for_tokens shape: {freqs_for_tokens.shape}, dtype: {freqs_for_tokens.dtype}"
+                f"[DEBUG] freqs_for_tokens shape: {freqs_for_tokens.shape}, "
+                f"dtype: {freqs_for_tokens.dtype}"
             )
             print(f"[DEBUG] x shape: {x.shape}")
             # This format is ambiguous - assume it needs to be duplicated
@@ -348,7 +349,8 @@ class TrainableMLA(nn.Module):
             sin = freqs_for_tokens
         else:
             # freqs_for_tokens is already real, split it into cos and sin
-            # Assume format: [total_tokens, qk_rope_head_dim] where first half is cos, second is sin
+            # Assume format: [total_tokens, qk_rope_head_dim]
+            # where first half is cos, second is sin
             half_dim = freqs_for_tokens.shape[-1] // 2
             cos = freqs_for_tokens[
                 ..., :half_dim
@@ -371,8 +373,10 @@ class TrainableMLA(nn.Module):
         Forward pass for Multi-Head Latent Attention.
 
         Args:
-            hidden_states: Input tensor of shape [batch, seq_len, hidden_size] or [total_tokens, hidden_size]
-            freqs_cis: Precomputed RoPE frequencies [max_seq_len, qk_rope_head_dim//2]
+            hidden_states: Input tensor of shape [batch, seq_len, hidden_size]
+                or [total_tokens, hidden_size]
+            freqs_cis: Precomputed RoPE frequencies
+                [max_seq_len, qk_rope_head_dim//2]
             attention_mask: Optional attention mask (not fully supported yet)
             positions: Per-token positions for RoPE indexing (from vLLM)
             **kwargs: Additional vLLM-specific kwargs
@@ -428,7 +432,8 @@ class TrainableMLA(nn.Module):
         )
 
         # Apply RoPE to q_pe using positions to index freqs_cis
-        # Convert freqs_cis from complex to cos/sin BEFORE indexing to avoid dtype issues
+        # Convert freqs_cis from complex to cos/sin BEFORE indexing
+        # to avoid dtype issues
         if freqs_cis.is_complex():
             # Extract cos and sin from complex freqs_cis
             freqs_cos = freqs_cis.real  # [max_seq_len, qk_rope_head_dim//2]

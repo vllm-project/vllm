@@ -124,7 +124,8 @@ class DeepSeekV3TorchTitanForCausalLM(VLLMModelForCausalLM):
             **kwargs: Additional vLLM kwargs
 
         Returns:
-            hidden_states: Hidden states before final projection [batch, seq_len, hidden]
+            hidden_states: Hidden states before final projection
+                [batch, seq_len, hidden]
         """
         # Store positions in forward context for attention layers
         store_positions_in_context(positions)
@@ -160,17 +161,29 @@ class DeepSeekV3TorchTitanForCausalLM(VLLMModelForCausalLM):
         hf_to_tt = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention KV (always present)
-            "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
-            "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
-            "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": (
+                "layers.{}.attention.wkv_a.weight"
+            ),
+            "model.layers.{}.self_attn.kv_a_layernorm.weight": (
+                "layers.{}.attention.kv_norm.weight"
+            ),
+            "model.layers.{}.self_attn.kv_b_proj.weight": (
+                "layers.{}.attention.wkv_b.weight"
+            ),
+            "model.layers.{}.self_attn.o_proj.weight": (
+                "layers.{}.attention.wo.weight"
+            ),
             # MLP
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
             "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
             "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # Layer norms
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.layers.{}.input_layernorm.weight": (
+                "layers.{}.attention_norm.weight"
+            ),
+            "model.layers.{}.post_attention_layernorm.weight": (
+                "layers.{}.ffn_norm.weight"
+            ),
             # Output
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
@@ -180,15 +193,23 @@ class DeepSeekV3TorchTitanForCausalLM(VLLMModelForCausalLM):
         if self.config.q_lora_rank != 0:
             hf_to_tt.update(
                 {
-                    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
-                    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
-                    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
+                    "model.layers.{}.self_attn.q_a_proj.weight": (
+                        "layers.{}.attention.wq_a.weight"
+                    ),
+                    "model.layers.{}.self_attn.q_a_layernorm.weight": (
+                        "layers.{}.attention.q_norm.weight"
+                    ),
+                    "model.layers.{}.self_attn.q_b_proj.weight": (
+                        "layers.{}.attention.wq_b.weight"
+                    ),
                 }
             )
         else:
             hf_to_tt.update(
                 {
-                    "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+                    "model.layers.{}.self_attn.q_proj.weight": (
+                        "layers.{}.attention.wq.weight"
+                    ),
                 }
             )
 

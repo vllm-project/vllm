@@ -50,7 +50,6 @@ def test_deepseek_v3_tp_creation(distributed_setup):
     from examples.custom_models.deepseek_v3_torchtitan import (
         DeepSeekV3TorchTitanForCausalLM,
     )
-
     from vllm.config import CacheConfig, ModelConfig
     from vllm.model_executor.parallel_context import ParallelContext
 
@@ -112,7 +111,6 @@ def test_deepseek_v3_tp_forward(distributed_setup):
     from examples.custom_models.deepseek_v3_torchtitan import (
         DeepSeekV3TorchTitanForCausalLM,
     )
-
     from vllm.config import CacheConfig, ModelConfig
     from vllm.model_executor.parallel_context import ParallelContext
 
@@ -182,7 +180,6 @@ def test_deepseek_v3_tp_sharding(distributed_setup):
     from examples.custom_models.deepseek_v3_torchtitan import (
         DeepSeekV3TorchTitanForCausalLM,
     )
-
     from vllm.config import CacheConfig, ModelConfig
     from vllm.model_executor.parallel_context import ParallelContext
 

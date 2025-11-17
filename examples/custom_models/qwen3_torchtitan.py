@@ -158,15 +158,23 @@ class Qwen3TorchTitanForCausalLM(VLLMModelForCausalLM):
             "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
             "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
-            "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
+            "model.layers.{}.self_attn.q_norm.weight": (
+                "layers.{}.attention.q_norm.weight"
+            ),
+            "model.layers.{}.self_attn.k_norm.weight": (
+                "layers.{}.attention.k_norm.weight"
+            ),
             # MLP weights
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
             "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
             "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # Layer norms
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.layers.{}.input_layernorm.weight": (
+                "layers.{}.attention_norm.weight"
+            ),
+            "model.layers.{}.post_attention_layernorm.weight": (
+                "layers.{}.ffn_norm.weight"
+            ),
         }
 
         # Load weights using utility function

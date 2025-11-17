@@ -306,15 +306,16 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                     positions = forward_ctx._torchtitan_positions
                     # Debug: Log positions during generation, not just warmup
                     unique_pos = torch.unique(positions[: min(100, len(positions))])
-                    if (
-                        len(unique_pos) > 1 or unique_pos[0] != 0
-                    ):  # Skip warmup with all zeros
-                        if not hasattr(self, "_rope_gen_debug"):
-                            self._rope_gen_debug = True
-                            print(f"\n[ROPE GEN] Got real positions: {unique_pos[:20]}")
-                            print(
-                                f"[ROPE GEN] total_tokens: {total_tokens}, freqs_cis.shape: {freqs_cis.shape}"
-                            )
+                    # Skip warmup with all zeros
+                    if (len(unique_pos) > 1 or unique_pos[0] != 0) and not hasattr(
+                        self, "_rope_gen_debug"
+                    ):
+                        self._rope_gen_debug = True
+                        print(f"\n[ROPE GEN] Got real positions: {unique_pos[:20]}")
+                        print(
+                            f"[ROPE GEN] total_tokens: {total_tokens}, "
+                            f"freqs_cis.shape: {freqs_cis.shape}"
+                        )
                 else:
                     # Fallback to sequential positions
                     positions = torch.arange(total_tokens, device=q.device)
@@ -364,10 +365,12 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                     print(f"\n[ROPE DEBUG] Error applying RoPE: {e}")
                 pass
 
-        # Delegate to vLLM's Attention layer if available (handles KV cache automatically)
+        # Delegate to vLLM's Attention layer if available
+        # (handles KV cache automatically)
         if self.vllm_attn is not None and not self.training:
             # Let vLLM handle all KV cache logic
-            # vllm_attn expects q,k,v in shape [total_tokens, num_heads*head_dim] or [total_tokens, num_heads, head_dim]
+            # vllm_attn expects q,k,v in shape [total_tokens, num_heads*head_dim]
+            # or [total_tokens, num_heads, head_dim]
             attn_output = self.vllm_attn(q, k, v)
             # vllm_attn returns [total_tokens, num_heads * head_dim]
         else:
