@@ -14,14 +14,17 @@ from vllm.lora.request import LoRARequest
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
+LORA_MODULE_PATH="charent/self_cognition_Alice"
 LORA_RANK = 8
 
 
-def make_lora_request(lora_id: int, lora_path: str):
-    return LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+def make_lora_request(lora_id: int):
+    return LoRARequest(
+        lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
+    )
 
 
-def test_lora_functions_sync(qwen3_lora_files):
+def test_lora_functions_sync():
     max_loras = 4
     # Create engine in eager-mode. Due to high max_loras, the CI can
     # OOM during cuda-graph capture.
@@ -41,25 +44,25 @@ def test_lora_functions_sync(qwen3_lora_files):
         fn(args)
         assert set(llm.list_loras()) == set(expected)
 
-    run_check(llm.add_lora, make_lora_request(1, qwen3_lora_files), [1])
-    run_check(llm.add_lora, make_lora_request(2, qwen3_lora_files), [1, 2])
+    run_check(llm.add_lora, make_lora_request(1), [1])
+    run_check(llm.add_lora, make_lora_request(2), [1, 2])
 
     # Pin LoRA 1 and test that it is never removed on subsequent adds.
     run_check(llm.pin_lora, 1, [1, 2])
-    run_check(llm.add_lora, make_lora_request(3, qwen3_lora_files), [1, 2, 3])
-    run_check(llm.add_lora, make_lora_request(4, qwen3_lora_files), [1, 2, 3, 4])
-    run_check(llm.add_lora, make_lora_request(5, qwen3_lora_files), [1, 5, 3, 4])
-    run_check(llm.add_lora, make_lora_request(6, qwen3_lora_files), [1, 5, 6, 4])
-    run_check(llm.add_lora, make_lora_request(7, qwen3_lora_files), [1, 5, 6, 7])
-    run_check(llm.add_lora, make_lora_request(8, qwen3_lora_files), [1, 8, 6, 7])
-    run_check(llm.add_lora, make_lora_request(9, qwen3_lora_files), [1, 8, 9, 7])
-    run_check(llm.add_lora, make_lora_request(10, qwen3_lora_files), [1, 8, 9, 10])
+    run_check(llm.add_lora, make_lora_request(3), [1, 2, 3])
+    run_check(llm.add_lora, make_lora_request(4), [1, 2, 3, 4])
+    run_check(llm.add_lora, make_lora_request(5), [1, 5, 3, 4])
+    run_check(llm.add_lora, make_lora_request(6), [1, 5, 6, 4])
+    run_check(llm.add_lora, make_lora_request(7), [1, 5, 6, 7])
+    run_check(llm.add_lora, make_lora_request(8), [1, 8, 6, 7])
+    run_check(llm.add_lora, make_lora_request(9), [1, 8, 9, 7])
+    run_check(llm.add_lora, make_lora_request(10), [1, 8, 9, 10])
 
     # Remove LoRA 1 and continue adding.
     run_check(llm.remove_lora, 1, [8, 9, 10])
-    run_check(llm.add_lora, make_lora_request(11, qwen3_lora_files), [8, 9, 10, 11])
-    run_check(llm.add_lora, make_lora_request(12, qwen3_lora_files), [12, 9, 10, 11])
-    run_check(llm.add_lora, make_lora_request(13, qwen3_lora_files), [12, 13, 10, 11])
+    run_check(llm.add_lora, make_lora_request(11), [8, 9, 10, 11])
+    run_check(llm.add_lora, make_lora_request(12), [12, 9, 10, 11])
+    run_check(llm.add_lora, make_lora_request(13), [12, 13, 10, 11])
 
     # Remove all LoRAs.
     run_check(llm.remove_lora, 13, [12, 10, 11])
@@ -69,7 +72,7 @@ def test_lora_functions_sync(qwen3_lora_files):
 
 
 @pytest.mark.asyncio
-async def test_lora_functions_async(qwen3_lora_files):
+async def test_lora_functions_async():
     max_loras = 4
     engine_args = AsyncEngineArgs(
         model=MODEL_PATH,
@@ -86,45 +89,25 @@ async def test_lora_functions_async(qwen3_lora_files):
         assert set(await llm.list_loras()) == set(expected)
 
     async with build_async_engine_client_from_engine_args(engine_args) as llm:
-        await run_check(llm.add_lora, make_lora_request(1, qwen3_lora_files), [1])
-        await run_check(llm.add_lora, make_lora_request(2, qwen3_lora_files), [1, 2])
+        await run_check(llm.add_lora, make_lora_request(1), [1])
+        await run_check(llm.add_lora, make_lora_request(2), [1, 2])
 
         # Pin LoRA 1 and test that it is never removed on subsequent adds.
         await run_check(llm.pin_lora, 1, [1, 2])
-        await run_check(llm.add_lora, make_lora_request(3, qwen3_lora_files), [1, 2, 3])
-        await run_check(
-            llm.add_lora, make_lora_request(4, qwen3_lora_files), [1, 2, 3, 4]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(5, qwen3_lora_files), [1, 5, 3, 4]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(6, qwen3_lora_files), [1, 5, 6, 4]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(7, qwen3_lora_files), [1, 5, 6, 7]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(8, qwen3_lora_files), [1, 8, 6, 7]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(9, qwen3_lora_files), [1, 8, 9, 7]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(10, qwen3_lora_files), [1, 8, 9, 10]
-        )
+        await run_check(llm.add_lora, make_lora_request(3), [1, 2, 3])
+        await run_check(llm.add_lora, make_lora_request(4), [1, 2, 3, 4])
+        await run_check(llm.add_lora, make_lora_request(5), [1, 5, 3, 4])
+        await run_check(llm.add_lora, make_lora_request(6), [1, 5, 6, 4])
+        await run_check(llm.add_lora, make_lora_request(7), [1, 5, 6, 7])
+        await run_check(llm.add_lora, make_lora_request(8), [1, 8, 6, 7])
+        await run_check(llm.add_lora, make_lora_request(9), [1, 8, 9, 7])
+        await run_check(llm.add_lora, make_lora_request(10), [1, 8, 9, 10])
 
         # Remove LoRA 1 and continue adding.
         await run_check(llm.remove_lora, 1, [8, 9, 10])
-        await run_check(
-            llm.add_lora, make_lora_request(11, qwen3_lora_files), [8, 9, 10, 11]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(12, qwen3_lora_files), [12, 9, 10, 11]
-        )
-        await run_check(
-            llm.add_lora, make_lora_request(13, qwen3_lora_files), [12, 13, 10, 11]
-        )
+        await run_check(llm.add_lora, make_lora_request(11), [8, 9, 10, 11])
+        await run_check(llm.add_lora, make_lora_request(12), [12, 9, 10, 11])
+        await run_check(llm.add_lora, make_lora_request(13), [12, 13, 10, 11])
 
         # Remove all LoRAs
         await run_check(llm.remove_lora, 13, [12, 10, 11])
