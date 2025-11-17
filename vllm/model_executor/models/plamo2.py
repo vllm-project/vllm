@@ -4,10 +4,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 import torch
 from torch import nn

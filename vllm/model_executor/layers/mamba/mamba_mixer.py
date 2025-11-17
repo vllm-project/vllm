@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, NamedTuple
-
-if TYPE_CHECKING:
-    pass
+from typing import NamedTuple
 
 import torch
 from torch import nn

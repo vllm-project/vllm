@@ -2,12 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
-
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -36,9 +30,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-
-if TYPE_CHECKING:
-    pass
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
