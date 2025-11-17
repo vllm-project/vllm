@@ -39,8 +39,8 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention
 from vllm.model_executor.models.qwen2_vl import (
+    Qwen2VisionAttention,
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
@@ -328,7 +328,7 @@ class DotsVisionAttention(nn.Module):
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
         x, _ = self.qkv(x)
-        q, k, v = Qwen2_5_VisionAttention.split_qkv(self, x)
+        q, k, v = Qwen2VisionAttention.split_qkv(self, x)
         bs = q.shape[1]
         # [S,B,H,D] -> [B,S,H,D]
         q = q.permute(1, 0, 2, 3).contiguous()
