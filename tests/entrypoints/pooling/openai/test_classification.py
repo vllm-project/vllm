@@ -205,7 +205,7 @@ async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_pooling(server: RemoteOpenAIServer, model_name: str):
+async def test_pooling(server: RemoteOpenAIServer, model_name: str):
     input_text = ["This product was excellent and exceeded my expectations"]
     response = requests.post(
         server.url_for("pooling"),
@@ -221,7 +221,6 @@ def test_pooling(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_score(server: RemoteOpenAIServer, model_name: str):
 async def test_score(server: RemoteOpenAIServer, model_name: str):
     # score api is only enabled for num_labels == 1.
     response = requests.post(

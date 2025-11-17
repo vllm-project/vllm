@@ -2023,20 +2023,6 @@ class GPUModelRunner(
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if self.scheduler_config.enable_chunked_prefill:
-            if "token_embed" in supported_tasks:
-                supported_tasks.remove("token_embed")
-            if "token_classify" in supported_tasks:
-                supported_tasks.remove("token_classify")
-
-            logger.debug_once(
-                "Chunked prefill is not supported with "
-                "token_embed and token_classify tasks "
-                "which using ALL pooling. "
-                "Please turn off chunked prefill by "
-                "`--no-enable-chunked-prefill` before using it."
-            )
-
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
@@ -3834,22 +3820,6 @@ class GPUModelRunner(
                 "https://docs.vllm.ai/en/latest/models/pooling_models.html "
                 "to learn more."
             )
-            if self.scheduler_config.enable_chunked_prefill:
-                raise RuntimeError(
-                    f"Model {self.model_config.model} does not support "
-                    "any pooling tasks with chunked prefill enabled. "
-                    "Please add --no-enable-chunked-prefill to your "
-                    "config or CLI args. See "
-                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
-                    "to learn more."
-                )
-            else:
-                raise RuntimeError(
-                    f"Model {self.model_config.model} does not support "
-                    "any pooling tasks. See "
-                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
-                    "to learn more."
-                )
 
         output_size = dict[PoolingTask, float]()
         for task in supported_pooling_tasks:
