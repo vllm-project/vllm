@@ -4,7 +4,7 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.logprobs import FlattenLogprobs
+from vllm.logprobs import FlatLogprobs
 
 MODELS = ["distilbert/distilgpt2"]
 MAX_TOKENS = 5
@@ -16,17 +16,17 @@ MAX_LOGPROBS = max(NUM_TOP_LOGPROBS, NUM_PROMPT_LOGPROBS)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("greedy", [True, False])
-@pytest.mark.parametrize("flatten_logprobs", [True, False])
+@pytest.mark.parametrize("flat_logprobs", [True, False])
 def test_ranks(
     vllm_runner,
     model,
     dtype,
     greedy,
-    flatten_logprobs,
+    flat_logprobs,
     example_prompts,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("VLLM_FLATTEN_LOGPROBS", "1" if flatten_logprobs else "0")
+    monkeypatch.setenv("VLLM_FLAT_LOGPROBS", "1" if flat_logprobs else "0")
     with vllm_runner(model, dtype=dtype, max_logprobs=MAX_LOGPROBS) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
         example_prompt_tokens = [tokenizer.encode(prompt) for prompt in example_prompts]
@@ -44,12 +44,8 @@ def test_ranks(
         decode_tokens, _, decode_logprobs, prompt_logprobs = result
 
         # Ensure the return type of logprobs is accurate
-        assert isinstance(
-            prompt_logprobs, FlattenLogprobs if flatten_logprobs else list
-        )
-        assert isinstance(
-            decode_logprobs, FlattenLogprobs if flatten_logprobs else list
-        )
+        assert isinstance(prompt_logprobs, FlatLogprobs if flat_logprobs else list)
+        assert isinstance(decode_logprobs, FlatLogprobs if flat_logprobs else list)
 
         ########################
         # Check prompt logprobs

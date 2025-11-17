@@ -5,7 +5,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
+import numpy as np
 import torch
+
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
@@ -15,11 +18,11 @@ else:
 
 class LogprobsLists(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
-    logprob_token_ids: list[list[int]]
+    logprob_token_ids: np.ndarray
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
-    logprobs: list[list[float]]
+    logprobs: np.ndarray
     # [num_reqs x num_generated_tokens]
-    sampled_token_ranks: list[int]
+    sampled_token_ranks: np.ndarray
     # [num_reqs]
     # Used for slicing the logprobs in cases like speculative
     # decoding where the number of generated tokens may be
@@ -60,9 +63,9 @@ class LogprobsTensors(NamedTuple):
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
-            self.logprob_token_ids.tolist(),
-            self.logprobs.tolist(),
-            self.selected_token_ranks.tolist(),
+            self.logprob_token_ids.cpu().numpy(),
+            self.logprobs.cpu().numpy(),
+            self.selected_token_ranks.cpu().numpy(),
             cu_num_generated_tokens,
         )
 
@@ -135,6 +138,13 @@ class KVConnectorOutput:
         )
 
 
+@dataclass
+class ECConnectorOutput:
+    # [mm_hash]
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -148,7 +158,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[np.ndarray]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -165,6 +175,8 @@ class ModelRunnerOutput:
     pooler_output: list[torch.Tensor | None]
 
     kv_connector_output: KVConnectorOutput | None = None
+
+    ec_connector_output: ECConnectorOutput | None = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
@@ -189,6 +201,41 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+
+
+def make_empty_encoder_model_runner_output(
+    scheduler_output: "SchedulerOutput",
+) -> ModelRunnerOutput:
+    """
+    Create a ModelRunnerOutput stub that contains the correct
+    per-request bookkeeping but no generated data yet.
+    """
+    if not scheduler_output.num_scheduled_tokens:
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    # Convert to list so we get a deterministic, indexable sequence
+    req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
+
+    # Give every request its own contiguous index
+    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
+
+    # No tokens generated yet ⇒ one empty list per request
+    sampled_token_ids: list[list[int]] = [np.array([0]) for _ in req_ids]
+
+    # Pooler outputs are not available yet ⇒ use None placeholders
+    pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
+
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=pooler_output,
+        kv_connector_output=None,
+        ec_connector_output=None,
+        num_nans_in_logits=None,
+    )
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(

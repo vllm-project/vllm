@@ -31,7 +31,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
@@ -61,6 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargs,
 )
@@ -198,23 +199,18 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         if image_processor is None:
             image_processor = self.get_image_processor()
 
-        do_resize = True
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
-
-        if do_resize:
-            resized_height, resized_width = smart_resize(
-                height=image_height,
-                width=image_width,
-                factor=patch_size * merge_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
-            )
-            preprocessed_size = ImageSize(width=resized_width, height=resized_height)
-        else:
-            preprocessed_size = ImageSize(width=image_width, height=image_height)
+        resized_height, resized_width = smart_resize(
+            height=image_height,
+            width=image_width,
+            factor=patch_size * merge_size,
+            min_pixels=image_processor.min_pixels,
+            max_pixels=image_processor.max_pixels,
+        )
+        preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
         grid_t = 1
         grid_h = preprocessed_size.height // patch_size
@@ -227,8 +223,18 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
-        image_size = hf_config.vision_config.image_size
-        return ImageSize(height=image_size, width=image_size)
+
+        # See `smart_resize` for the calculation of the image size.
+        merge_size = hf_config.vision_config.spatial_merge_size
+        patch_size = hf_config.vision_config.patch_size
+        factor = merge_size * patch_size
+        max_num_tokens = self.get_image_processor().max_pixels // (factor**2)
+        # Find factors of max_num_tokens close to its square root
+        # to create a dummy image with a reasonable aspect ratio.
+        h_patches = int(math.sqrt(max_num_tokens))
+        max_num_tokens -= max_num_tokens % h_patches
+        w_patches = max_num_tokens // h_patches
+        return ImageSize(height=h_patches * factor, width=w_patches * factor)
 
 
 class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessingInfo]):
@@ -574,8 +580,8 @@ class SiglipAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend: _Backend = _Backend.TORCH_SDPA,
-        attn_backend_override: _Backend | None = None,
+        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
+        attn_backend_override: AttentionBackendEnum | None = None,
         use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
@@ -615,8 +621,8 @@ class SiglipAttention(nn.Module):
             )
         )
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -674,10 +680,10 @@ class SiglipAttention(nn.Module):
                 cu_seqlens,
                 max_seqlen,
                 batch_size,
-                self.attn_backend == _Backend.ROCM_AITER_FA,
+                self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
                 self.use_upstream_fa,
             )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             outputs = []
             for i in range(1, len(cu_seqlens)):
                 start_idx = cu_seqlens[i - 1]
@@ -696,7 +702,7 @@ class SiglipAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             if seqlens is None:
                 raise ValueError("xFormers attention backend requires seqlens tensor.")
             context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
@@ -780,8 +786,8 @@ class SiglipEncoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
-        attn_backend: _Backend = _Backend.TORCH_SDPA,
-        attn_backend_override: _Backend | None = None,
+        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
+        attn_backend_override: AttentionBackendEnum | None = None,
         use_upstream_fa: bool = False,
     ):
         super().__init__()
@@ -841,7 +847,7 @@ class SiglipEncoder(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -855,16 +861,16 @@ class SiglipEncoder(nn.Module):
         )
         self.use_upstream_fa = False
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         } and check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
+            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
             self.use_upstream_fa = True
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"PaddleOCR-VL does not support {self.attn_backend} backend now."
@@ -937,9 +943,12 @@ class SiglipEncoder(nn.Module):
 
         max_seqlen = None
         seqlens = None
-        if self.attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
 
         hidden_states = inputs_embeds
@@ -960,7 +969,7 @@ class SiglipVisionTransformer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -1010,7 +1019,7 @@ class SiglipVisionModel(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
@@ -1175,15 +1184,17 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float],
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
@@ -1220,20 +1231,12 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index]
                 video_second_per_grid_t = 1.0
                 if second_per_grid_ts:
                     video_second_per_grid_t = second_per_grid_ts[video_index]
@@ -1324,10 +1327,10 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             inputs_embeds = None
 
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            vision_embeddings = self.embed_multimodal(**kwargs)
             is_multimodal = kwargs.pop("is_multimodal", None)
             handle_oov_mm_token = kwargs.pop("handle_oov_mm_token", False)
-            inputs_embeds = self.get_input_embeddings(
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 vision_embeddings,
                 is_multimodal=is_multimodal,
@@ -1387,7 +1390,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return ()

@@ -92,7 +92,7 @@ class OAIAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = config.rope_theta
 
-        self.qkv = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.num_attention_heads,
@@ -129,7 +129,7 @@ class OAIAttention(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
-        qkv, _ = self.qkv(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
@@ -198,6 +198,7 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -207,7 +208,10 @@ class TransformerBlock(torch.nn.Module):
 
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(
-            config, prefix=f"{prefix}.attn", cache_config=cache_config
+            config,
+            prefix=f"{prefix}.attn",
+            quant_config=quant_config,
+            cache_config=cache_config,
         )
         self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -243,6 +247,7 @@ class GptOssModel(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
@@ -254,6 +259,7 @@ class GptOssModel(nn.Module):
             lambda prefix: TransformerBlock(
                 vllm_config,
                 prefix=prefix,
+                quant_config=self.quant_config,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -263,7 +269,7 @@ class GptOssModel(nn.Module):
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
     def forward(
@@ -277,7 +283,7 @@ class GptOssModel(nn.Module):
             if inputs_embeds is not None:
                 x = inputs_embeds
             else:
-                x = self.get_input_embeddings(input_ids)
+                x = self.embed_input_ids(input_ids)
 
             residual = None
         else:
@@ -488,8 +494,8 @@ class GptOssModel(nn.Module):
 
     def _load_weights_other(
         self,
-        ep_rank_start: int,
         ep_rank_end: int,
+        ep_rank_start: int,
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -600,9 +606,9 @@ class GptOssModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".qkv", ".q_proj", "q"),
-            (".qkv", ".k_proj", "k"),
-            (".qkv", ".v_proj", "v"),
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
         ]
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -635,8 +641,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_end,
                 ep_rank_start,
+                ep_rank_end,
                 heads_per_rank,
                 head_start,
                 weights,
@@ -645,7 +651,7 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
-    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
@@ -697,8 +703,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

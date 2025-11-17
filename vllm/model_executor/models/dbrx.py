@@ -25,7 +25,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -355,7 +354,7 @@ class DbrxModel(nn.Module):
             ["hidden_states"], config.d_model
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
@@ -369,7 +368,7 @@ class DbrxModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
@@ -441,27 +440,23 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         if config.tie_word_embeddings:
             raise ValueError("tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
-        self.unpadded_vocab_size = config.vocab_size
+
         self.transformer = DbrxModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
