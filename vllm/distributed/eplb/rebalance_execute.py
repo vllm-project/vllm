@@ -29,9 +29,9 @@ def _allocate_peer_group_buffers(
     ep_group: ProcessGroup,
 ) -> tuple[
     int,
-    dict[int, torch.Tensor],
-    dict[int, torch.Tensor],
-    list[int],
+    dict[int, dict[torch.dtype, torch.Tensor]],
+    dict[int, dict[torch.dtype, torch.Tensor]],
+    dict[torch.dtype, list[int]],
 ]:
     """
     Allocate two contiguous buffers per peer rank (send and recv)
@@ -40,31 +40,30 @@ def _allocate_peer_group_buffers(
         layer_bytes: The size of the layer in bytes.
         max_group_layers: The maximum number of layers that can be grouped
         so that we can fit auxiliary buffers into half of the free memory.
-        peer_send_buffers: A dictionary mapping peer -> send buffer.
-        peer_recv_buffers: A dictionary mapping peer -> recv buffer.
-        elem_offsets: A list of element offsets per weight.
+        peer_send_buffers: A dictionary mapping peer -> send buffer (by dtype).
+        peer_recv_buffers: A dictionary mapping peer -> recv buffer (by dtype).
+        elem_offsets_by_dtype: A dictionary mapping dtype -> list of element offsets.
           - elem_offsets gives cumulative element offsets per weight for later packing.
     """
     device = first_layer_weights[0].device
-    dtypes = [w.dtype for w in first_layer_weights]
-    if len(set(dtypes)) > 1:
-        logger.warning("EPLB: Different dtypes found in MoE weight: %s", dtypes)
-        return 0, {}, {}, []
-    dtype = dtypes[0]
-
     # Number of local experts on this rank (rows in expert weight tensors)
     assert first_layer_weights, "Expected non-empty first_layer_weights"
     num_local_experts = int(first_layer_weights[0].shape[0])
 
-    layer_elems = 0
+    # Group weights by dtype and compute per-dtype sizes and offsets
+    layer_elems_by_dtype: dict[torch.dtype, int] = {}
     layer_bytes = 0
-    elem_offsets: list[int] = [0]
+    elem_offsets_by_dtype: dict[torch.dtype, list[int]] = {}
     for w in first_layer_weights:
         assert w.dim() >= 2, "Expected expert weight with [num_local_experts, ...]"
+        d = w.dtype
         expert_width = int(w.shape[1])
-        layer_elems += expert_width
+        if d not in elem_offsets_by_dtype:
+            elem_offsets_by_dtype[d] = [0]
+            layer_elems_by_dtype[d] = 0
+        layer_elems_by_dtype[d] += expert_width
         layer_bytes += int(expert_width * w.element_size())
-        elem_offsets.append(layer_elems)
+        elem_offsets_by_dtype[d].append(elem_offsets_by_dtype[d][-1] + expert_width)
 
     free_bytes, _ = torch.cuda.mem_get_info(device)
     # Fit auxiliary buffers into half of the free memory.
@@ -75,11 +74,9 @@ def _allocate_peer_group_buffers(
     num_peers = max(1, world_size - 1)
     # Each peer needs to allocate two contiguous buffers (send and recv).
     # Worst case: a single peer may receive all local experts from a layer.
-    # Account for that by multiplying per-layer bytes by num_local_experts.
-    bytes_per_row = layer_bytes  # one expert across all weights
-    bytes_per_layer_per_peer = num_local_experts * bytes_per_row
-    # Subtract one layer worth to account for the auxiliary buffers.
+    bytes_per_layer_per_peer = num_local_experts * layer_bytes
     per_peer_capacity = target_total_bytes // (2 * num_peers)
+    # Subtract one layer worth to account for the auxiliary buffers.
     per_peer_target_bytes = per_peer_capacity - bytes_per_layer_per_peer
 
     # Fit as many layers as possible into the target bytes.
@@ -90,10 +87,9 @@ def _allocate_peer_group_buffers(
     if max_group_layers <= 0:
         logger.warning(
             "Not enough free memory for EPLB peer buffers. "
-            "layer_bytes(per-expert): %d, num_local_experts: %d, "
-            "bytes_per_layer_per_peer: %d, max_group_layers: %d, "
-            "free_bytes: %d (%.2f GiB), target_total_bytes: %d (%.2f GiB)",
-            layer_bytes,
+            "num_local_experts: %d, bytes_per_layer_per_peer: %d,"
+            "max_group_layers: %d, free_bytes: %d (%.2f GiB), "
+            "target_total_bytes: %d (%.2f GiB)",
             num_local_experts,
             bytes_per_layer_per_peer,
             max_group_layers,
@@ -102,7 +98,7 @@ def _allocate_peer_group_buffers(
             target_total_bytes,
             target_total_bytes / 1024**3,
         )
-        return 0, {}, {}, []
+        return 0, {}, {}, {}
     if ep_group.rank() == 0:
         logger.debug(
             "EPLB: target_total_bytes=%.2fGiB, layer_bytes=%.2fKiB, "
@@ -115,29 +111,34 @@ def _allocate_peer_group_buffers(
             num_moe_layers,
         )
 
-    peer_send_buffers: dict[int, torch.Tensor] = {}
-    peer_recv_buffers: dict[int, torch.Tensor] = {}
+    peer_send_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
+    peer_recv_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
     # Preallocate enough rows to handle the worst case per layer
     capacity_rows = max_group_layers * num_local_experts
     for peer in range(world_size):
         if peer == rank:
             continue
-        peer_send_buffers[peer] = torch.empty(
-            (capacity_rows, layer_elems),
-            dtype=dtype,
-            device=device,
-        )
-        peer_recv_buffers[peer] = torch.empty(
-            (capacity_rows, layer_elems),
-            dtype=dtype,
-            device=device,
-        )
+        send_by_dtype: dict[torch.dtype, torch.Tensor] = {}
+        recv_by_dtype: dict[torch.dtype, torch.Tensor] = {}
+        for d, layer_elems in layer_elems_by_dtype.items():
+            send_by_dtype[d] = torch.empty(
+                (capacity_rows, layer_elems),
+                dtype=d,
+                device=device,
+            )
+            recv_by_dtype[d] = torch.empty(
+                (capacity_rows, layer_elems),
+                dtype=d,
+                device=device,
+            )
+        peer_send_buffers[peer] = send_by_dtype
+        peer_recv_buffers[peer] = recv_by_dtype
 
     return (
         max_group_layers,
         peer_send_buffers,
         peer_recv_buffers,
-        elem_offsets,
+        elem_offsets_by_dtype,
     )
 
 
@@ -376,9 +377,9 @@ def shuffle_layer_pack(
     expert_weights_group: Sequence[Iterable[torch.Tensor]],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
-    peer_send_buffers: dict[int, torch.Tensor],
-    peer_recv_buffers: dict[int, torch.Tensor],
-    layer_elem_offsets: list[int],
+    peer_send_buffers: dict[int, dict[torch.dtype, torch.Tensor]],
+    peer_recv_buffers: dict[int, dict[torch.dtype, torch.Tensor]],
+    layer_elem_offsets: dict[torch.dtype, list[int]],
 ) -> None:
     """
     Perform expert weights rearrangement for a group of layers in one
@@ -392,18 +393,17 @@ def shuffle_layer_pack(
     assert len(old_indices_group) == len(new_indices_group) == len(expert_weights_group)
     group_size = len(old_indices_group)
 
-    # Validate dtype/device consistency and prepare layout info
     first_weights_list = list(expert_weights_group[0])
-    dtypes = {w.dtype for w in first_weights_list}
-    assert len(dtypes) == 1, "All expert weights in a layer must share dtype"
-    dtype = first_weights_list[0].dtype
     device = first_weights_list[0].device
 
-    elem_offsets = layer_elem_offsets
-    elems_per_weight = [
-        elem_offsets[i + 1] - elem_offsets[i] for i in range(len(elem_offsets) - 1)
-    ]
-    elems_per_expert = elem_offsets[-1]
+    # Precompute per-dtype expert sizes (elements) using provided offsets
+    elems_per_expert_by_dtype: dict[torch.dtype, int] = {
+        d: offsets[-1] for d, offsets in layer_elem_offsets.items()
+    }
+    elems_per_weight_by_dtype: dict[torch.dtype, list[int]] = {
+        d: [offsets[i + 1] - offsets[i] for i in range(len(offsets) - 1)]
+        for d, offsets in layer_elem_offsets.items()
+    }
 
     # Helper mapping per layer
     def build_local_maps_for_layer(
@@ -507,7 +507,7 @@ def shuffle_layer_pack(
 
     # Prepare per-peer buffers and post irecvs first
     p2p_ops: list[P2POp] = []
-    recv_buffers: dict[int, torch.Tensor] = {}
+    recv_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
     recv_orders: dict[int, list[tuple[int, int]]] = {}
 
     for peer_rank, items in sorted(recv_peers_group.items()):
@@ -515,54 +515,73 @@ def shuffle_layer_pack(
         if not experts_order:
             continue
         need_rows = len(experts_order)
-        pre_buf = peer_recv_buffers.get(peer_rank)
-        if (
-            pre_buf is not None
-            and need_rows <= pre_buf.shape[0]
-            and pre_buf.shape[1] == elems_per_expert
-        ):
-            recv_buf = pre_buf[:need_rows].reshape(-1)
-        else:
-            recv_buf = torch.empty(
-                need_rows * elems_per_expert, dtype=dtype, device=device
-            )
+        dtype_to_buf_recv: dict[torch.dtype, torch.Tensor] = {}
+        for d, offsets in layer_elem_offsets.items():
+            elems_per_expert = elems_per_expert_by_dtype[d]
+            pre_buf_d = peer_recv_buffers.get(peer_rank, {}).get(d)
+            if (
+                pre_buf_d is not None
+                and need_rows <= pre_buf_d.shape[0]
+                and pre_buf_d.shape[1] == elems_per_expert
+            ):
+                recv_buf_d = pre_buf_d[:need_rows].reshape(-1)
+            else:
+                recv_buf_d = torch.empty(
+                    need_rows * elems_per_expert, dtype=d, device=device
+                )
+            dtype_to_buf_recv[d] = recv_buf_d
         src_global = get_global_rank(ep_group, peer_rank)
-        p2p_ops.append(P2POp(torch.distributed.irecv, recv_buf, src_global))
-        recv_buffers[peer_rank] = recv_buf
+        for d, buf in dtype_to_buf_recv.items():
+            p2p_ops.append(P2POp(torch.distributed.irecv, buf, src_global))
+        recv_buffers[peer_rank] = dtype_to_buf_recv
         recv_orders[peer_rank] = experts_order
 
     # Pack and post sends
-    send_buffers: dict[int, torch.Tensor] = {}
+    send_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
     for peer_rank, items in sorted(send_peers_group.items()):
         experts_order = sorted(items)
         if not experts_order:
             continue
         need_rows = len(experts_order)
-        pre_buf = peer_send_buffers.get(peer_rank)
-        if (
-            pre_buf is not None
-            and need_rows <= pre_buf.shape[0]
-            and pre_buf.shape[1] == elems_per_expert
-        ):
-            send_buf = pre_buf[:need_rows].reshape(-1)
-        else:
-            send_buf = torch.empty(
-                need_rows * elems_per_expert, dtype=dtype, device=device
-            )
+        dtype_to_buf_send: dict[torch.dtype, torch.Tensor] = {}
+        for d, offsets in layer_elem_offsets.items():
+            elems_per_expert = elems_per_expert_by_dtype[d]
+            pre_buf_d = peer_send_buffers.get(peer_rank, {}).get(d)
+            if (
+                pre_buf_d is not None
+                and need_rows <= pre_buf_d.shape[0]
+                and pre_buf_d.shape[1] == elems_per_expert
+            ):
+                send_buf_d = pre_buf_d[:need_rows].reshape(-1)
+            else:
+                send_buf_d = torch.empty(
+                    need_rows * elems_per_expert, dtype=d, device=device
+                )
+            dtype_to_buf_send[d] = send_buf_d
 
         # Pack across layers
         for i, (layer_idx, expert) in enumerate(experts_order):
             weights_list = list(expert_weights_group[layer_idx])
             src = layer_experts_send_loc[layer_idx][expert]
-            base = i * elems_per_expert
+            # Group weights by dtype in this layer to map to dtype-specific offsets
+            weights_idx_by_dtype_send: dict[torch.dtype, list[int]] = {}
             for k, w in enumerate(weights_list):
-                vec = w[src].reshape(-1)
-                start = base + elem_offsets[k]
-                send_buf.narrow(0, start, vec.numel()).copy_(vec)
+                weights_idx_by_dtype_send.setdefault(w.dtype, []).append(k)
+            for d, idx_list in weights_idx_by_dtype_send.items():
+                send_buf_d = dtype_to_buf_send[d]
+                offsets = layer_elem_offsets[d]
+                elems_per_expert = elems_per_expert_by_dtype[d]
+                base = i * elems_per_expert
+                for j, k in enumerate(idx_list):
+                    w = weights_list[k]
+                    vec = w[src].reshape(-1)
+                    start = base + offsets[j]
+                    send_buf_d.narrow(0, start, vec.numel()).copy_(vec)
 
         dst_global = get_global_rank(ep_group, peer_rank)
-        p2p_ops.append(P2POp(torch.distributed.isend, send_buf, dst_global))
-        send_buffers[peer_rank] = send_buf
+        for d, buf in dtype_to_buf_send.items():
+            p2p_ops.append(P2POp(torch.distributed.isend, buf, dst_global))
+        send_buffers[peer_rank] = dtype_to_buf_send
 
     # Start all P2P ops
     reqs = batch_isend_irecv(p2p_ops) if p2p_ops else []
@@ -615,15 +634,25 @@ def shuffle_layer_pack(
 
     # Unpack received buffers directly into expert weights
     for peer_rank, experts_order in recv_orders.items():
-        recv_buf = recv_buffers[peer_rank]
+        recv_bufs_by_dtype = recv_buffers[peer_rank]
         for i, (layer_idx, expert) in enumerate(experts_order):
             weights_list = list(expert_weights_group[layer_idx])
             dst = layer_experts_recv_loc[layer_idx][expert]
-            base = i * elems_per_expert
+            # Group weights by dtype to unpack with dtype-specific buffers
+            weights_idx_by_dtype_recv: dict[torch.dtype, list[int]] = {}
             for k, w in enumerate(weights_list):
-                num = elems_per_weight[k]
-                slice_view = recv_buf.narrow(0, base + elem_offsets[k], num)
-                w[dst].copy_(slice_view.view_as(w[dst]))
+                weights_idx_by_dtype_recv.setdefault(w.dtype, []).append(k)
+            for d, idx_list in weights_idx_by_dtype_recv.items():
+                recv_buf_d = recv_bufs_by_dtype[d]
+                offsets = layer_elem_offsets[d]
+                elems_per_expert = elems_per_expert_by_dtype[d]
+                base = i * elems_per_expert
+                elems_per_weight = elems_per_weight_by_dtype[d]
+                for j, k in enumerate(idx_list):
+                    w = weights_list[k]
+                    num = elems_per_weight[j]
+                    slice_view = recv_buf_d.narrow(0, base + offsets[j], num)
+                    w[dst].copy_(slice_view.view_as(w[dst]))
 
     # After unpacking, duplicate experts to additional local destinations if needed
     # (TODO) this has to be cleaned up after postprocessing of the rebalance.
@@ -754,34 +783,35 @@ def rearrange_expert_weights_inplace(
                 expert_weights_buffer,
                 ep_group,
             )
-
-    # Group layers into batches of up to max_group_layers and perform grouped shuffle
-    start = 0
-    while start < num_moe_layers:
-        end = min(start + max_group_layers, num_moe_layers)
-        old_group = [
-            old_global_expert_indices_cpu[i].tolist() for i in range(start, end)
-        ]
-        new_group = [
-            new_global_expert_indices_cpu[i].tolist() for i in range(start, end)
-        ]
-        weights_group = [expert_weights[i] for i in range(start, end)]
-        shuffle_layer_pack(
-            num_local_physical_experts,
-            ep_rank,
-            old_group,
-            new_group,
-            weights_group,
-            expert_weights_buffer,
-            ep_group,
-            peer_send_buffers,
-            peer_recv_buffers,
-            layer_elem_offsets,
-        )
-        start = end
-    del peer_send_buffers, peer_recv_buffers
-    del expert_weights_buffer
-    torch.cuda.empty_cache()
+    else:
+        # Group layers into batches of up to max_group_layers
+        # and perform grouped shuffle
+        start = 0
+        while start < num_moe_layers:
+            end = min(start + max_group_layers, num_moe_layers)
+            old_group = [
+                old_global_expert_indices_cpu[i].tolist() for i in range(start, end)
+            ]
+            new_group = [
+                new_global_expert_indices_cpu[i].tolist() for i in range(start, end)
+            ]
+            weights_group = [expert_weights[i] for i in range(start, end)]
+            shuffle_layer_pack(
+                num_local_physical_experts,
+                ep_rank,
+                old_group,
+                new_group,
+                weights_group,
+                expert_weights_buffer,
+                ep_group,
+                peer_send_buffers,
+                peer_recv_buffers,
+                layer_elem_offsets,
+            )
+            start = end
+        del peer_send_buffers, peer_recv_buffers
+        del expert_weights_buffer
+        torch.cuda.empty_cache()
 
 
 def _map_old_expert_indices_with_rank_mapping(
