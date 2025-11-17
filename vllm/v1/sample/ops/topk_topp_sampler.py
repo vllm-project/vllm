@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
 from packaging import version
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -86,15 +86,9 @@ class TopKTopPSampler(nn.Module):
             self.forward = self.forward_cpu
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
-            and current_platform.is_rocm()
-            and envs.VLLM_ROCM_USE_AITER
+            and rocm_aiter_ops.is_sampler_enabled()
         ):
-            import aiter.ops.sampling  # noqa: F401
-
-            self.aiter_ops = torch.ops.aiter
-            logger.info_once(
-                "Using aiter sampler on ROCm (lazy import, sampling-only)."
-            )
+            logger.info_once("Using rocm_aiter_ops for top-p & top-k sampling.")
             self.forward = self.forward_hip
         else:
             self.forward = self.forward_native
@@ -184,9 +178,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
         if (k is None and p is None) or generators:
             if generators:
@@ -199,44 +193,7 @@ class TopKTopPSampler(nn.Module):
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
-        return self.aiter_sample(logits, k, p, generators), None
-
-    def aiter_sample(
-        self,
-        logits: torch.Tensor,
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-        generators: dict[int, torch.Generator],
-    ) -> torch.Tensor:
-        """Sample from logits using aiter ops."""
-        use_top_k = k is not None
-        use_top_p = p is not None
-        # Joint k+p path
-        if use_top_p and use_top_k:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = self.aiter_ops.top_k_top_p_sampling_from_probs(
-                probs,
-                None,
-                *_to_tensor_scalar_tuple(k),
-                *_to_tensor_scalar_tuple(p),
-                deterministic=True,
-            )
-            return next_token_ids.view(-1)
-        # Top-p only path
-        elif use_top_p:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
-                probs, None, *_to_tensor_scalar_tuple(p), deterministic=True
-            )
-            return next_token_ids.view(-1)
-        # Top-k only path
-        elif use_top_k:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            renorm_probs = self.aiter_ops.top_k_renorm_probs(
-                probs, *_to_tensor_scalar_tuple(k)
-            )
-            return torch.multinomial(renorm_probs, num_samples=1).view(-1)
-        raise RuntimeError("aiter_sample was called with no active top-k or top-p.")
+        return rocm_aiter_ops.top_k_top_p_sample(logits, k, p, generators), None
 
 
 # Note: this is a workaround for
@@ -388,10 +345,3 @@ def flashinfer_sample(
         )
 
     return next_token_ids.view(-1)
-
-
-def _to_tensor_scalar_tuple(x):
-    if isinstance(x, torch.Tensor):
-        return (x, 0)
-    else:
-        return (None, x)
