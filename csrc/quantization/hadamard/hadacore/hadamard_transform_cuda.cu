@@ -802,7 +802,7 @@ torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace) {
     });
 
     if (numel % 256 != 0) {
-        out = out.index({torch::indexing::Slice(0, numel / had_size)});
+        out = out.narrow(0, 0, numel / had_size);
     }
 
     if (inplace && out.data_ptr() != x.data_ptr()) {

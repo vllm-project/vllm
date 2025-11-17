@@ -3,7 +3,10 @@
 
 from openai_harmony import Role
 
-from vllm.entrypoints.harmony_utils import parse_input_to_harmony_message
+from vllm.entrypoints.harmony_utils import (
+    has_custom_tools,
+    parse_input_to_harmony_message,
+)
 
 
 class TestParseInputToHarmonyMessage:
@@ -252,3 +255,12 @@ class TestParseInputToHarmonyMessage:
         assert len(messages[0].content) == 2
         assert messages[0].content[0].text == ""
         assert messages[0].content[1].text == "actual text"
+
+
+def test_has_custom_tools() -> None:
+    assert not has_custom_tools(set())
+    assert not has_custom_tools({"web_search_preview", "code_interpreter", "container"})
+    assert has_custom_tools({"others"})
+    assert has_custom_tools(
+        {"web_search_preview", "code_interpreter", "container", "others"}
+    )

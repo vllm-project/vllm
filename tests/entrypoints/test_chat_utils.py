@@ -1882,6 +1882,39 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 
+    # Additional test: Verify HF base parameters work with **kwargs tokenizers
+    # This validates the fix for tokenizers like Kimi K2 that use **kwargs
+    # to receive standard HuggingFace parameters instead of declaring them explicitly
+    from vllm.entrypoints.chat_utils import _get_hf_base_chat_template_params
+
+    hf_base_params = _get_hf_base_chat_template_params()
+    # Verify common HF parameters are in the base class
+    assert {"add_generation_prompt", "tools", "continue_final_message"}.issubset(
+        hf_base_params
+    ), f"Expected HF base params not found in {hf_base_params}"
+
+    # Test with a mock tokenizer that uses **kwargs (like Kimi K2)
+    class MockTokenizerWithKwargs:
+        def apply_chat_template(self, conversation, **kwargs):
+            return "mocked_output"
+
+    mock_tokenizer = MockTokenizerWithKwargs()
+    mock_kwargs = {
+        "add_generation_prompt": True,
+        "tools": tools,
+        "continue_final_message": False,
+        "unknown_param": "should_be_filtered",
+    }
+    resolved_mock = resolve_chat_template_kwargs(
+        mock_tokenizer, chat_template, mock_kwargs, raise_on_unexpected=False
+    )
+    # HF base params should pass through even with **kwargs tokenizer
+    assert "add_generation_prompt" in resolved_mock
+    assert "tools" in resolved_mock
+    assert "continue_final_message" in resolved_mock
+    # Unknown params should be filtered out
+    assert "unknown_param" not in resolved_mock
+
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`

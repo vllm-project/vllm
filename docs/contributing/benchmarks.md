@@ -9,9 +9,6 @@ vLLM provides comprehensive benchmarking tools for performance testing and evalu
 - **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
 - **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
-- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
-
-[Benchmark CLI]: #benchmark-cli
 
 ## Benchmark CLI
 
@@ -320,6 +317,73 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+
+##### Load Pattern Configuration
+
+vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
+
+###### Load Pattern Control Parameters
+
+- `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
+- `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
+- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
+
+These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
+
+The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
+
+- Shape parameter: `burstiness` value
+- Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
+- Traffic characteristics:
+    - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
+    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
+    - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
+
+![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)
+
+*Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
+
+Load Pattern Recommendations by Use Case:
+
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+| ---                | ---          | ---             | ---             | ---                                                       |
+| Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+
+These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
+
+The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+
+- Users send requests as fast as they can (infinite rate)
+- A load balancer or API gateway controls the maximum concurrent connections
+- The system operates at its concurrency limit, revealing true throughput capacity
+- `--burstiness` has no effect since request timing is not controlled when rate is infinite
+
+This pattern helps determine optimal concurrency settings for your production load balancer configuration.
+
+To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
+
+```text
+GPU KV cache size: 15,728,640 tokens
+Maximum concurrency for 8,192 tokens per request: 1920
+```
+
+Where:
+
+- GPU KV cache size: Total tokens that can be cached across all concurrent requests
+- Maximum concurrency: Theoretical maximum concurrent requests for the given `max_model_len`
+- Calculation: `max_concurrency = kv_cache_size / max_model_len`
+
+Using KV cache metrics for load pattern configuration:
+
+- For Capacity Planning: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
+- For SLA Validation: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
+- For Realistic Testing: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
+- Request rate guidance: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
 
 </details>
 
@@ -919,7 +983,7 @@ each document has close to 512 tokens.
 
 Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
 with an embedding model, also set `--no_reranker`. Because in this case the query is
-treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+treated as an individual prompt by the server, here we send `random_batch_size - 1` documents
 to account for the extra prompt which is the query. The token accounting to report the
 throughput numbers correctly is also adjusted.
 
@@ -994,7 +1058,7 @@ Follow these steps to run the script:
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.serve \
+vllm bench sweep serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1042,7 +1106,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.serve_sla \
+vllm bench sweep serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1071,7 +1135,7 @@ The algorithm for adjusting the SLA variable is as follows:
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x max_concurrency \
     --row-by random_input_len \
     --col-by random_output_len \
@@ -1100,7 +1164,7 @@ docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingf
 Then, run below command inside the docker instance.
 
 ```bash
-bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 When run, benchmark script generates results under **benchmark/results** folder, along with the benchmark_results.md and benchmark_results.json.
@@ -1118,7 +1182,7 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
@@ -1143,11 +1207,3 @@ The benchmarking currently runs on a predefined set of models configured in the 
 #### Viewing Results
 
 All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
-
-## Nightly Benchmarks
-
-These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `nightly-benchmarks` labels.
-
-The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
-
-More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).

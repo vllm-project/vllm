@@ -17,7 +17,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -25,7 +24,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["kimi_k2"])
 class KimiK2ToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -96,8 +94,8 @@ class KimiK2ToolParser(ToolParser):
                 tool_calls = []
                 for match in function_call_tuples:
                     function_id, function_args = match
-                    # function_id: functions.get_weather:0
-                    function_name = function_id.split(".")[1].split(":")[0]
+                    # function_id: functions.get_weather:0 or get_weather:0
+                    function_name = function_id.split(":")[0].split(".")[-1]
                     tool_calls.append(
                         ToolCall(
                             id=function_id,
@@ -254,7 +252,7 @@ class KimiK2ToolParser(ToolParser):
                 )
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
-                    tool_name = tool_id.split(".")[1].split(":")[0]
+                    tool_name = tool_id.split(":")[0].split(".")[-1]
                     current_tool_call["id"] = tool_id
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
@@ -264,7 +262,7 @@ class KimiK2ToolParser(ToolParser):
                     )
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
-                        tool_name = tool_id_str.split(".")[1].split(":")[0]
+                        tool_name = tool_id_str.split(":")[0].split(".")[-1]
                         current_tool_call["id"] = tool_id_str
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
