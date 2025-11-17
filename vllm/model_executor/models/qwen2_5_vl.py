@@ -373,33 +373,22 @@ class Qwen2_5_VisionAttention(nn.Module):
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
-<<<<<<< HEAD
         qkv = einops.rearrange(
             x,
             "s b (three head head_dim) -> b s three head head_dim",
             three=3,
             head=self.num_attention_heads_per_partition,
-=======
-        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
-        q, k, v = self.split_qkv(x)
-        batch_size = q.shape[1]
-
-        q, k, v = (einops.rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
-
-        # [2 * b, s, heads, head_dim]
-        qk_concat = torch.cat([q, k], dim=0)
-        qk_rotated = apply_rotary_pos_emb_vision(
-            qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
->>>>>>> 137e3e19b (Use cos and sin cache in Qwen2VL and Qwen3VL)
         )
 
-        if rotary_pos_emb is not None:
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
             qk_reshaped = einops.rearrange(
                 qk, "b s two head head_dim -> (two b) s head head_dim", two=2
             )
-            qk_rotated = apply_rotary_pos_emb_vision(qk_reshaped, rotary_pos_emb)
+            qk_rotated = apply_rotary_pos_emb_vision(
+                qk_reshaped, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin
+            )
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
