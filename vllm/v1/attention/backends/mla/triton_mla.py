@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import ClassVar
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,
 )
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
-from vllm.attention.ops.triton_flash_attention import triton_attention
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -28,6 +27,9 @@ logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -35,6 +37,10 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return True
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -89,54 +95,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
-        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
-        self.triton_fa_func = triton_attention if HAS_TRITON else None
-
-    def _flash_attn_varlen_diff_headdims_rocm(
-        self, q, k, v, softmax_scale=None, **kwargs
-    ):
-        assert self.triton_fa_func is not None
-
-        # Triton Attention requires a padded V
-        padded_v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]], value=0)
-        # The output of triton_attention is a tuple of
-        # [output_tensor, encoded_softmax] where encoded_softmax is always None
-        output_tensor, _ = self.triton_fa_func(
-            q,
-            k,
-            padded_v,
-            None,  # output
-            kwargs["cu_seqlens_q"],
-            kwargs["cu_seqlens_k"],
-            kwargs["max_seqlen_q"],
-            kwargs["max_seqlen_k"],
-            kwargs["causal"],
-            softmax_scale,
-            None,  # bias
-        )
-
-        return output_tensor
-
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
-        if (
-            current_platform.is_rocm()
-            and self.use_triton_flash_attn
-            and not return_softmax_lse
-        ):
-            return self._flash_attn_varlen_diff_headdims_rocm(
-                q, k, v, softmax_scale=softmax_scale, **kwargs
-            )
-        else:
-            return super()._flash_attn_varlen_diff_headdims(
-                q,
-                k,
-                v,
-                return_softmax_lse=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs,
-            )
+        return super()._flash_attn_varlen_diff_headdims(
+            q,
+            k,
+            v,
+            return_softmax_lse=return_softmax_lse,
+            softmax_scale=softmax_scale,
+            **kwargs,
+        )
 
     def _forward_decode(
         self,

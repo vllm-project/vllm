@@ -1304,7 +1304,7 @@ def kda_gate_fwd_kernel(
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
 
 
-def kda_gate_fwd(
+def fused_kda_gate(
     g: torch.Tensor,
     A: torch.Tensor,
     head_k_dim: int,

@@ -24,7 +24,7 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from transformers import GenerationConfig, PretrainedConfig
+from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -68,19 +68,21 @@ def _get_hf_token() -> str | None:
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
+        if isinstance(value := super().__getitem__(key), type):
+            return value
+
         import vllm.transformers_utils.configs as configs
 
-        return getattr(configs, super().__getitem__(key))
+        return getattr(configs, value)
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v3="DeepseekV3Config",
-    deepseek_v32="DeepseekV3Config",
+    deepseek_v32=DeepseekV3Config,
     flex_olmo="FlexOlmoConfig",
+    kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -105,6 +107,7 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
 
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
+    "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
 
@@ -469,8 +472,7 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     """
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
+        return len(set(layer_types)) > 1
     return False
 
 
