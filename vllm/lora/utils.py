@@ -171,10 +171,9 @@ def is_base_embeddding_weights(name: str) -> bool:
     input_embedding_subfix = ".embed_tokens.base_layer.weight"
     output_embedding_subfix = ".lm_head.base_layer.weight"
 
-    if name.endswith(input_embedding_subfix) or name.endswith(output_embedding_subfix):
-        return True
-
-    return False
+    return name.endswith(input_embedding_subfix) or name.endswith(
+        output_embedding_subfix
+    )
 
 
 def is_regex_target_modules(
