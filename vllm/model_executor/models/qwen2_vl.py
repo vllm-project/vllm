@@ -283,10 +283,7 @@ def apply_rotary_pos_emb_vision(
     rotary_emb_function = dispatch_rotary_emb_function(
         default=partial(apply_rotary_emb_torch, is_neox_style=True)
     )
-    t_ = t.float()
-    cos_ = cos.float()
-    sin_ = sin.float()
-    output = rotary_emb_function(t_, cos_, sin_).type_as(t)
+    output = rotary_emb_function(t, cos, sin).type_as(t)
     return output
 
 
