@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from safetensors.torch import load_file, save_file
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
@@ -149,7 +150,7 @@ def save_eplb_state(
         tensors[f"global_expert_load_window_{name}"] = global_expert_load_window
     try:
         file_path = f"{save_dir}/global_expert_load_window_i{dir_iter}.safetensors"  # noqa: E501
-        torch.save(tensors, file_path)
+        save_file(tensors, file_path)
         logger.info("Successfully saved to %s.", file_path)
     except Exception as e:
         logger.error("An error occurred while saving the tensor: %s.", e)
@@ -158,7 +159,7 @@ def save_eplb_state(
 def load_eplb_state(
     eplb_load_path: Path, model_states: list[EplbModelState]
 ) -> list[torch.Tensor]:
-    loaded_tensors = torch.load(eplb_load_path)
+    loaded_tensors = load_file(eplb_load_path)
     global_load_windows = []
     for eplb_model_state in model_states:
         name = type(eplb_model_state.model).__name__
@@ -527,13 +528,14 @@ class EplbState:
         # performing collective communication.
         self.expert_rearrangement_step += 1
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
-            self.rearrange()
             self.expert_rearrangement_step = 0
+            self.rearrange()
 
     def rearrange(
         self,
         is_profile: bool = False,
         execute_shuffle: bool = True,
+        load_initial_load_window: bool = False,
         global_expert_loads: list[torch.Tensor] | None = None,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
@@ -564,10 +566,7 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
 
-        if (
-            self.parallel_config.eplb_config.load_path is not None
-            and self.expert_rearrangement_step == 0
-        ):
+        if load_initial_load_window:
             global_expert_load_windows = load_eplb_state(
                 self.parallel_config.eplb_config.load_path,
                 list(self.model_states.values()),
@@ -578,8 +577,7 @@ class EplbState:
             global_expert_load_windows = []
             should_save_eplb_state = (
                 self.parallel_config.eplb_config.save_load_window
-                and not is_profile
-                and self.expert_rearrangement_step > 0
+                and not is_profile and not load_initial_load_window
             )
             if not execute_shuffle:
                 num_models = torch.tensor(

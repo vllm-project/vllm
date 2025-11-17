@@ -3160,8 +3160,8 @@ class GPUModelRunner(
                 rank_mapping,
             )
             if self.parallel_config.eplb_config.load_path is not None:
-                self.eplb_state.rearrange(self.model)
-                if self.parallel_config.eplb_config.save_dir is None:
+                self.eplb_state.rearrange(self.model, load_initial_load_window=True)
+                if self.parallel_config.eplb_config.static:
                     self.eplb_state = None
 
         if (
