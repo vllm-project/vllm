@@ -4,6 +4,7 @@
 import random
 import threading
 import time
+from unittest import mock
 
 import multiprocess as mp
 import numpy as np
@@ -120,63 +121,154 @@ def test_shm_broadcast():
 
 
 @worker_fn_wrapper
-def worker_fn_test_cancel():
+def worker_fn_test_shutdown():
     rank = dist.get_rank()
-    if rank == 0:
-        port = get_open_port()
-        ip = "127.0.0.1"
-        dist.broadcast_object_list([ip, port], src=0)
-    else:
-        recv = [None, None]
-        dist.broadcast_object_list(recv, src=0)
-        ip, port = recv  # type: ignore
+    writer_rank = 2
+    message_queue = MessageQueue.create_from_process_group(
+        dist.group.WORLD, 40 * 1024, 2, writer_rank
+    )
 
-    stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
+    if not message_queue._is_writer:
+        # Put into idle mode
+        message_queue._spin_condition.last_read = 0
 
-    for pg in [dist.group.WORLD, stateless_pg]:
-        writer_rank = 2
-        message_queue = MessageQueue.create_from_process_group(
-            pg, 40 * 1024, 2, writer_rank
-        )
+        shutdown_event = threading.Event()
 
-        if pg == dist.group.WORLD:
-            dist.barrier()
-        else:
-            pg.barrier()
+        def shutdown_thread(mq, shutdown_event):
+            shutdown_event.wait()
+            mq.shutdown()
 
-        if rank != writer_rank:
-            # Put into idle mode
-            message_queue._spin_condition.last_read = 0
+        threading.Thread(
+            target=shutdown_thread, args=(message_queue, shutdown_event)
+        ).start()
 
-            shutdown_event = threading.Event()
+        with pytest.raises(TimeoutError):
+            message_queue.dequeue(timeout=0.01)
 
-            def shutdown_thread(mq, shutdown_event):
-                shutdown_event.wait()
-                mq.shutdown()
+        shutdown_event.set()
 
-            threading.Thread(
-                target=shutdown_thread, args=(message_queue, shutdown_event)
-            ).start()
-
-            with pytest.raises(TimeoutError):
-                message_queue.dequeue(timeout=0.001)
-
-            shutdown_event.set()
-
+        with pytest.raises(RuntimeError, match="cancelled"):
             message_queue.dequeue(timeout=1)
 
-            assert message_queue.shutting_down
-        else:
-            # Write nothing
-            message_queue.shutdown()
+        assert message_queue.shutting_down
 
-        if pg == dist.group.WORLD:
-            print(f"torch distributed passed the test! Rank {rank}")
-            dist.barrier()
-        else:
-            print(f"StatelessProcessGroup passed the test! Rank {rank}")
-            pg.barrier()
+    print(f"torch distributed passed the test! Rank {rank}")
+    dist.barrier()
 
 
 def test_message_queue_shutdown():
-    distributed_run(worker_fn_test_cancel, 4)
+    distributed_run(worker_fn_test_shutdown, 4)
+
+
+@worker_fn_wrapper
+def worker_fn_test_idle_to_busy():
+    rank = dist.get_rank()
+    writer_rank = 2
+    message_queue = MessageQueue.create_from_process_group(
+        dist.group.WORLD, 40 * 1024, 2, writer_rank
+    )
+
+    message1 = "hello world"
+    message2 = np.random.randint(1, 100, 100)
+    with mock.patch.object(
+        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
+    ) as wrapped_wait:
+        if not message_queue._is_writer:
+            # Put into idle mode
+            message_queue._spin_condition.last_read = 0
+
+            # no messages, so expect a TimeoutError
+            with pytest.raises(TimeoutError):
+                message_queue.dequeue(timeout=0.01)
+            # wait should only be called once while idle
+            assert wrapped_wait.call_count == 1
+
+            # sync with the writer and wait for message1
+            dist.barrier()
+            recv_message = message_queue.dequeue(timeout=5)
+            assert recv_message == message1
+            # second call to wait, with a message read, this puts in a busy spin
+            assert wrapped_wait.call_count == 2
+
+            # sync with the writer and wait for message2
+            dist.barrier()
+            recv_message = message_queue.dequeue(timeout=1)
+            assert np.array_equal(recv_message, message2)
+            # in busy mode, we expect wait to have been called multiple times
+            assert wrapped_wait.call_count > 3
+        else:
+            # writer writes two messages in sync with the reader
+            dist.barrier()
+            # sleep delays the send to ensure reader enters the read loop
+            time.sleep(0.1)
+            message_queue.enqueue(message1)
+
+            dist.barrier()
+            time.sleep(0.1)
+            message_queue.enqueue(message2)
+
+    message_queue.shutdown()
+    assert message_queue.shutting_down
+    print(f"torch distributed passed the test! Rank {rank}")
+
+
+def test_message_queue_idle_wake():
+    distributed_run(worker_fn_test_idle_to_busy, 4)
+
+
+@worker_fn_wrapper
+def worker_fn_test_busy_to_idle():
+    rank = dist.get_rank()
+    writer_rank = 2
+    message_queue = MessageQueue.create_from_process_group(
+        dist.group.WORLD, 40 * 1024, 2, writer_rank
+    )
+
+    message1 = 12345
+    message2 = list(range(3))
+    with mock.patch.object(
+        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
+    ) as wrapped_wait:
+        if not message_queue._is_writer:
+            # Put into busy mode
+            message_queue._spin_condition.busy_loop_s = 9999
+
+            # sync with the writer and wait for message1
+            dist.barrier()
+            recv_message = message_queue.dequeue(timeout=1)
+            assert recv_message == message1
+            # in busy mode, we expect wait to have been called many times
+            assert wrapped_wait.call_count > 1
+
+            # simulate busy loop ending
+            message_queue._spin_condition.busy_loop_s = 0
+            # ensure we enter idle mode, then record call count
+            with pytest.raises(TimeoutError):
+                message_queue.dequeue(timeout=0.01)
+            call_count = wrapped_wait.call_count
+
+            # sync with the writer and wait for message2
+            dist.barrier()
+            recv_message = message_queue.dequeue(timeout=1)
+            assert recv_message == message2
+
+            # call to wait after idle should only happen once
+            assert wrapped_wait.call_count == call_count + 1
+        else:
+            # writer writes two messages in sync with the reader
+            dist.barrier()
+            # sleep delays the send to ensure reader enters the read loop
+            time.sleep(0.1)
+            message_queue.enqueue(message1)
+
+            dist.barrier()
+            time.sleep(0.1)
+            message_queue.enqueue(message2)
+
+    message_queue.shutdown()
+    assert message_queue.shutting_down
+    print(f"torch distributed passed the test! Rank {rank}")
+
+
+def test_message_queue_busy_to_idle():
+    distributed_run(worker_fn_test_busy_to_idle, 4)
