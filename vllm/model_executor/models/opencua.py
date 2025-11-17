@@ -47,7 +47,8 @@ from .qwen2_vl import (
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as OpenCUADummyInputsBuilder
+from .qwen2_vl import Qwen2VLDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from transformers.models.qwen2_vl import (
     Qwen2VLImageProcessor,
     Qwen2VLProcessor,
@@ -601,17 +602,15 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
-        
-        # Get token IDs from config, with fallback to default values
-        # OpenCUA uses different token IDs than Qwen2-VL
-        image_token_id = getattr(hf_config, "image_token_id", 151664)
-        video_token_id = getattr(hf_config, "video_token_id", 151656)
-        
+        vocab = tokenizer.get_vocab()
+        hf_config = self.info.get_hf_config()
+
+        # OpenCUA's chat_template uses <|media_placeholder|> for images
+        # This is what actually appears in the prompt, not <|image_pad|>
         placeholder = {
-            "image": image_token_id,
-            "video": video_token_id,
+            "image": vocab.get("<|media_placeholder|>", vocab.get(hf_processor.image_token, getattr(hf_config, "image_token_id", 151664))),
+            "video": vocab.get(hf_processor.video_token, getattr(hf_config, "video_token_id", 151656)),
         }
 
         merge_length = image_processor.merge_size**2
@@ -624,17 +623,29 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
             num_tokens = int(grid_thw.prod()) // merge_length
             return [placeholder[modality]] * num_tokens
 
-        # Use processor's image_token and video_token as target
-        # These match what get_dummy_text uses (via Qwen2VLDummyInputsBuilder)
-        # which calls hf_processor.image_token and hf_processor.video_token
         return [
             PromptReplacement(
                 modality=modality,
-                target=hf_processor.image_token if modality == "image" else hf_processor.video_token,
+                target=[placeholder[modality]],
                 replacement=partial(get_replacement_opencua, modality=modality),
             )
             for modality in ("image", "video")
         ]
+
+
+class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    """Dummy inputs builder for OpenCUA that uses <|media_placeholder|> instead of <|image_pad|>."""
+    
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        
+        # OpenCUA's chat_template uses <|media_placeholder|> for images
+        # This must match what actually appears in the prompt after chat_template processing
+        image_token = "<|media_placeholder|>"
+        video_token = "<|video_pad|>"  # Keep video token as is for now
+        
+        return image_token * num_images + video_token * num_videos
 
 
 @MULTIMODAL_REGISTRY.register_processor(
