@@ -1405,7 +1405,7 @@ __global__ void Marlin(
     }
   };
 
-  auto matmul_a8 = [&](int k, int pipe) {
+  auto matmul_a8 = [&](int k) {
     int k2 = k % 2;
   #pragma unroll
     for (int j = 0; j < 2; j++) {
@@ -1922,7 +1922,7 @@ __global__ void Marlin(
           matmul(k, pipe - (k >= b_sh_wr_iters - 2 ? 1 : 0));
         } else {
           static_assert(group_blocks != 0 && group_blocks != 1);
-          matmul_a8(k, pipe - (k >= b_sh_wr_iters - 2 ? 1 : 0));
+          matmul_a8(k);
         }
       }
       slice_iters--;
