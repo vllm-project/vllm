@@ -113,7 +113,6 @@ The initialization code should look like this:
 
     See [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py) for a complete example.
 
-
 ### Computation Code
 
 - Add a `embed_input_ids` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.

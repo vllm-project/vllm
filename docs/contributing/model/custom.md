@@ -154,6 +154,7 @@ replace_with_trainable_attention(model, use_mla=False)
 ```
 
 This automatically replaces external attention layers with vLLM's `TrainableFlashAttention`, which:
+
 - Supports PyTorch backward passes (for training/fine-tuning)
 - Uses vLLM's optimized KV cache (for inference)
 - Auto-registers for KV cache allocation
@@ -167,6 +168,7 @@ replace_with_trainable_attention(model, use_mla=True)
 ```
 
 Features:
+
 - Low-rank compression for Q and KV projections
 - Split Q/K into RoPE and non-RoPE parts
 - Shared K_PE across all heads (memory efficient)
@@ -194,6 +196,7 @@ loaded, skipped = load_external_weights(
 ```
 
 Features:
+
 - Automatic layer number substitution (`{}` in names)
 - Returns counts of loaded and skipped parameters
 - Handles both regular tensors and sharded weights
@@ -288,8 +291,8 @@ def __init__(self, vllm_config, **kwargs):
 ```
 
 2. **TP Application Order**:
-   - ✅ Model creation → Attention replacement → TP → dtype conversion
-   - ❌ Attention replacement → TP → Model creation (breaks weight sharding)
+    - ✅ Model creation → Attention replacement → TP → dtype conversion
+    - ❌ Attention replacement → TP → Model creation (breaks weight sharding)
 
 3. **Process Group Management**: Use `parallel_context` to get vLLM's process groups:
 
@@ -303,12 +306,13 @@ tp_size = parallel_context.get_tensor_parallel_world_size()
 See the `examples/custom_models/` directory for complete examples:
 
 - **DeepSeek V3**: TorchTitan model with MLA attention and TP
-  - `examples/custom_models/deepseek_v3_torchtitan.py`
+    - `examples/custom_models/deepseek_v3_torchtitan.py`
 
 - **Qwen3**: TorchTitan model with flash attention and TP
-  - `examples/custom_models/qwen3_torchtitan.py`
+    - `examples/custom_models/qwen3_torchtitan.py`
 
 Each example demonstrates:
+
 - Importing external model implementations
 - Attention replacement
 - Weight loading with name mapping

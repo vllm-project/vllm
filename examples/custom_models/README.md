@@ -11,6 +11,7 @@ This directory contains examples demonstrating how to integrate custom models wi
 - **`benchmark_deepseek_v3.py`**: Benchmark comparing custom DeepSeek V3 with vLLM's built-in implementation
 
 These examples show how to:
+
 1. Import external model implementations (e.g., from TorchTitan)
 2. Replace attention layers with vLLM's trainable attention
 3. Register custom models with vLLM's model registry
@@ -81,6 +82,7 @@ PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepsee
 ```
 
 The benchmark measures:
+
 - **Throughput**: Tokens generated per second
 - **Requests/sec**: Request processing rate
 - **Latency**: P50/P90/P99 latency distribution
@@ -97,7 +99,8 @@ PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepsee
 ```
 
 This will output:
-```
+
+```text
 Metric                    Custom               Built-in             Speedup
 --------------------------------------------------------------------------------
 Throughput (tok/s)        1028.11              945.23               1.09x
