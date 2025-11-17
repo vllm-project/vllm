@@ -318,10 +318,11 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+        in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
 
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
+        # Early return if no work and not participating in DP synchronization
+        needs_dp_sync = in_dp_mode and getattr(self, "engines_running", False)
+        if not (self.scheduler.has_requests() or needs_dp_sync):
             return {}, False
         with record_function_or_nullcontext("core step: schedule"):
             scheduler_output = self.scheduler.schedule()
@@ -339,7 +340,11 @@ class EngineCore:
                 scheduler_output, model_output
             )
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+        # Mark as executed if we processed tokens OR participated in DP sync
+        has_tokens = scheduler_output.total_num_scheduled_tokens > 0
+        executed = has_tokens or in_dp_mode
+
+        return engine_core_outputs, executed
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -386,7 +391,9 @@ class EngineCore:
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            has_tokens = scheduler_output.total_num_scheduled_tokens > 0
+            in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
+            model_executed = has_tokens or in_dp_mode
 
             if scheduler_output.pending_structured_output_tokens:
                 with record_function_or_nullcontext(
