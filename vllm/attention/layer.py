@@ -1027,8 +1027,6 @@ def unified_mla_attention(
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
-
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
