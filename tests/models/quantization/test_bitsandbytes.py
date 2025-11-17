@@ -10,14 +10,15 @@ from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx9
 
 from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm() and on_gfx9(),
-    reason="bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)",
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+    pytestmark = pytest.mark.skipif(
+        on_gfx9(),
+        reason="bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)",
 )
 
 models_4bit_to_test = [
