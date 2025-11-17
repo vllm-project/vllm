@@ -203,6 +203,10 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
 
@@ -1367,6 +1371,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
+
         intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
 
         # Will transpose the loaded weight along the
@@ -1738,6 +1747,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
+
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
@@ -2013,6 +2027,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         **extra_weight_attrs,
     ):
         # Shapes per local rank (TP/EP):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
+
         #   w13: [E, 2*I_local, H]  int8  (int4 values in [-8,7])
         #   w2 : [E, H, I_local]    int8
         # Scales:

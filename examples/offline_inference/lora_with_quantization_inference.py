@@ -114,6 +114,12 @@ def main():
             "quantization": "gptq",
             "lora_repo": "jashing/tinyllama-colorist-lora",
         },
+        {
+            "name": "compressed_tensors_inference_with_lora_example",
+            "model": "neuralmagic/TinyLlama-1.1B-Chat-v1.0-INT4",
+            "quantization": "compressed-tensors",
+            "lora_repo": "jashing/tinyllama-colorist-lora",
+        },
     ]
 
     for test_config in test_configs:

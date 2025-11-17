@@ -614,22 +614,45 @@ class LoRAModelManager:
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (
-                        module.base_layer.org_vocab_size
-                        + self.lora_config.lora_extra_vocab_size
-                        if hasattr(module.base_layer, "org_vocab_size")
-                        else module.base_layer.weight.shape[1]
-                    )
-                    output_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[0]
-                    )
-                    embeddings_tensor_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[1]
-                    )
+                    # Try to get dimensions from layer attributes first
+                    if hasattr(module.base_layer, "org_vocab_size"):
+                        input_dim = (
+                            module.base_layer.org_vocab_size
+                            + self.lora_config.lora_extra_vocab_size
+                        )
+                    elif hasattr(module.base_layer, "input_size"):
+                        input_dim = module.base_layer.input_size
+                    elif hasattr(module.base_layer, "weight_shape"):
+                        # Compressed tensors: weight_shape stores [output, input]
+                        # For embeddings: [vocab_size, embedding_dim]
+                        input_dim = module.base_layer.weight_shape[0].item()
+                    else:
+                        # For embeddings: weight.shape = [vocab_size, embedding_dim]
+                        input_dim = module.weight.shape[0]
+
+                    if hasattr(module.base_layer, "embedding_dim"):
+                        output_dim = module.base_layer.embedding_dim
+                    elif hasattr(module.base_layer, "output_size"):
+                        output_dim = module.base_layer.output_size
+                    elif hasattr(module.base_layer, "weight_shape"):
+                        # Compressed tensors: weight_shape stores [output, input]
+                        # For embeddings: [vocab_size, embedding_dim]
+                        output_dim = module.base_layer.weight_shape[1].item()
+                    else:
+                        # For embeddings: weight.shape = [vocab_size, embedding_dim]
+                        output_dim = module.weight.shape[1]
+
+                    if hasattr(module.base_layer, "embedding_dim"):
+                        embeddings_tensor_dim = module.base_layer.embedding_dim
+                    elif hasattr(module.base_layer, "output_size"):
+                        embeddings_tensor_dim = module.base_layer.output_size
+                    elif hasattr(module.base_layer, "weight_shape"):
+                        # Compressed tensors: weight_shape stores [output, input]
+                        # For embeddings: [vocab_size, embedding_dim]
+                        embeddings_tensor_dim = module.base_layer.weight_shape[1].item()
+                    else:
+                        # For embeddings: weight.shape = [vocab_size, embedding_dim]
+                        embeddings_tensor_dim = module.weight.shape[1]
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
