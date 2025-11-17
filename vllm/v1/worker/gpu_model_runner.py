@@ -2100,7 +2100,8 @@ class GPUModelRunner(
         """
         if not self.parallel_config.enable_eplb:
             return
-        if is_profile and self.parallel_config.eplb_config.load_initial_load_window: # Maybe we can get rid of that
+        if (self.parallel_config.eplb_config.load_initial_load_window and
+            is_profile):
             return
         if (
             self.parallel_config.eplb_config.static

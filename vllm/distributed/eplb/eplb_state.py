@@ -354,7 +354,10 @@ class EplbState:
         )
 
         eplb_step_interval = self.parallel_config.eplb_config.step_interval
-        if self.parallel_config.eplb_config.load_initial_load_window or self.parallel_config.eplb_config.save_load_window:
+        if (
+            self.parallel_config.eplb_config.load_initial_load_window
+            or self.parallel_config.eplb_config.save_load_window
+        ):
             self.expert_rearrangement_step = 0
         else:
             # Set the initial progress of rearrangement to 3/4
@@ -567,6 +570,7 @@ class EplbState:
             logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
 
         if load_initial_load_window:
+            assert self.parallel_config.eplb_config.load_path is not None
             global_expert_load_windows = load_eplb_state(
                 self.parallel_config.eplb_config.load_path,
                 list(self.model_states.values()),
@@ -577,7 +581,8 @@ class EplbState:
             global_expert_load_windows = []
             should_save_eplb_state = (
                 self.parallel_config.eplb_config.save_load_window
-                and not is_profile and not load_initial_load_window
+                and not is_profile
+                and not load_initial_load_window
             )
             if not execute_shuffle:
                 num_models = torch.tensor(
@@ -621,6 +626,7 @@ class EplbState:
                 global_expert_load_windows.append(global_expert_load_window)
 
             if is_main_rank and should_save_eplb_state:
+                assert self.parallel_config.eplb_config.save_dir is not None
                 save_eplb_state(
                     global_expert_load_windows,
                     self.parallel_config.eplb_config.save_dir,

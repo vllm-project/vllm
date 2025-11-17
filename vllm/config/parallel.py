@@ -620,10 +620,13 @@ class ParallelConfig:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
-        
-        if self.eplb_config.load_initial_load_window and self.eplb_config.load_path is None:
+        if (
+            self.eplb_config.load_initial_load_window
+            and self.eplb_config.load_path is None
+        ):
             raise ValueError(
-                "load_initial_load_window is set to True, but load_path is not provided."
+                "load_initial_load_window is set to True,"
+                "but load_path is not provided."
             )
         if self.eplb_config.save_load_window and self.eplb_config.save_dir is None:
             raise ValueError(

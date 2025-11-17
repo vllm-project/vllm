@@ -58,7 +58,7 @@ def test_eplb_model(
         # Load EPLB statistics from disk
         eplb_config_load = EPLBConfig(
             load_initial_load_window=True,
-            load_path="/tmp/global_expert_load_window_i0.safetensors"
+            load_path="/tmp/global_expert_load_window_i0.safetensors",
         )
         llm = LLM(eplb_config=eplb_config_load, **llm_args)
         llm.generate(test_prompts, sampling_config)
