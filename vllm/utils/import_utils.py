@@ -62,6 +62,14 @@ def import_pynvml():
     return pynvml
 
 
+@cache
+def import_triton_kernels():
+    import vllm.third_party.triton_kernels as triton_kernels
+
+    sys.modules["triton_kernels"] = triton_kernels
+    return triton_kernels
+
+
 def import_from_path(module_name: str, file_path: str | os.PathLike):
     """
     Import a Python file according to its file path.
@@ -397,7 +405,10 @@ def has_deep_gemm() -> bool:
 
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
-    return _has_module("triton_kernels")
+    is_available = _has_module("vllm.third_party.triton_kernels")
+    if is_available:
+        import_triton_kernels()
+    return is_available
 
 
 def has_tilelang() -> bool:
