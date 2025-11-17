@@ -173,7 +173,7 @@ def cp_lse_ag_out_rs(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
-    ctx: CPTritonContext = None,
+    ctx: CPTritonContext | None = None,
     return_lse=False,
 ):
     """

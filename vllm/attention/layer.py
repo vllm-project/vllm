@@ -824,7 +824,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         has_context = attn_metadata.prefill.chunked_context is not None
 
         # KV projection and splitting
-        kv_nope = self.impl.kv_b_proj(k_c_normed)[0].view(
+        kv_nope = self.impl.kv_b_proj(k_c_normed)[0].view(  # type: ignore[attr-defined]
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
@@ -832,7 +832,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         # Run prefill for new tokens
-        output = self.impl._run_prefill_new_tokens(
+        output = self.impl._run_prefill_new_tokens(  # type: ignore[attr-defined]
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
@@ -900,11 +900,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
                     assert (
                         cur_allgather_kvcache.shape[-1]
-                        == self.impl.kv_lora_rank + self.qk_rope_head_dim
+                        == self.impl.kv_lora_rank + self.qk_rope_head_dim  # type: ignore[attr-defined]
                     )
                     allgatered_kv_c_normed, allgatered_k_pe = (
                         cur_allgather_kvcache.unsqueeze(1).split(
-                            [self.impl.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                            [self.impl.kv_lora_rank, self.qk_rope_head_dim],
+                            dim=-1,  # type: ignore[attr-defined]
                         )
                     )
 
@@ -928,16 +929,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         block_table=prefill_metadata.block_table,
                         cu_seq_lens=chunked_context.cu_seq_lens[i],
                         batch_size=attn_metadata.num_prefills,
-                        kv_cache_dtype=self.impl.kv_cache_dtype,
+                        kv_cache_dtype=self.impl.kv_cache_dtype,  # type: ignore[attr-defined]
                         scale=self._k_scale,
                         seq_starts=chunked_context.starts[i],
                     )
 
-                    kv_c_normed = workspace[:toks][..., : self.impl.kv_lora_rank]
-                    k_pe = workspace[:toks][..., self.impl.kv_lora_rank :].unsqueeze(1)
+                    kv_c_normed = workspace[:toks][..., : self.impl.kv_lora_rank]  # type: ignore[attr-defined]
+                    k_pe = workspace[:toks][..., self.impl.kv_lora_rank :].unsqueeze(1)  # type: ignore[attr-defined]
 
                 # KV projection and splitting
-                kv_nope = self.impl.kv_b_proj(kv_c_normed)[0].view(
+                kv_nope = self.impl.kv_b_proj(kv_c_normed)[0].view(  # type: ignore[attr-defined]
                     -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
                 )
                 k_nope, v_chunk = kv_nope.split(
@@ -949,7 +950,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
                 # Run attention kernel for this chunk
-                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
+                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(  # type: ignore[attr-defined]
                     prefill=prefill_metadata,
                     chunk_idx=i,
                     q=q,
@@ -986,7 +987,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         # Unpad if necessary
-        if self.impl._pad_v:
+        if self.impl._pad_v:  # type: ignore[attr-defined]
             output = output[..., : v.shape[-1]]
 
         return output.flatten(start_dim=-2)
@@ -1010,33 +1011,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # (B, N, P) -> (N, B, P)
         decode_q_nope = decode_q_nope.transpose(0, 1)
 
-        if self.impl.q_pad_num_heads is not None:
+        if self.impl.q_pad_num_heads is not None:  # type: ignore[attr-defined]
             B, N, L = decode_q_pe.shape
-            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))
+            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))  # type: ignore[attr-defined]
             decode_pe_padded.resize_((B, N, L))
             decode_pe_padded.copy_(decode_q_pe)
             decode_q_pe = decode_pe_padded
 
-        if self.impl.is_aiter_triton_fp8_bmm_enabled:
+        if self.impl.is_aiter_triton_fp8_bmm_enabled:  # type: ignore[attr-defined]
             # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
             decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 decode_q_nope,
-                self.impl.W_K,
-                self.impl.W_K_scale,
+                self.impl.W_K,  # type: ignore[attr-defined]
+                self.impl.W_K_scale,  # type: ignore[attr-defined]
                 group_size=128,
                 transpose_bm=True,
             )
         else:
             N, B, P = decode_q_nope.shape
-            _, _, L = self.impl.W_UK_T.shape
-            if self.impl.q_pad_num_heads is not None:
+            _, _, L = self.impl.W_UK_T.shape  # type: ignore[attr-defined]
+            if self.impl.q_pad_num_heads is not None:  # type: ignore[attr-defined]
                 decode_ql_nope = decode_q_nope.new_empty(
-                    (self.impl.q_pad_num_heads, B, L)
+                    (self.impl.q_pad_num_heads, B, L)  # type: ignore[attr-defined]
                 )
                 decode_ql_nope.resize_((N, B, L))
             else:
                 decode_ql_nope = decode_q_nope.new_empty((N, B, L))
-            torch.bmm(decode_q_nope, self.impl.W_UK_T, out=decode_ql_nope)
+            torch.bmm(decode_q_nope, self.impl.W_UK_T, out=decode_ql_nope)  # type: ignore[attr-defined]
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
         if fp8_attention:
@@ -1061,7 +1062,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             decode_q = torch.cat(decode_q, dim=-1)
             decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
-        attn_out, lse = self.impl._forward_decode(
+        attn_out, lse = self.impl._forward_decode(  # type: ignore[attr-defined]
             decode_q, kv_cache, attn_metadata, self
         )
 
@@ -1073,7 +1074,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=q.dtype,
             device=q.device,
         )
-        self.impl._v_up_proj(attn_out, out=out)
+        self.impl._v_up_proj(attn_out, out=out)  # type: ignore[attr-defined]
         return out
 
     def forward_impl(
