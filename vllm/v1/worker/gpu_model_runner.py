@@ -2240,7 +2240,11 @@ class GPUModelRunner(
             has_mm_features = any(
                 req_state.mm_features for req_state in self.requests.values()
             )
-            if self.uses_custom_attention_masks and has_mm_features:
+            if (
+                self.uses_custom_attention_masks
+                and has_mm_features
+                and hasattr(self.model, "generate_attention_masks")
+            ):
                 mask_kwargs = self.model.generate_attention_masks(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     self.positions.gpu[:num_scheduled_tokens],
