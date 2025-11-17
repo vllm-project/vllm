@@ -324,6 +324,7 @@ def test_prepare_inputs_padded():
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
+@pytest.mark.parametrize("use_distinct_lm_head", [True, False])
 @mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
 @mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
 @mock.patch("vllm.v1.spec_decode.eagle.get_model")
@@ -335,6 +336,7 @@ def test_load_model(
     attn_backend,
     pp_size,
     use_distinct_embed_tokens,
+    use_distinct_lm_head,
     monkeypatch,
 ):
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
@@ -350,12 +352,13 @@ def test_load_model(
 
     # Setup draft model mock
     mock_model = mock.MagicMock()
+    mock_model.model = mock.MagicMock()
+    mock_model.has_own_embed_tokens = use_distinct_embed_tokens
     if use_distinct_embed_tokens:
-        # Some models can have a different hidden size than the target model,
-        # so we test that their embed_tokens doesn't get overwritten
-        mock_model.model.embed_tokens.weight.shape = (131072, 2048)
-    else:
-        mock_model.model.embed_tokens.weight.shape = (131072, 4096)
+        mock_model.model.embed_tokens = mock.MagicMock()
+    mock_model.has_own_lm_head = use_distinct_lm_head
+    if use_distinct_lm_head:
+        mock_model.lm_head = mock.MagicMock()
 
     mock_get_model.return_value = mock_model
 
@@ -391,14 +394,12 @@ def test_load_model(
 
     target_model = mock.create_autospec(_TargetModelStub, instance=True)
     target_model.model = mock.MagicMock()
-    target_model.model.embed_tokens.weight.shape = (131072, 4096)
+    target_model.lm_head = mock.MagicMock()
+    target_model.model.embed_tokens = mock.MagicMock()
 
     from vllm.model_executor.models import SupportsMultiModal
 
     assert not isinstance(target_model, SupportsMultiModal)
-
-    if method == "eagle":
-        target_model.lm_head = mock.MagicMock()
 
     # Create proposer using the helper function
     proposer = _create_proposer(method, num_speculative_tokens=8)
@@ -409,18 +410,18 @@ def test_load_model(
     # Verify common interactions
     mock_get_model.assert_called_once()
 
-    # Verify that EAGLE models gain the lm head from the target model
-    if method == "eagle":
-        assert proposer.model.lm_head == target_model.lm_head
+    # Verify that the lm head is set correctly
+    if use_distinct_lm_head:
+        assert proposer.model.lm_head is not target_model.lm_head
+    else:
+        assert proposer.model.lm_head is target_model.lm_head
 
     # Verify that the embed tokens are set correctly
     # If pp_size is > 1, the embed tokens should be distinct
     if pp_size > 1 or use_distinct_embed_tokens:
-        assert proposer.model.model.embed_tokens != target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens is not target_model.model.embed_tokens
     else:
-        # When pp_size is 1 and the draft and target models have
-        # embed_tokens of the same shape, they should be shared.
-        assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens is target_model.model.embed_tokens
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
