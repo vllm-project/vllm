@@ -755,8 +755,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             self.w13_weight = w13_weight
             self.w2_weight = w2_weight
-            layer.w13_weight = Parameter(w13_weight.storage.data, requires_grad=False)
-            layer.w2_weight = Parameter(w2_weight.storage.data, requires_grad=False)
+            layer.w13_weight = Parameter(
+                w13_weight.storage
+                if isinstance(w13_weight.storage, torch.Tensor)
+                else w13_weight.storage.data,
+                requires_grad=False,
+            )
+            layer.w2_weight = Parameter(
+                w2_weight.storage
+                if isinstance(w2_weight.storage, torch.Tensor)
+                else w2_weight.storage.data,
+                requires_grad=False,
+            )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
