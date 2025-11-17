@@ -87,6 +87,7 @@ def benchmark_model(
     max_batch_size: int = 32,
     max_tokens: int = 128,
     max_model_len: int = 8192,
+    track_latency: bool = False,
 ) -> dict:
     """Benchmark a model with given requests."""
     print(f"\n{'=' * 70}")
@@ -130,12 +131,19 @@ def benchmark_model(
     print(f"\nRunning benchmark ({len(requests)} requests)...")
     start_time = time.time()
 
-    # Track per-request timing by generating in small batches
-    batch_size = min(max_batch_size, 8)  # Use smaller batches for timing granularity
+    # Determine batch size based on latency tracking
+    if track_latency:
+        # Use smaller batches for timing granularity (reduces throughput)
+        batch_size = min(max_batch_size, 8)
+        print(f"  (Latency tracking enabled: batches of {batch_size})")
+    else:
+        # Use full batch size for maximum throughput
+        batch_size = max_batch_size
+        print(f"  (Using batches of {batch_size} for max throughput)")
+
     outputs = []
     request_latencies = []
 
-    print(f"  (Generating in batches of {batch_size} for latency tracking...)")
     for i in range(0, len(requests), batch_size):
         batch = requests[i : i + batch_size]
         batch_start = time.time()
@@ -145,10 +153,13 @@ def benchmark_model(
 
         outputs.extend(batch_outputs)
 
-        # Estimate per-request latency as batch_time / batch_size
-        # This is an approximation but better than nothing for batched generation
-        for _ in batch:
-            request_latencies.append(batch_time / len(batch))
+        # Track per-request latency only if enabled
+        if track_latency:
+            # Estimate per-request latency as batch_time / batch_size
+            # This is an approximation but better than nothing for batched
+            # generation
+            for _ in batch:
+                request_latencies.append(batch_time / len(batch))
 
     end_time = time.time()
     total_time = end_time - start_time
@@ -204,7 +215,7 @@ def benchmark_model(
         print(f"P90 Latency:       {results['p90_latency'] * 1000:.2f}ms")
         print(f"P99 Latency:       {results['p99_latency'] * 1000:.2f}ms")
     else:
-        print("P50/P90/P99:       N/A (use --num-requests ≤20 for per-request latency)")
+        print("P50/P90/P99:       N/A (use --track-latency for percentiles)")
     print(f"{'=' * 70}")
 
     return results
@@ -259,6 +270,14 @@ def main():
         action="store_true",
         help="Skip built-in model benchmark (only run custom)",
     )
+    parser.add_argument(
+        "--track-latency",
+        action="store_true",
+        help=(
+            "Enable fine-grained latency tracking (P50/P90/P99). "
+            "Uses smaller batches which reduces throughput."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -272,11 +291,11 @@ def main():
     print("DeepSeek V3 Benchmark: TorchTitan vs Built-in")
     print(f"{'#' * 70}")
     if run_custom and run_builtin:
-        print("Mode: Comparing Custom vs Built-in")
+        print("Mode: Comparing TorchTitan vs Built-in")
     elif run_custom:
-        print("Mode: Custom model only")
+        print("Mode: TorchTitan only")
     elif run_builtin:
-        print("Mode: Built-in model only")
+        print("Mode: Built-in only")
 
     # Import custom model if needed
     if run_custom:
@@ -294,7 +313,7 @@ def main():
     if run_custom:
         try:
             print("\n" + "=" * 70)
-            print("CUSTOM MODEL (TorchTitan + vLLM MLA)")
+            print("TorchTitan DeepSeek (Custom Implementation)")
             print("=" * 70)
             results["custom"] = benchmark_model(
                 model_name=args.model,
@@ -303,6 +322,7 @@ def main():
                 max_batch_size=args.max_batch_size,
                 max_tokens=args.max_tokens,
                 max_model_len=args.max_model_len,
+                track_latency=args.track_latency,
             )
         except Exception as e:
             print(f"\n❌ Custom model benchmark failed: {e}")
@@ -314,7 +334,7 @@ def main():
     if run_builtin:
         try:
             print("\n" + "=" * 70)
-            print("BUILT-IN vLLM MODEL")
+            print("Built-in DeepSeek (vLLM Native Implementation)")
             print("=" * 70)
             results["builtin"] = benchmark_model(
                 model_name=args.model,
@@ -323,6 +343,7 @@ def main():
                 max_batch_size=args.max_batch_size,
                 max_tokens=args.max_tokens,
                 max_model_len=args.max_model_len,
+                track_latency=args.track_latency,
             )
         except Exception as e:
             print(f"\n❌ Built-in model benchmark failed: {e}")
@@ -340,7 +361,9 @@ def main():
         builtin = results.get("builtin", {})
 
         if custom and builtin:
-            print(f"\n{'Metric':<25} {'Custom':<20} {'Built-in':<20} {'Speedup':<15}")
+            print(
+                f"\n{'Metric':<25} {'TorchTitan':<20} {'Built-in':<20} {'Speedup':<15}"
+            )
             print("-" * 80)
 
             metrics = [
