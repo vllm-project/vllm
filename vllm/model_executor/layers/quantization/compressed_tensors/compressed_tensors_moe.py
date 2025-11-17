@@ -1927,7 +1927,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 )
             if not isinstance(layer, FusedMoE):
                 raise TypeError(
-                    "EPLB sólo está soportado cuando `layer` es una instancia de FusedMoE."
+                    "EPLB is only supported when `layer` is a instance of FusedMoE."
                 )
 
         from vllm.model_executor.layers.fused_moe import fused_experts
