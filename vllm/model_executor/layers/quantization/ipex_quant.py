@@ -6,15 +6,18 @@ from typing import Any, Optional
 
 import torch
 from packaging import version
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm._ipex_ops import ipex_ops as ops
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -27,9 +30,16 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    get_linear_quant_method,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
+from vllm.transformers_utils.config import get_safetensors_params_metadata
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.math_utils import round_up
 
 MIN_IPEX_VERSION = "2.6.0"
 
@@ -49,20 +59,28 @@ class IPEXConfig(QuantizationConfig):
         method: str,
         weight_bits: int,
         group_size: int,
+        is_qweight_sym: bool,
+        full_config: dict[str, Any],
+        dynamic: dict[str, dict[str, int | bool]],
         modules_to_not_convert: list[str] | None = None,
         desc_act: bool | None = None,
         lm_head_quantized: bool | None = None,
-        is_sym: bool | None = None,
+        modules_in_block_to_quantize: list[str] | None = None,
+        checkpoint_format: str = "",
     ) -> None:
         super().__init__()
+        self.dynamic = dynamic
         self.method = method
+        self.linear_quant_method = method
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.modules_to_not_convert = modules_to_not_convert or []
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
-        self.is_sym = is_sym
+        self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
+        self.full_config = full_config
         self.pack_factor = 32 // self.weight_bits
+        self.bit8_pack_factor = 8 // self.weight_bits
 
         if self.weight_bits not in [4]:
             raise ValueError(
@@ -74,12 +92,24 @@ class IPEXConfig(QuantizationConfig):
             raise ValueError(
                 f"IPEX quantization supports [awq, gptq], but got {self.method}."
             )
+        self.is_qweight_sym = is_qweight_sym
+        # used to identify GPTQ model quantized by autoround
+        self.autoround_version = (
+            full_config.get("autoround_version", "") if full_config is not None else ""
+        )
+        # GPTQ v1 and v2 format deals with zero points differently.
+        # Currently GPTQModel stores v1 format checkpoints by default,
+        # but provides the option to set `format="gptq_v2"` in `QuantizeConfig`.
+        self.checkpoint_format = checkpoint_format
 
     def __repr__(self) -> str:
         return (
             f"IPEXConfig(method={self.method},"
             f"weight_bits={self.weight_bits}, "
-            f"group_size={self.group_size})"
+            f"group_size={self.group_size}),"
+            f"dynamic={self.dynamic}, "
+            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize}),"
+            f"checkpoint_format={self.checkpoint_format})"
         )
 
     @classmethod
@@ -103,6 +133,8 @@ class IPEXConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "IPEXConfig":
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
+        dynamic = {} if dynamic is None else dynamic
         method = cls.get_from_keys(config, ["quant_method"]).lower()
         if method == "awq":
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
@@ -110,24 +142,44 @@ class IPEXConfig(QuantizationConfig):
             modules_to_not_convert = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
             )
-            is_sym = not cls.get_from_keys_or(config, ["zero_point"], default=False)
+            is_qweight_sym = not cls.get_from_keys_or(
+                config, ["zero_point"], default=False
+            )
             return cls(
                 method,
                 weight_bits,
                 group_size,
+                is_qweight_sym,
+                config,
+                dynamic,
                 modules_to_not_convert,
                 False,
                 False,
-                is_sym,
             )
         # otherwise for gptq
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
-        is_sym = cls.get_from_keys_or(config, ["sym"], default=True)
+        is_qweight_sym = cls.get_from_keys_or(config, ["sym"], default=True)
+        modules_in_block_to_quantize = cls.get_from_keys_or(
+            config, ["modules_in_block_to_quantize"], default=None
+        )
+        checkpoint_format = cls.get_from_keys_or(
+            config, ["checkpoint_format"], default=""
+        )
         return cls(
-            method, weight_bits, group_size, [], desc_act, lm_head_quantized, is_sym
+            method,
+            weight_bits,
+            group_size,
+            is_qweight_sym,
+            config,
+            dynamic,
+            [],
+            desc_act,
+            lm_head_quantized,
+            modules_in_block_to_quantize,
+            checkpoint_format,
         )
 
     @classmethod
@@ -155,8 +207,41 @@ class IPEXConfig(QuantizationConfig):
                     return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)
             if self.method == "gptq":
-                return IPEXGPTQLinearMethod(self)
+                return get_linear_quant_method(
+                    self, layer, prefix, IPEXGPTQLinearMethod
+                )
+                # return IPEXGPTQLinearMethod(self)
+        if isinstance(layer, FusedMoE) and self.method == "gptq":
+            return XPUGPTQMarlinMoEMethod(self, layer.moe_config)
         return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper):
+        if self.modules_in_block_to_quantize is not None:
+            self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
+                self.modules_in_block_to_quantize
+            )
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_in_block_to_quantize:
+            if is_list_of(self.modules_in_block_to_quantize, list):
+                # original modules_in_block_to_quantize: list[list[str]]
+                # flatten original modules_in_block_to_quantize
+                self.modules_in_block_to_quantize = [
+                    item
+                    for sublist in self.modules_in_block_to_quantize
+                    for item in sublist
+                ]
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_in_block_to_quantize = list(quant_layers)
 
 
 class IPEXGPTQLinearMethod(GPTQLinearMethod):
@@ -213,7 +298,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
                 bias=bias,
                 group_size=self.quant_config.group_size,
                 quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"],
-                weight_qscheme="sym" if self.quant_config.is_sym else "asym",
+                weight_qscheme="sym" if self.quant_config.is_qweight_sym else "asym",
             )
         )
 
@@ -284,7 +369,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
                 bias=bias,
                 group_size=self.quant_config.group_size,
                 quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"],  # type: ignore
-                weight_qscheme="sym" if self.quant_config.is_sym else "asym",
+                weight_qscheme="sym" if self.quant_config.is_qweight_sym else "asym",
             )
         )
 
@@ -465,3 +550,227 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             num_expert_group,
             custom_routing_function=custom_routing_function,
         )
+
+
+class XPUGPTQMarlinMoEMethod(FusedMoEMethodBase):
+    TYPE_MAP = {
+        (4, True): scalar_types.uint4b8,
+        (8, True): scalar_types.uint8b128,
+    }
+
+    def __init__(
+        self,
+        quant_config: IPEXConfig,
+        moe: FusedMoEConfig,
+    ) -> None:
+        super().__init__(moe)
+        self.quant_config = quant_config
+
+        weight_bits = quant_config.weight_bits
+        is_qweight_sym = quant_config.is_qweight_sym
+        self.quant_type = self.TYPE_MAP[(weight_bits, is_qweight_sym)]
+
+        if self.quant_type.size_bits != 4:
+            raise ValueError("XPUGPTQMarlinMoEMethod only supports int4 now.")
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
+
+        self.is_k_full = (not self.quant_config.desc_act) or (
+            intermediate_size_per_partition == intermediate_size_full
+        )
+        intermediate_size_per_partition = round_up(
+            intermediate_size_per_partition, self.quant_config.group_size
+        )
+        if self.quant_config.group_size != -1:
+            scales_size13 = hidden_size // self.quant_config.group_size
+            w2_scales_size = (
+                intermediate_size_full
+                if self.quant_config.desc_act
+                else intermediate_size_per_partition
+            )
+            scales_size2 = w2_scales_size // self.quant_config.group_size
+            strategy = FusedMoeWeightScaleSupported.GROUP.value
+        else:
+            scales_size13 = 1
+            scales_size2 = 1
+            strategy = FusedMoeWeightScaleSupported.CHANNEL.value
+
+        extra_weight_attrs.update({"quant_method": strategy, "is_transposed": True})
+        # Fused gate_up_proj (column parallel)
+        w13_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size // self.quant_config.pack_factor,
+                2 * intermediate_size_per_partition,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_qweight", w13_qweight)
+        set_weight_attrs(w13_qweight, extra_weight_attrs)
+        # down_proj (row parallel)
+        w2_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                intermediate_size_per_partition // self.quant_config.pack_factor,
+                hidden_size,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_qweight", w2_qweight)
+        set_weight_attrs(w2_qweight, extra_weight_attrs)
+        # up_proj scales
+        w13_scales = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                scales_size13,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_scales", w13_scales)
+        set_weight_attrs(w13_scales, extra_weight_attrs)
+        # down_proj scales
+        w2_scales = torch.nn.Parameter(
+            torch.empty(num_experts, scales_size2, hidden_size, dtype=params_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_scales", w2_scales)
+        set_weight_attrs(w2_scales, extra_weight_attrs)
+        # don't shard the w2 scales when running act order
+        set_weight_attrs(w2_scales, {"load_full_w2": self.quant_config.desc_act})
+        # up_proj scales
+        w13_qzeros = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                scales_size13,
+                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_qzeros", w13_qzeros)
+        set_weight_attrs(w13_qzeros, extra_weight_attrs)
+        # down_proj scales
+        w2_qzeros = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                scales_size2,
+                hidden_size // self.quant_config.pack_factor,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_qzeros", w2_qzeros)
+        set_weight_attrs(w2_qzeros, extra_weight_attrs)
+        # don't shard the w2 scales when running act order
+        set_weight_attrs(w2_qzeros, {"load_full_w2": self.quant_config.desc_act})
+        w13_g_idx = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_g_idx", w13_g_idx)
+        set_weight_attrs(w13_g_idx, extra_weight_attrs)
+        w2_g_idx = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                intermediate_size_per_partition,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_g_idx", w2_g_idx)
+        set_weight_attrs(w2_g_idx, extra_weight_attrs)
+        w13_g_idx_sort_indices = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+        set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
+        w2_g_idx_sort_indices = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                intermediate_size_per_partition,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import intel_extension_for_pytorch as ipex
+
+        if self.quant_config.linear_quant_method == "gptq":
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_qweight.permute(0, 2, 1),
+                layer.w2_qweight.permute(0, 2, 1),
+                w1_scale_inv=layer.w13_scales.permute(0, 2, 1),
+                w2_scale_inv=layer.w2_scales.permute(0, 2, 1),
+                is_int4=True,
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported quant method {self.quant_config.linear_quant_method} "
+                "for XPU MOE."
+            )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        res = layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+        )
+        return res
