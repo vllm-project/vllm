@@ -753,63 +753,49 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
-            fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
+                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rms_norm",
                 op_func=_rocm_aiter_rms_norm_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rms_norm_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
             _OPS_REGISTERED = True
 
