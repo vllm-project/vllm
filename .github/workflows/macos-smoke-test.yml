@@ -7,8 +7,6 @@ jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
     timeout-minutes: 20
-    env:
-      UV_SYSTEM_PYTHON: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +18,11 @@ jobs:
             requirements/**/*.txt
             pyproject.toml
           python-version: '3.12'
+
+      - name: Create virtual environment
+        run: |
+          uv venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies and build vLLM
         run: |
