@@ -471,7 +471,6 @@ def _rocm_aiter_top_p_sampling_from_probs_fake(
     p_scalar: float = 0.0,
     deterministic: bool = True,
 ) -> torch.Tensor:
-    # 返回 token id，形状为 [batch_size]
     return torch.empty((probs.shape[0],), dtype=torch.int64, device=probs.device)
 
 
@@ -607,12 +606,6 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
-
-    @classmethod
-    @if_aiter_supported
-    def is_sampler_enabled(cls) -> bool:
-        """Verifies device specs and availability of env variable."""
-        return cls._AITER_ENABLED
 
     @staticmethod
     @if_aiter_supported
