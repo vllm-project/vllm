@@ -1336,9 +1336,12 @@ class Scheduler(SchedulerInterface):
             # the kv blocks to 0 and thus we can make sure the reset is successful.
             # Preempt in reverse order so the requests will be added back to the
             # running queue in FIFO order.
-            for req in reversed(self.running):
-                self._preempt_request(req, timestamp)
+            while self.running:
+                self._preempt_request(self.running.pop(), timestamp)
             self.running = []
+
+            # Clear scheduled request ids cache
+            self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests:
