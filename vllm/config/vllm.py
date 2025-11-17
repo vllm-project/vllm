@@ -14,13 +14,14 @@ from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
+from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -374,10 +375,22 @@ class VllmConfig:
                     "Async scheduling is not yet compatible with "
                     "pipeline_parallel_size > 1."
                 )
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
             if self.speculative_config is not None:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with speculative decoding."
-                )
+                if self.speculative_config.method not in get_args(EagleModelTypes):
+                    raise ValueError(
+                        "Currently, async scheduling is only supported "
+                        "with EAGLE/MTP kind of speculative decoding"
+                    )
+                if self.speculative_config.disable_padded_drafter_batch:
+                    raise ValueError(
+                        "async scheduling for EAGLE/MTP kind of speculative "
+                        "decoding is enabled, but disable_padded_drafter_batch=True "
+                        "disable_padded_drafter_batch=True is not supported for "
+                        "this situation now. please set "
+                        "disable_padded_drafter_batch=Fasle"
+                    )
             if not executor_supports_async_sched:
                 raise ValueError(
                     "Currently, async scheduling only supports `mp`, `uni`, or "

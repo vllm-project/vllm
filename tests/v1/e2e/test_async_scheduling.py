@@ -15,7 +15,7 @@ from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
 
 MODEL = "Qwen/Qwen3-0.6B"
-MTP_MODEL = "XiaomiMiMo/MiMo-7B-Base"
+MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 first_prompt = (
@@ -29,7 +29,8 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 
 default_params = dict(
     temperature=0.0,  # greedy
-    max_tokens=20,
+    max_tokens=23,
+    min_tokens=18,
 )
 
 
@@ -69,15 +70,9 @@ def test_without_spec_decoding(
         (True, "uni", True, None, True),
     ]
 
-    run_tests(
-        monkeypatch,
-        MODEL,
-        test_configs,
-        test_sampling_params,
-    )
+    run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-@pytest.mark.skip("MTP model too big to run in fp32 in CI")
 def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
@@ -85,8 +80,9 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """
 
     spec_config = {
-        "method": "mtp",
+        "method": "eagle3",
         "num_speculative_tokens": 2,
+        "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
     }
     spec_config_short = spec_config | {"max_model_len": 50}
 
@@ -106,12 +102,7 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         (True, "uni", True, spec_config_short, True),
     ]
 
-    run_tests(
-        monkeypatch,
-        MTP_MODEL,
-        test_configs,
-        [{}],
-    )
+    run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
 
 
 @dynamo_config.patch(cache_size_limit=16)
@@ -182,15 +173,13 @@ def run_tests(
                     and test_acceptance_rate is not None
                 ):
                     if "spec_mml=None" in test_config:
-                        # because the acceptance rate can vary, we use a looser
-                        # tolerance here.
                         assert (
                             pytest.approx(test_acceptance_rate, rel=5e-2)
                             == base_acceptance_rate
                         )
                     else:
                         # Currently the reported acceptance rate is expected to be
-                        # lower when we skip drafting altogether.
+                        # lower when we sometimes skip drafting altogether.
                         assert test_acceptance_rate > 0.05
                 print(
                     f"PASSED: config=[{test_config}], params={params}"
@@ -220,6 +209,7 @@ def run_test(
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
+        # Force preemptions
         dict(num_gpu_blocks_override=32)
         if test_preemption
         else dict(gpu_memory_utilization=0.9)
@@ -238,6 +228,7 @@ def run_test(
         model,
         max_model_len=512,
         enable_chunked_prefill=test_prefill_chunking,
+        # Force prefill chunking
         max_num_batched_tokens=48 if test_prefill_chunking else None,
         # enforce_eager=True,
         async_scheduling=async_scheduling,
@@ -255,10 +246,7 @@ def run_test(
             results.append(
                 vllm_model.generate(
                     example_prompts,
-                    sampling_params=SamplingParams(
-                        **default_params,
-                        **override_params,
-                    ),
+                    sampling_params=SamplingParams(**default_params, **override_params),
                     return_logprobs=True,
                 )
             )
@@ -270,9 +258,7 @@ def run_test(
 
             if test_preemption:
                 preemptions = _get_count(
-                    metrics_before,
-                    metrics_after,
-                    "vllm:num_preemptions",
+                    metrics_before, metrics_after, "vllm:num_preemptions"
                 )
                 assert preemptions > 0, "preemption test had no preemptions"
 
