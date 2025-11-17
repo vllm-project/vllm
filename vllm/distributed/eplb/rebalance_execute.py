@@ -73,8 +73,9 @@ def _allocate_peer_group_buffers(
     rank = ep_group.rank()
     num_peers = max(1, world_size - 1)
     # Each peer needs to allocate two contiguous buffers (send and recv).
-    # Worst case: a single peer may receive all local experts from a layer.
-    bytes_per_layer_per_peer = num_local_experts * layer_bytes
+    # Allocate num_local_experts // num_peers rows per peer.
+    num_rows_per_peer = (num_local_experts + num_peers - 1) // num_peers
+    bytes_per_layer_per_peer = num_rows_per_peer * layer_bytes
     per_peer_capacity = target_total_bytes // (2 * num_peers)
     # Subtract one layer worth to account for the auxiliary buffers.
     per_peer_target_bytes = per_peer_capacity - bytes_per_layer_per_peer
@@ -87,10 +88,12 @@ def _allocate_peer_group_buffers(
     if max_group_layers <= 0:
         logger.warning(
             "Not enough free memory for EPLB peer buffers. "
-            "num_local_experts: %d, bytes_per_layer_per_peer: %d,"
+            "num_local_experts: %d, num_rows_per_peer: %d, "
+            "bytes_per_layer_per_peer: %d, "
             "max_group_layers: %d, free_bytes: %d (%.2f GiB), "
             "target_total_bytes: %d (%.2f GiB)",
             num_local_experts,
+            num_rows_per_peer,
             bytes_per_layer_per_peer,
             max_group_layers,
             free_bytes,
@@ -102,10 +105,12 @@ def _allocate_peer_group_buffers(
     if ep_group.rank() == 0:
         logger.debug(
             "EPLB: target_total_bytes=%.2fGiB, layer_bytes=%.2fKiB, "
-            "local_experts=%d, free_bytes=%.2fGiB, max_group_layers=%d/%d",
+            "local_experts=%d, num_rows_per_peer=%d, free_bytes=%.2fGiB, "
+            "max_group_layers=%d/%d",
             target_total_bytes / (1024**3),
             layer_bytes / 1024,
             num_local_experts,
+            num_rows_per_peer,
             free_bytes / (1024**3),
             max_group_layers,
             num_moe_layers,
@@ -113,8 +118,8 @@ def _allocate_peer_group_buffers(
 
     peer_send_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
     peer_recv_buffers: dict[int, dict[torch.dtype, torch.Tensor]] = {}
-    # Preallocate enough rows to handle the worst case per layer
-    capacity_rows = max_group_layers * num_local_experts
+    # Preallocate enough rows to handle the average num rows per peer per layer
+    capacity_rows = max_group_layers * num_rows_per_peer
     for peer in range(world_size):
         if peer == rank:
             continue
