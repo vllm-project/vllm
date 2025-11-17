@@ -16,10 +16,11 @@ from ..utils import check_embeddings_close, check_logprobs_close
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx9
+
     pytestmark = pytest.mark.skipif(
         on_gfx9(),
         reason="bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)",
-)
+    )
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
