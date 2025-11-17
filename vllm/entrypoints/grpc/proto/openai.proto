@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package vllm.openai;
+
+// ============ 服务定义 ============
+service OpenAIService {
+  // 非流式 chat completion
+  rpc ChatCompletion (ChatCompletionRequest) returns (ChatCompletionResponse);
+  
+  // 流式 chat completion
+  rpc ChatCompletionStream (ChatCompletionRequest) returns (stream ChatCompletionStreamResponse);
+  
+  // 健康检查
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============ Chat Completion 请求 ============
+message ChatCompletionRequest {
+  // 必需字段
+  string model = 1;
+  repeated ChatMessage messages = 2;
+  
+  // 采样参数（可选）
+  optional float temperature = 3;
+  optional float top_p = 4;
+  optional int32 max_tokens = 5;
+  optional int32 max_completion_tokens = 6;
+  optional bool stream = 7;
+  repeated string stop = 8;
+  optional int64 seed = 9;
+  optional float frequency_penalty = 10;
+  optional float presence_penalty = 11;
+  optional int32 top_k = 12;
+  optional float min_p = 13;
+  optional float repetition_penalty = 14;
+  optional int32 n = 15;
+  
+  // 元数据（可选）
+  optional string user = 20;
+}
+
+message ChatMessage {
+  string role = 1;      // "system", "user", "assistant"
+  optional string content = 2;
+}
+
+// ============ Chat Completion 响应 ============
+message ChatCompletionResponse {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated Choice choices = 5;
+  Usage usage = 6;
+}
+
+message Choice {
+  int32 index = 1;
+  ChatMessage message = 2;
+  string finish_reason = 3;  // "stop", "length", etc.
+}
+
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}
+
+// ============ 流式响应 ============
+message ChatCompletionStreamResponse {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated StreamChoice choices = 5;
+  optional Usage usage = 6;
+}
+
+message StreamChoice {
+  int32 index = 1;
+  Delta delta = 2;
+  optional string finish_reason = 3;
+}
+
+message Delta {
+  optional string role = 1;
+  optional string content = 2;
+}
+
+// ============ 健康检查 ============
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
