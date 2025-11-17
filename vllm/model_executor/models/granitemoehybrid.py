@@ -703,12 +703,6 @@ class GraniteMoeHybridForCausalLM(
 
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
-
-        if hasattr(vllm_config, "quant_config"):
-            vllm_config.quant_config = self.maybe_update_quant_config(
-                vllm_config.quant_config
-            )
-
         self.model_config = vllm_config.model_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
