@@ -44,10 +44,16 @@ from vllm.utils.platform_utils import is_pin_memory_available
 
 from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
-    Qwen2VLDummyInputsBuilder,
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
+from .qwen2_vl import Qwen2VLDummyInputsBuilder as OpenCUADummyInputsBuilder
+from transformers.models.qwen2_vl import (
+    Qwen2VLImageProcessor,
+    Qwen2VLProcessor,
+    Qwen2VLVideoProcessor,
+)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -129,7 +135,23 @@ class OpenCUAVisionTransformer(nn.Module):
         # Use 1D-RoPE instead of M-RoPE
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
+        # Flash Attention: vLLM's flash_attn requires head_dim to be a multiple of 32
+        # but upstream flash_attn (flash-attn library) supports head_dim=80
+        # OpenCUA uses head_dim=80 (1280/16), same as Qwen2.5-VL
+        # Use upstream flash_attn if available, otherwise fallback to XFORMERS
         use_upstream_fa = False
+        from vllm.attention.layer import check_upstream_fa_availability
+        from vllm.platforms import current_platform
+        
+        if head_dim % 32 != 0:
+            # If head_dim is not a multiple of 32, we need upstream flash_attn
+            # which supports arbitrary head_dim values
+            if current_platform.is_cuda() and check_upstream_fa_availability(torch.get_default_dtype()):
+                use_upstream_fa = True
+            else:
+                # Fallback to XFORMERS if upstream flash_attn is not available
+                attn_backend_override = AttentionBackendEnum.XFORMERS
+        
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
@@ -246,18 +268,36 @@ class OpenCUAVisionTransformer(nn.Module):
         llm_w = w // self.spatial_merge_size
         total_seq_len = t * llm_h * llm_w
         
-        # Generate 1D-RoPE embeddings
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(total_seq_len)
+        # Ensure rotary_pos_emb_1d is large enough for all indices in window_index_thw
+        # window_index_thw may have indices up to max_index, so we need at least max_index + 1
+        max_index = window_index_thw.max().item() if len(window_index_thw) > 0 else total_seq_len - 1
+        required_seq_len = max(total_seq_len, max_index + 1)
         
-        # Reshape to match window structure
-        rotary_pos_emb_reshaped = rotary_pos_emb_1d.view(
-            t, llm_h, llm_w, -1
-        )
-        rotary_pos_emb_reshaped = rotary_pos_emb_reshaped.flatten(0, 2)
+        # Generate 1D-RoPE embeddings: (required_seq_len, rotary_dim)
+        rotary_pos_emb_1d = self.rotary_pos_emb_1d(required_seq_len)
         
-        # Apply window indexing
+        # Reshape to match spatial structure: (t, llm_h, llm_w, rotary_dim)
+        # Then flatten to (total_seq_len, rotary_dim) for indexing
+        # If required_seq_len > total_seq_len, we need to pad or extend
+        if required_seq_len > total_seq_len:
+            # Extend rotary_pos_emb_1d to cover all indices
+            rotary_pos_emb_reshaped = rotary_pos_emb_1d[:required_seq_len]
+        else:
+            rotary_pos_emb_reshaped = rotary_pos_emb_1d.view(
+                t, llm_h, llm_w, -1
+            ).flatten(0, 2)  # (total_seq_len, rotary_dim)
+        
+        # Apply window indexing: window_index_thw is already 1D indices
+        # rotary_pos_emb_reshaped[window_index_thw] -> (len(window_index_thw), rotary_dim)
         rotary_pos_emb_thw = rotary_pos_emb_reshaped[window_index_thw]
-        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        
+        # Expand rotary_pos_emb_thw to match spatial_merge_unit
+        # Similar to Qwen2.5-VL, we need to repeat for each spatial_merge_unit
+        # rotary_pos_emb_thw: (len(window_index_thw), rotary_dim)
+        # After expansion: (len(window_index_thw) * spatial_merge_unit, rotary_dim)
+        rotary_pos_emb_thw = rotary_pos_emb_thw.unsqueeze(1).expand(
+            -1, self.spatial_merge_unit, -1
+        ).flatten(0, 1)  # (len(window_index_thw) * spatial_merge_unit, rotary_dim)
         
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([llm_h * llm_w], dtype=torch.int32), t
@@ -273,15 +313,24 @@ class OpenCUAVisionTransformer(nn.Module):
         self,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        seqlens = torch.zeros(1, device=cu_seqlens.device)
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            # Calculate max_seqlen and ensure it's int32 tensor
+            # cu_seqlens is int32, so difference is int32, but max() may return float
+            seq_diffs = cu_seqlens[1:] - cu_seqlens[:-1]
+            if len(seq_diffs) > 0:
+                max_seqlen = seq_diffs.max().to(torch.int32)
+            else:
+                max_seqlen = torch.tensor(0, device=cu_seqlens.device, dtype=torch.int32)
+            seqlens = torch.zeros(1, device=cu_seqlens.device, dtype=torch.int32)
         elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+            max_seqlen = torch.tensor(0, device=cu_seqlens.device, dtype=torch.int32)
+        else:
+            max_seqlen = torch.tensor(0, device=cu_seqlens.device, dtype=torch.int32)
+            seqlens = torch.zeros(1, device=cu_seqlens.device, dtype=torch.int32)
         return max_seqlen, seqlens
 
     @staticmethod
@@ -416,21 +465,115 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
     """Processing info for OpenCUA models."""
 
     def get_hf_config(self):
-        """Load OpenCUAConfig from vLLM configs."""
-        from vllm.transformers_utils.configs.opencua import OpenCUAConfig
-
-        return self.ctx.get_hf_config(OpenCUAConfig)
+        """Load OpenCUAConfig.
+        
+        When trust_remote_code=True, HuggingFace loads the config class
+        from the model repository, which may differ from vLLM's OpenCUAConfig.
+        We skip type validation to allow both cases.
+        """
+        # Skip type validation to support trust_remote_code configs
+        return self.ctx.get_hf_config(None)
 
     def get_hf_processor(self, **kwargs: object):
-        """Load OpenCUA processor from transformers."""
-        # Use ctx.get_hf_processor() which automatically handles trust_remote_code
-        # OpenCUA uses AutoProcessor, so we don't specify a specific processor class
-        return self.ctx.get_hf_processor(**kwargs)
+        """Load OpenCUA processor.
+        
+        OpenCUA uses TikTokenV3 tokenizer, which is incompatible with
+        Qwen2VLProcessor's expected Qwen2Tokenizer. We construct a custom processor
+        similar to Tarsier2Processor.
+        """
+        # Get OpenCUA's actual tokenizer
+        tokenizer = self.get_tokenizer()
+        
+        # Get image processor config and create Qwen2-VL processors
+        vision_config = self.ctx.get_hf_image_processor_config()
+        
+        # Use custom processor class that accepts any tokenizer type
+        return OpenCUAProcessor(
+            vision_config=vision_config,
+            tokenizer=tokenizer,
+            **kwargs,
+        )
 
 
-class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder[OpenCUAProcessingInfo]):
-    """Dummy inputs builder for OpenCUA."""
-    pass
+class OpenCUAProcessor(Qwen2VLProcessor):
+    """Custom processor for OpenCUA that accepts TikTokenV3 tokenizer."""
+    
+    def check_argument_for_proper_class(self, attribute_name: str, arg: object) -> None:
+        """Override to bypass type validation for tokenizer."""
+        # Skip type checking for tokenizer to allow TikTokenV3
+        if attribute_name == "tokenizer":
+            return
+        # Call parent's check for other attributes
+        return super().check_argument_for_proper_class(attribute_name, arg)
+    
+    def __init__(
+        self,
+        vision_config: dict,
+        tokenizer: AnyTokenizer,
+        **kwargs,
+    ):
+        # Create processors
+        image_processor = Qwen2VLImageProcessor(**vision_config)
+        video_processor = Qwen2VLVideoProcessor(**vision_config)
+        chat_template = kwargs.pop("chat_template", None)
+        
+        # Call super().__init__ - our check_argument_for_proper_class will bypass tokenizer validation
+        super().__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            video_processor=video_processor,
+            chat_template=chat_template,
+            **kwargs,
+        )
+        
+        # Set image_token and video_token attributes required by Qwen2VLProcessor
+        # These are the default tokens used by Qwen2-VL models
+        self.image_token = "<|image_pad|>"
+        self.video_token = "<|video_pad|>"
+    
+    def __call__(
+        self,
+        text=None,
+        images=None,
+        videos=None,
+        return_tensors=None,
+        **kwargs,
+    ):
+        """Override __call__ to ensure compatibility with TikTokenV3 tokenizer.
+        
+        This method directly calls tokenizer and image/video processors
+        to avoid any compatibility issues with TikTokenV3.
+        """
+        # Process text with tokenizer
+        if text is not None:
+            # Ensure text is a list
+            if not isinstance(text, list):
+                text = [text]
+            # Call tokenizer directly - TikTokenV3 should support standard interface
+            text_inputs = self.tokenizer(text, **kwargs)
+        else:
+            text_inputs = {}
+        
+        # Process images with image processor
+        image_inputs = {}
+        if images is not None:
+            if not isinstance(images, list):
+                images = [images]
+            if len(images) > 0:
+                image_inputs = self.image_processor(images, return_tensors=return_tensors or "pt")
+        
+        # Process videos with video processor
+        video_inputs = {}
+        if videos is not None:
+            if not isinstance(videos, list):
+                videos = [videos]
+            if len(videos) > 0:
+                video_inputs = self.video_processor(videos, return_tensors=return_tensors or "pt")
+        
+        # Combine all inputs
+        combined_inputs = {**text_inputs, **image_inputs, **video_inputs}
+        
+        return BatchFeature(combined_inputs, tensor_type=return_tensors)
 
 
 class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo]):
@@ -458,12 +601,17 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
+        
+        # Get token IDs from config, with fallback to default values
+        # OpenCUA uses different token IDs than Qwen2-VL
+        image_token_id = getattr(hf_config, "image_token_id", 151664)
+        video_token_id = getattr(hf_config, "video_token_id", 151656)
+        
         placeholder = {
-            "image": vocab[hf_processor.image_token],
-            "video": vocab[hf_processor.video_token],
+            "image": image_token_id,
+            "video": video_token_id,
         }
 
         merge_length = image_processor.merge_size**2
@@ -476,10 +624,13 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
             num_tokens = int(grid_thw.prod()) // merge_length
             return [placeholder[modality]] * num_tokens
 
+        # Use processor's image_token and video_token as target
+        # These match what get_dummy_text uses (via Qwen2VLDummyInputsBuilder)
+        # which calls hf_processor.image_token and hf_processor.video_token
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=hf_processor.image_token if modality == "image" else hf_processor.video_token,
                 replacement=partial(get_replacement_opencua, modality=modality),
             )
             for modality in ("image", "video")
@@ -514,6 +665,7 @@ class OpenCUAForConditionalGeneration(
         orig_to_new_prefix={
             "model.language_model.": "language_model.model.",
             "model.visual.": "visual.",
+            "vision_tower.": "visual.",  # Map vision_tower to visual (for some checkpoints)
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         }
@@ -661,6 +813,7 @@ class OpenCUAForConditionalGeneration(
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
+            hf_config=config.text_config,  # Use text_config from OpenCUA's main config
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen2ForCausalLM"],
         )
