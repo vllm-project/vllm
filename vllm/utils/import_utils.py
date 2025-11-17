@@ -18,6 +18,10 @@ from typing import Any
 import regex as re
 from typing_extensions import Never
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
@@ -66,6 +70,10 @@ def import_pynvml():
 def import_triton_kernels():
     import vllm.third_party.triton_kernels as triton_kernels
 
+    logger.info_once(
+        "Loading module triton_kernels from vllm.third_party.triton_kernels",
+        scope="local",
+    )
     sys.modules["triton_kernels"] = triton_kernels
     return triton_kernels
 
