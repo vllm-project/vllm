@@ -28,11 +28,15 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
+        use_deepseek_fp8_block_scale: bool = False,
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
         self.local_tokens = None
+        # Toggle for DeepSeek-style FP8 block-scale path where activations are
+        # not quantized here and weight block scales are consumed by the kernel.
+        self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -73,8 +77,9 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
+        use_deepseek_fp8_block_scale: bool = False,
     ):
-        super().__init__(use_dp, num_dispatchers)
+        super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
         self.alltoall_info = None
 
         # Initialize all2all_manager only for DP case
@@ -97,15 +102,19 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         )
 
         if not self.use_dp:
-            # Non-DP case: standard quantization
-            a1q, a1q_scale = moe_kernel_quantize_input(
-                a1,
-                quant_config.a1_gscale,
-                quant_config.quant_dtype,
-                quant_config.per_act_token_quant,
-                quant_config.block_shape,
-                is_fp4_scale_swizzled=not self.use_dp,
-            )
+            # Non-DP case: quantize activations unless using block-scale path
+            if not self.use_deepseek_fp8_block_scale:
+                a1q, a1q_scale = moe_kernel_quantize_input(
+                    a1,
+                    quant_config.a1_gscale,
+                    quant_config.quant_dtype,
+                    quant_config.per_act_token_quant,
+                    quant_config.block_shape,
+                    is_fp4_scale_swizzled=not self.use_dp,
+                )
+            else:
+                a1q = a1
+                a1q_scale = None
         else:
             # DP case: use FlashInfer AllToAll
             global_num_tokens_cpu = get_local_sizes()
@@ -122,6 +131,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
                     top_k,
                     num_experts,
                     quant_config,
+                    use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
                 )
             )
 
@@ -154,8 +164,9 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         self,
         use_dp: bool,
         num_dispatchers: int = 1,
+        use_deepseek_fp8_block_scale: bool = False,
     ):
-        super().__init__(use_dp, num_dispatchers)
+        super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
 
     def prepare(
         self,
@@ -173,22 +184,42 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         if not self.use_dp and quant_config.quant_dtype == "nvfp4":
             return a1, None, None, topk_ids, topk_weights
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            quant_config.a1_gscale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            is_fp4_scale_swizzled=not self.use_dp,
-        )
+        if not self.use_deepseek_fp8_block_scale:
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_gscale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+                is_fp4_scale_swizzled=not self.use_dp,
+            )
+        else:
+            # Block-scale path: pass activations through, omit per-token scales
+            a1q = a1
+            a1q_scale = None
 
         if self.use_dp:
-            topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
-                [topk_weights, topk_ids, a1q, a1q_scale],
-                dim=0,
-                sizes=get_local_sizes(),
-            )
-        if quant_config.quant_dtype == "nvfp4":
+            # Build gather list conditionally - omit a1q_scale if None
+            # (block-scale path)
+            gather_list = [topk_weights, topk_ids, a1q]
+            if a1q_scale is not None:
+                gather_list.append(a1q_scale)
+                gathered = get_dp_group().all_gatherv(
+                    gather_list,
+                    dim=0,
+                    sizes=get_local_sizes(),
+                )
+                topk_weights, topk_ids, a1q, a1q_scale = gathered
+            else:
+                gathered = get_dp_group().all_gatherv(
+                    gather_list,
+                    dim=0,
+                    sizes=get_local_sizes(),
+                )
+                topk_weights, topk_ids, a1q = gathered
+                a1q_scale = None
+
+        if quant_config.quant_dtype == "nvfp4" and a1q_scale is not None:
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
@@ -221,6 +252,7 @@ def flashinfer_alltoall_dispatch(
     top_k: int,
     num_experts: int,
     quant_config: FusedMoEQuantConfig,
+    use_deepseek_fp8_block_scale: bool = False,
 ):
     from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
@@ -250,30 +282,42 @@ def flashinfer_alltoall_dispatch(
     )
     topk_weights = topk_weights.view(dtype=orig_topk_weights_dtype)
 
-    x, x_sf = moe_kernel_quantize_input(
-        x,
-        gs,
-        quant_config.quant_dtype,
-        quant_config.per_act_token_quant,
-        quant_config.block_shape,
-        is_fp4_scale_swizzled=False,  # delay swizzle to after comm
-    )
-    x = MnnvlMoe.mnnvl_moe_alltoallv(
-        x,
-        alltoall_info,
-        all2all_manager.workspace_tensor,
-        ep_rank,
-        ep_size,
-    )
+    if not use_deepseek_fp8_block_scale:
+        x, x_sf = moe_kernel_quantize_input(
+            x,
+            gs,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+        )
+        x = MnnvlMoe.mnnvl_moe_alltoallv(
+            x,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
 
-    x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
-        x_sf,
-        alltoall_info,
-        all2all_manager.workspace_tensor,
-        ep_rank,
-        ep_size,
-    )
-    x_sf = nvfp4_block_scale_interleave(x_sf)
+        x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
+            x_sf,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
+        if quant_config.quant_dtype == "nvfp4":
+            x_sf = nvfp4_block_scale_interleave(x_sf)
+    else:
+        # Block-scale path: pass activations through without quantization
+        x_sf = None
+        x = MnnvlMoe.mnnvl_moe_alltoallv(
+            x,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
     return alltoall_info, topk_ids, topk_weights, x, x_sf
 
 
@@ -304,6 +348,7 @@ def create_flashinfer_prepare_finalize(
     use_dp: bool,
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> FlashInferCutlassMoEPrepareAndFinalize:
     """Factory function to create the appropriate FlashInfer implementation."""
     if use_nvfp4:
@@ -311,5 +356,7 @@ def create_flashinfer_prepare_finalize(
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
         else:
             return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
-    # Fp8 only supports AllGather
-    return FlashInferAllGatherMoEPrepareAndFinalize(use_dp)
+    # FP8 path currently supported via AllGather; optionally enable block-scale
+    return FlashInferAllGatherMoEPrepareAndFinalize(
+        use_dp=use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+    )

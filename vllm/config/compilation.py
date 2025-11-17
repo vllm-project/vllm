@@ -320,9 +320,10 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
-    compile_mm_encoder: bool = True
+    compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl`."""
+    Currently, this only works for `Qwen2_5_vl` on selected platforms. 
+    Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
     use_inductor: bool | None = None
