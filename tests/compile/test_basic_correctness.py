@@ -5,6 +5,7 @@ import dataclasses
 import pytest
 
 from vllm.config import CompilationMode
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
@@ -68,13 +69,19 @@ class TestSetting:
             attn_backend="FLASH_ATTN",
             method="encode",
         ),
-        TestSetting(
-            model="BAAI/bge-base-en-v1.5",
-            model_args=["--runner", "pooling"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="encode",
+        pytest.param(
+            TestSetting(
+                model="BAAI/bge-base-en-v1.5",
+                model_args=["--runner", "pooling"],
+                pp_size=1,
+                tp_size=1,
+                attn_backend="FLASH_ATTN",
+                method="encode",
+            ),
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Skipping BAAI/bge-base-en-v1.5 test for ROCm",
+            ),
         ),
         # vision language model
         # See https://github.com/vllm-project/vllm/issues/26716.
