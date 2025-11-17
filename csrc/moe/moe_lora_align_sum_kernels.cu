@@ -250,11 +250,7 @@ void moe_lora_align_block_size(
   const int32_t shared_mem = (num_thread + 1) * num_experts * sizeof(int32_t) +
                              (num_experts + 1) * sizeof(int32_t);
 
-  if (shared_mem > device_max_shared_mem) {
-    TORCH_CHECK(false,
-                "Shared memory usage exceeds device limit, and global memory "
-                "fallback is not implemented yet.");
-  }
+
   bool use_global_memory = (shared_mem > device_max_shared_mem);
 
   VLLM_DISPATCH_INTEGRAL_TYPES(
