@@ -220,6 +220,11 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            # TODO (cake): Checking loading status for backward KV cache tokens
+            # if loading is done, need to adjust the compute specification for the request
+            # also start new loading 
+            # if they meet, need to cache the blocks in KvCacheManager
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -277,6 +282,8 @@ class Scheduler(SchedulerInterface):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
+                        # TODO (cake): Incrementally allocate blocks from both ends
+                        # num_new_tokens => num_new_tokens + num_external_tokens 
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
@@ -383,6 +390,13 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting.peek_request()
 
+                #TODO (cake): check for WAITING_FOR_BACKWARD_KVS state
+                # the operations done in self._update_waiting_for_remote_kv(request) can be reused for WAITING_FOR_BACKWARD_KVS state
+                # if request.num_external_load_tokens + request.num_computed_tokens == request.num_external_computed_tokens
+                # should switch to waiting state and hash the blocks
+                # however, if load is not finished, instead of being popped, it should be kept in waiting queue
+
+
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -432,8 +446,13 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    # NOTE (cake): Requests needing external KV cache tokens automatically scheduled
+                    # behind the ones that don't need external KV cache tokens.
 
                     # Get externally-cached tokens if using a KVConnector.
+                    #TODO (cake): check for num_external_load_tokens
+                    # need to decide whether to keep loading without asking connector for cache hit 
+                    # also how many blocks to load, i.e. decide ext_tokens and load_kv_async
                     if self.connector is not None:
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
@@ -467,6 +486,9 @@ class Scheduler(SchedulerInterface):
                 new_encoder_compute_budget = encoder_compute_budget
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
+                #TODO (cake): for WAITING_FOR_BACKWARD_KVS state, num_new_tokens wouldn't need to be 0 even when loading
+                # decided by algorithm for optimization
+                # for bidirectional loading, num_external_computed_tokens should be new_external_loading_tokens
                 if load_kv_async:
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
@@ -475,6 +497,7 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
+                    # TODO (cake): for bidirectional loading, num_new_tokens should be request.num_tokens_to_compute - num_computed_tokens
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -537,6 +560,7 @@ class Scheduler(SchedulerInterface):
                     num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    # TODO (cake): should be false before meeting of the two ends
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
@@ -570,6 +594,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 req_index += 1
+                # TODO (cake): Logic for prioritizing WAITING over WAITING_FOR_BACKWARD_KVS
+                # maybe add and pop from a priority queue. so that 
+                # decode > no cache hit >  local cache hit > external cache hit 
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(

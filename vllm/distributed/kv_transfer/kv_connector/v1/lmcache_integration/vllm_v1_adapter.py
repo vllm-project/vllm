@@ -68,6 +68,11 @@ class LoadSpec:
     lmcache_cached_tokens: int
     # Whether the scheduler allow us to load the tokens
     can_load: bool
+    #TODO (cake): backward loading
+    # can_load_backward: bool
+    # lmchache_backward_loading_tokens: int <- num of tokens to load from end in this step
+
+
 
 
 @dataclass
@@ -357,6 +362,7 @@ class ReqMeta:
 
         block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
         block_offsets = torch.arange(0, block_size, dtype=torch.long)
+        # TODO (cake): Add backward loading slot mapping
         slot_mapping = (
             block_offsets.reshape((1, block_size))
             + block_ids.reshape((num_blocks, 1)) * block_size
@@ -827,6 +833,7 @@ class LMCacheConnectorV1Impl:
             self._stats_monitor.update_interval_vllm_hit_tokens(
                 request.load_spec.vllm_cached_tokens
             )
+            # TODO (cake): Add backward loading mask
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
@@ -836,6 +843,7 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            #TODO (cake): Add backward loading
             if self.use_layerwise:
                 sync = idx == last_idx
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
