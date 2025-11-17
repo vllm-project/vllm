@@ -280,24 +280,26 @@ def build_my_model(vllm_config, parallel_context):
 
 1. **Deferred Imports**: Import external libraries inside `__init__` to avoid CUDA initialization before vLLM's multiprocessing fork:
 
-```python
-def __init__(self, vllm_config, **kwargs):
-    super().__init__()
+   ```python
+   def __init__(self, vllm_config, **kwargs):
+       super().__init__()
 
-    # Import inside __init__, not at module level
-    from torchtitan.models.qwen3 import Qwen3Model
+       # Import inside __init__, not at module level
+       from torchtitan.models.qwen3 import Qwen3Model
 
-    self.model = Qwen3Model(...)
-```
+       self.model = Qwen3Model(...)
+   ```
+
 2. **TP Application Order**:
     - ✅ Model creation → Attention replacement → TP → dtype conversion
     - ❌ Attention replacement → TP → Model creation (breaks weight sharding)
+
 3. **Process Group Management**: Use `parallel_context` to get vLLM's process groups:
 
-```python
-tp_group = parallel_context.get_tp_process_group()
-tp_size = parallel_context.get_tensor_parallel_world_size()
-```
+   ```python
+   tp_group = parallel_context.get_tp_process_group()
+   tp_size = parallel_context.get_tensor_parallel_world_size()
+   ```
 
 ## Complete Examples
 
