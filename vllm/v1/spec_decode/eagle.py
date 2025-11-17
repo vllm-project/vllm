@@ -665,7 +665,7 @@ class EagleProposer:
         )
 
         is_rejected_token_index_mask = ~((torch.cumsum(marker, dim=0)[:-1]).bool())
-        common_attn_metadata.slot_mapping[is_rejected_token_index_mask] = -1
+        spec_common_attn_metadata.slot_mapping[is_rejected_token_index_mask] = PADDING_SLOT_ID
 
         return (
             spec_common_attn_metadata,
