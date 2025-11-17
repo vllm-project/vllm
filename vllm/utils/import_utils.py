@@ -68,14 +68,24 @@ def import_pynvml():
 
 @cache
 def import_triton_kernels():
-    import vllm.third_party.triton_kernels as triton_kernels
-
-    logger.info_once(
-        "Loading module triton_kernels from vllm.third_party.triton_kernels",
-        scope="local",
-    )
-    sys.modules["triton_kernels"] = triton_kernels
-    return triton_kernels
+    """
+    For convenience, prioritize triton_kernels that is available in
+    `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
+    """
+    if _has_module("triton_kernels"):
+        import triton_kernels
+        logger.info_once(f"Loading module triton_kernels from {triton_kernels.__file__}.", scope="local")
+    elif _has_module("vllm.third_party.triton_kernels"):
+        import vllm.third_party.triton_kernels as triton_kernels
+        logger.info_once(
+            "Loading module triton_kernels from vllm.third_party.triton_kernels",
+            scope="local",
+        )
+        sys.modules["triton_kernels"] = triton_kernels
+    else:
+        logger.info_once("triton_kernels unavailable in this build. "
+            "Please consider installing triton_kernels from "
+            "https://github.com/triton-lang/triton/tree/main/python/triton_kernels")
 
 
 def import_from_path(module_name: str, file_path: str | os.PathLike):
@@ -413,7 +423,7 @@ def has_deep_gemm() -> bool:
 
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
-    is_available = _has_module("vllm.third_party.triton_kernels")
+    is_available = _has_module("triton_kernels") or _has_module("vllm.third_party.triton_kernels")
     if is_available:
         import_triton_kernels()
     return is_available
