@@ -18,9 +18,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 if TYPE_CHECKING:
     from ..gptq import GPTQConfig
     from ..gptq_marlin import GPTQMarlinConfig
+    from ..ipex_quant import IPEXConfig
 else:
     GPTQConfig = object
     GPTQMarlinConfig = object
+    IPEXConfig = object
 
 
 # Match dynamic rules with module name (prefix) and override quantize
@@ -126,7 +128,7 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: GPTQConfig | GPTQMarlinConfig,
+    config: GPTQConfig | GPTQMarlinConfig | IPEXConfig,
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,

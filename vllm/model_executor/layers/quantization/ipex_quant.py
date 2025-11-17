@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from packaging import version
@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
-    LinearMethodBase,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import (
@@ -196,9 +195,7 @@ class IPEXConfig(QuantizationConfig):
 
         return None
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["LinearMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped(
