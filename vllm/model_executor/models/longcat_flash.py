@@ -388,15 +388,18 @@ class LongcatMoe(nn.Module):
                         zero_expert_result, (0, final_dim - zero_dim), mode="constant", value=0.0
                     )
             
-            # Final check after alignment (should always pass, but shows info if it doesn't)
-            torch._assert(
-                final_hidden_states.size(-1) == zero_expert_result.size(-1),
-                f"[LongcatMoe] After alignment, shapes still mismatch: "
-                f"final_hidden_states.shape={final_hidden_states.shape}, "
-                f"zero_expert_result.shape={zero_expert_result.shape}, "
-                f"hidden_dim={hidden_dim}, padded_hidden={padded_hidden}, "
-                f"experts_hidden_size={self.experts.hidden_size}"
-            )
+            # Verify alignment succeeded
+            if final_hidden_states.size(-1) != zero_expert_result.size(-1):
+                raise RuntimeError(
+                    f"[LongcatMoe] Shape mismatch after alignment: "
+                    f"final_hidden_states.shape={final_hidden_states.shape} "
+                    f"(last_dim={final_hidden_states.size(-1)}), "
+                    f"zero_expert_result.shape={zero_expert_result.shape} "
+                    f"(last_dim={zero_expert_result.size(-1)}), "
+                    f"hidden_dim={hidden_dim}, padded_hidden={padded_hidden}, "
+                    f"experts_hidden_size={self.experts.hidden_size}, "
+                    f"logical_num_experts={self.experts.logical_num_experts}"
+                )
             
             final_hidden_states = final_hidden_states + zero_expert_result
 
