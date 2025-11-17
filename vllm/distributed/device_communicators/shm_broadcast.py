@@ -3,6 +3,7 @@
 import functools
 import math
 import pickle
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -140,14 +141,14 @@ class SpinCondition:
             logger.debug("Canceling waiting reads on SHM Buffer")
             self.write_cancel_socket.send(b"\x00")
 
-    def wait(self, timeout_ms: float | None = None) -> None:
+    def wait(self, timeout_ms: int | None = None) -> None:
         """Wait for data on the shared memory buffer.
 
         Yields the scheduler then returns immediately if it has been less than
         self.busy_loop_s since the last read.
 
         Otherwise, enters idle mode and awaits a socket ping for at most
-        `timeout_ms` milliseconds, or indefinitely if timeout_s is None.
+        `timeout_ms` milliseconds, or indefinitely if timeout_ms is None.
         """
         assert self.is_reader, "Only readers can wait"
 
@@ -562,10 +563,20 @@ class MessageQueue:
     ):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
-        if not indefinite and timeout is not None:
+        if timeout is not None:
             deadline = start_time + timeout
+            wait_timeout_ms = (
+                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000
+                if not indefinite
+                else sys.maxsize
+            )
         else:
             deadline = math.inf
+            # wait_timeout_ms is a constant if timeout is None
+            wait_timeout_ms = (
+                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if not indefinite else None
+            )
+
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -579,27 +590,22 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
+                    if timeout is not None:
+                        time_left_ms = int((deadline - time.monotonic()) * 1000)
+                        # if we time out, raise an exception
+                        if time_left_ms <= 0:
+                            raise TimeoutError
 
-                    if not indefinite:
-                        self._spin_condition.wait(
-                            timeout_ms=min(
-                                VLLM_RINGBUFFER_WARNING_INTERVAL,
-                                deadline - time.monotonic(),
-                            )
-                            * 1000
-                        )
-                    else:
-                        self._spin_condition.wait()
+                        wait_timeout_ms = min(wait_timeout_ms, time_left_ms)
+                    # else: use constant wait_timeout_ms defined outside of loop
+
+                    self._spin_condition.wait(timeout_ms=wait_timeout_ms)
 
                     if self.shutting_down:
                         raise RuntimeError("cancelled")
 
-                    # if we time out, raise an exception
-                    elapsed = time.monotonic() - start_time
-                    if timeout is not None and elapsed > timeout:
-                        raise TimeoutError
-
                     # if we wait for a long time, log a message
+                    elapsed = time.monotonic() - start_time
                     if not indefinite and (
                         elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
                     ):
