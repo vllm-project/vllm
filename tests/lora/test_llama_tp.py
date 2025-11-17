@@ -11,7 +11,7 @@ from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-from ..utils import VLLM_PATH, create_new_process_for_each_test
+from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 PROMPT_TEMPLATE = """<|eot_id|><|start_header_id|>user<|end_header_id|>
 I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me.Below is an instruction that describes a task, Write a response that appropriately completes the request.
@@ -122,7 +122,8 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
         MODEL_PATH,
         enable_lora=True,
         # also test odd max_num_seqs
-        max_num_seqs=13,
+        max_num_seqs=7,
+        max_model_len=1024,
         max_loras=4,
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=cudagraph_specialize_lora,
@@ -131,29 +132,34 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
     generate_and_test(llm, llama32_lora_files)
 
 
+@multi_gpu_test(num_gpus=4)
 def test_llama_lora_tp4(llama32_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         enable_lora=True,
-        max_num_seqs=16,
+        max_num_seqs=7,
+        max_model_len=1024,
         max_loras=4,
         tensor_parallel_size=4,
     )
     generate_and_test(llm, llama32_lora_files)
 
 
+@multi_gpu_test(num_gpus=4)
 def test_llama_lora_tp4_fully_sharded_loras(llama32_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         enable_lora=True,
-        max_num_seqs=16,
+        max_num_seqs=8,
         max_loras=4,
+        max_model_len=1024,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
     )
     generate_and_test(llm, llama32_lora_files)
 
 
+@multi_gpu_test(num_gpus=2)
 def test_tp2_serialize_and_deserialize_lora(
     tmp_path,
     llama32_lora_files,
@@ -207,7 +213,8 @@ def test_tp2_serialize_and_deserialize_lora(
         enable_lora=True,
         enforce_eager=True,
         model_loader_extra_config=tensorizer_config,
-        max_num_seqs=13,
+        max_num_seqs=7,
+        max_model_len=1024,
         tensor_parallel_size=2,
         max_loras=2,
     )

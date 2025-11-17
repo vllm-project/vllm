@@ -38,6 +38,7 @@ def test_worker_apply_lora(qwen3_lora_files):
             MODEL_PATH,
             seed=0,
             dtype="float16",
+            max_model_len=127,
             enforce_eager=True,
         ),
         load_config=LoadConfig(
