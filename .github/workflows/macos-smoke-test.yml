@@ -7,6 +7,8 @@ jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
     timeout-minutes: 20
+    env:
+      UV_SYSTEM_PYTHON: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +23,8 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
-          uv pip install --system -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install --system -e .
+          uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
+          uv pip install -e .
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
