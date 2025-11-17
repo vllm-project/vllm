@@ -5,7 +5,15 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, get_args, overload
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Protocol,
+    TypeAlias,
+    cast,
+    get_args,
+    overload,
+)
 
 import torch
 import torch.nn.functional as F
@@ -66,12 +74,15 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if TYPE_CHECKING:
     from .naive_epdp_prepare_finalize import (
-        NaiveEPDPPrepareAndFinalize as NaiveEPDPPrepareAndFinalizeType,
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeType,
     )
 else:
-    NaiveEPDPPrepareAndFinalizeType = Any
 
-NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeType | None = None
+    class _NaiveEPDPPrepareAndFinalizeType(Protocol): ...
+
+
+NaiveEPDPPrepareAndFinalizeCls: TypeAlias = type[_NaiveEPDPPrepareAndFinalizeType]
+NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeCls | None = None
 
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
@@ -1776,11 +1787,15 @@ class FusedMoE(CustomOp):
             modular_prepare_finalize = self.quant_method.fused_experts.prepare_finalize
 
         do_naive_dispatch = False
+        naive_prepare_finalize_cls = NaiveEPDPPrepareAndFinalize
         if (
             self.dp_size > 1
             and modular_prepare_finalize is not None
-            and NaiveEPDPPrepareAndFinalize is not None
-            and isinstance(modular_prepare_finalize, NaiveEPDPPrepareAndFinalize)
+            and naive_prepare_finalize_cls is not None
+            and isinstance(
+                modular_prepare_finalize,
+                cast(type[object], naive_prepare_finalize_cls),
+            )
         ):
             do_naive_dispatch = True
 
