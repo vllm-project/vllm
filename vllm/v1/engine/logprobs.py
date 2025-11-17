@@ -86,6 +86,10 @@ class LogprobsProcessor:
                 if self.tokenizer is None
                 else (convert_ids_list_to_tokens(self.tokenizer, token_ids))
             )
+            if self.tokenizer is not None:
+                decoded_tokens = self._verify_tokens(
+                    decoded_tokens=decoded_tokens, tokens=token_ids
+                )
 
             # Sampler puts the sampled logprob in first.
             sampled_token_logprob = logprobs[0]
@@ -174,6 +178,41 @@ class LogprobsProcessor:
         if plp:
             self.prompt_logprobs = []
         return plp
+
+    def _correct_decoded_token(self, idx: int, tokens: list[int]) -> str:
+        if self.tokenizer is None:
+            # Double check state of self.tokenizer and help linter
+            raise RuntimeError("self.tokenizer should not be None")
+
+        # try with prev token id in same list
+        possible_decoded_token = self.tokenizer.decode(tokens[idx - 1 : idx + 1])
+        if not possible_decoded_token.endswith("�"):
+            return possible_decoded_token
+        # try with previous logprob token id
+        if self.logprobs:
+            latest_token_id = next(iter(self.logprobs[-1]))
+            possible_decoded_token = self.tokenizer.decode(
+                [latest_token_id] + tokens[idx - 1 : idx + 1]
+            )
+            if not possible_decoded_token.endswith("�"):
+                return possible_decoded_token
+
+        return ""
+
+    def _verify_tokens(self, decoded_tokens: list[str], tokens: list[int]) -> list[str]:
+        corrected_decoded_token_map = dict()
+        for idx, text in enumerate(decoded_tokens):
+            if text.endswith("�"):
+                # utf-8 char at the end means it's a potential unfinished byte sequence
+                # from byte fallback tokenization.
+                corrected_decoded_token_map[idx] = self._correct_decoded_token(
+                    idx, tokens
+                )
+
+        for idx, text in corrected_decoded_token_map.items():
+            decoded_tokens[idx] = text
+
+        return decoded_tokens
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         if output.new_logprobs is not None:
