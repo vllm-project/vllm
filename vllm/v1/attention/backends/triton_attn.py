@@ -109,9 +109,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         )
 
-        # Set initial value for the threshold for the number of sequences used
-        # to select between the 2D and 3D kernels for decode.
+        # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
+        # A lower bound for num_q_blocks is the number of sequences.
+        # To ensure the minimum launch grid size is achieved, the number of sequences
+        # must be at least equal to the threshold below.
+        # If this threshold is not reached (i.e., the batch size is not large enough),
+        # the 3D kernel will be selected instead.
         self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+
+        # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
             capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
             if not capture_sizes:
