@@ -13,7 +13,6 @@ from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
@@ -66,9 +65,10 @@ class CPUOffloadingSpec(OffloadingSpec):
         self, kv_caches: dict[str, torch.Tensor]
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
+                    " and Intel XPUs"
                 )
 
             layer_names = list(kv_caches.keys())
@@ -80,13 +80,26 @@ class CPUOffloadingSpec(OffloadingSpec):
                 for layer_name in layer_names
             }
 
-            self._handler = CpuGpuOffloadingHandler(
-                attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=self.num_cpu_blocks,
-                gpu_caches=kv_caches,
-            )
+            if current_platform.is_xpu():
+                from vllm.v1.kv_offload.worker.cpu_xpu import CpuXpuOffloadingHandler
+
+                self._handler = CpuXpuOffloadingHandler(
+                    attn_backends=attn_backends,
+                    gpu_block_size=self.gpu_block_size,
+                    cpu_block_size=self.offloaded_block_size,
+                    num_cpu_blocks=self.num_cpu_blocks,
+                    gpu_caches=kv_caches,
+                )
+            else:
+                from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
+
+                self._handler = CpuGpuOffloadingHandler(
+                    attn_backends=attn_backends,
+                    gpu_block_size=self.gpu_block_size,
+                    cpu_block_size=self.offloaded_block_size,
+                    num_cpu_blocks=self.num_cpu_blocks,
+                    gpu_caches=kv_caches,
+                )
 
         assert self._handler is not None
         yield GPULoadStoreSpec, CPULoadStoreSpec, self._handler

@@ -4,7 +4,12 @@
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops as ops
 from vllm.attention import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
