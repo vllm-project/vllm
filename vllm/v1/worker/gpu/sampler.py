@@ -67,74 +67,104 @@ class Sampler:
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )
 
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         sampled = gumbel_sample(
-            probs,
-            sampling_metadata.temperature,
+            logits,
+            is_greedy,
             sampling_metadata.seeds,
             sampling_metadata.pos,
         )
-        sampled = sampled.to(torch.int64)
         return sampled, logits if return_logits else None
 
 
 @triton.jit
 def _gumbel_sample_kernel(
-    probs_ptr,
-    probs_stride,
+    sampled_ptr,
+    logits_ptr,
+    logits_stride,
     seeds_ptr,
     pos_ptr,
-    temp_ptr,
+    is_greedy_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    temp = tl.load(temp_ptr + req_idx)
+    is_greedy = tl.load(is_greedy_ptr + req_idx)
 
-    if temp == 0.0:
+    if is_greedy:
         # Greedy sampling. Don't apply gumbel noise.
+        max_val = float("-inf")
+        max_idx = 0
+        for i in range(0, vocab_size, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < vocab_size
+            logits = tl.load(
+                logits_ptr + req_idx * logits_stride + block,
+                mask=mask,
+                other=float("-inf"),
+            )
+
+            idx = tl.argmax(logits, axis=0)
+            value = tl.max(logits, axis=0)
+            is_greater = value > max_val
+            max_val = tl.where(is_greater, value, max_val)
+            max_idx = tl.where(is_greater, i + idx, max_idx)
+        tl.store(sampled_ptr + req_idx, max_idx)
         return
 
+    # Random sampling.
+    # Calculate gumbel seed.
     seed = tl.load(seeds_ptr + req_idx)
     pos = tl.load(pos_ptr + req_idx)
     gumbel_seed = tl.randint(seed, pos)
 
-    block_id = tl.program_id(1)
-    r_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    q = tl.rand(gumbel_seed, r_offset)
+    max_val = float("-inf")
+    max_idx = 0
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
 
-    # NOTE(woosuk): This logic makes sure q is not 0.
-    RMAX = 0.9999999403953552
-    RMAX_LOG = -5.960464477539063e-08
-    q = tl.where(q >= RMAX, RMAX_LOG, tl.math.log(q))
-    q = -1.0 * q
+        # Generate gumbel noise.
+        r = tl.rand(gumbel_seed, block).to(tl.float64)
+        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        gumbel_noise = gumbel_noise.to(tl.float32)
 
-    p = tl.load(
-        probs_ptr + req_idx * probs_stride + r_offset, mask=r_offset < vocab_size
-    )
-    p = p / q
-    tl.store(
-        probs_ptr + req_idx * probs_stride + r_offset, p, mask=r_offset < vocab_size
-    )
+        # Apply gumbel noise.
+        logits = tl.load(logits_ptr + req_idx * logits_stride + block, mask=mask)
+        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+
+        # Argmax to get the sampled token.
+        idx = tl.argmax(logits, axis=0)
+        value = tl.max(logits, axis=0)
+        is_greater = value > max_val
+        max_val = tl.where(is_greater, value, max_val)
+        max_idx = tl.where(is_greater, i + idx, max_idx)
+    tl.store(sampled_ptr + req_idx, max_idx)
 
 
 def gumbel_sample(
-    probs: torch.Tensor,  # [num_reqs, vocab_size]
-    temperature: torch.Tensor,  # [num_reqs]
+    logits: torch.Tensor,  # [num_reqs, vocab_size]
+    is_greedy: torch.Tensor,  # [num_reqs]
     seed: torch.Tensor,  # [num_reqs]
     pos: torch.Tensor,  # [num_reqs]
 ) -> torch.Tensor:
-    num_reqs, vocab_size = probs.shape
+    num_reqs, vocab_size = logits.shape
+    # NOTE(woosuk): Use int64 for later indexing.
+    sampled = torch.empty(
+        num_reqs,
+        dtype=torch.int64,
+        device=logits.device,
+    )
     _gumbel_sample_kernel[(num_reqs,)](
-        probs,
-        probs.stride(0),
+        sampled,
+        logits,
+        logits.stride(0),
         seed,
         pos,
-        temperature,
+        is_greedy,
         vocab_size,
-        BLOCK_SIZE=8192,  # type: ignore
+        num_warps=8,
+        BLOCK_SIZE=16384,  # type: ignore
     )
-    sampled = probs.argmax(dim=-1)
     return sampled
 
 
