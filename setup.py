@@ -49,15 +49,15 @@ elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin"))
         sys.platform,
     )
     VLLM_TARGET_DEVICE = "empty"
-elif (
-    sys.platform.startswith("linux")
-    and torch.version.cuda is None
-    and os.getenv("VLLM_TARGET_DEVICE") is None
-    and torch.version.hip is None
-):
-    # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
-    # fallback to cpu
-    VLLM_TARGET_DEVICE = "cpu"
+elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
+    if torch.version.hip is not None:
+        VLLM_TARGET_DEVICE = "rocm"
+        logger.info("Auto-detected ROCm")
+    elif torch.version.cuda is not None:
+        VLLM_TARGET_DEVICE = "cuda"
+        logger.info("Auto-detected CUDA")
+    else:
+        VLLM_TARGET_DEVICE = "cpu"
 
 
 def is_sccache_available() -> bool:
@@ -115,20 +115,26 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
-            # `nvcc_threads` is either the value of the NVCC_THREADS
-            # environment variable (if defined) or 1.
-            # when it is set, we reduce `num_jobs` to avoid
-            # overloading the system.
-            nvcc_threads = envs.NVCC_THREADS
-            if nvcc_threads is not None:
-                nvcc_threads = int(nvcc_threads)
-                logger.info(
-                    "Using NVCC_THREADS=%d as the number of nvcc threads.", nvcc_threads
-                )
-            else:
-                nvcc_threads = 1
-            num_jobs = max(1, num_jobs // nvcc_threads)
+        if _is_cuda() and CUDA_HOME is not None:
+            try:
+                nvcc_version = get_nvcc_cuda_version()
+                if nvcc_version >= Version("11.2"):
+                    # `nvcc_threads` is either the value of the NVCC_THREADS
+                    # environment variable (if defined) or 1.
+                    # when it is set, we reduce `num_jobs` to avoid
+                    # overloading the system.
+                    nvcc_threads = envs.NVCC_THREADS
+                    if nvcc_threads is not None:
+                        nvcc_threads = int(nvcc_threads)
+                        logger.info(
+                            "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                            nvcc_threads,
+                        )
+                    else:
+                        nvcc_threads = 1
+                    num_jobs = max(1, num_jobs // nvcc_threads)
+            except Exception as e:
+                logger.warning("Failed to get NVCC version: %s", e)
 
         return num_jobs, nvcc_threads
 
@@ -206,9 +212,9 @@ class cmake_build_ext(build_ext):
             # Default build tool to whatever cmake picks.
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
-        if _is_cuda():
+        if _is_cuda() and CUDA_HOME is not None:
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
-        elif _is_hip():
+        elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
@@ -304,7 +310,9 @@ class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
 
     def run(self) -> None:
-        assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+        assert _is_cuda() or _is_hip(), (
+            "VLLM_USE_PRECOMPILED is only supported for CUDA or ROCm builds."
+        )
 
     def build_extensions(self) -> None:
         print("Skipping build_ext: using precompiled extensions.")
@@ -476,6 +484,8 @@ def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
     # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
     try:
+        if ROCM_HOME is None:
+            return None
         librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
         if not librocm_core_file.is_file():
             return None
@@ -639,7 +649,9 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
         # Optional since this doesn't get built (produce an .so file) when
@@ -662,7 +674,9 @@ package_data = {
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
-    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+    assert _is_cuda() or _is_hip(), (
+        "VLLM_USE_PRECOMPILED is only supported for CUDA or ROCm builds."
+    )
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
