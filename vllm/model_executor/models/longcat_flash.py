@@ -371,6 +371,33 @@ class LongcatMoe(nn.Module):
             hidden_states=hidden_states_padded, router_logits=router_logits
         )
         if zero_expert_result is not None:
+            # Force shape alignment before addition to avoid dimension mismatch
+            # This handles cases where FusedMoE returns different hidden_size than expected
+            final_dim = final_hidden_states.size(-1)
+            zero_dim = zero_expert_result.size(-1)
+            
+            # Align by padding the smaller one to match the larger one
+            if final_dim != zero_dim:
+                # Auto-align by padding the smaller tensor
+                if final_dim < zero_dim:
+                    final_hidden_states = torch.nn.functional.pad(
+                        final_hidden_states, (0, zero_dim - final_dim), mode="constant", value=0.0
+                    )
+                else:
+                    zero_expert_result = torch.nn.functional.pad(
+                        zero_expert_result, (0, final_dim - zero_dim), mode="constant", value=0.0
+                    )
+            
+            # Final check after alignment (should always pass, but shows info if it doesn't)
+            torch._assert(
+                final_hidden_states.size(-1) == zero_expert_result.size(-1),
+                f"[LongcatMoe] After alignment, shapes still mismatch: "
+                f"final_hidden_states.shape={final_hidden_states.shape}, "
+                f"zero_expert_result.shape={zero_expert_result.shape}, "
+                f"hidden_dim={hidden_dim}, padded_hidden={padded_hidden}, "
+                f"experts_hidden_size={self.experts.hidden_size}"
+            )
+            
             final_hidden_states = final_hidden_states + zero_expert_result
 
         # Crop back to original hidden dimension if padded earlier

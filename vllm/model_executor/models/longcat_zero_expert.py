@@ -82,7 +82,8 @@ def zero_experts_compute_triton(
     hidden_dim = hidden_states.size(-1)
     num_tokens = hidden_states.size(0)
 
-    grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
+    # Use cdiv to handle non-divisible hidden_dim
+    grid = lambda meta: (num_tokens * triton.cdiv(hidden_dim, meta["BLOCK_SIZE"]),)
     _compute_identity_kernel[grid](
         top_k=expert_indices.size(-1),
         hidden_states_ptr=hidden_states,
