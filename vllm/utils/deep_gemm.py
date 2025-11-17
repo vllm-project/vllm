@@ -366,10 +366,12 @@ def should_use_deepgemm_for_fp8_linear(
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
     return (
-        supports_deep_gemm
-        and output_dtype == torch.bfloat16
-        and weight.shape[0] % 128 == 0
-        and weight.shape[1] % 128 == 0
+        supports_deep_gemm and output_dtype == torch.bfloat16
+        # TODO [alexm-redhat]: Verify in more detail why this
+        # restriction was here in the first place for fp8_gemm_nt
+        # function of deepgemm.
+        # and weight.shape[0] % 128 == 0
+        # and weight.shape[1] % 128 == 0
     )
 
 
