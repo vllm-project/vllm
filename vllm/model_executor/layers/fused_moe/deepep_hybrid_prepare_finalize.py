@@ -51,7 +51,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
-        buffer: deep_ep.HybridEPBuffer,
+        buffer: "deep_ep.HybridEPBuffer",
         num_dispatchers: int,
         rank_expert_offset: int,
         num_local_experts: int,
