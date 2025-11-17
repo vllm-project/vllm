@@ -124,7 +124,7 @@ class EngineCore:
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
             logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size

@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for multi-modal models."""
+"""Transformers modeling backend mixin for multi-modal models."""
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -27,6 +27,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalUUIDDict,
@@ -38,7 +39,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature, PretrainedConfig
+    from transformers import BatchFeature
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
@@ -309,9 +310,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return model_output
 
     def get_language_model(self) -> torch.nn.Module:
-        """Transformers backend multimodal classes do not contain a separate vLLM
-        language model class. Therefore, in order to return a language model vLLM class,
-        we use a wrapper to give `self` the same interface as a text model."""
+        """Transformers modeling backend multimodal classes do not contain a separate
+        vLLM language model class. Therefore, in order to return a language model vLLM
+        class, we use a wrapper to give `self` the same interface as a text model."""
 
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
@@ -329,7 +330,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return LanguageModel(self)
 
-    def get_multimodal_embeddings(self, **kwargs):
+    def embed_multimodal(self, **kwargs):
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
@@ -367,20 +368,36 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: "PretrainedConfig",
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        if any((second_per_grid_ts, audio_feature_lengths, use_audio_in_video)):
-            raise NotImplementedError("Transformers backend only supports images.")
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
+        if any(
+            v
+            for k, v in kwargs.items()
+            if k not in {"image_grid_thw", "video_grid_thw"}
+        ):
+            raise NotImplementedError(
+                "Transformers modeling backend only supports images."
+            )
 
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),

@@ -7,7 +7,6 @@ with the correct prompt format on Qwen2.5-Omni (thinker only).
 
 from typing import NamedTuple
 
-import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -72,11 +71,7 @@ def get_use_audio_in_video_query() -> QueryResult:
     )
     asset = VideoAsset(name="baby_reading", num_frames=16)
     audio = asset.get_audio(sampling_rate=16000)
-    assert not envs.VLLM_USE_V1, (
-        "V1 does not support use_audio_in_video. "
-        "Please launch this example with "
-        "`VLLM_USE_V1=0`."
-    )
+
     return QueryResult(
         inputs={
             "prompt": prompt,

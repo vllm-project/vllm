@@ -2,7 +2,7 @@
 
 vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
-Currently the CPU implementation for s390x architecture supports FP32 datatype only.
+Currently, the CPU implementation for s390x architecture supports FP32 datatype only.
 
 !!! warning
     There are no pre-built wheels or images for this device, so you must build vLLM from source.

@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for causal language models."""
+"""Transformers modeling backend mixin for causal language models."""
 
 from typing import TYPE_CHECKING
 
@@ -42,7 +42,6 @@ class CausalMixin(VllmModelForTextGeneration):
             self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
-            self.unpadded_vocab_size = self.text_config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
                 self.text_config.hidden_size,
@@ -56,7 +55,7 @@ class CausalMixin(VllmModelForTextGeneration):
 
             logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.text_config.vocab_size, logit_scale
+                self.text_config.vocab_size, scale=logit_scale
             )
         else:
             self.lm_head = PPMissingLayer()

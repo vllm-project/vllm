@@ -767,7 +767,7 @@ class GraniteSpeechForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self,
         **kwargs: object,
     ) -> MultiModalEmbeddings:
@@ -779,7 +779,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_features = self._process_audio_input(audio_input)
         return audio_features
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -790,9 +790,9 @@ class GraniteSpeechForConditionalGeneration(
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,

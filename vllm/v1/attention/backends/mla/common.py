@@ -196,8 +196,8 @@ from typing import ClassVar, Generic, TypeVar
 import torch
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
@@ -309,24 +309,12 @@ class MLACommonBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def is_mla(cls) -> bool:
+        return True
 
 
 @dataclass
@@ -349,6 +337,7 @@ class MLACommonPrefillMetadata:
         local_context_lens_allranks: list[list[int]] | None = None
         padded_local_cu_seq_lens: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
+        chunk_size: int | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -425,8 +414,10 @@ class MLACommonMetadata(Generic[D]):
     ) = None
 
     def __post_init__(self):
-        if self.head_dim is not None:
-            MLACommonBackend.validate_head_size(self.head_dim)
+        if self.head_dim is not None and not MLACommonBackend.supports_head_size(
+            self.head_dim
+        ):
+            raise ValueError(f"Head dimension {self.head_dim} is not supported by MLA.")
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
@@ -461,12 +452,6 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
         and current_platform.is_device_capability(100)
     )
-
-
-# Currently 394MB, this can be tuned based on GEMM sizes used.
-# Chosen to be the same as sglang:
-#  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -600,7 +585,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_fi_prefill:
             self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
             )
 
             self._fi_prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
@@ -612,7 +599,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_trtllm_ragged_prefill:
             self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
             )
 
         if self._use_cudnn_prefill:
@@ -914,6 +903,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                             device, non_blocking=True
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
+                        chunk_size=padded_local_max_context_chunk_across_ranks,
                     )
                 else:
                     chunked_context_metadata = chunked_context_metadata_cls(
@@ -998,6 +988,8 @@ def reorg_kvcache(
     local_context_lens_allranks: list[list[int]],
     sum_seq_len: int,
     max_seq_len: int,
+    chunk_size: int,
+    chunk_idx: int,
     toks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1013,6 +1005,9 @@ def reorg_kvcache(
         local_context_lens_allranks: local context lengths on each CP rank.
         sum_seq_len: the sum of cp_chunk_seq_lens_lst.
         max_seq_len: the max value of cp_chunk_seq_lens_lst.
+        chunk_size: the local padded max context chunk from
+            chunked_context_metadata building.
+        chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
     """
     kv_c_segments = []
@@ -1024,20 +1019,31 @@ def reorg_kvcache(
     ):
         cur_seq_len = 0
         for rank, local_context_len in enumerate(local_context_lens):
-            if local_context_len != 0:
+            # Note(qcs): We split the context into multiple chunks,
+            # depending on the size of the workspace.
+            # local_context in dcp0:   |-----------------|
+            # local_context in dcp1:   |--------------|
+            # n*padded_local_chunk:    |-----|-----|-----|
+            # local_chunk_len in dcp1: |-----|-----|--|
+            # so we need update the last chunk length in dcp1.
+            local_chunk_len = min(
+                max(0, local_context_len - chunk_idx * chunk_size),
+                padded_local_chunk_seq_len,
+            )
+            if local_chunk_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + local_context_len
+                    + local_chunk_len
                 ]
                 k_pe_segment = allgatered_k_pe[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + local_context_len
+                    + local_chunk_len
                 ]
                 kv_c_segments.append(kv_c_segment)
                 k_pe_segments.append(k_pe_segment)
-                cur_seq_len += local_context_len
+                cur_seq_len += local_chunk_len
         max_seq_len_check = max(max_seq_len_check, cur_seq_len)
         src_token_idx += padded_local_chunk_seq_len
     reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
@@ -1688,6 +1694,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill_metadata.chunked_context.local_context_lens_allranks is not None
         assert prefill_metadata.chunked_context.padded_local_cu_seq_lens is not None
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
+        assert prefill_metadata.chunked_context.chunk_size is not None
 
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
@@ -1737,6 +1744,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 local_context_lens_allranks=prefill_metadata.chunked_context.local_context_lens_allranks,
                 sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
                 max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
+                chunk_size=prefill_metadata.chunked_context.chunk_size,
+                chunk_idx=i,
                 toks=toks,
             )
 
@@ -2010,7 +2019,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q, kv_cache, attn_metadata, layer
             )
 
-            # recorect dcp attn_out with lse.
+            # correct dcp attn_out with lse.
             if self.dcp_world_size > 1:
                 attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
 

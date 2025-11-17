@@ -10,8 +10,6 @@ vLLM provides comprehensive benchmarking tools for performance testing and evalu
 - **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 
-[Benchmark CLI]: #benchmark-cli
-
 ## Benchmark CLI
 
 This section guides you through running benchmark tests with the extensive
@@ -985,7 +983,7 @@ each document has close to 512 tokens.
 
 Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
 with an embedding model, also set `--no_reranker`. Because in this case the query is
-treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+treated as an individual prompt by the server, here we send `random_batch_size - 1` documents
 to account for the extra prompt which is the query. The token accounting to report the
 throughput numbers correctly is also adjusted.
 

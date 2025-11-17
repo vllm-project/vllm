@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 
@@ -34,6 +34,9 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
 __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
@@ -54,6 +57,7 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        self.ignore: list[str] = cast(list[str], self.quant_config.get("exclude", []))
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -74,9 +78,8 @@ class QuarkConfig(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
-        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(
-            prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
+            prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
         ):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
@@ -89,6 +92,9 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "QuarkConfig":
@@ -114,7 +120,14 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
 
-            if not kv_cache_set.issubset(layer_quant_set):
+            if not (
+                kv_cache_set.issubset(layer_quant_set)
+                or any(
+                    fnmatch.fnmatchcase(layer_quant, pat)
+                    for layer_quant in list(layer_quant_set)
+                    for pat in list(kv_cache_set)
+                )
+            ):
                 raise ValueError(
                     "The Quark quantized model has the "
                     "kv_cache_group parameter setting, "
@@ -124,10 +137,15 @@ class QuarkConfig(QuantizationConfig):
                 )
 
             q_configs = [
-                cast(dict[str, Any], layer_quant_config.get(name))
-                for name in kv_cache_group
+                quant_cfg
+                for name, quant_cfg in layer_quant_config.items()
+                if any(fnmatch.fnmatchcase(name, pattern) for pattern in kv_cache_group)
             ]
-            if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
+
+            if not all(
+                deep_compare(q_config["output_tensors"], q_configs[0]["output_tensors"])
+                for q_config in q_configs
+            ):
                 raise ValueError(
                     "The quantization method used for kv_cache should "
                     "be the same, but the quantization method for the "
@@ -312,9 +330,15 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config")
             )
-            for name_pattern in layer_quant_config:
-                if fnmatch.fnmatch(layer_name, name_pattern):
-                    return layer_quant_config[name_pattern]
+
+            def _matches_pattern(layer_name, pattern):
+                if "*" not in pattern:
+                    return layer_name in pattern
+                return fnmatch.fnmatch(layer_name, pattern)
+
+            for name_pattern, config in layer_quant_config.items():
+                if _matches_pattern(layer_name, name_pattern):
+                    return config
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(

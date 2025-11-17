@@ -49,10 +49,15 @@ def _ref_convert_id_to_token(
 @pytest.mark.parametrize(
     "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
+@pytest.mark.parametrize("stream_interval", [1, 5, 10])
 def test_incremental_detokenization(
-    request_output_kind: RequestOutputKind, dummy_test_vectors
+    request_output_kind: RequestOutputKind,
+    stream_interval: int,
+    dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
+    )
     engine_core = MockEngineCore(tokens_list=dummy_test_vectors.generation_tokens)
 
     # Make N requests.
@@ -104,9 +109,18 @@ def test_incremental_detokenization(
             if request_id not in gen_strings:
                 gen_strings[request_id] = new_text
                 gen_tokens[request_id] = new_tokens
+                if request_output_kind == RequestOutputKind.DELTA:
+                    assert len(new_tokens) == 1, f"{len(new_tokens)=}"
             else:
                 gen_strings[request_id] += new_text
                 gen_tokens[request_id].extend(new_tokens)
+                if (
+                    request_output_kind == RequestOutputKind.DELTA
+                    and not request_output.finished
+                ):
+                    assert len(new_tokens) >= stream_interval, (
+                        f"{len(new_tokens)=}, {stream_interval=}"
+                    )
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_toks) in enumerate(

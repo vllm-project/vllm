@@ -13,7 +13,6 @@ from transformers import (
     BatchFeature,
     WhisperConfig,
     WhisperFeatureExtractor,
-    WhisperProcessor,
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
@@ -571,7 +570,7 @@ class WhisperDecoder(nn.Module):
         positions: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
     ):
-        inputs_embeds = self.get_input_embeddings(input_ids)
+        inputs_embeds = self.embed_input_ids(input_ids)
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
 
@@ -584,7 +583,7 @@ class WhisperDecoder(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
 
@@ -659,16 +658,6 @@ class WhisperModel(nn.Module):
 class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
-
-    def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
-        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
-        # initialize processor. We use a monkeypatch to fix it here.
-        # See: https://github.com/vllm-project/vllm/issues/20224
-        processor_class = WhisperProcessor
-        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
-        if processor_class.tokenizer_class != tokenizer_class:
-            processor_class.tokenizer_class = tokenizer_class
-        return self.ctx.get_hf_processor(processor_class, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
@@ -890,7 +879,7 @@ class WhisperForConditionalGeneration(
         self.dtype = vllm_config.model_config.dtype
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
-        self.unpadded_vocab_size = config.vocab_size
+
         self.proj_out = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -899,9 +888,7 @@ class WhisperForConditionalGeneration(
         )
         self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def forward(
         self,
@@ -920,12 +907,12 @@ class WhisperForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.model.decoder
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         return [self.model.get_encoder_outputs(audio_input["input_features"])]
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -935,7 +922,7 @@ class WhisperForConditionalGeneration(
     ) -> torch.Tensor:
         # This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens.
-        return self.model.decoder.get_input_embeddings(input_ids)
+        return self.model.decoder.embed_input_ids(input_ids)
 
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
