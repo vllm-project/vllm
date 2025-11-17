@@ -210,6 +210,18 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    master_addr: str = "127.0.0.1"
+    """distributed master address for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    master_port: int = 29501
+    """distributed master port for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    node_rank: int = 0
+    """distributed node rank for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    nnodes: int = 1
+    """num of nodes for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -278,10 +290,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda():
+            if not current_platform.is_cuda_alike():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices now."
+                    "CUDA devices or ROCm devices now."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -386,6 +398,23 @@ class ParallelConfig:
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
         )
+
+    @property
+    def node_rank_within_dp(self) -> int:
+        return self.node_rank % self.nnodes_within_dp
+
+    @property
+    def nnodes_within_dp(self) -> int:
+        if self.nnodes == 1:
+            return 1
+        data_parallel_node_size = (
+            self.data_parallel_size // self.data_parallel_size_local
+        )
+        return self.nnodes // data_parallel_node_size
+
+    @property
+    def local_world_size(self) -> int:
+        return self.world_size // self.nnodes_within_dp
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
@@ -528,6 +557,8 @@ class ParallelConfig:
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
+            elif current_platform.is_cuda() and self.nnodes > 1:
+                backend = "mp"
             elif (
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
@@ -564,6 +595,10 @@ class ParallelConfig:
             logger.warning(
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
+            )
+        if self.distributed_executor_backend != "mp" and self.nnodes > 1:
+            raise ValueError(
+                "nnodes > 1 can only be set when distributed exectuor backend is mp."
             )
 
     @property
@@ -606,6 +641,11 @@ class ParallelConfig:
             logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
+            )
+        if self.nnodes > 1:
+            self.disable_custom_all_reduce = True
+            logger.debug(
+                "Disabled the custom all-reduce since we are running on multi-node."
             )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(

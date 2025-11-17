@@ -35,7 +35,7 @@ from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausa
 from vllm.model_executor.models.utils import extract_layer_index
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -82,7 +82,7 @@ class LlamaModel(nn.Module):
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -93,7 +93,7 @@ class LlamaModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
@@ -195,7 +195,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    get_input_embeddings = SupportsMultiModal.get_input_embeddings  # type: ignore
+    embed_input_ids = SupportsMultiModal.embed_input_ids  # type: ignore
 
     def forward(
         self,
@@ -212,6 +212,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             name, weight = self.permute_qk_weight_for_rotary(name, loaded_weight)
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, weight
 
         loader = AutoWeightsLoader(

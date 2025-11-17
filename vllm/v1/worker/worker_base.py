@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import warn_for_unimplemented_methods
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -33,7 +32,6 @@ logger = init_logger(__name__)
 _R = TypeVar("_R")
 
 
-@warn_for_unimplemented_methods
 class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
@@ -182,6 +180,7 @@ class WorkerWrapperBase:
         self,
         vllm_config: VllmConfig,
         rpc_rank: int = 0,
+        global_rank: int | None = None,
     ) -> None:
         """
         Initialize the worker wrapper with the given vllm_config and rpc_rank.
@@ -194,6 +193,7 @@ class WorkerWrapperBase:
         group.
         """
         self.rpc_rank = rpc_rank
+        self.global_rank = self.rpc_rank if global_rank is None else global_rank
         self.worker: WorkerBase | None = None
 
         # do not store this `vllm_config`, `init_worker` will set the final
@@ -314,7 +314,7 @@ class WorkerWrapperBase:
             assert self.worker is not None
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
-        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        kv_cache_config = kv_cache_configs[self.global_rank]
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 

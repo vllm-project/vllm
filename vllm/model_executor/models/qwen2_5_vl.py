@@ -26,7 +26,6 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -56,12 +55,12 @@ from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -110,7 +109,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    conv3d_to_linear_weight,
     get_vit_attn_backend,
     run_dp_sharded_mrope_vision_model,
 )
@@ -291,25 +289,6 @@ class Qwen2_5_VisionMLP(nn.Module):
         return x_down
 
 
-def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
-    """All-gather the input tensor interleavely across model parallel group."""
-    import torch.distributed as dist
-
-    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
-    dist.all_gather(
-        gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group
-    )
-
-    gathered_tensors_split = [
-        torch.split(tensor, hidden_size // tp_size, -1) for tensor in gathered_tensors
-    ]
-    ordered_tensors = [
-        tensor for pair in zip(*gathered_tensors_split) for tensor in pair
-    ]
-    result_tensor = torch.cat(ordered_tensors, dim=-1)
-    return result_tensor
-
-
 class Qwen2_5_VisionAttention(nn.Module):
     def __init__(
         self,
@@ -380,34 +359,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        # [s, b, 3 * head * head_dim]
-        seq_len, bs, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = all_gather_interleave(qkv, self.qkv.hidden_size, self.tp_size)
-
-        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
-        q, k, v = qkv.chunk(3, dim=2)
-
-        # 3 * [s, b, head * head_dim]
-        if self.tp_size > 1:
-            splitter = partial(
-                dist_utils.split_tensor_along_last_dim, num_partitions=self.tp_size
-            )
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-            v = splitter(v)[self.tp_rank]
-
-        # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
-        new_shape = (
-            seq_len,
-            bs,
-            self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-        )
-        q, k, v = (x.view(*new_shape) for x in (q, k, v))
-        return q, k, v
-
     def forward(
         self,
         x: torch.Tensor,
@@ -418,17 +369,32 @@ class Qwen2_5_VisionAttention(nn.Module):
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
+        seq_len, batch_size, _ = x.shape
 
-        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
-        q, k, v = self.split_qkv(x)
-        batch_size = q.shape[1]
+        qkv = einops.rearrange(
+            x,
+            "s b (three head head_dim) -> b s three head head_dim",
+            three=3,
+            head=self.num_attention_heads_per_partition,
+        )
 
-        q, k, v = (einops.rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
         if rotary_pos_emb is not None:
-            # [2 * b, s, heads, head_dim]
-            qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
-            q, k = torch.chunk(qk_rotated, 2, dim=0)
+            qk, v = qkv[:, :, :2], qkv[:, :, 2]
+
+            qk_reshaped = einops.rearrange(
+                qk, "b s two head head_dim -> (two b) s head head_dim", two=2
+            )
+            qk_rotated = apply_rotary_pos_emb_vision(qk_reshaped, rotary_pos_emb)
+            qk_rotated = qk_rotated.view(
+                2,
+                batch_size,
+                seq_len,
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            q, k = qk_rotated.unbind(dim=0)
+        else:
+            q, k, v = qkv.unbind(dim=2)
 
         if self.is_flash_attn_backend:
             context_layer = vit_flash_attn_wrapper(
@@ -555,15 +521,18 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = ReplicatedLinear(
-            in_channels * math.prod(kernel_size),
+        self.proj = Conv3dLayer(
+            in_channels,
             hidden_size,
+            kernel_size=kernel_size,
+            stride=kernel_size,
             bias=False,
-            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
+        L, C = x.shape
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
+        x = self.proj(x).view(L, self.hidden_size)
         return x
 
 
@@ -987,9 +956,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            if name.endswith("patch_embed.proj.weight"):
-                loaded_weight = conv3d_to_linear_weight(loaded_weight)
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1564,7 +1530,7 @@ class Qwen2_5_VLForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []

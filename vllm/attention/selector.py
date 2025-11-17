@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -75,6 +76,7 @@ def get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -93,6 +95,7 @@ def get_attn_backend(
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
+        attn_type=attn_type,
     )
 
 
@@ -105,6 +108,7 @@ def _cached_get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     # Check whether a particular choice of backend was
     # previously forced.
@@ -141,17 +145,37 @@ def _cached_get_attn_backend(
     # get device-specific attn_backend
     from vllm.platforms import current_platform
 
-    attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        True,
-        use_mla,
-        has_sink,
-        use_sparse,
-    )
+    sig = inspect.signature(current_platform.get_attn_backend_cls)
+    if "use_v1" in sig.parameters:
+        logger.warning_once(
+            "use_v1 parameter for get_attn_backend_cls is deprecated and will "
+            "be removed in v0.13.0 or v1.0.0, whichever is soonest. Please "
+            "remove it from your plugin code."
+        )
+        attention_cls = current_platform.get_attn_backend_cls(
+            selected_backend,
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            True,  # use_v1
+            use_mla,
+            has_sink,
+            use_sparse,
+            attn_type,
+        )
+    else:
+        attention_cls = current_platform.get_attn_backend_cls(
+            selected_backend,
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            attn_type,
+        )
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"

@@ -1384,3 +1384,16 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def disable_deepgemm_ue8m0(monkeypatch):
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    with monkeypatch.context() as monkeypatch_ctx:
+        monkeypatch_ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+        is_deep_gemm_e8m0_used.cache_clear()
+        yield
+        # Clear cache so the next time it is used it is processed with the
+        # default VLLM_USE_DEEP_GEMM_E8M0  setting.
+        is_deep_gemm_e8m0_used.cache_clear()

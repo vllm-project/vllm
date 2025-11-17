@@ -429,7 +429,7 @@ def load_weights_using_from_2_way_softmax(
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fallback to get_input_embeddings(), which is used by
-        # the Transformers backend.
+        # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens
             if hasattr(model.model, "embed_tokens")
@@ -487,7 +487,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fallback to get_input_embeddings(), which is used by
-        # the Transformers backend.
+        # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens
             if hasattr(model.model, "embed_tokens")

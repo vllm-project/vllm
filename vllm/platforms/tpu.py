@@ -9,21 +9,25 @@ from tpu_info import device
 
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from typing import TypeAlias
+
     from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
+
+    ParamsType: TypeAlias = SamplingParams | PoolingParams
 else:
     BlockSize = None
     VllmConfig = None
     PoolingParams = None
     AttentionBackendEnum = None
+    ParamsType = None
 
 logger = init_logger(__name__)
 
@@ -58,10 +62,10 @@ class TpuPlatform(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
 
@@ -70,8 +74,6 @@ class TpuPlatform(Platform):
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        if not use_v1:
-            raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
         return AttentionBackendEnum.PALLAS.get_path()
 
@@ -188,10 +190,9 @@ class TpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod
@@ -207,10 +208,12 @@ class TpuPlatform(Platform):
     def validate_request(
         cls,
         prompt: PromptType,
-        params: SamplingParams | PoolingParams,
+        params: ParamsType,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
+        from vllm.sampling_params import SamplingParams, SamplingType
+
         if (
             isinstance(params, SamplingParams)
             and params.sampling_type == SamplingType.RANDOM_SEED

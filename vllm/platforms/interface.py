@@ -171,7 +171,11 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
-        return self._enum == PlatformEnum.CUDA
+        # TODO: Actually only mi3xx has the sleep mode support now
+        # for ROCm, but currently we don't have a way to detect the
+        # exact GPU model statelessly here. So we return True for
+        # all ROCm platforms for now.
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
@@ -215,10 +219,10 @@ class Platform:
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
@@ -541,13 +545,6 @@ class Platform:
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
-
-    @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        """
-        Returns the total number of compute units (CU) on single GPU.
-        """
-        raise NotImplementedError
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

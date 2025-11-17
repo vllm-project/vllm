@@ -35,7 +35,7 @@ DEVICE_MLA_BACKENDS = {
 DEVICE_REGULAR_ATTN_BACKENDS = {
     "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
     "hip": ["ROCM_ATTN"],
-    "cpu": ["TORCH_SDPA"],
+    "cpu": ["CPU_ATTN"],
 }
 
 DEVICE_MLA_BLOCK_SIZES = {
@@ -86,7 +86,7 @@ def test_env(
         if device == "cpu":
             with patch("vllm.platforms.current_platform", CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, None, block_size)
-            assert backend.get_name() == "TORCH_SDPA"
+            assert backend.get_name() == "CPU_ATTN"
 
         elif device == "hip":
             with patch("vllm.platforms.current_platform", RocmPlatform()):
@@ -224,7 +224,7 @@ def test_fp32_fallback(device: str):
     if device == "cpu":
         with patch("vllm.platforms.current_platform", CpuPlatform()):
             backend = get_attn_backend(16, torch.float32, None, 16)
-        assert backend.get_name() == "TORCH_SDPA"
+        assert backend.get_name() == "CPU_ATTN"
 
     elif device == "cuda":
         with patch("vllm.platforms.current_platform", CudaPlatform()):
