@@ -415,6 +415,6 @@ replace_with_trainable_attention(model.model, ...)
 ## Next Steps
 
 - Review the [basic model guide](basic.md) for vLLM model fundamentals
-- Check out [example implementations](../../examples/custom_models/)
+- Check out [example implementations](../../examples/custom_models/README.md)
 - Read about [model registration](registration.md)
 - Learn about [testing models](tests.md)
