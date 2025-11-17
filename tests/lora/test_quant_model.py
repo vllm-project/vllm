@@ -114,7 +114,10 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.
         # Assert that the outputs changed.
-        if model.quantization in ("gptq", "compressed-tensors") and expected_output is expected_lora_output:
+        if (
+            model.quantization in ("gptq", "compressed-tensors")
+            and expected_output is expected_lora_output
+        ):
             for i, o in enumerate(output):
                 assert o.startswith("#"), (
                     f"Expected example {i} to start with # but got {o}"
