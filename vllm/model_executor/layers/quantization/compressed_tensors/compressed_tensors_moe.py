@@ -6,6 +6,7 @@ from collections.abc import Callable
 from enum import Enum
 
 import torch
+from torch.nn.parameter import Parameter
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import ActivationOrdering, QuantizationStrategy
 
@@ -300,14 +301,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
         # Input Global Scales
-        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
-            self.flashinfer_moe_backend
-        )
-        global_scale_num_experts = extra_weight_attrs.get(
-            "global_num_experts") if use_global_sf else num_experts
         w13_input_scale = torch.nn.Parameter(
-            torch.empty(global_scale_num_experts, 2,
-                        dtype=torch.float32), requires_grad=False
+            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
         )
         layer.register_parameter("w13_input_global_scale", w13_input_scale)
         extra_weight_attrs.update(
@@ -316,8 +311,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
         w2_input_scale = torch.nn.Parameter(
-            torch.empty(global_scale_num_experts,
-                        dtype=torch.float32), requires_grad=False
+            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
         )
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
@@ -490,25 +484,10 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             prepare_moe_fp4_layer_for_marlin(layer)
             return
 
-        # swizzle weight scales
-        layer.w13_weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.w13_weight_scale), requires_grad=False
+        # w13
+        w13_input_global_scale = layer.w13_input_global_scale.max(dim=1).values.to(
+            torch.float32
         )
-
-        layer.w2_weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
-        )
-
-        use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
-            self.flashinfer_moe_backend)
-        if use_global_sf:
-            # For backends provide by Flashinfer, the input global scales are
-            # shared across all experts.
-            w13_input_global_scale = (layer.w13_input_global_scale.max().to(
-                torch.float32).expand(layer.num_experts))
-        else:
-            w13_input_global_scale = layer.w13_input_global_scale.max(
-                dim=1).values.to(torch.float32)
 
         layer.g1_alphas = torch.nn.Parameter(
             ((1 / w13_input_global_scale) * layer.w13_weight_scale_2),
@@ -519,15 +498,13 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (w13_input_global_scale), requires_grad=False
         )
 
-        if use_global_sf:
-            # For backends provide by Flashinfer, the input global scales are
-            # shared across all experts.
-            w2_input_global_scale = (layer.w2_input_global_scale.max().to(
-                torch.float32).expand(layer.num_experts))
-        else:
-            w2_input_global_scale = layer.w2_input_global_scale
-
         # w2
+        if self.allow_flashinfer and self.flashinfer_moe_backend==FlashinferMoeBackend.TENSORRT_LLM:
+            w2_input_global_scale=layer.w2_input_global_scale.min().to(torch.float32).expand(layer.num_experts)
+        else:
+            w2_input_global_scale=layer.w2_input_global_scale
+
+
         layer.g2_alphas = torch.nn.Parameter(
             ((1 / w2_input_global_scale) * layer.w2_weight_scale_2).to(
                 torch.float32
@@ -536,17 +513,74 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         )
 
         layer.w2_input_scale_quant = torch.nn.Parameter(
-            (layer.w2_input_global_scale), requires_grad=False
+            (w2_input_global_scale), requires_grad=False
         )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.use_marlin:
+        # TensorRT-LLM specific processing
+        if (
+                self.allow_flashinfer
+                and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            # Prepare static weights for TRT-LLM kernel
+            # alternate: prepare_static_weight_layouts_for_trtllm_moe
+            (
+                gemm1_weights_fp4_shuffled,
+                gemm1_scales_fp4_shuffled,
+                gemm2_weights_fp4_shuffled,
+                gemm2_scales_fp4_shuffled,
+            ) = self.prepare_static_weights_for_trtllm_fp4_moe(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                layer.w2_weight.size(-2),  # hidden_size
+                layer.w13_weight.size(-2) // 2,  # intermediate_size
+                layer.w13_weight.size(0),  # num_experts
+            )
+            logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
+
+            layer.gemm1_weights_fp4_shuffled = Parameter(
+                gemm1_weights_fp4_shuffled, requires_grad=False
+            )
+            layer.gemm2_weights_fp4_shuffled = Parameter(
+                gemm2_weights_fp4_shuffled, requires_grad=False
+            )
+            layer.gemm1_scales_fp4_shuffled = Parameter(
+                gemm1_scales_fp4_shuffled, requires_grad=False
+            )
+            layer.gemm2_scales_fp4_shuffled = Parameter(
+                gemm2_scales_fp4_shuffled, requires_grad=False
+            )
+
+            # Additional parameter needed for TRT-LLM
+            layer.g1_scale_c = Parameter(
+                (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
+                requires_grad=False,
+            )
+
+            # Clean up weights that won't be used by TRT-LLM
+            del layer.w2_weight
+            del layer.w2_weight_scale
+            del layer.w13_weight
+            del layer.w13_weight_scale
+        else:
+            # swizzle weight scales
+            layer.w13_weight_scale = torch.nn.Parameter(
+                swizzle_blockscale(layer.w13_weight_scale), requires_grad=False
+            )
+
+            layer.w2_weight_scale = torch.nn.Parameter(
+                swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
+            )
+
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+        if self.use_marlin or (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
             return None
         elif not self.allow_flashinfer:
-            return super().maybe_make_prepare_finalize(routing_tables)
+            return super().maybe_make_prepare_finalize()
 
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
@@ -619,7 +653,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
             from vllm.model_executor.models.llama4 import Llama4MoE
 
-            assert self.fused_experts is None
 
             a1_gscale = layer.w13_input_scale_quant
             (hidden_states_fp4, hidden_states_scale_linear_fp4) = (
@@ -632,16 +665,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             use_llama4_routing = (
                 custom_routing_function is Llama4MoE.custom_routing_function
             )
-            routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+            routing_method_type = layer.routing_method_type
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
             routing_bias = e_score_correction_bias
             if routing_bias is not None:
                 routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-                routing_logits=router_logits
-                if use_llama4_routing
-                else router_logits.to(torch.float32),
+                routing_logits=router_logits,
                 routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
@@ -665,8 +696,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 output2_scale_scalar=layer.g2_alphas.data,
                 num_experts=global_num_experts,
                 top_k=top_k,
-                n_group=num_expert_group if num_expert_group is not None else 1,
-                topk_group=topk_group if topk_group is not None else 1,
+                n_group=num_expert_group,
+                topk_group=topk_group,
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
@@ -1118,14 +1149,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     layer.w2_weight_scale
                 )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or self.rocm_aiter_moe_enabled:
             return None
         else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+            return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
@@ -2146,20 +2174,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
-            if expert_load_view is None:
-                raise ValueError("enable_eplb=True requiere expert_load_view != None")
-            if logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requiere logical_to_physical_map != None"
-                )
-            if logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requiere logical_replica_count != None"
-                )
-            if not isinstance(layer, FusedMoE):
-                raise TypeError(
-                    "EPLB is only supported when `layer` is a instance of FusedMoE."
-                )
+            raise NotImplementedError(
+                "EPLB not supported for `CompressedTensorsWNA16MoEMethod` yet."
+            )
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -2176,12 +2193,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
-            num_fused_shared_experts=getattr(layer, "num_fused_shared_experts", 0),
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
         )
 
         return fused_experts(
@@ -2197,10 +2208,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
-
-    @property
-    def supports_eplb(self) -> bool:
-        return True
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
