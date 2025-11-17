@@ -129,8 +129,9 @@ def test_preprocessor_text_no_mm_inputs(model_id, prompt):
 )
 @pytest.mark.skip(
     reason=(
-        "Applying huggingface processor on text inputs results in ",
-        "significant performance regression for multimodal models. See https://github.com/vllm-project/vllm/issues/26320",
+        "Applying huggingface processor on text inputs results in "
+        "significant performance regression for multimodal models. "
+        "See https://github.com/vllm-project/vllm/issues/26320"
     )
 )
 def test_preprocessor_always_mm_code_path(model_id, prompt):
