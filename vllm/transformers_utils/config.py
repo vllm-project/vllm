@@ -77,6 +77,7 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32=DeepseekV3Config,
