@@ -14,6 +14,7 @@ RUN apt clean && apt-get update -y && \
     libxext6 \
     libgl1 \
     lsb-release \
+    libaio-dev \
     numactl \
     wget \
     vim \
@@ -68,8 +69,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN python3 -m pip install -e tests/vllm_test_utils
 
 # install nixl from source code
+ENV NIXL_VERSION=0.7.0
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
-ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/python3.12/dist-packages/.nixl.mesonpy.libs/plugins/"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall oneccl oneccl-devel -y
