@@ -19,16 +19,17 @@ else()
           GIT_REPOSITORY https://github.com/triton-lang/triton.git
           GIT_TAG ${DEFAULT_TRITON_KERNELS_TAG}
           GIT_PROGRESS TRUE
+          SOURCE_SUBDIR python/triton_kernels/triton_kernels
   )
 endif()
 
 # Fetch content 
-FetchContent_Populate(triton_kernels)
+FetchContent_MakeAvailable(triton_kernels)
 
 if (NOT triton_kernels_SOURCE_DIR)
   message (FATAL_ERROR "[triton_kernels] Cannot resolve triton_kernels_SOURCE_DIR")
 endif()
-  
+
 if (TRITON_KERNELS_SRC_DIR)
   # When passed in explicitly we expect TRITON_KERNELS_SRC_DIR to point to the python directory directly.
   set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}")
@@ -36,6 +37,8 @@ else()
   # Triton kernels lives in the python directory
   set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}/python/triton_kernels/triton_kernels/")
 endif()
+
+message (STATUS "[triton_kernels] triton_kernels is available at ${TRITON_KERNELS_PYTHON_DIR}")
 
 add_custom_target(triton_kernels)
 
