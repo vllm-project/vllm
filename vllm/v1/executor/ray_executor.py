@@ -99,6 +99,11 @@ class RayDistributedExecutor(Executor):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
+        self.ec_producer = (
+            self.vllm_config.ec_transfer_config is not None
+            and self.vllm_config.ec_transfer_config.is_ec_producer
+        )
+
         self.scheduler_output: SchedulerOutput | None = None
 
     @property
@@ -395,6 +400,12 @@ class RayDistributedExecutor(Executor):
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
+
+        if self.ec_producer or not scheduler_output.total_num_scheduled_tokens:
+            # Model will not execute, call model runner immediately.
+            return self._execute_dag(scheduler_output, None, non_block)
+
+        # Model will execute, defer to sample_tokens() call.
         self.scheduler_output = scheduler_output
         return COMPLETED_NONE_FUTURE if non_block else None
 
@@ -417,10 +428,18 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
 
         self.scheduler_output = None
 
+        return self._execute_dag(scheduler_output, grammar_output, non_block)
+
+    def _execute_dag(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
