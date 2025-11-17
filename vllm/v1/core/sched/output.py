@@ -36,7 +36,6 @@ else:
 class NewRequestData:
     req_id: str
     prompt_token_ids: list[int] | None
-    prefill_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -45,16 +44,19 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
+    # Only used for v2 model runner.
+    prefill_token_ids: list[int] | None = None
+
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            prefill_token_ids=request._all_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -62,6 +64,7 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            prefill_token_ids=prefill_token_ids,
         )
 
     def __repr__(self) -> str:
@@ -70,6 +73,7 @@ class NewRequestData:
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids={self.prompt_token_ids},"
+            f"prefill_token_ids={self.prefill_token_ids},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -177,7 +181,6 @@ class SchedulerOutput:
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
 
-    preempted_req_ids: set[str]
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
@@ -185,6 +188,10 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    # Request IDs that are preempted in this step.
+    # Only used for v2 model runner.
+    preempted_req_ids: set[str] | None = None
 
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
@@ -206,7 +213,6 @@ class SchedulerOutput:
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[],
-            preempted_req_ids=set(),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
