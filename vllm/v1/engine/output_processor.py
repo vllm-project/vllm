@@ -104,6 +104,7 @@ class RequestState:
         arrival_time: float,
         queue: RequestOutputCollector | None,
         log_stats: bool,
+        stream_interval: int,
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
@@ -131,6 +132,10 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
+        # Stream Interval
+        self.stream_interval = stream_interval
+        self.sent_tokens_offset = 0  # Offset of sent tokens
+
     @classmethod
     def from_new_request(
         cls,
@@ -141,6 +146,7 @@ class RequestState:
         request_index: int,
         queue: RequestOutputCollector | None,
         log_stats: bool,
+        stream_interval: int,
     ) -> "RequestState":
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
@@ -188,6 +194,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            stream_interval=stream_interval,
         )
 
     def make_request_output(
@@ -204,6 +211,29 @@ class RequestState:
         if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
+
+        if self.stream_interval > 1:
+            assert self.detokenizer is not None
+
+            # Send output request only when
+            # 1. It has finished, or
+            # 2. It is the first token, or
+            # 3. It has reached the stream interval number of tokens
+            if not (
+                finished
+                or self.sent_tokens_offset == 0
+                or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+                >= self.stream_interval
+            ):
+                return None
+
+            if self.output_kind == RequestOutputKind.DELTA:
+                # Send tokens from the offset in DELTA mode, otherwise all
+                # tokens are sent.
+                new_token_ids = self.detokenizer.output_token_ids[
+                    self.sent_tokens_offset :
+                ]
+                self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
 
         request_id = self.request_id
         if pooling_output is not None:
@@ -310,9 +340,12 @@ class RequestState:
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self, tokenizer: AnyTokenizer, log_stats: bool):
+    def __init__(
+        self, tokenizer: AnyTokenizer, log_stats: bool, stream_interval: int = 1
+    ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates(log_stats)
@@ -385,6 +418,7 @@ class OutputProcessor:
             request_index=request_index,
             queue=queue,
             log_stats=self.log_stats,
+            stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
         if parent_req:

@@ -542,7 +542,7 @@ class VllmConfig:
 
         if (
             self.model_config is not None
-            and self.scheduler_config.chunked_prefill_enabled
+            and self.scheduler_config.enable_chunked_prefill
             and self.model_config.dtype == torch.float32
             and current_platform.get_device_capability() == (7, 5)
         ):
@@ -648,21 +648,6 @@ class VllmConfig:
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                    elif (
-                        current_platform.is_cuda()
-                        and current_platform.is_device_capability(100)
-                        and self.model_config.max_model_len > 131072
-                        and not self.model_config.use_mla
-                    ):
-                        # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
-                        logger.warning_once(
-                            "NVIDIA Blackwell TRTLLM attention cannot support "
-                            "max_model_len >= 131072 (found "
-                            f"{self.model_config.max_model_len}), causing dynamic "
-                            "dispatching that breaks full cudagraphs. "
-                            "Overriding cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -749,7 +734,7 @@ class VllmConfig:
         ):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
-            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.long_prefill_token_threshold = 0
 
             if self.cache_config is not None:
@@ -800,6 +785,32 @@ class VllmConfig:
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
+            # With pipeline parallelism or dynamo partitioning,
+            # native rms norm tracing errors due to incorrect residual shape.
+            # Use custom rms norm to unblock. In the future,
+            # the pass will operate on higher-level IR to avoid the issue.
+            # TODO: https://github.com/vllm-project/vllm/issues/27894
+            is_fullgraph = (
+                self.compilation_config.use_inductor_graph_partition
+                or len(self.compilation_config.splitting_ops) == 0
+            )
+            if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
+                if "-rms_norm" not in self.compilation_config.custom_ops:
+                    self.compilation_config.custom_ops.append("+rms_norm")
+                else:
+                    regime = (
+                        "Dynamo partition"
+                        if not is_fullgraph
+                        else "pipeline parallelism"
+                    )
+                    logger.warning_once(
+                        "Sequence parallelism not supported with"
+                        "native rms_norm when using %s, "
+                        "this will likely lead to an error.",
+                        regime,
+                    )
+
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
             if (
@@ -820,14 +831,6 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
-
-            # final migrate the deprecated flags
-            self.compilation_config.use_cudagraph = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-            self.compilation_config.full_cuda_graph = (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            )
 
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
@@ -1018,7 +1021,9 @@ class VllmConfig:
                 )
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
-                cudagraph_capture_sizes = dedup_sizes
+                cudagraph_capture_sizes = [
+                    i for i in dedup_sizes if i <= max_num_tokens
+                ]
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
@@ -1100,7 +1105,6 @@ class VllmConfig:
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
-        self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
         if self.model_config is None:
@@ -1197,7 +1201,7 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )

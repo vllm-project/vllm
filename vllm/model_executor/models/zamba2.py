@@ -756,7 +756,7 @@ class Zamba2Model(nn.Module):
         # Final layer normalization
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
 
         Args:
@@ -786,7 +786,7 @@ class Zamba2Model(nn.Module):
         """
         # Handle pipeline parallelism for first rank
         if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds
 
         # Process through layers
@@ -930,14 +930,14 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
         # Initialize logits processing and sampling
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
         Args:
             input_ids: Tensor of input token IDs
         Returns:
             Embedded representation of the input tokens
         """
-        return self.model.get_input_embeddings(input_ids)
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
