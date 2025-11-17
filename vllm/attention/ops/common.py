@@ -87,10 +87,7 @@ def _correct_attn_cp_out_kernel(
         -float("inf"),
         lse_finally,
     )
-    if IS_BASE_E:
-        factor = tl.exp(lse_finally)
-    else:
-        factor = tl.exp2(lse_finally)
+    factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
     output = tl.load(outputs_ptr + output_offsets)
     output = output * factor
 
