@@ -80,9 +80,10 @@ class StructuredOutputsConfig:
             and self.reasoning_parser not in valid_reasoning_parsers
         ):
             logger.warning(
-                "Reasoning parser %s not defined in reasoning_parser_plugin "
-                "argument. Assuming it is registered to the "
-                "ReasoningParserManager programmatically.",
+                "Reasoning parser %s not found among built-in parsers or "
+                "reasoning_parser_plugin argument. Assuming it will be "
+                "registered to the ReasoningParserManager programmatically "
+                "before use.",
                 self.reasoning_parser,
             )
 
