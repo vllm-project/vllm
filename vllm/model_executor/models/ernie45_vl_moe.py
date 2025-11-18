@@ -154,7 +154,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
             head_size=self.head_dim,
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
-            rope_parameters=rope_parameters,
+            base=rope_parameters["rope_theta"],
             is_neox_style=False,
             dtype=torch.get_default_dtype(),
             mrope_section=[h_rope, w_rope, t_rope],
