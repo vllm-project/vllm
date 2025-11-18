@@ -94,6 +94,9 @@ get_num_gpus() {
   elif [[ "$SMI_BIN" == *"rocm"* ]]; then
     echo "$($SMI_BIN -l | grep GPU | wc -l)"
   else
+    # works for non-cuda platforms,
+    # assuming at least 1 device and
+    # let system to decide which card to use
     echo "1"
   fi
 }
