@@ -49,6 +49,16 @@ def to_bytes_big(value: int, size: int) -> bytes:
 logger = init_logger(__name__)
 
 
+def long_wait_time_msg(threshold: int) -> str:
+    return (
+        "No available shared memory broadcast block found "
+        f"in {threshold} seconds. This typically happens "
+        "when some processes are hanging or doing some "
+        "time-consuming work (e.g. compilation, "
+        "weight/kv cache quantization)."
+    )
+
+
 class SpinTimer:
     def record_activity(self):
         pass
@@ -422,11 +432,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation)",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
                         n_warning += 1
 
@@ -493,11 +499,7 @@ class MessageQueue:
                         elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
                     ):
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation).",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
                         n_warning += 1
 

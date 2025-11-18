@@ -4,7 +4,7 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Final, cast
 
 import jinja2
@@ -122,6 +122,10 @@ class OpenAIServingPooling(OpenAIServing):
                 engine_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
+                if not isinstance(engine_prompts, Sequence) or isinstance(
+                    engine_prompts, (str, bytes, bytearray)
+                ):
+                    engine_prompts = [engine_prompts]
 
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(
@@ -170,15 +174,24 @@ class OpenAIServingPooling(OpenAIServing):
                 pooling_params = request.to_pooling_params()
 
             pooling_task: PoolingTask
-            if "token_embed" in self.supported_tasks:
-                pooling_task = "token_embed"
-            elif "token_classify" in self.supported_tasks:
-                pooling_task = "token_classify"
-            elif "plugin" in self.supported_tasks:
-                pooling_task = "plugin"
+            if request.task is None:
+                if "token_embed" in self.supported_tasks:
+                    pooling_task = "token_embed"
+                elif "token_classify" in self.supported_tasks:
+                    pooling_task = "token_classify"
+                elif "plugin" in self.supported_tasks:
+                    pooling_task = "plugin"
+                else:
+                    return self.create_error_response(
+                        f"pooling_task must be one of {self.supported_tasks}."
+                    )
             else:
+                pooling_task = request.task
+
+            if pooling_task not in self.supported_tasks:
                 return self.create_error_response(
-                    f"pooling_task must be one of {self.supported_tasks}."
+                    f"Task {pooling_task} is not supported, it"
+                    f" must be one of {self.supported_tasks}."
                 )
 
             try:

@@ -607,7 +607,7 @@ class ClassifierPooler(Pooler):
             pooled_data -= self.logit_bias
 
         pooling_params = get_pooling_params(pooling_metadata)
-        flags = [p.activation for p in pooling_params]
+        flags = [p.use_activation for p in pooling_params]
 
         if len(set(flags)) == 1:
             scores = self.act_fn(pooled_data) if flags[0] else pooled_data
@@ -681,7 +681,7 @@ class TokenClassifierPoolerHead(nn.Module):
         if self.logit_bias is not None:
             scores -= self.logit_bias
 
-        if pooling_param.activation:
+        if pooling_param.use_activation:
             scores = self.act_fn(scores)
 
         # scores shape: [n_token, num_labels]

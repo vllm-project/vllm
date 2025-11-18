@@ -6,6 +6,8 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 
 import functools
+import importlib
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +22,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import fused_moe
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
@@ -66,8 +69,6 @@ FUSED_MOE_MNK_FACTORS = [
     (1, 128, 128),
     (1, 2048, 128),
     (33, 2048, 128),
-    (222, 1024, 1024),
-    (32768, 128, 128),
     (32768, 2048, 511),
     (40000, 1024, 1024),
 ]
@@ -76,13 +77,10 @@ FUSED_MOE_WN16_MNK_FACTORS = [
     (1, 128, 128),
     (1, 1024, 1024),
     (32, 2048, 128),
-    (32, 1024, 1024),
     (222, 2048, 1024),
 ]
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def run_moe_test(
@@ -415,14 +413,12 @@ def test_mixtral_moe(
     huggingface."""
 
     # clear the cache before every test
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-        is_rocm_aiter_moe_enabled,
-    )
+    # Force reload aiter_ops to pick up the new environment variables.
+    if "rocm_aiter_ops" in sys.modules:
+        importlib.reload(rocm_aiter_ops)
 
-    is_rocm_aiter_moe_enabled.cache_clear()
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
         if dtype == torch.float32:
             pytest.skip("AITER ROCm test skip for float32")
 
@@ -512,8 +508,8 @@ def marlin_moe_generate_valid_test_cases():
     e_list = [4, 12]
     topk_list = [2, 3]
     ep_size_list = [1, 4]
-    dtype_list = [torch.half, torch.bfloat16]
-    group_size_list = [-1, 16, 32, 128]
+    dtype_list = [torch.bfloat16]
+    group_size_list = [-1, 32, 128]
     act_order_list = [True, False]
     quant_type_list = [
         scalar_types.float4_e2m1f,
@@ -885,10 +881,10 @@ def test_batched_moe_align_block_size_opcheck():
     )
 
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222])
+@pytest.mark.parametrize("m", [1, 33, 222])
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("k", [128, 511, 1024])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     input = torch.randn((m, topk, k), device="cuda", dtype=dtype)

@@ -7,6 +7,9 @@ from typing import Any
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @config
@@ -48,7 +51,15 @@ class PoolerConfig:
     """
 
     ## for classification models
-    activation: bool | None = None
+    softmax: float | None = None
+    """
+    softmax will be deprecated, please use use_activation instead.
+    """
+    activation: float | None = None
+    """
+    activation will be deprecated, please use use_activation instead.
+    """
+    use_activation: bool | None = None
     """
     Whether to apply activation function to the classification outputs.
     Defaults to True.
@@ -59,11 +70,6 @@ class PoolerConfig:
     """
 
     ## for reward models
-    softmax: bool | None = None
-    """
-    Whether to apply softmax to the reward outputs.
-    Defaults to True.
-    """
     step_tag_id: int | None = None
     """
     If set, only the score corresponding to the `step_tag_id` in the
@@ -76,6 +82,10 @@ class PoolerConfig:
     such as the token IDs of `good_token` and `bad_token` in the
     `math-shepherd-mistral-7b-prm` model.
     """
+
+    def __post_init__(self):
+        # raise deprecated warning for softmax and activation
+        self.use_activation = get_use_activation(self)
 
     def compute_hash(self) -> str:
         """
@@ -94,3 +104,19 @@ class PoolerConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+
+def get_use_activation(o: object):
+    if softmax := getattr(o, "softmax", None) is not None:
+        logger.warning_once(
+            "softmax will be deprecated, please use use_activation instead."
+        )
+        return softmax
+
+    if activation := getattr(o, "activation", None) is not None:
+        logger.warning_once(
+            "activation will be deprecated, please use use_activation instead."
+        )
+        return activation
+
+    return getattr(o, "use_activation", None)

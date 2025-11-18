@@ -52,6 +52,16 @@ prompts = [
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token: int | None = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"target_token value {target_token} {type(target_token)} is not int"
+            )
+
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
     ):
@@ -62,11 +72,14 @@ class DummyLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: BatchUpdate | None):
+        def extract_extra_arg(params: SamplingParams) -> int | None:
+            self.validate_params(params)
+            return params.extra_args and params.extra_args.get("target_token")
+
         process_dict_updates(
             self.req_info,
             batch_update,
-            lambda params, _, __: params.extra_args
-            and (params.extra_args.get("target_token")),
+            lambda params, _, __: extract_extra_arg(params),
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:

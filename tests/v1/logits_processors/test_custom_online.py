@@ -177,3 +177,32 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
 
         # Alternate whether to activate dummy logitproc for each request
         use_dummy_logitproc = not use_dummy_logitproc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_custom_logitsproc_arg(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    """Test that request with invalid custom logitsproc is rejected"""
+
+    prompt = "Hello, my name is"
+    # Pass invalid (non-int) target_token value to dummy logits processor
+    request_keyword_args: dict[str, Any] = {
+        **api_keyword_args,
+        "extra_body": {
+            "vllm_xargs": {DUMMY_LOGITPROC_ARG: "invalid_target_token_value"}
+        },
+    }
+
+    with pytest.raises(openai.OpenAIError) as exc_info:
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            **request_keyword_args,
+        )
+
+    assert "is not int" in str(exc_info.value)

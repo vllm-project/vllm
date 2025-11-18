@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 import uuid
 import warnings
-from functools import wraps
-from typing import Any, TypeVar
+from typing import Any
 
 import torch
 
@@ -41,12 +39,6 @@ def __dir__() -> list[str]:
 
 logger = init_logger(__name__)
 
-# This value is chosen to have a balance between ITL and TTFT. Note it is
-# not optimized for throughput.
-DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
-POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
-MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
@@ -57,60 +49,13 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # Possible string values of STR_BACKEND_ENV_VAR
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 
-T = TypeVar("T")
-
-
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
-    """
-    A replacement for `abc.ABC`.
-    When we use `abc.ABC`, subclasses will fail to instantiate
-    if they do not implement all abstract methods.
-    Here, we only require `raise NotImplementedError` in the
-    base class, and log a warning if the method is not implemented
-    in the subclass.
-    """
-
-    original_init = cls.__init__
-
-    def find_unimplemented_methods(self: object):
-        unimplemented_methods = []
-        for attr_name in dir(self):
-            # bypass inner method
-            if attr_name.startswith("_"):
-                continue
-
-            try:
-                attr = getattr(self, attr_name)
-                # get the func of callable method
-                if callable(attr):
-                    attr_func = attr.__func__
-            except AttributeError:
-                continue
-            src = inspect.getsource(attr_func)
-            if "NotImplementedError" in src:
-                unimplemented_methods.append(attr_name)
-        if unimplemented_methods:
-            method_names = ",".join(unimplemented_methods)
-            msg = f"Methods {method_names} not implemented in {self}"
-            logger.debug(msg)
-
-    @wraps(original_init)
-    def wrapped_init(self, *args, **kwargs) -> None:
-        original_init(self, *args, **kwargs)
-        find_unimplemented_methods(self)
-
-    type.__setattr__(cls, "__init__", wrapped_init)
-    return cls
 
 
 def length_from_prompt_token_ids_or_embeds(

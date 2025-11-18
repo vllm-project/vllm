@@ -3,9 +3,11 @@
 # install_prerequisites.py
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 
 # --- Configuration ---
 WHEELS_CACHE_HOME = os.environ.get("WHEELS_CACHE_HOME", "/tmp/wheels_cache")
@@ -18,6 +20,20 @@ NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 
 
 # --- Helper Functions ---
+def get_latest_nixl_version():
+    """Helper function to get latest release version of NIXL"""
+    try:
+        nixl_release_url = "https://api.github.com/repos/ai-dynamo/nixl/releases/latest"
+        with urllib.request.urlopen(nixl_release_url) as response:
+            data = json.load(response)
+            return data.get("tag_name", "0.7.0")
+    except Exception:
+        return "0.7.0"
+
+
+NIXL_VERSION = os.environ.get("NIXL_VERSION", get_latest_nixl_version())
+
+
 def run_command(command, cwd=".", env=None):
     """Helper function to run a shell command and check for errors."""
     print(f"--> Running command: {' '.join(command)} in '{cwd}'", flush=True)
@@ -37,7 +53,7 @@ def is_pip_package_installed(package_name):
 def find_nixl_wheel_in_cache(cache_dir):
     """Finds a nixl wheel file in the specified cache directory."""
     # The repaired wheel will have a 'manylinux' tag, but this glob still works.
-    search_pattern = os.path.join(cache_dir, "nixl*.whl")
+    search_pattern = os.path.join(cache_dir, f"nixl*{NIXL_VERSION}*.whl")
     wheels = glob.glob(search_pattern)
     if wheels:
         # Sort to get the most recent/highest version if multiple exist
@@ -146,6 +162,10 @@ def build_and_install_prerequisites(args):
     print("\n[2/3] Building NIXL wheel from source...", flush=True)
     if not os.path.exists(NIXL_DIR):
         run_command(["git", "clone", NIXL_REPO_URL, NIXL_DIR])
+    else:
+        run_command(["git", "fetch", "--tags"], cwd=NIXL_DIR)
+    run_command(["git", "checkout", NIXL_VERSION], cwd=NIXL_DIR)
+    print(f"--> Checked out NIXL version: {NIXL_VERSION}", flush=True)
 
     build_env = os.environ.copy()
     build_env["PKG_CONFIG_PATH"] = os.path.join(ucx_install_path, "lib", "pkgconfig")
@@ -203,7 +223,14 @@ def build_and_install_prerequisites(args):
             {os.path.basename(newly_built_wheel)}. Now installing...",
         flush=True,
     )
-    install_command = [sys.executable, "-m", "pip", "install", newly_built_wheel]
+    install_command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",  # w/o "no-deps", it will install cuda-torch
+        newly_built_wheel,
+    ]
     if args.force_reinstall:
         install_command.insert(-1, "--force-reinstall")
 

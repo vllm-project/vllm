@@ -22,7 +22,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
@@ -53,7 +52,6 @@ def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
     )
 
 
-@ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with

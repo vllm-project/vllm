@@ -81,8 +81,6 @@ TOP_KS = [1, 2, 6]
 DTYPES = [torch.float8_e4m3fn, torch.bfloat16]
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def torch_prepare(

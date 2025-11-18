@@ -266,14 +266,14 @@ class DeviceCommunicatorBase:
             module
             for module in model.modules()
             # TODO(bnell): Should use isinstance but can't.  Maybe search for
-            # presence of quant_method.init_prepare_finalize?
+            # presence of quant_method.maybe_init_modular_kernel?
             if (
                 module.__class__.__name__ == "FusedMoE"
                 or module.__class__.__name__ == "SharedFusedMoE"
             )
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module)
+            module.maybe_init_modular_kernel()
 
     def dispatch(
         self,
