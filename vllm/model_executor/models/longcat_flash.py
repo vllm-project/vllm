@@ -378,7 +378,8 @@ class LongcatMoe(nn.Module):
         )
         if zero_expert_result is not None:
             # Force shape alignment before addition to avoid dimension mismatch
-            # This handles cases where FusedMoE returns different hidden_size than expected
+            # This handles cases where FusedMoE returns different hidden_size
+            # than expected
             final_dim = final_hidden_states.size(-1)
             zero_dim = zero_expert_result.size(-1)
 

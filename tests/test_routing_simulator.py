@@ -98,7 +98,7 @@ def test_routing_strategy_integration(monkeypatch, device):
         envs.environment_variables[env_name] = lambda s=strategy: s
 
         # Test the select_experts method
-    topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=top_k,
@@ -108,16 +108,12 @@ def test_routing_strategy_integration(monkeypatch, device):
         )
 
         # Verify output shapes
-        assert topk_weights.shape == (num_tokens, top_k), (
-            f"Wrong weights shape for {strategy}"
-        )
+        assert topk_weights.shape == (num_tokens, top_k), f"Wrong weights shape for {strategy}"
         assert topk_ids.shape == (num_tokens, top_k), f"Wrong ids shape for {strategy}"
 
         # Verify expert IDs are valid
         assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
-        assert topk_ids.max() < num_experts, (
-            f"Invalid expert ID (too large) for {strategy}"
-        )
+        assert topk_ids.max() < num_experts, f"Invalid expert ID (too large) for {strategy}"
 
 
 def test_distribution_based_routing_with_custom_strategy():

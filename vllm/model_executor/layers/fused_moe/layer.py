@@ -1377,7 +1377,8 @@ class FusedMoE(CustomOp):
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif e_score_correction_bias is not None:
             # Align router_logits dimension with e_score_correction_bias if needed
-            # This handles cases where router_logits includes zero_experts but bias doesn't
+            # This handles cases where router_logits includes zero_experts
+            # but bias doesn't
             bias_dim = (
                 e_score_correction_bias.shape[-1]
                 if e_score_correction_bias.dim() > 0
