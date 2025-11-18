@@ -31,6 +31,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -747,7 +748,7 @@ class VisionTransformer(nn.Module):
     def __init__(self, args: VisionEncoderArgs):
         super().__init__()
         self.args = args
-        self.patch_conv = nn.Conv2d(
+        self.patch_conv = Conv2dLayer(
             in_channels=args.num_channels,
             out_channels=args.hidden_size,
             kernel_size=args.patch_size,
@@ -1212,7 +1213,7 @@ class PixtralHFVisionModel(nn.Module):
 
         self.config = config
 
-        self.patch_conv = nn.Conv2d(
+        self.patch_conv = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=config.hidden_size,
             kernel_size=config.patch_size,
