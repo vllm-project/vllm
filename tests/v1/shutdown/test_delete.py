@@ -19,7 +19,6 @@ MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("send_one_request", [False, True])
@@ -62,10 +61,10 @@ async def test_async_llm_delete(
     wait_for_gpu_memory_to_clear(
         devices=devices,
         threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+        timeout_s=SHUTDOWN_TEST_TIMEOUT_SEC,
     )
 
 
-@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("enable_multiprocessing", [True])
@@ -111,4 +110,5 @@ def test_llm_delete(
         wait_for_gpu_memory_to_clear(
             devices=devices,
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+            timeout_s=SHUTDOWN_TEST_TIMEOUT_SEC,
         )
