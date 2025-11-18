@@ -9,13 +9,23 @@ import torch
 from utils import _extract_step_logprobs, _random_prompt, skip_unsupported
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
+
+BACKENDS: list[str] = [
+    "FLASH_ATTN",
+    "FLASHINFER",
+]
+
+capability = current_platform.get_device_capability()  # type: ignore[attr-defined]
+if capability is not None and capability.major == 9:
+    BACKENDS.append("FLASH_ATTN_MLA")
 
 
 @skip_unsupported
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "backend",
-    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+    BACKENDS,
 )
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     backend, monkeypatch: pytest.MonkeyPatch
@@ -48,6 +58,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    # if an MLA backend is requested but the model is still the default Qwen3,
+    # switch to a known DeepSeek-V2-Lite-Chat
+    if backend.endswith("MLA") and model == "Qwen/Qwen3-1.7B":
+        model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
@@ -150,7 +164,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 @skip_unsupported
 @pytest.mark.parametrize(
     "backend",
-    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+    BACKENDS,
 )
 @pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
@@ -161,6 +175,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    if backend.endswith("MLA") and model_name == "Qwen/Qwen3-1.7B":
+        model_name = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
@@ -369,7 +385,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 @skip_unsupported
 @pytest.mark.parametrize(
     "backend",
-    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+    BACKENDS,
 )
 def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     """
@@ -378,6 +394,8 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
     model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    if backend.endswith("MLA") and model == "Qwen/Qwen3-1.7B":
+        model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
     llm = LLM(
         model=model,
@@ -419,7 +437,7 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
 @skip_unsupported
 @pytest.mark.parametrize(
     "backend",
-    ["FLASH_ATTN", "FLASHINFER", "FLASH_ATTN_MLA", "FLASHINFER_MLA", "TRITON_MLA"],
+    BACKENDS,
 )
 @pytest.mark.forked
 def test_logprobs_without_batch_invariance_should_fail(
