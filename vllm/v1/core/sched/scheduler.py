@@ -503,7 +503,7 @@ class Scheduler(SchedulerInterface):
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
-                        # If we disable chunked_prefill, we can stop the scheduling here.
+                        # If chunked_prefill is disabled, we can stop the scheduling here.
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
