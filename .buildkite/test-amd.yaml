@@ -496,7 +496,7 @@ steps:
   # Run unit tests defined directly under compile/,
   # not including subdirectories, which are usually heavier
   # tests covered elsewhere.
-  - pytest -v -s compile/test_*.py
+  - find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \;
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -510,7 +510,7 @@ steps:
   commands:
   # Run smoke tests under fullgraph directory, except test_full_graph.py
   # as it is a heavy test that is covered in other steps.
-  - pytest -v -s compile/fullgraph/ --ignore=compile/fullgraph/test_full_graph.py
+  - find compile/fullgraph/ -name 'test_*.py' -not name 'test_full_graph.py' -exec pytest -s -v {} \;
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
