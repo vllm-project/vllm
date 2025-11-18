@@ -9,7 +9,7 @@ on:
 jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
