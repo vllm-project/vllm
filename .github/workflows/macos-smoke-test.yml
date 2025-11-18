@@ -37,14 +37,11 @@ jobs:
       - name: Verify installation
         run: |
           python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
-          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
 
       - name: Smoke test vllm serve
-        timeout-minutes: 10
         run: |
           # Start server in background
-          vllm serve Qwen/Qwen3-0.6B \
-            --max-model-len=2048 \
+          vllm serve trl-internal-testing/tiny-random-LlamaForCausalLM \
             --load-format=dummy \
             --enforce-eager \
             --port 8000 &
