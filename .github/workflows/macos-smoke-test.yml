@@ -69,7 +69,7 @@ jobs:
           curl -f http://localhost:8000/v1/completions \
             -H "Content-Type: application/json" \
             -d '{
-              "model": "Qwen/Qwen3-0.6B",
+              "model": "trl-internal-testing/tiny-random-LlamaForCausalLM",
               "prompt": "Hello",
               "max_tokens": 5
             }'
