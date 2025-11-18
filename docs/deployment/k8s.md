@@ -1,23 +1,25 @@
----
-title: Using Kubernetes
----
-[](){ #deployment-k8s }
+# Using Kubernetes
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-* [Deployment with CPUs](#deployment-with-cpus)
-* [Deployment with GPUs](#deployment-with-gpus)
+- [Deployment with CPUs](#deployment-with-cpus)
+- [Deployment with GPUs](#deployment-with-gpus)
+- [Troubleshooting](#troubleshooting)
+    - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
+- [Conclusion](#conclusion)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
-* [Helm](frameworks/helm.md)
-* [InftyAI/llmaz](integrations/llmaz.md)
-* [KServe](integrations/kserve.md)
-* [kubernetes-sigs/lws](frameworks/lws.md)
-* [meta-llama/llama-stack](integrations/llamastack.md)
-* [substratusai/kubeai](integrations/kubeai.md)
-* [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
-* [vllm-project/production-stack](integrations/production-stack.md)
+- [Helm](frameworks/helm.md)
+- [InftyAI/llmaz](integrations/llmaz.md)
+- [KAITO](integrations/kaito.md)
+- [KServe](integrations/kserve.md)
+- [KubeRay](integrations/kuberay.md)
+- [kubernetes-sigs/lws](frameworks/lws.md)
+- [meta-llama/llama-stack](integrations/llamastack.md)
+- [substratusai/kubeai](integrations/kubeai.md)
+- [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
+- [vllm-project/production-stack](integrations/production-stack.md)
 
 ## Deployment with CPUs
 
@@ -26,89 +28,96 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vllm-models
-spec:
-  accessModes:
-    - ReadWriteOnce
-  volumeMode: Filesystem
-  resources:
-    requests:
-      storage: 50Gi
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: hf-token-secret
-type: Opaque
-data:
-  token: $(HF_TOKEN)
-EOF
-```
+??? console "Config"
+
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: vllm-models
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      volumeMode: Filesystem
+      resources:
+        requests:
+          storage: 50Gi
+    ---
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: hf-token-secret
+    type: Opaque
+    stringData:
+      token: "REPLACE_WITH_TOKEN"
+    EOF
+    ```
+
+Here, the `token` field stores your **Hugging Face access token**. For details on how to generate a token,
+see the [Hugging Face documentation](https://huggingface.co/docs/hub/en/security-tokens).
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vllm
-  template:
+??? console "Config"
+
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
-      labels:
-        app.kubernetes.io/name: vllm
+      name: vllm-server
     spec:
-      containers:
-      - name: vllm
-        image: vllm/vllm-openai:latest
-        command: ["/bin/sh", "-c"]
-        args: [
-          "vllm serve meta-llama/Llama-3.2-1B-Instruct"
-        ]
-        env:
-        - name: HUGGING_FACE_HUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token-secret
-              key: token
-        ports:
-          - containerPort: 8000
-        volumeMounts:
+      replicas: 1
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: vllm
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: vllm
+        spec:
+          containers:
+          - name: vllm
+            image: vllm/vllm-openai:latest
+            command: ["/bin/sh", "-c"]
+            args: [
+              "vllm serve meta-llama/Llama-3.2-1B-Instruct"
+            ]
+            env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            ports:
+              - containerPort: 8000
+            volumeMounts:
+              - name: llama-storage
+                mountPath: /root/.cache/huggingface
+          volumes:
           - name: llama-storage
-            mountPath: /root/.cache/huggingface
-      volumes:
-      - name: llama-storage
-        persistentVolumeClaim:
-          claimName: vllm-models
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-server
-spec:
-  selector:
-    app.kubernetes.io/name: vllm
-  ports:
-  - protocol: TCP
-    port: 8000
-    targetPort: 8000
-  type: ClusterIP
-EOF
-```
+            persistentVolumeClaim:
+              claimName: vllm-models
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: vllm-server
+    spec:
+      selector:
+        app.kubernetes.io/name: vllm
+      ports:
+      - protocol: TCP
+        port: 8000
+        targetPort: 8000
+      type: ClusterIP
+    EOF
+    ```
 
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
-```console
+```bash
 kubectl logs -l app.kubernetes.io/name=vllm
 ...
 INFO:     Started server process [1]
@@ -124,6 +133,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 1. Create a PVC, Secret and Deployment for vLLM
 
       PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1
@@ -141,6 +153,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         volumeMode: Filesystem
       ```
 
+      </details>
+
       Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
 
       ```yaml
@@ -153,12 +167,15 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       stringData:
         token: "REPLACE_WITH_TOKEN"
       ```
-
+  
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
       Here are two examples for using NVIDIA GPU and AMD GPU.
 
       NVIDIA GPU:
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -195,7 +212,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
               ]
               env:
-              - name: HUGGING_FACE_HUB_TOKEN
+              - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
@@ -230,9 +247,14 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 5
       ```
 
+      </details>
+
       AMD GPU:
 
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -279,7 +301,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
               ]
               env:
-              - name: HUGGING_FACE_HUB_TOKEN
+              - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
@@ -302,11 +324,16 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 mountPath: /dev/shm
       ```
 
+      </details>
+
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. Create a Kubernetes Service for vLLM
 
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1
@@ -327,18 +354,20 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         type: ClusterIP
       ```
 
+      </details>
+
 3. Deploy and Test
 
       Apply the deployment and service configurations using `kubectl apply -f <filename>`:
 
-      ```console
+      ```bash
       kubectl apply -f deployment.yaml
       kubectl apply -f service.yaml
       ```
 
       To test the deployment, run the following `curl` command:
 
-      ```console
+      ```bash
       curl http://mistral-7b.default.svc.cluster.local/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
@@ -350,6 +379,17 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Troubleshooting
+
+### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
+
+If the startup or readiness probe failureThreshold is too low for the time needed to start up the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+
+1. container log contains "KeyboardInterrupt: terminated"
+2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`
+
+To mitigate, increase the failureThreshold to allow more time for the model server to start serving. You can identify an ideal failureThreshold by removing the probes from the manifest and measuring how much time it takes for the model server to show it's ready to serve.
 
 ## Conclusion
 

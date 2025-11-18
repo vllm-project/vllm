@@ -1,13 +1,10 @@
----
-title: LoRA Adapters
----
-[](){ #lora-adapter }
+# LoRA Adapters
 
 This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09685) with vLLM on top of a base model.
 
 LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vllm.model_executor.models.interfaces.SupportsLoRA].
 
-Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
+Adapters can be efficiently served on a per-request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
 ```python
@@ -29,31 +26,33 @@ We can now submit the prompts and call `llm.generate` with the `lora_request` pa
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
-```python
-sampling_params = SamplingParams(
-    temperature=0,
-    max_tokens=256,
-    stop=["[/assistant]"]
-)
+??? code
 
-prompts = [
-     "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
-     "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
-]
+    ```python
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=256,
+        stop=["[/assistant]"],
+    )
 
-outputs = llm.generate(
-    prompts,
-    sampling_params,
-    lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
-)
-```
+    prompts = [
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
+    ]
 
-Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+    outputs = llm.generate(
+        prompts,
+        sampling_params,
+        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path),
+    )
+    ```
+
+Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 
 LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
-`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kickoff the server:
+`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kick off the server:
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf \
@@ -68,24 +67,26 @@ The server entrypoint accepts all other LoRA configuration parameters (`max_lora
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
-```bash
-curl localhost:8000/v1/models | jq .
-{
-    "object": "list",
-    "data": [
-        {
-            "id": "meta-llama/Llama-2-7b-hf",
-            "object": "model",
-            ...
-        },
-        {
-            "id": "sql-lora",
-            "object": "model",
-            ...
-        }
-    ]
-}
-```
+??? console "Command"
+
+    ```bash
+    curl localhost:8000/v1/models | jq .
+    {
+        "object": "list",
+        "data": [
+            {
+                "id": "meta-llama/Llama-2-7b-hf",
+                "object": "model",
+                ...
+            },
+            {
+                "id": "sql-lora",
+                "object": "model",
+                ...
+            }
+        ]
+    }
+    ```
 
 Requests can specify the LoRA adapter as if it were any other model via the `model` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
@@ -118,6 +119,7 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 ```
 
 ### Using API Endpoints
+
 Loading a LoRA Adapter:
 
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
@@ -155,6 +157,7 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
 ```
 
 ### Using Plugins
+
 Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
@@ -168,36 +171,36 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    Example of a simple S3 LoRAResolver implementation:
+    ??? code "Example of a simple S3 LoRAResolver implementation"
 
-    ```python
-    import os
-    import s3fs
-    from vllm.lora.request import LoRARequest
-    from vllm.lora.resolver import LoRAResolver
+        ```python
+        import os
+        import s3fs
+        from vllm.lora.request import LoRARequest
+        from vllm.lora.resolver import LoRAResolver
 
-    class S3LoRAResolver(LoRAResolver):
-        def __init__(self):
-            self.s3 = s3fs.S3FileSystem()
-            self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
-            self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
+        class S3LoRAResolver(LoRAResolver):
+            def __init__(self):
+                self.s3 = s3fs.S3FileSystem()
+                self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
+                self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
 
-        async def resolve_lora(self, base_model_name, lora_name):
-            s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
-            local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+            async def resolve_lora(self, base_model_name, lora_name):
+                s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+                local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
 
-            # Download the LoRA from S3 to the local path
-            await self.s3._get(
-                s3_path, local_path, recursive=True, maxdepth=1
-            )
+                # Download the LoRA from S3 to the local path
+                await self.s3._get(
+                    s3_path, local_path, recursive=True, maxdepth=1
+                )
 
-            lora_request = LoRARequest(
-                lora_name=lora_name,
-                lora_path=local_path,
-                lora_int_id=abs(hash(lora_name))
-            )
-            return lora_request
-    ```
+                lora_request = LoRARequest(
+                    lora_name=lora_name,
+                    lora_path=local_path,
+                    lora_int_id=abs(hash(lora_name)),
+                )
+                return lora_request
+        ```
 
 2. Register `LoRAResolver` plugin.
 
@@ -234,38 +237,133 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
-```bash
-$ curl http://localhost:8000/v1/models
+??? console "Command output"
 
-{
-    "object": "list",
-    "data": [
-        {
-        "id": "meta-llama/Llama-2-7b-hf",
-        "object": "model",
-        "created": 1715644056,
-        "owned_by": "vllm",
-        "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
-        "parent": null,
-        "permission": [
+    ```bash
+    $ curl http://localhost:8000/v1/models
+
+    {
+        "object": "list",
+        "data": [
             {
-            .....
+            "id": "meta-llama/Llama-2-7b-hf",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
+            "parent": null,
+            "permission": [
+                {
+                .....
+                }
+            ]
+            },
+            {
+            "id": "sql-lora",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
+            "parent": meta-llama/Llama-2-7b-hf,
+            "permission": [
+                {
+                ....
+                }
+            ]
             }
         ]
-        },
-        {
-        "id": "sql-lora",
-        "object": "model",
-        "created": 1715644056,
-        "owned_by": "vllm",
-        "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
-        "parent": meta-llama/Llama-2-7b-hf,
-        "permission": [
-            {
-            ....
-            }
+    }
+    ```
+
+## Default LoRA Models For Multimodal Models
+
+Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-3.3-8b) and [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) multimodal, contain LoRA adapter(s) that are expected to always be applied when a given modality is present. This can be a bit tedious to manage with the above approaches, as it requires the user to send the `LoRARequest` (offline) or to filter requests between the base model and LoRA model (server) depending on the content of the request's multimodal data.
+
+To this end, we allow registration of default multimodal LoRAs to handle this automatically, where users can map each modality to a LoRA adapter to automatically apply it when the corresponding inputs are present. Note that currently, we only allow one LoRA per prompt; if several modalities are provided, each of which are registered to a given modality, none of them will be applied.
+
+??? code "Example usage for offline inference"
+
+    ```python
+    from transformers import AutoTokenizer
+    from vllm import LLM, SamplingParams
+    from vllm.assets.audio import AudioAsset
+
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    def get_prompt(question: str, has_audio: bool):
+        """Build the input prompt to send to vLLM."""
+        if has_audio:
+            question = f"<|audio|>{question}"
+        chat = [
+            {"role": "user", "content": question},
         ]
+        return tokenizer.apply_chat_template(chat, tokenize=False)
+
+
+    llm = LLM(
+        model=model_id,
+        enable_lora=True,
+        max_lora_rank=64,
+        max_model_len=2048,
+        limit_mm_per_prompt={"audio": 1},
+        # Will always pass a `LoRARequest` with the `model_id`
+        # whenever audio is contained in the request data.
+        default_mm_loras = {"audio": model_id},
+        enforce_eager=True,
+    )
+
+    question = "can you transcribe the speech into a written format?"
+    prompt_with_audio = get_prompt(
+        question=question,
+        has_audio=True,
+    )
+    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+
+    inputs = {
+        "prompt": prompt_with_audio,
+        "multi_modal_data": {
+            "audio": audio,
         }
-    ]
-}
+    }
+
+
+    outputs = llm.generate(
+        inputs,
+        sampling_params=SamplingParams(
+            temperature=0.2,
+            max_tokens=64,
+        ),
+    )
+    ```
+
+You can also pass a json dictionary of `--default-mm-loras` mapping modalities to LoRA model IDs. For example, when starting the server:
+
+```bash
+vllm serve ibm-granite/granite-speech-3.3-2b \
+    --max-model-len 2048 \
+    --enable-lora \
+    --default-mm-loras '{"audio":"ibm-granite/granite-speech-3.3-2b"}' \
+    --max-lora-rank 64
+```
+
+Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
+
+## Using Tips
+
+### Configuring `max_lora_rank`
+
+The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:
+
+- **Set it to the maximum rank** among all LoRA adapters you plan to use
+- **Avoid setting it too high** - using a value much larger than needed wastes memory and can cause performance issues
+
+For example, if your LoRA adapters have ranks [16, 32, 64], use `--max-lora-rank 64` rather than 256
+
+```bash
+# Good: matches actual maximum rank
+vllm serve model --enable-lora --max-lora-rank 64
+
+# Bad: unnecessarily high, wastes memory
+vllm serve model --enable-lora --max-lora-rank 256
 ```

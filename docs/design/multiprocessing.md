@@ -2,13 +2,13 @@
 
 ## Debugging
 
-Please see the [Troubleshooting][troubleshooting-python-multiprocessing]
+Please see the [Troubleshooting](../usage/troubleshooting.md#python-multiprocessing)
 page for information on known issues and how to solve them.
 
 ## Introduction
 
-!!! warning
-    The source code references are to the state of the code at the time of writing in December, 2024.
+!!! important
+    The source code references are to the state of the code at the time of writing in December 2024.
 
 The use of Python multiprocessing in vLLM is complicated by:
 
@@ -77,12 +77,12 @@ The `multiproc_xpu_executor` forces the use of `spawn`.
 
 There are other miscellaneous places hard-coding the use of `spawn`:
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L135>
+- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/all_reduce_utils.py#L135>
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/entrypoints/openai/api_server.py#L184>
 
 Related PRs:
 
-- <gh-pr:8823>
+- <https://github.com/vllm-project/vllm/pull/8823>
 
 ## Prior State in v1
 
@@ -123,7 +123,7 @@ what is happening. First, a log message from vLLM:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/usage/debugging.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 

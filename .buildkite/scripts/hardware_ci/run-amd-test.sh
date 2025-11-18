@@ -59,7 +59,7 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
+echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
@@ -78,21 +78,13 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 
-if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"pytest -v -s basic_correctness/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
   commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
 fi
 
-if [[ $commands == *"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"* ]]; then
-  commands=${commands//"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"/"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2 and not BambaForCausalLM and not Gemma2ForCausalLM and not Grok1ModelForCausalLM and not Zamba2ForCausalLM and not Gemma2Model and not GritLM'"}
-fi
-
-if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"pytest -v -s compile/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s lora"* ]]; then
   commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
@@ -107,10 +99,8 @@ fi
 
 if [[ $commands == *" kernels/attention"* ]]; then
   commands="${commands} \
-  --ignore=kernels/attention/stest_attention_selector.py \
-  --ignore=kernels/attention/test_blocksparse_attention.py \
-  --ignore=kernels/attention/test_encoder_decoder_attn.py \
   --ignore=kernels/attention/test_attention_selector.py \
+  --ignore=kernels/attention/test_encoder_decoder_attn.py \
   --ignore=kernels/attention/test_flash_attn.py \
   --ignore=kernels/attention/test_flashinfer.py \
   --ignore=kernels/attention/test_prefix_prefill.py \
@@ -123,7 +113,6 @@ fi
 if [[ $commands == *" kernels/quantization"* ]]; then
   commands="${commands} \
   --ignore=kernels/quantization/test_int8_quant.py \
-  --ignore=kernels/quantization/test_aqlm.py \
   --ignore=kernels/quantization/test_machete_mm.py \
   --ignore=kernels/quantization/test_block_fp8.py \
   --ignore=kernels/quantization/test_block_int8.py \
@@ -167,15 +156,8 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_chat.py \
   --ignore=entrypoints/llm/test_accuracy.py \
   --ignore=entrypoints/llm/test_init.py \
-  --ignore=entrypoints/llm/test_generate_multiple_loras.py \
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
-
-#Obsolete currently
-##ignore certain Entrypoints/llm tests
-#if [[ $commands == *" && pytest -v -s entrypoints/llm/test_guided_generate.py"* ]]; then
-#  commands=${commands//" && pytest -v -s entrypoints/llm/test_guided_generate.py"/" "}
-#fi
 
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
 # --ignore=entrypoints/openai/test_embedding.py \
@@ -187,19 +169,28 @@ fi
 PARALLEL_JOB_COUNT=8
 MYPYTHONPATH=".."
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
+# Test that we're launching on the machine that has
+# proper access to GPUs
+render_gid=$(getent group render | cut -d: -f3)
+if [[ -z "$render_gid" ]]; then
+  echo "Error: 'render' group not found. This is required for GPU access." >&2
+  exit 1
+fi
+
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs.
 if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used   
-  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+  # assign job count as the number of shards used
+  commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     # assign shard-id for each shard
-    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
+    commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
     echo "Shard ${GPU} commands:$commands_gpu"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network=host \
         --shm-size=16gb \
+        --group-add "$render_gid" \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
@@ -231,8 +222,8 @@ else
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network=host \
           --shm-size=16gb \
+          --group-add "$render_gid" \
           --rm \
-          -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
           -e AWS_SECRET_ACCESS_KEY \

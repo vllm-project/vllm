@@ -2,30 +2,41 @@
 
 The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
 
-```
+```bash
 vllm --help
 ```
 
 Available Commands:
 
-```
+```bash
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
 ## serve
 
-Start the vLLM OpenAI Compatible API server.
+Starts the vLLM OpenAI Compatible API server.
 
-Examples:
+Start with a model:
 
 ```bash
-# Start with a model
 vllm serve meta-llama/Llama-2-7b-hf
+```
 
-# Specify the port
+Specify the port:
+
+```bash
 vllm serve meta-llama/Llama-2-7b-hf --port 8100
+```
 
-# Check with --help for more options
+Serve over a Unix domain socket:
+
+```bash
+vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
+```
+
+Check with --help for more options:
+
+```bash
 # To list all groups
 vllm serve --help=listgroup
 
@@ -37,13 +48,16 @@ vllm serve --help=max-num-seqs
 
 # To search by keyword
 vllm serve --help=max
+
+# To view full help with pager (less/more)
+vllm serve --help=page
 ```
+
+See [vllm serve](./serve.md) for the full reference of all available arguments.
 
 ## chat
 
 Generate chat completions via the running API server.
-
-Examples:
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -56,11 +70,11 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm chat --quick "hi"
 ```
 
+See [vllm chat](./chat.md) for the full reference of all available arguments.
+
 ## complete
 
 Generate text completions based on the given prompt via the running API server.
-
-Examples:
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -72,6 +86,8 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
 ```
+
+See [vllm complete](./complete.md) for the full reference of all available arguments.
 
 ## bench
 
@@ -89,8 +105,6 @@ vllm bench {latency, serve, throughput}
 
 Benchmark the latency of a single batch of requests.
 
-Example:
-
 ```bash
 vllm bench latency \
     --model meta-llama/Llama-3.2-1B-Instruct \
@@ -100,11 +114,11 @@ vllm bench latency \
     --load-format dummy
 ```
 
+See [vllm bench latency](./bench/latency.md) for the full reference of all available arguments.
+
 ### serve
 
 Benchmark the online serving throughput.
-
-Example:
 
 ```bash
 vllm bench serve \
@@ -116,11 +130,11 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
+
 ### throughput
 
 Benchmark offline inference throughput.
-
-Example:
 
 ```bash
 vllm bench throughput \
@@ -130,6 +144,8 @@ vllm bench throughput \
     --enforce-eager \
     --load-format dummy
 ```
+
+See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
 
 ## collect-env
 
@@ -143,21 +159,25 @@ vllm collect-env
 
 Run batch prompts and write results to file.
 
-Examples:
+Running with a local file:
 
 ```bash
-# Running with a local file
 vllm run-batch \
     -i offline_inference/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
+```
 
-# Using remote file
+Using remote file:
+
+```bash
 vllm run-batch \
     -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
+
+See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
 
 ## More Help
 

@@ -1,7 +1,4 @@
----
-title: INT8 W8A8
----
-[](){ #int8 }
+# INT8 W8A8
 
 vLLM supports quantizing weights and activations to INT8 for memory savings and inference acceleration.
 This quantization method is particularly useful for reducing model size while maintaining good performance.
@@ -9,20 +6,24 @@ This quantization method is particularly useful for reducing model size while ma
 Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int8-llms-for-vllm-668ec32c049dca0369816415).
 
 !!! note
-    INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper, Blackwell).
+    INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper).
+
+!!! warning
+    **Blackwell GPU Limitation**: INT8 is not supported on compute capability >= 100 (e.g., RTX 6000 Blackwell).
+    Use [FP8 quantization](fp8.md) instead, or run on Hopper/Ada/Ampere architectures.
 
 ## Prerequisites
 
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
-```console
+```bash
 pip install llmcompressor
 ```
 
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
-```console
-pip install vllm lm-eval==0.4.4
+```bash
+pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 ```
 
 ## Quantization Process
@@ -43,7 +44,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
+    MODEL_ID,
+    device_map="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
@@ -54,54 +57,60 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-```python
-from datasets import load_dataset
+??? code
 
-NUM_CALIBRATION_SAMPLES = 512
-MAX_SEQUENCE_LENGTH = 2048
+    ```python
+    from datasets import load_dataset
 
-# Load and preprocess the dataset
-ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
-ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+    NUM_CALIBRATION_SAMPLES = 512
+    MAX_SEQUENCE_LENGTH = 2048
 
-def preprocess(example):
-    return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
-ds = ds.map(preprocess)
+    # Load and preprocess the dataset
+    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+    ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
 
-def tokenize(sample):
-    return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
-ds = ds.map(tokenize, remove_columns=ds.column_names)
-```
+    def preprocess(example):
+        return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+    ds = ds.map(preprocess)
+
+    def tokenize(sample):
+        return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
+    ds = ds.map(tokenize, remove_columns=ds.column_names)
+    ```
+
+</details>
 
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
 
-```python
-from llmcompressor.transformers import oneshot
-from llmcompressor.modifiers.quantization import GPTQModifier
-from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+??? code
 
-# Configure the quantization algorithms
-recipe = [
-    SmoothQuantModifier(smoothing_strength=0.8),
-    GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
-]
+    ```python
+    from llmcompressor.transformers import oneshot
+    from llmcompressor.modifiers.quantization import GPTQModifier
+    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
-# Apply quantization
-oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-)
+    # Configure the quantization algorithms
+    recipe = [
+        SmoothQuantModifier(smoothing_strength=0.8),
+        GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
+    ]
 
-# Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
-SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
-tokenizer.save_pretrained(SAVE_DIR)
-```
+    # Apply quantization
+    oneshot(
+        model=model,
+        dataset=ds,
+        recipe=recipe,
+        max_seq_length=MAX_SEQUENCE_LENGTH,
+        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    )
+
+    # Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
+    SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
+    model.save_pretrained(SAVE_DIR, save_compressed=True)
+    tokenizer.save_pretrained(SAVE_DIR)
+    ```
 
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 
@@ -111,13 +120,14 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
 
-```console
-$ lm_eval --model vllm \
+```bash
+lm_eval --model vllm \
   --model_args pretrained="./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token",add_bos_token=true \
   --tasks gsm8k \
   --num_fewshot 5 \

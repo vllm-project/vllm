@@ -31,22 +31,22 @@ Features that fall under this policy include (at a minimum) the following:
 The deprecation process consists of several clearly defined stages that span
 multiple Y releases:
 
-**1. Deprecated (Still On By Default)**
+### 1. Deprecated (Still On By Default)
 
 - **Action**: Feature is marked as deprecated.
 - **Timeline**: A removal version is explicitly stated in the deprecation
 warning (e.g., "This will be removed in v0.10.0").
 - **Communication**: Deprecation is noted in the following, as applicable:
-  - Help strings
-  - Log output
-  - API responses
-  - `/metrics` output (for metrics features)
-  - User-facing documentation
-  - Release notes
-  - GitHub Issue (RFC) for feedback
-  - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
+    - Help strings
+    - Log output
+    - API responses
+    - `/metrics` output (for metrics features)
+    - User-facing documentation
+    - Release notes
+    - GitHub Issue (RFC) for feedback
+    - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
 
-**2.Deprecated (Off By Default)**
+### 2.Deprecated (Off By Default)
 
 - **Action**: Feature is disabled by default, but can still be re-enabled via a
 CLI flag or environment variable. Feature throws an error when used without
@@ -55,7 +55,7 @@ re-enabling.
 while signaling imminent removal. Ensures any remaining usage is clearly
 surfaced and blocks silent breakage before full removal.
 
-**3. Removed**
+### 3. Removed
 
 - **Action**: Feature is completely removed from the codebase.
 - **Note**: Only features that have passed through the previous deprecation

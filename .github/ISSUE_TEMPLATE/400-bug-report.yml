@@ -8,6 +8,16 @@ body:
   attributes:
     value: >
       #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+sort%3Acreated-desc+).
+- type: markdown
+  attributes:
+    value: |
+      ⚠️ **SECURITY WARNING:** Please review any text you paste to ensure it does not contain sensitive information such as:
+      - API tokens or keys (e.g., Hugging Face tokens, OpenAI API keys)
+      - Passwords or authentication credentials
+      - Private URLs or endpoints
+      - Personal or confidential data
+      
+      Consider redacting or replacing sensitive values with placeholders like `<YOUR_TOKEN_HERE>` when sharing configuration or code examples.
 - type: textarea
   attributes:
     label: Your current environment

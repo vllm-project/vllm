@@ -1,7 +1,4 @@
----
-title: LiteLLM
----
-[](){ #deployment-litellm }
+# LiteLLM
 
 [LiteLLM](https://github.com/BerriAI/litellm) call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
 
@@ -16,9 +13,9 @@ And LiteLLM supports all models on VLLM.
 
 ## Prerequisites
 
-- Setup vLLM and litellm environment
+Set up the vLLM and litellm environment:
 
-```console
+```bash
 pip install vllm litellm
 ```
 
@@ -26,39 +23,42 @@ pip install vllm litellm
 
 ### Chat completion
 
-- Start the vLLM server with the supported chat completion model, e.g.
+1. Start the vLLM server with the supported chat completion model, e.g.
 
-```console
-vllm serve qwen/Qwen1.5-0.5B-Chat
-```
+    ```bash
+    vllm serve qwen/Qwen1.5-0.5B-Chat
+    ```
 
-- Call it with litellm:
+1. Call it with litellm:
 
-```python
-import litellm 
+??? code
 
-messages = [{ "content": "Hello, how are you?","role": "user"}]
+    ```python
+    import litellm 
 
-# hosted_vllm is prefix key word and necessary
-response = litellm.completion(
-            model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
-            messages=messages,
-            api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
-            temperature=0.2,
-            max_tokens=80)
+    messages = [{"content": "Hello, how are you?", "role": "user"}]
 
-print(response)
-```
+    # hosted_vllm is prefix key word and necessary
+    response = litellm.completion(
+        model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
+        messages=messages,
+        api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
+        temperature=0.2,
+        max_tokens=80,
+    )
+
+    print(response)
+    ```
 
 ### Embeddings
 
-- Start the vLLM server with the supported embedding model, e.g.
+1. Start the vLLM server with the supported embedding model, e.g.
 
-```console
-vllm serve BAAI/bge-base-en-v1.5
-```
+    ```bash
+    vllm serve BAAI/bge-base-en-v1.5
+    ```
 
-- Call it with litellm:
+1. Call it with litellm:
 
 ```python
 from litellm import embedding   

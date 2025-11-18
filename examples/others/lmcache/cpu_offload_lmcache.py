@@ -17,7 +17,8 @@ Usage:
             (Without enable_chunked_prefill)
 
 Note that `lmcache` is needed to run this example.
-Requirements: Linux, Python: 3.10 or higher, CUDA: 12.1
+Requirements:
+https://docs.lmcache.ai/getting_started/installation.html#prerequisites
 Learn more about LMCache environment setup, please refer to:
 https://docs.lmcache.ai/getting_started/installation.html
 """
@@ -28,15 +29,15 @@ import os
 import time
 from dataclasses import asdict
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
 
-def setup_environment_variables(vllm_version: str):
+def setup_environment_variables():
     # LMCache-related environment variables
     # Use experimental features in LMCache
     os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
@@ -46,12 +47,10 @@ def setup_environment_variables(vllm_version: str):
     os.environ["LMCACHE_LOCAL_CPU"] = "True"
     # Set local CPU memory limit to 5.0 GB
     os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
-    if vllm_version == "v0":
-        os.environ["VLLM_USE_V1"] = "0"
 
 
 @contextlib.contextmanager
-def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str):
+def build_llm_with_lmcache(lmcache_connector: str, model: str):
     ktc = KVTransferConfig(
         kv_connector=lmcache_connector,
         kv_role="kv_both",
@@ -59,21 +58,12 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
-    if vllm_version == "v0":
-        llm_args = EngineArgs(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-            enable_chunked_prefill=True,  # Only in v0
-        )
-    else:
-        llm_args = EngineArgs(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-        )
+    llm_args = EngineArgs(
+        model=model,
+        kv_transfer_config=ktc,
+        max_model_len=8000,
+        gpu_memory_utilization=0.8,
+    )
 
     llm = LLM(**asdict(llm_args))
     try:
@@ -115,18 +105,10 @@ def parse_args():
 
 
 def main():
-    args = parse_args()
-
-    if args.version == "v0":
-        lmcache_connector = "LMCacheConnector"
-        model = "mistralai/Mistral-7B-Instruct-v0.2"
-    else:
-        lmcache_connector = "LMCacheConnectorV1"
-        model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-
-    setup_environment_variables(args.version)
-
-    with build_llm_with_lmcache(lmcache_connector, model, args.version) as llm:
+    lmcache_connector = "LMCacheConnectorV1"
+    model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    setup_environment_variables()
+    with build_llm_with_lmcache(lmcache_connector, model) as llm:
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         shared_prompt = "Hello, how are you?" * 1000

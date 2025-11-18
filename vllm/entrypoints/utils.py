@@ -2,25 +2,45 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import dataclasses
 import functools
 import os
-from typing import Any, Optional
+from argparse import Namespace
+from pathlib import Path
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.config import ModelConfig
+from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    load_chat_template,
+    resolve_hf_chat_template,
+    resolve_mistral_chat_template,
+)
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    StreamOptions,
+)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.transformers_utils.tokenizers import MistralTokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
-    "Tip: Use `vllm [serve|run-batch] --help=<keyword>` "
-    "to explore arguments from help.\n"
-    "   - To view a argument group:     --help=ModelConfig\n"
-    "   - To view a single argument:    --help=max-num-seqs\n"
-    "   - To search by keyword:         --help=max\n"
-    "   - To list all groups:           --help=listgroup")
+    "For full list:            vllm {subcmd} --help=all\n"
+    "For a section:            vllm {subcmd} --help=ModelConfig    (case-insensitive)\n"  # noqa: E501
+    "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
+    "Documentation:            https://docs.vllm.ai\n"
+)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -28,10 +48,12 @@ async def listen_for_disconnect(request: Request) -> None:
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
-            if request.app.state.enable_server_load_tracking:
-                # on timeout/cancellation the BackgroundTask in load_aware_call
-                # cannot decrement the server load metrics.
-                # Must be decremented by with_cancellation instead.
+            # If load tracking is enabled *and* the counter exists, decrement
+            # it. Combines the previous nested checks into a single condition
+            # to satisfy the linter rule.
+            if getattr(
+                request.app.state, "enable_server_load_tracking", False
+            ) and hasattr(request.app.state, "server_load_metrics"):
                 request.app.state.server_load_metrics -= 1
             break
 
@@ -62,15 +84,15 @@ def with_cancellation(handler_func):
     # normal route handler, with the correct request type hinting.
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
-
         # The request is either the second positional arg or `raw_request`
         request = args[1] if len(args) > 1 else kwargs["raw_request"]
 
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
 
-        done, pending = await asyncio.wait([handler_task, cancellation_task],
-                                           return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+        )
         for task in pending:
             task.cancel()
 
@@ -86,18 +108,21 @@ def decrement_server_load(request: Request):
 
 
 def load_aware_call(func):
-
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        raw_request = kwargs.get("raw_request",
-                                 args[1] if len(args) > 1 else None)
+        raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
 
         if raw_request is None:
             raise ValueError(
-                "raw_request required when server load tracking is enabled")
+                "raw_request required when server load tracking is enabled"
+            )
 
-        if not raw_request.app.state.enable_server_load_tracking:
+        if not getattr(raw_request.app.state, "enable_server_load_tracking", False):
             return await func(*args, **kwargs)
+
+        # ensure the counter exists
+        if not hasattr(raw_request.app.state, "server_load_metrics"):
+            raw_request.app.state.server_load_metrics = 0
 
         raw_request.app.state.server_load_metrics += 1
         try:
@@ -108,18 +133,18 @@ def load_aware_call(func):
 
         if isinstance(response, (JSONResponse, StreamingResponse)):
             if response.background is None:
-                response.background = BackgroundTask(decrement_server_load,
-                                                     raw_request)
+                response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):
-                response.background.add_task(decrement_server_load,
-                                             raw_request)
+                response.background.add_task(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTask):
                 # Convert the single BackgroundTask to BackgroundTasks
                 # and chain the decrement_server_load task to it
                 tasks = BackgroundTasks()
-                tasks.add_task(response.background.func,
-                               *response.background.args,
-                               **response.background.kwargs)
+                tasks.add_task(
+                    response.background.func,
+                    *response.background.args,
+                    **response.background.kwargs,
+                )
                 tasks.add_task(decrement_server_load, raw_request)
                 response.background = tasks
         else:
@@ -153,10 +178,9 @@ def cli_env_setup():
 
 def _validate_truncation_size(
     max_model_len: int,
-    truncate_prompt_tokens: Optional[int],
-    tokenization_kwargs: Optional[dict[str, Any]] = None,
-) -> Optional[int]:
-
+    truncate_prompt_tokens: int | None,
+    tokenization_kwargs: dict[str, Any] | None = None,
+) -> int | None:
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -165,69 +189,131 @@ def _validate_truncation_size(
             raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size.")
+                f" Please, select a smaller truncation size."
+            )
 
         if tokenization_kwargs is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
+    else:
+        if tokenization_kwargs is not None:
+            tokenization_kwargs["truncation"] = False
+
     return truncate_prompt_tokens
 
 
-def show_filtered_argument_or_group_from_help(parser, subcommand_name):
-    import sys
+def get_max_tokens(
+    max_model_len: int,
+    request: ChatCompletionRequest | CompletionRequest,
+    input_length: int,
+    default_sampling_params: dict,
+) -> int:
+    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
+    default_max_tokens = max_model_len - input_length
+    max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
-    # Only handle --help=<keyword> for the current subcommand.
-    # Since subparser_init() runs for all subcommands during CLI setup,
-    # we skip processing if the subcommand name is not in sys.argv.
-    if subcommand_name not in sys.argv:
-        return
+    return min(
+        val
+        for val in (
+            default_max_tokens,
+            max_tokens,
+            max_output_tokens,
+            default_sampling_params.get("max_tokens"),
+        )
+        if val is not None
+    )
 
-    for arg in sys.argv:
-        if arg.startswith('--help='):
-            search_keyword = arg.split('=', 1)[1]
 
-            # List available groups
-            if search_keyword == 'listgroup':
-                print("\nAvailable argument groups:")
-                for group in parser._action_groups:
-                    if group.title and not group.title.startswith(
-                            "positional arguments"):
-                        print(f"  - {group.title}")
-                        if group.description:
-                            print("    " + group.description.strip())
-                        print()
-                sys.exit(0)
+def log_non_default_args(args: Namespace | EngineArgs):
+    non_default_args = {}
 
-            # For group search
-            formatter = parser._get_formatter()
-            for group in parser._action_groups:
-                if group.title and group.title.lower() == search_keyword.lower(
-                ):
-                    formatter.start_section(group.title)
-                    formatter.add_text(group.description)
-                    formatter.add_arguments(group._group_actions)
-                    formatter.end_section()
-                    print(formatter.format_help())
-                    sys.exit(0)
+    # Handle Namespace
+    if isinstance(args, Namespace):
+        parser = make_arg_parser(FlexibleArgumentParser())
+        for arg, default in vars(parser.parse_args([])).items():
+            if default != getattr(args, arg):
+                non_default_args[arg] = getattr(args, arg)
 
-            # For single arg
-            matched_actions = []
+    # Handle EngineArgs instance
+    elif isinstance(args, EngineArgs):
+        default_args = EngineArgs(model=args.model)  # Create default instance
+        for field in dataclasses.fields(args):
+            current_val = getattr(args, field.name)
+            default_val = getattr(default_args, field.name)
+            if current_val != default_val:
+                non_default_args[field.name] = current_val
+        if default_args.model != EngineArgs.model:
+            non_default_args["model"] = default_args.model
+    else:
+        raise TypeError(
+            "Unsupported argument type. Must be Namespace or EngineArgs instance."
+        )
 
-            for group in parser._action_groups:
-                for action in group._group_actions:
-                    # search option name
-                    if any(search_keyword.lower() in opt.lower()
-                           for opt in action.option_strings):
-                        matched_actions.append(action)
+    logger.info("non-default args: %s", non_default_args)
 
-            if matched_actions:
-                print(f"\nParameters matching '{search_keyword}':\n")
-                formatter = parser._get_formatter()
-                formatter.add_arguments(matched_actions)
-                print(formatter.format_help())
-                sys.exit(0)
 
-            print(f"\nNo group or parameter matching '{search_keyword}'")
-            print("Tip: use `--help=listgroup` to view all groups.")
-            sys.exit(1)
+def should_include_usage(
+    stream_options: StreamOptions | None, enable_force_include_usage: bool
+) -> tuple[bool, bool]:
+    if stream_options:
+        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_continuous_usage = include_usage and bool(
+            stream_options.continuous_usage_stats
+        )
+    else:
+        include_usage, include_continuous_usage = enable_force_include_usage, False
+    return include_usage, include_continuous_usage
+
+
+def process_lora_modules(
+    args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
+) -> list[LoRAModulePath]:
+    lora_modules = args_lora_modules
+    if default_mm_loras:
+        default_mm_lora_paths = [
+            LoRAModulePath(
+                name=modality,
+                path=lora_path,
+            )
+            for modality, lora_path in default_mm_loras.items()
+        ]
+        if args_lora_modules is None:
+            lora_modules = default_mm_lora_paths
+        else:
+            lora_modules += default_mm_lora_paths
+    return lora_modules
+
+
+async def process_chat_template(
+    args_chat_template: Path | str | None,
+    engine_client: EngineClient,
+    model_config: ModelConfig,
+) -> str | None:
+    resolved_chat_template = load_chat_template(args_chat_template)
+    if resolved_chat_template is not None:
+        # Get the tokenizer to check official template
+        tokenizer = await engine_client.get_tokenizer()
+
+        if isinstance(tokenizer, MistralTokenizer):
+            # The warning is logged in resolve_mistral_chat_template.
+            resolved_chat_template = resolve_mistral_chat_template(
+                chat_template=resolved_chat_template
+            )
+        else:
+            hf_chat_template = resolve_hf_chat_template(
+                tokenizer=tokenizer,
+                chat_template=None,
+                tools=None,
+                model_config=model_config,
+            )
+
+            if hf_chat_template != resolved_chat_template:
+                logger.warning(
+                    "Using supplied chat template: %s\n"
+                    "It is different from official chat template '%s'. "
+                    "This discrepancy may lead to performance degradation.",
+                    resolved_chat_template,
+                    model_config.model,
+                )
+    return resolved_chat_template

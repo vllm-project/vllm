@@ -4,6 +4,13 @@ mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
-python-markdown-math
+mkdocs-glightbox
+mkdocs-git-revision-date-localized-plugin
+mkdocs-minify-plugin
 regex
 ruff
+pydantic
+
+# For generating argparse docs.
+# Adding requirements here should only be used as a last resort.
+msgspec  # Need for multiple inheritance involving msgspec.Struct
