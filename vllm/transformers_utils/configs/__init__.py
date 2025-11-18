@@ -5,7 +5,8 @@ Model configs may be defined in this directory for the following reasons:
 
 - There is no configuration file defined by HF Hub or Transformers library.
 - There is a need to override the existing config to support vLLM.
-- The HF model_type is not recognized by Transformers library but maps to a config in Transformers library, ex., deepseek-ai/DeepSeek-V3.2-Exp.
+- The HF model_type is not recognized by Transformers library but maps to a
+  config in Transformers library, ex., deepseek-ai/DeepSeek-V3.2-Exp.
 """
 
 from vllm.transformers_utils.configs.afmoe import AfmoeConfig
