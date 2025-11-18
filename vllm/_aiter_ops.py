@@ -432,13 +432,6 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
-def _aiter_to_tensor_scalar_tuple(x):
-    if isinstance(x, torch.Tensor):
-        return (x, 0)
-    else:
-        return (None, x)
-
-
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -985,86 +978,6 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_weight
 
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
-
-    @staticmethod
-    def top_k_renorm_probs(
-        probs: torch.Tensor,
-        k_tensor: torch.Tensor | None = None,
-        k_scalar: int = 0,
-    ) -> torch.Tensor:
-        from aiter.ops.sampling import top_k_renorm_probs
-
-        return top_k_renorm_probs(probs, k_tensor, k_scalar)
-
-    @staticmethod
-    def top_p_sampling_from_probs(
-        probs: torch.Tensor,
-        rand_values: torch.Tensor | None = None,
-        p_tensor: torch.Tensor | None = None,
-        p_scalar: float = 0.0,
-        deterministic: bool = True,
-    ) -> torch.Tensor:
-        from aiter.ops.sampling import top_p_sampling_from_probs
-
-        return top_p_sampling_from_probs(
-            probs, rand_values, p_tensor, p_scalar, deterministic
-        )
-
-    @staticmethod
-    def top_k_top_p_sampling_from_probs(
-        probs: torch.Tensor,
-        rand_values: torch.Tensor | None = None,
-        k_tensor: torch.Tensor | None = None,
-        k_scalar: int = 0,
-        p_tensor: torch.Tensor | None = None,
-        p_scalar: float = 0.0,
-        deterministic: bool = True,
-    ) -> torch.Tensor:
-        from aiter.ops.sampling import top_k_top_p_sampling_from_probs
-
-        return top_k_top_p_sampling_from_probs(
-            probs, rand_values, k_tensor, k_scalar, p_tensor, p_scalar, deterministic
-        )
-
-    @staticmethod
-    def top_k_top_p_sample(
-        logits: torch.Tensor,
-        k: torch.Tensor | None,
-        p: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Sample from logits using aiter ops."""
-        use_top_k = k is not None
-        use_top_p = p is not None
-
-        # Joint k+p path
-        if use_top_p and use_top_k:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = rocm_aiter_ops.top_k_top_p_sampling_from_probs(
-                probs,
-                None,
-                *_aiter_to_tensor_scalar_tuple(k),
-                *_aiter_to_tensor_scalar_tuple(p),
-                deterministic=True,
-            )
-            return next_token_ids.view(-1)
-
-        # Top-p only path
-        elif use_top_p:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = rocm_aiter_ops.top_p_sampling_from_probs(
-                probs, None, *_aiter_to_tensor_scalar_tuple(p), deterministic=True
-            )
-            return next_token_ids.view(-1)
-
-        # Top-k only path
-        elif use_top_k:
-            probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            renorm_probs = rocm_aiter_ops.top_k_renorm_probs(
-                probs, *_aiter_to_tensor_scalar_tuple(k)
-            )
-            return torch.multinomial(renorm_probs, num_samples=1).view(-1)
-
-        raise RuntimeError("aiter_sample was called with no active top-k or top-p.")
 
 
 rocm_aiter_ops.register_ops_once()
