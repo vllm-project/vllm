@@ -246,7 +246,7 @@ def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
 
 def test_regex_timeout_handling(parser):
     """Test regex timeout is handled gracefully"""
-    fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2
+    fake_problematic_input = "{hello world[A(A=" + "\t)A(A=,\t" * 2
 
     # create a mock regex that raises TimeoutError
     mock_regex = MagicMock()
