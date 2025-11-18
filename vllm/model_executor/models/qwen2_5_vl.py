@@ -383,11 +383,11 @@ class Qwen2_5_VisionAttention(nn.Module):
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
-            qk_reshaped = einops.rearrange(
+            qk_rotated = einops.rearrange(
                 qk, "b s two head head_dim -> (two b) s head head_dim", two=2
             )
             qk_rotated = apply_rotary_pos_emb_vision(
-                qk_reshaped, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin
+                qk_rotated, cos=rotary_pos_emb_cos, sin=rotary_pos_emb_sin, inplace=True
             )
             qk_rotated = qk_rotated.view(
                 2,

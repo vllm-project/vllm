@@ -278,12 +278,12 @@ class Qwen2VisionMLP(nn.Module):
 
 
 def apply_rotary_pos_emb_vision(
-    t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, inplace: bool = False
 ) -> torch.Tensor:
     rotary_emb_function = dispatch_rotary_emb_function(
         default=partial(apply_rotary_emb_torch, is_neox_style=True)
     )
-    output = rotary_emb_function(t, cos, sin).type_as(t)
+    output = rotary_emb_function(t, cos, sin, inplace=inplace).type_as(t)
     return output
 
 
@@ -395,9 +395,9 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...") for x in (q, k, v))
 
         # [2 * b, s, heads, head_dim]
-        qk_concat = torch.cat([q, k], dim=0)
+        qk_rotated = torch.cat([q, k], dim=0)
         qk_rotated = apply_rotary_pos_emb_vision(
-            qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
+            qk_rotated, rotary_pos_emb_cos, rotary_pos_emb_sin, inplace=True
         )
         q, k = torch.chunk(qk_rotated, 2, dim=0)
 

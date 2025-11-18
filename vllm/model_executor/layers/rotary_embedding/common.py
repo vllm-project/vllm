@@ -37,6 +37,7 @@ def apply_rotary_emb_torch(
     cos: torch.Tensor,
     sin: torch.Tensor,
     is_neox_style: bool,
+    inplace: bool = False,
 ) -> torch.Tensor:
     cos = cos.unsqueeze(-2).to(x.dtype)
     sin = sin.unsqueeze(-2).to(x.dtype)
@@ -47,6 +48,10 @@ def apply_rotary_emb_torch(
         x2 = x[..., 1::2]
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
+    if inplace:
+        x1.copy_(o1)
+        x2.copy_(o2)
+        return x
     if is_neox_style:
         return torch.cat((o1, o2), dim=-1)
     else:

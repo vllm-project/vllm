@@ -357,9 +357,9 @@ class Glm4vVisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             # [2 * b, s, heads, head_dim]
-            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = torch.cat([q, k], dim=0)
             qk_rotated = apply_rotary_pos_emb_vision(
-                qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
+                qk_rotated, rotary_pos_emb_cos, rotary_pos_emb_sin, inplace=True
             )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
