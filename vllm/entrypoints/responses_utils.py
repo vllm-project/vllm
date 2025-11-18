@@ -40,6 +40,8 @@ def construct_chat_message_with_tool_call(
         )
     elif isinstance(item, ResponseReasoningItem):
         reasoning_content = ""
+        if item.encrypted_content:
+            raise ValueError("Encrypted content is not supported.")
         if len(item.summary) == 1:
             reasoning_content = item.summary[0].text
         elif item.content and len(item.content) == 1:

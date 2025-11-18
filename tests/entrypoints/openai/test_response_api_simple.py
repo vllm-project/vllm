@@ -16,7 +16,8 @@ def server():
     args = ["--reasoning-parser", "qwen3"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
-        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+        # uncomment for tool calling
+        # PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
     )
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:

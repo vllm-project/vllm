@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 from openai.types.responses.response_reasoning_item import (
     Content,
     ResponseReasoningItem,
@@ -74,3 +75,14 @@ class TestResponsesUtils:
             formatted_item["reasoning_content"]
             == 'Hmm, the user has just started with a simple "Hello,"'
         )
+
+        item = ResponseReasoningItem(
+            id="lol",
+            summary=[],
+            type="reasoning",
+            content=None,
+            encrypted_content="TOP_SECRET_MESSAGE",
+            status=None,
+        )
+        with pytest.raises(ValueError):
+            construct_chat_message_with_tool_call(item)
