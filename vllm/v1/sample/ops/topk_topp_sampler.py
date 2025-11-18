@@ -654,6 +654,9 @@ def top_k_top_p_filter(
             p_fil_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
             p_fil_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
 
+            min_larger_p_fil_pivot = float("inf")
+            num_min_larger_p_fil_pivot = tl.zeros((), dtype=tl.uint32)
+
             for i in range(0, search_iters):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < search_range
@@ -669,11 +672,11 @@ def top_k_top_p_filter(
                 p_fil_pivots_num_1 += tl.sum(logits_blk > p_fil_pivot_1)
                 p_fil_pivots_num_2 += tl.sum(logits_blk > p_fil_pivot_2)
 
-                larger_p_fil_pivot = tl.where(
-                    logits_blk > p_fil_pivot, logits_blk, -float("inf")
+                larger_p_fil_pivot_2 = tl.where(
+                    logits_blk > p_fil_pivot_2, logits_blk, float("inf")
                 )
                 min_larger_p_fil_pivot = tl.minimum(
-                    min_larger_p_fil_pivot, tl.min(larger_p_fil_pivot)
+                    min_larger_p_fil_pivot, tl.min(larger_p_fil_pivot_2)
                 )
 
             for i in range(0, search_iters):
