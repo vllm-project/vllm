@@ -15,6 +15,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
@@ -782,7 +783,6 @@ class Worker(WorkerBase):
     ) -> None:
         from vllm.config import set_current_vllm_config
         from vllm.distributed.parallel_state import (
-            cleanup_dist_env_and_memory,
             get_ep_group,
         )
 
@@ -848,8 +848,10 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+            runner.free_kv_cache()
         if self.profiler is not None:
             self.profiler.shutdown()
+        cleanup_dist_env_and_memory()
 
 
 def init_worker_distributed_environment(
