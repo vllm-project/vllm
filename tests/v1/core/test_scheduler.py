@@ -653,12 +653,13 @@ def test_schedule_concurrent_batches(
 def test_schedule_order(enable_chunked_prefill: bool):
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
-        max_num_seqs=2,
+        max_num_seqs=3,
         enable_chunked_prefill=enable_chunked_prefill,
     )
 
+    # long requests
     requests = create_requests(num_requests=2, num_tokens=800)
-
+    # short requests
     requests += create_requests(num_requests=2, num_tokens=10)
 
     for request in requests:
@@ -672,7 +673,7 @@ def test_schedule_order(enable_chunked_prefill: bool):
     else:
         # When disable chunked prefill, should not skip the long requests,
         # and scheduling subsequent short requests in advance,
-        # even though there is still a token budget remaining.
+        # even though there is still token budgets remaining.
         assert len(scheduler_output1.scheduled_new_reqs) == 1
 
 
