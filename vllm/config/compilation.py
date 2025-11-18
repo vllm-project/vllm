@@ -530,6 +530,10 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    vit_cudagraph_capture_sizes: list[int] | None = None
+    """Sizes to capture vit cudagraph.
+    - None (default): capture sizes are inferred from vllm config.
+    - list[int]: capture sizes are specified as given."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers

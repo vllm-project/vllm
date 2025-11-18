@@ -378,6 +378,9 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
+    vit_cudagraph_capture_sizes: list[int] | None = (
+        CompilationConfig.vit_cudagraph_capture_sizes
+    )
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -1149,6 +1152,9 @@ class EngineArgs:
             "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
         )
         compilation_group.add_argument(
+            "--vit-cudagraph-capture-sizes", **compilation_kwargs["vit_cudagraph_capture_sizes"]
+        )
+        compilation_group.add_argument(
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
@@ -1737,6 +1743,15 @@ class EngineArgs:
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
             compilation_config.cudagraph_capture_sizes = self.cudagraph_capture_sizes
+        
+        if self.vit_cudagraph_capture_sizes is not None:
+            if compilation_config.vit_cudagraph_capture_sizes is not None:
+                raise ValueError(
+                    "vit_cudagraph_capture_sizes and compilation_config."
+                    "vit_cudagraph_capture_sizes are mutually exclusive"
+                )
+            compilation_config.vit_cudagraph_capture_sizes = self.vit_cudagraph_capture_sizes
+            
         if self.max_cudagraph_capture_size is not None:
             if compilation_config.max_cudagraph_capture_size is not None:
                 raise ValueError(

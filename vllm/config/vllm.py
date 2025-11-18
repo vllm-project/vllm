@@ -15,6 +15,7 @@ from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args
+import bisect
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -360,6 +361,21 @@ class VllmConfig:
         ]
         return hash_str
 
+    def pad_for_cudagraph(self, batch_size: int) -> int:
+        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
+        # it should raise an IndexError.
+        # the caller should make sure the batch_size is within the range,
+        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
+        return self.compilation_config.bs_to_padded_graph_size[batch_size]
+
+    def pad_for_vit_cudagraph(self, batch_size: int) -> int:
+        capture_sizes = self.compilation_config.vit_cudagraph_capture_sizes
+        # Find the insertion point for batch_size to maintain order.
+        # This gives the index of the first element >= batch_size.
+        idx = bisect.bisect_left(capture_sizes, batch_size)
+
+        return capture_sizes[idx] if idx < len(capture_sizes) else batch_size
+    
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -815,6 +831,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
+            self._set_vit_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1333,6 +1350,42 @@ class VllmConfig:
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
         )
+    def _set_vit_cudagraph_sizes(self):
+        if (
+            self.model_config is not None
+            and not self.model_config.enforce_eager
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # determine the vit_cudagraph_capture_sizes
+            if self.compilation_config.vit_cudagraph_capture_sizes is not None:
+                assert len(self.compilation_config.vit_cudagraph_capture_sizes) > 0, (
+                    "vit_cudagraph_capture_sizes should contain at least one element "
+                    "when using cuda graph."
+                )
+                # sort to make sure the sizes are in ascending order
+                self.compilation_config.vit_cudagraph_capture_sizes.sort()
+                # de-duplicate the sizes provided by the config
+                dedup_sizes = list(set(self.compilation_config.vit_cudagraph_capture_sizes))
+                vit_cudagraph_capture_sizes = dedup_sizes
+            else:
+                max_vit_cudagraph_capture_size = 5120
+                vit_cudagraph_capture_sizes = [
+                    i for i in [16, 32, 64, 128, 256] if i <= max_vit_cudagraph_capture_size
+                ]
+                if max_vit_cudagraph_capture_size >= 1024:
+                    # Step size 64 for small batch sizes, up to 2048(not included)
+                    vit_cudagraph_capture_sizes += list(
+                        range(512, min(max_vit_cudagraph_capture_size + 1, 2048), 64)
+                    )
+                if max_vit_cudagraph_capture_size >= 2048:
+                    # Step size 128 for larger batch sizes
+                    vit_cudagraph_capture_sizes += list(
+                        range(2048, max_vit_cudagraph_capture_size + 1, 128)
+                    )
+            self.compilation_config.vit_cudagraph_capture_sizes = vit_cudagraph_capture_sizes
+        else:
+            # no cudagraph in use
+            self.compilation_config.vit_cudagraph_capture_sizes = []
 
     def try_verify_and_update_config(self):
         if self.model_config is None:
