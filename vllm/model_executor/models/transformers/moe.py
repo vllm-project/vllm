@@ -262,7 +262,7 @@ class MoEMixin(MixtureOfExperts):
                 # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
                 # down_proj = (num_experts, intermediate_size, hidden_size)
                 params = list(child_module.parameters())
-                is_3d = bool(params) and all(p.ndim == 3 for p in params)
+                is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
                 if child_name == "experts" and (is_modulelist or is_3d):
                     # Alias for readability
                     mlp = module
