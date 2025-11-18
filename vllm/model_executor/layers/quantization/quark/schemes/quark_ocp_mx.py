@@ -73,9 +73,7 @@ try:
         N = weight.shape[0]
         K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(
-                M, N, K
-            ):
+            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
                 if x_scales is None:
                     # use hip quant kernel for performance
                     if M >= 32:
