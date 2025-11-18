@@ -69,8 +69,7 @@ __device__ void moe_fused_gate_impl(void* input, void* bias, float* output_ptr,
   }
 
   // Calculate topk_excluding_share_expert_fusion from topk
-  int64_t topk_excluding_share_expert_fusion =
-      topk - (num_fused_shared_experts > 0 ? 1 : 0);
+  int64_t topk_excluding_share_expert_fusion = topk - num_fused_shared_experts;
 
   // Cast pointers to type T:
   auto* input_ptr = reinterpret_cast<T*>(input);
@@ -362,6 +361,9 @@ std::vector<at::Tensor> moe_fused_gate(
     at::Tensor& input, at::Tensor& bias, int64_t num_expert_group,
     int64_t topk_group, int64_t topk, int64_t num_fused_shared_experts,
     double routed_scaling_factor, bool apply_routed_scaling_factor_on_output) {
+  TORCH_CHECK(input.dtype() == bias.dtype(),
+              "input and bias should have the same dtype");
+
   int64_t num_rows = input.size(0);
   int32_t num_experts = input.size(1);
   auto options =
@@ -410,16 +412,16 @@ std::vector<at::Tensor> moe_fused_gate(
           LAUNCH_MOE_GATE_CONFIG(float16_t, 256, 8);
         } else if (input.scalar_type() == at::kFloat) {
           LAUNCH_MOE_GATE_CONFIG(float32_t, 256, 8);
-        } else if (num_expert_group == 16) {
-          // Here VPT = 256/16 = 16, ROWS_PER_WARP = 32/16 = 2, ROWS_PER_CTA = 6
-          // * 2 = 12.
-          if (input.scalar_type() == at::kBFloat16) {
-            LAUNCH_MOE_GATE_CONFIG(bfloat16_t, 256, 16);
-          } else if (input.scalar_type() == at::kHalf) {
-            LAUNCH_MOE_GATE_CONFIG(float16_t, 256, 16);
-          } else if (input.scalar_type() == at::kFloat) {
-            LAUNCH_MOE_GATE_CONFIG(float32_t, 256, 16);
-          }
+        }
+      } else if (num_expert_group == 16) {
+        // Here VPT = 256/16 = 16, ROWS_PER_WARP = 32/16 = 2, ROWS_PER_CTA = 6
+        // * 2 = 12.
+        if (input.scalar_type() == at::kBFloat16) {
+          LAUNCH_MOE_GATE_CONFIG(bfloat16_t, 256, 16);
+        } else if (input.scalar_type() == at::kHalf) {
+          LAUNCH_MOE_GATE_CONFIG(float16_t, 256, 16);
+        } else if (input.scalar_type() == at::kFloat) {
+          LAUNCH_MOE_GATE_CONFIG(float32_t, 256, 16);
         }
       }
       break;
@@ -433,16 +435,16 @@ std::vector<at::Tensor> moe_fused_gate(
           LAUNCH_MOE_GATE_CONFIG(float16_t, 128, 4);
         } else if (input.scalar_type() == at::kFloat) {
           LAUNCH_MOE_GATE_CONFIG(float32_t, 128, 4);
-        } else if (num_expert_group == 8) {
-          // VPT = 128/8 = 16, ROWS_PER_WARP = 32/8 = 4, ROWS_PER_CTA = 6 * 4
-          // = 24.
-          if (input.scalar_type() == at::kBFloat16) {
-            LAUNCH_MOE_GATE_CONFIG(bfloat16_t, 128, 8);
-          } else if (input.scalar_type() == at::kHalf) {
-            LAUNCH_MOE_GATE_CONFIG(float16_t, 128, 8);
-          } else if (input.scalar_type() == at::kFloat) {
-            LAUNCH_MOE_GATE_CONFIG(float32_t, 128, 8);
-          }
+        }
+      } else if (num_expert_group == 8) {
+        // VPT = 128/8 = 16, ROWS_PER_WARP = 32/8 = 4, ROWS_PER_CTA = 6 * 4
+        // = 24.
+        if (input.scalar_type() == at::kBFloat16) {
+          LAUNCH_MOE_GATE_CONFIG(bfloat16_t, 128, 8);
+        } else if (input.scalar_type() == at::kHalf) {
+          LAUNCH_MOE_GATE_CONFIG(float16_t, 128, 8);
+        } else if (input.scalar_type() == at::kFloat) {
+          LAUNCH_MOE_GATE_CONFIG(float32_t, 128, 8);
         }
       }
       break;
