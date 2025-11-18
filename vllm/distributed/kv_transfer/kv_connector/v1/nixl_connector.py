@@ -1161,6 +1161,14 @@ class NixlConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         split_k_and_v = self.kv_topo.split_k_and_v
         tensor_size_bytes = None
+
+        # TODO (NickLucche): Get kernel_block_size in a cleaner way
+        # NHD default "view" for non-MLA cache
+        if self.device_type == "cpu":
+            block_size_position = -2
+        else:
+            block_size_position = -2 if self.use_mla else -3
+
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
@@ -1175,9 +1183,7 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
-                # TODO (NickLucche): Get kernel_block_size in a cleaner way
-                # NHD default "view" for non-MLA cache
-                kernel_block_size = cache.shape[-2] if self.use_mla else cache.shape[-3]
+                kernel_block_size = cache.shape[block_size_position]
 
                 if self.block_size != kernel_block_size:
                     logger.info_once(
