@@ -10,6 +10,7 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
     CompressedTensorsLinearMethod,
@@ -766,4 +767,45 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
         llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
+    """
+    Integration test for MoE layer ignore functionality with a real model.
+
+    This test would verify that when loading a compressed-tensors quantized
+    MoE model where some MoE layers are in the ignore list, those layers
+    use UnquantizedFusedMoEMethod while non-ignored layers use the
+    quantized method.
+
+    Expected model structure:
+    - Compressed-tensors quantized MoE model (e.g., Mixtral-based)
+    - Config with ignore list containing specific MoE layers
+    - Multiple MoE layers where some are quantized and some are not
+    """
+    model_path = "nm-testing/Qwen3-30B-A3B-W4A16-first-10"
+
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+                CompressedTensorsMoEMethod,
+            )
+
+            # Check layer 0 MoE (should be quantized)
+            layer_quantized = model.model.layers[0].mlp.experts
+            assert isinstance(layer_quantized, FusedMoE)
+            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+
+            # Check layer 10 MoE (should be unquantized + ignored)
+            layer_unquantized = model.model.layers[10].mlp.experts
+            assert isinstance(layer_unquantized, FusedMoE)
+            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+
+        llm.apply_model(check_model)
+
+        # Verify the model can generate output
+        output = llm.generate_greedy("Hello, my name is", max_tokens=4)
         assert output
