@@ -1076,6 +1076,7 @@ def process_statistics(
     verbose: bool,
     gen_conv_args: GenConvArgs | None = None,
     excel_output: bool = False,
+    warmup_runtime_sec: float | None = None,
 ) -> None:
     if len(client_metrics) == 0:
         logger.info("No samples to process")
@@ -1169,8 +1170,13 @@ def process_statistics(
         # Convert milliseconds to seconds
         runtime_sec = runtime_sec / 1000.0
         requests_per_sec = float(len(df)) / runtime_sec
-
-        params = {"runtime_sec": runtime_sec, "requests_per_sec": requests_per_sec}
+        params = {
+            "runtime_sec": runtime_sec,
+            "requests_per_sec": requests_per_sec,
+        }
+        if warmup_runtime_sec is not None:
+            params["warmup_runtime_sec"] = warmup_runtime_sec
+            params["total_runtime_incl_warmup_sec"] = runtime_sec + warmup_runtime_sec
 
         # Generate a summary of relevant metrics (and drop irrelevant data)
         df = df.drop(columns=exclude).describe(percentiles=percentiles).transpose()
@@ -1552,6 +1558,8 @@ async def main() -> None:
         url=args.url, num_clients=args.num_clients, early_stop=not args.no_early_stop
     )
 
+    warmup_runtime_sec: float | None = None
+
     # Warm-up step
     if args.warmup_step:
         # Only send a single user prompt from every conversation.
@@ -1566,26 +1574,56 @@ async def main() -> None:
         # all clients should finish their work before exiting
         warmup_bench_args = bench_args._replace(early_stop=False)
 
-        logger.info(f"{Color.PURPLE}Warmup start{Color.RESET}")
+        logger.info("%sWarmup start%s", Color.PURPLE, Color.RESET)
+        warmup_start_ns = time.perf_counter_ns()
         conversations, _ = await main_mp(
             warmup_client_args, req_args, warmup_bench_args, tokenizer, conversations
         )
-        logger.info(f"{Color.PURPLE}Warmup done{Color.RESET}")
+        warmup_runtime_sec = nanosec_to_sec(time.perf_counter_ns() - warmup_start_ns)
+        logger.info(
+            "%sWarmup runtime: %.3f sec (%.3f ms)%s",
+            Color.PURPLE,
+            warmup_runtime_sec,
+            warmup_runtime_sec * 1000,
+            Color.RESET,
+        )
+        logger.info("%sWarmup done%s", Color.PURPLE, Color.RESET)
 
     # Run the benchmark
-    start_time = time.perf_counter_ns()
+    benchmark_start_ns = time.perf_counter_ns()
     client_convs, client_metrics = await main_mp(
         client_args, req_args, bench_args, tokenizer, conversations
     )
-    total_runtime_ms = nanosec_to_millisec(time.perf_counter_ns() - start_time)
+    benchmark_runtime_sec = nanosec_to_sec(time.perf_counter_ns() - benchmark_start_ns)
 
     # Calculate requests per second
-    total_runtime_sec = total_runtime_ms / 1000.0
-    rps = len(client_metrics) / total_runtime_sec
+    requests_per_sec = len(client_metrics) / benchmark_runtime_sec
+    benchmark_runtime_ms = benchmark_runtime_sec * 1000.0
     logger.info(
-        f"{Color.GREEN}All clients finished, total runtime: {total_runtime_sec:.3f} sec"
-        f" ({total_runtime_ms:.3f} ms), requests per second: {rps:.3f}{Color.RESET}"
+        "%sAll clients finished, benchmark runtime: %.3f sec (%.3f ms), "
+        "requests per second: %.3f%s",
+        Color.GREEN,
+        benchmark_runtime_sec,
+        benchmark_runtime_ms,
+        requests_per_sec,
+        Color.RESET,
     )
+    if warmup_runtime_sec is not None:
+        total_runtime_sec = benchmark_runtime_sec + warmup_runtime_sec
+        logger.info(
+            "%sWarmup runtime: %.3f sec (%.3f ms)%s",
+            Color.GREEN,
+            warmup_runtime_sec,
+            warmup_runtime_sec * 1000,
+            Color.RESET,
+        )
+        logger.info(
+            "%sTotal runtime (including warmup): %.3f sec (%.3f ms)%s",
+            Color.GREEN,
+            total_runtime_sec,
+            total_runtime_sec * 1000,
+            Color.RESET,
+        )
 
     # Benchmark parameters
     params = {
@@ -1610,6 +1648,7 @@ async def main() -> None:
         verbose=args.verbose,
         gen_conv_args=gen_conv_args,
         excel_output=args.excel_output,
+        warmup_runtime_sec=warmup_runtime_sec,
     )
 
     if args.output_file is not None:

@@ -154,7 +154,7 @@ def _fused_moe_lora_kernel(
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
         # pre-fetch lora weight
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()

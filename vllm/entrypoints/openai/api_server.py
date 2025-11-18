@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import logging
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -2019,6 +2020,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
+
+    # Suppress verbose logs from model_hosting_container_standards
+    logging.getLogger("model_hosting_container_standards").setLevel(logging.ERROR)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)

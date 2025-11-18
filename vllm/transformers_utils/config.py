@@ -77,6 +77,7 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32=DeepseekV3Config,
@@ -474,6 +475,17 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     if layer_types := getattr(text_config, "layer_types", None):
         return len(set(layer_types)) > 1
     return False
+
+
+def uses_custom_attention_masks(config: PretrainedConfig) -> bool:
+    """Detect if model uses custom attention mask generation for multimodal.
+
+    Some multimodal models require custom attention masks that enable
+    bidirectional attention between image tokens while maintaining causal
+    attention for text tokens. Currently applies to Gemma3 multimodal models.
+    """
+    architectures = getattr(config, "architectures", [])
+    return "Gemma3ForConditionalGeneration" in architectures
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
