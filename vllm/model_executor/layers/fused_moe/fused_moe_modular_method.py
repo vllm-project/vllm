@@ -34,15 +34,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             "disable_expert_map",
             not self.fused_experts.supports_expert_map(),
         )
+        self.w13_weight = getattr(old_quant_method, "w13_weight", None)
+        self.w2_weight = getattr(old_quant_method, "w2_weight", None)
         self.old_quant_method = old_quant_method
-        self.w13_weight = None
-        self.w2_weight = None
-        if self.moe_quant_config.use_mxfp4_w4a16:
-            from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Backend
-
-            if old_quant_method.mxfp4_backend == Mxfp4Backend.TRITON:
-                self.w13_weight = old_quant_method.w13_weight
-                self.w2_weight = old_quant_method.w2_weight
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
     @staticmethod
