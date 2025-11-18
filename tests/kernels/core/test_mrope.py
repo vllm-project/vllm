@@ -120,8 +120,8 @@ def test_mrope(
         head_size=head_dim,
         rotary_dim=rotary_dim,
         max_position=max_position,
-        rope_parameters=config.rope_parameters,
         is_neox_style=is_neox_style,
+        rope_parameters=config.rope_parameters,
         dtype=dtype,
     ).to(device=device)
 
@@ -191,8 +191,8 @@ def test_mrope_torch_compile_tracing(
         head_size=head_dim,
         rotary_dim=rotary_dim,
         max_position=max_position,
-        rope_parameters=config.rope_parameters,
         is_neox_style=is_neox_style,
+        rope_parameters=config.rope_parameters,
         dtype=dtype,
     ).to(device=device)
 

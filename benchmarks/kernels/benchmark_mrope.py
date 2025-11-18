@@ -85,9 +85,9 @@ def benchmark_mrope(
     tp_size: int,
     num_heads: int,
     num_kv_heads: int,
-    rope_parameters: dict[str, Any],
     max_position: int = 8192,
     is_neox_style: bool = True,
+    rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
     warmup_iter: int = 10,
@@ -101,8 +101,8 @@ def benchmark_mrope(
         head_size=head_dim,
         rotary_dim=head_dim,
         max_position=max_position,
-        rope_parameters=rope_parameters,
         is_neox_style=is_neox_style,
+        rope_parameters=rope_parameters,
         dtype=dtype,
     ).to(device=device)
 
@@ -298,8 +298,8 @@ if __name__ == "__main__":
                 head_dim = config.hidden_size // total_num_heads
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
-                rope_parameters = config.rope_parameters
                 is_neox_style = True
+                rope_parameters = config.rope_parameters
                 max_position = config.max_position_embeddings
 
                 for num_tokens in num_tokens_list:
@@ -311,8 +311,8 @@ if __name__ == "__main__":
                         num_heads=num_heads,
                         num_kv_heads=num_kv_heads,
                         max_position=max_position,
-                        rope_parameters=rope_parameters,
                         is_neox_style=is_neox_style,
+                        rope_parameters=rope_parameters,
                         dtype=getattr(torch, args.dtype),
                         seed=args.seed,
                         warmup_iter=args.warmup_iter,

@@ -84,7 +84,7 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
     rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
-    rope = get_rope(head_size, rotary_dim, max_position, rope_parameters, is_neox_style)
+    rope = get_rope(head_size, rotary_dim, max_position, is_neox_style, rope_parameters)
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
@@ -181,8 +181,8 @@ def test_rope_module_cache():
             head_size,
             rotary_dim,
             max_position,
-            rope_parameters,
             is_neox_style,
+            rope_parameters,
             dtype,
         )
         # check if cache take effect
