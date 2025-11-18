@@ -3,10 +3,10 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Callable, Optional, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import torch
-import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -17,7 +17,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
-    has_kv_transfer_group,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -25,8 +24,9 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -88,7 +88,7 @@ class TPUWorker:
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 
@@ -182,8 +182,8 @@ class TPUWorker:
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
 
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
+                # Use an empty tensor instead of `None` to force Dynamo to pass
+                # it by reference, rather by specializing on the value `None`.
                 tpu_kv_cache = torch.tensor([], dtype=dtype).to(self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
@@ -254,13 +254,13 @@ class TPUWorker:
             tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is set up
-        return output if self.is_driver_worker or has_kv_transfer_group() else None
+        self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | None:
+        return self.model_runner.execute_model(scheduler_output)
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
@@ -293,6 +293,9 @@ class TPUWorker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def reset_mm_cache(self) -> None:
+        self.model_runner.reset_mm_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -314,7 +317,7 @@ class TPUWorker:
         self,
         vllm_config: VllmConfig,
         rank: int,
-        distributed_init_method: Optional[str] = None,
+        distributed_init_method: str | None = None,
         local_rank: int = -1,
     ) -> None:
         """Initialize the distributed environment."""

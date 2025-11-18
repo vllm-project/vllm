@@ -4,12 +4,11 @@
 import csv
 import os
 from datetime import datetime
-from typing import Optional
 
 import flashinfer
 import torch
 
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = torch.float8_e4m3fn
@@ -28,9 +27,7 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 @torch.no_grad()
 def benchmark_decode(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_len: int,
     num_heads: tuple[int, int] = (64, 8),

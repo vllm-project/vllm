@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 from torch.nn import Parameter
@@ -25,11 +26,11 @@ __all__ = ["QuarkW8A8Fp8"]
 
 class QuarkW8A8Fp8(QuarkScheme):
     def __init__(
-        self, weight_config: dict[str, Any], input_config: Optional[dict[str, Any]]
+        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
     ):
         self.weight_qscheme = cast(str, weight_config.get("qscheme"))
         self.is_static_input_scheme: bool = False
-        self.input_qscheme: Optional[str] = None
+        self.input_qscheme: str | None = None
         if input_config is not None:
             self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
@@ -166,7 +167,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply(
             input=x,

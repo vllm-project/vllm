@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Union
 
 import regex as re
 
@@ -18,7 +17,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -26,7 +24,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("deepseek_v31")
 class DeepSeekV31ToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -129,7 +126,7 @@ class DeepSeekV31ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
@@ -272,7 +269,7 @@ class DeepSeekV31ToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 if current_tool_call is None:
                     return None
-                function_name: Union[str, None] = current_tool_call.get("name")
+                function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
                     return DeltaMessage(

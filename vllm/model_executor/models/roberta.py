@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -68,7 +67,7 @@ class RobertaEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         token_type_ids = _decode_token_type_ids(input_ids)
 
@@ -106,15 +105,7 @@ class RobertaClassificationHead(nn.Module):
 
 @default_pooling_type("CLS")
 class RobertaEmbeddingModel(BertEmbeddingModel):
-    """A model that uses Roberta to provide embedding functionalities.
-
-    This class encapsulates the BertModel and provides an interface for
-    embedding operations and customized pooling functions.
-
-    Attributes:
-        model: An instance of BertModel used for forward operations.
-        _pooler: An instance of Pooler used for pooling operations.
-    """
+    """A model that uses Roberta to provide embedding functionalities."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -124,8 +115,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fix Roberta positions here outside of the CUDA graph.
         # Because we need the to extract the sequences from
@@ -143,7 +134,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def _build_model(
         self, vllm_config: VllmConfig, prefix: str = ""
-    ) -> Union[BertModel, BertWithRope]:
+    ) -> BertModel | BertWithRope:
         if vllm_config.model_config.hf_config.position_embedding_type == "rotary":
             return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
         else:
@@ -213,20 +204,14 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config=pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
                 ),
             }
         )
@@ -235,16 +220,16 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.roberta.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.roberta.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         replace_roberta_positions(
             input_ids=input_ids, position_ids=positions, padding_idx=self.padding_idx

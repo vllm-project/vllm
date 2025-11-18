@@ -3,7 +3,6 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -65,7 +64,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
@@ -226,10 +225,10 @@ class VocabParallelEmbedding(CustomOp):
         self,
         num_embeddings: int,
         embedding_dim: int,
-        params_dtype: Optional[torch.dtype] = None,
-        org_num_embeddings: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        org_num_embeddings: int | None = None,
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -347,7 +346,7 @@ class VocabParallelEmbedding(CustomOp):
             added_vocab_end_index,
         )
 
-    def get_sharded_to_full_mapping(self) -> Optional[list[int]]:
+    def get_sharded_to_full_mapping(self) -> list[int] | None:
         """Get a mapping that can be used to reindex the gathered
         logits for sampling.
 
@@ -515,10 +514,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         num_embeddings: int,
         embedding_dim: int,
         bias: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        org_num_embeddings: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        org_num_embeddings: int | None = None,
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__(

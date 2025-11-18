@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -18,15 +20,39 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
+        assert vllm_config.kv_transfer_config is not None
+        use_native = vllm_config.kv_transfer_config.get_from_extra_config(
+            "use_native", False
+        )
+        if use_native:
+            logger.info("Initializing native LMCache connector")
+            # lazy import
+            from vllm.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
+
+            _adapter = lmcache_integration.vllm_v1_adapter
+
+            cls = _adapter.LMCacheConnectorV1Impl
+        else:
+            logger.info("Initializing latest dev LMCache connector")
+            cls = LMCacheConnectorLatestImpl
+
+        self._lmcache_engine = cls(vllm_config, role, self)
 
     # ==============================
     # Worker-side methods
@@ -96,7 +122,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -110,6 +136,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Get the set of block IDs that failed to load.
+
+        Returns:
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
+        """
+        method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
+        if callable(method):
+            return method()
+
+        # Fallback for older versions that don't support this method
+        return set()
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -117,7 +158,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -161,7 +202,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 

@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Protocol, Union, overload
+from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
@@ -12,27 +12,32 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (
-    cdiv,
-    direct_register_custom_op,
-    get_cuda_view_from_cpu_tensor,
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
+)
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    get_cuda_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
 
-WeightsMapping = Mapping[str, Optional[str]]
+WeightsMapping = Mapping[str, str | None]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
 
 
@@ -44,7 +49,15 @@ class WeightsMapper:
     orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
     orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
 
-    def _map_name(self, key: str) -> Optional[str]:
+    def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
+        """Combine two `WeightsMapper`s by merging their mappings."""
+        return WeightsMapper(
+            orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+        )
+
+    def _map_name(self, key: str) -> str | None:
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
                 if new_key is None:
@@ -99,18 +112,19 @@ class AutoWeightsLoader:
     the weights only once.
 
     The weight loading logic for individual modules can be overridden
-    by defining a ``load_weights`` method.
+    by defining a `load_weights` method.
 
     Similarly, the weight loading logic for individual parameters can be
-    overridden by defining a ``weight_loader`` method.
+    overridden by defining a `weight_loader` method.
 
     Detailed weight loading information can be viewed by setting the
-    environment variable ``VLLM_LOGGING_LEVEL=DEBUG``.
+    environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
     """
 
-    # Models trained using early version ColossalAI
-    # may include these tensors in checkpoint. Skip them.
+    # Models trained using early version ColossalAI or quantized by
+    # GPTQModel may include these tensors in checkpoint. Skip them.
     ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_pos_emb.inv_freq",
         "rotary_emb.inv_freq",
         "rotary_emb.cos_cached",
         "rotary_emb.sin_cached",
@@ -120,10 +134,10 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        skip_prefixes: Optional[list[str]] = None,
-        skip_substrs: Optional[list[str]] = None,
-        ignore_unexpected_prefixes: Optional[list[str]] = None,
-        ignore_unexpected_suffixes: Optional[list[str]] = None,
+        skip_prefixes: list[str] | None = None,
+        skip_substrs: list[str] | None = None,
+        ignore_unexpected_prefixes: list[str] | None = None,
+        ignore_unexpected_suffixes: list[str] | None = None,
     ) -> None:
         super().__init__()
 
@@ -306,7 +320,7 @@ class AutoWeightsLoader:
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
         *,
-        mapper: Optional[WeightsMapper] = None,
+        mapper: WeightsMapper | None = None,
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
@@ -323,8 +337,8 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: Optional[PretrainedConfig] = None,
-    architectures: Optional[list[str]] = None,
+    hf_config: PretrainedConfig | None = None,
+    architectures: list[str] | None = None,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -352,7 +366,7 @@ def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: Literal[True],
 ) -> torch.Tensor: ...
@@ -360,21 +374,21 @@ def flatten_bn(
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]: ...
+) -> list[torch.Tensor] | torch.Tensor: ...
 
 
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]:
+) -> list[torch.Tensor] | torch.Tensor:
     """
-    Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
+    Flatten the `B` and `N` dimensions of batched multimodal inputs.
 
-    The input tensor should have shape ``(B, N, ...)```.
+    The input tensor should have shape `(B, N, ...)`.
     """
     if isinstance(x, torch.Tensor):
         return x.flatten(0, 1)
@@ -410,18 +424,26 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     return " + ".join(_embedding_count_expression(inner) for inner in embeddings)
 
 
+def split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
+    ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
+    for num in lst:
+        index = num // interval
+        ranges[index].append(num)
+    return ranges
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
     is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
+    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
 
     Note:
-        This updates ``inputs_embeds`` in place.
+        This updates `inputs_embeds` in place.
     """
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
@@ -457,24 +479,24 @@ def _merge_multimodal_embeddings(
 
 @deprecated(
     "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.get_input_embeddings` and will be "
+    "`SupportsMultiModal.embed_input_ids` and will be "
     "removed in v0.12."
 )
 def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: Union[int, list[int]],
+    placeholder_token_id: int | list[int],
 ) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
+    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
 
-    ``placeholder_token_id`` can be a list of token ids (e.g, token ids
+    `placeholder_token_id` can be a list of token ids (e.g, token ids
     of img_start, img_break, and img_end tokens) when needed: This means
-    the order of these tokens in the ``input_ids`` MUST MATCH the order of
-    their embeddings in ``multimodal_embeddings`` since we need to
+    the order of these tokens in the `input_ids` MUST MATCH the order of
+    their embeddings in `multimodal_embeddings` since we need to
     slice-merge instead of individually scattering.
 
     For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
@@ -489,7 +511,7 @@ def merge_multimodal_embeddings(
     input_ids for a correct embedding merge.
 
     Note:
-        This updates ``inputs_embeds`` in place.
+        This updates `inputs_embeds` in place.
     """
     if isinstance(placeholder_token_id, list):
         is_multimodal = isin_list(input_ids, placeholder_token_id)
@@ -558,11 +580,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    if envs.VLLM_USE_V1:
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
-    else:
-        uva_offloading = False
+    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+    uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -699,6 +718,30 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
+def get_draft_quant_config(
+    vllm_config: VllmConfig,
+) -> QuantizationConfig | None:
+    """Get quantization config for Draft models.
+
+    Draft models should use their own quantization config instead of the verifier/target
+    model's config. This helper retrieves the draft model's quantization config.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The draft model's config if available, None otherwise.
+    """
+    draft_model_config = vllm_config.speculative_config.draft_model_config
+    draft_load_config = vllm_config.load_config
+
+    return (
+        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+        if draft_model_config
+        else None
+    )
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """
     Extract the layer index from the module name.
@@ -769,13 +812,6 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
-def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
-    if hasattr(hf_config, "hidden_size"):
-        return hf_config.hidden_size
-    text_config = hf_config.get_text_config()
-    return text_config.hidden_size
-
-
 # Chunk x along the num_tokens axis for sequence parallelism
 # NOTE: This is wrapped in a torch custom op to work around the following issue:
 # The output tensor can have a sequence length 0 at small input sequence lengths
@@ -817,3 +853,25 @@ direct_register_custom_op(
     fake_impl=sequence_parallel_chunk_impl_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def process_eagle_weight(
+    model: nn.Module,
+    name: str,
+) -> None:
+    """
+    Update EAGLE model flags based on loaded weight name.
+    This should be called during weight loading to detect if a model
+    has its own lm_head or embed_tokens weight.
+    Args:
+        model: The model instance (must support EAGLE)
+        name: The name of the weight to process
+    """
+    if not supports_any_eagle(model):
+        return
+
+    # To prevent overriding with target model's layers
+    if "lm_head" in name:
+        model.has_own_lm_head = True
+    if "embed_tokens" in name:
+        model.has_own_embed_tokens = True

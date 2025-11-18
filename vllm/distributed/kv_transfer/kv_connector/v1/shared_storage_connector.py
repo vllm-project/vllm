@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -86,15 +87,23 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config,
+        )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
-        transfer_config = vllm_config.kv_transfer_config
-        self._storage_path = transfer_config.get_from_extra_config(
+        self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
-        logger.info(vllm_config.kv_transfer_config)
+        logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -249,7 +258,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -277,9 +286,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
-        num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size
-        )
+        token_ids = request.prompt_token_ids or []
+        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
 
         return num_tokens_to_check - num_computed_tokens, False
 
@@ -311,13 +319,15 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
+            token_ids = new_req.prompt_token_ids or []
+            mm_hashes = [f.identifier for f in new_req.mm_features]
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(
-                    token_ids=new_req.prompt_token_ids,
+                    token_ids=token_ids,
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                     is_store=False,
-                    mm_hashes=[f.identifier for f in new_req.mm_features],
+                    mm_hashes=mm_hashes,
                 )
                 total_need_load += 1
             else:
@@ -325,46 +335,45 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
-                if not self._found_match_for_request(new_req):
+                if not self._found_match_for_prompt(token_ids, mm_hashes):
                     meta.add_request(
-                        token_ids=new_req.prompt_token_ids,
+                        token_ids=token_ids,
                         block_ids=new_req.block_ids[0],
                         block_size=self._block_size,
                         is_store=True,
-                        mm_hashes=[f.identifier for f in new_req.mm_features],
+                        mm_hashes=mm_hashes,
                     )
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
+            if not resumed_from_preemption or req_id not in self._requests_need_load:
+                continue
+
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             new_block_ids = cached_reqs.new_block_ids[i]
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
 
-            # NOTE(rob): here we rely on the resumed requests being
-            # the first N requests in the list scheduled_cache_reqs.
-            if not resumed_from_preemption:
-                break
-            if req_id in self._requests_need_load:
-                # NOTE(rob): cached_req_data does not have the full
-                # list of token ids (only new tokens). So we look it
-                # up in the actual request object.
-                request = self._requests_need_load[req_id]
-                total_tokens = num_computed_tokens + num_new_tokens
-                token_ids = request.all_token_ids[:total_tokens]
+            # NOTE(rob): cached_req_data does not have the full
+            # list of token ids (only new tokens). So we look it
+            # up in the actual request object.
+            request = self._requests_need_load[req_id]
+            total_tokens = num_computed_tokens + num_new_tokens
+            token_ids = request.all_token_ids[:total_tokens]
 
-                # NOTE(rob): For resumed req, new_block_ids is all
-                # of the block_ids for the request.
-                block_ids = new_block_ids[0]
+            # NOTE(rob): For resumed req, new_block_ids is all
+            # of the block_ids for the request.
+            assert new_block_ids is not None
+            block_ids = new_block_ids[0]
 
-                meta.add_request(
-                    token_ids=token_ids,
-                    block_ids=block_ids,
-                    block_size=self._block_size,
-                    is_store=False,
-                    mm_hashes=[f.identifier for f in request.mm_features],
-                )
-                total_need_load += 1
+            meta.add_request(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                block_size=self._block_size,
+                is_store=False,
+                mm_hashes=[f.identifier for f in request.mm_features],
+            )
+            total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
@@ -379,12 +388,22 @@ class SharedStorageConnector(KVConnectorBase_V1):
         request: "Request",
     ) -> bool:
         """Check if the cache is hit for the request."""
+        return self._found_match_for_prompt(
+            list(request.prompt_token_ids or []),
+            [f.identifier for f in request.mm_features],
+        )
+
+    def _found_match_for_prompt(
+        self,
+        prompt_token_ids: list[int],
+        mm_hashes: list[str],
+    ) -> bool:
         num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size
+            len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(request.prompt_token_ids)[:num_tokens_to_check],
-            [f.identifier for f in request.mm_features],
+            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            mm_hashes,
             create_folder=False,
         )
         return os.path.exists(foldername)

@@ -11,9 +11,10 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
+import torch
 
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
@@ -30,13 +31,15 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    dcp_kv_cache_interleave_size: int
     eager_mode: bool
     chunked_prefill: bool
 
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
+    attn_backend: str | None = None
 
 
 @dataclass
@@ -52,9 +55,11 @@ class CPTestSettings:
         tp_base: int = 4,
         pp_base: int = 1,
         dcp_base: int = 1,
+        dcp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
+        attn_backend: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -66,6 +71,7 @@ class CPTestSettings:
                                 tp_size=tp_base,
                                 pp_size=pp_multiplier * pp_base,
                                 dcp_size=int(dcp_multiplier * tp_base),
+                                dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
                                 eager_mode=eager_mode_val,
                                 chunked_prefill=chunked_prefill_val,
                             )
@@ -75,7 +81,9 @@ class CPTestSettings:
             distributed_backends=["mp"],
             runner=runner,
             test_options=CPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
+                multi_node_only=multi_node_only,
+                load_format=load_format,
+                attn_backend=attn_backend,
             ),
         )
 
@@ -108,11 +116,12 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        dcp_kv_cache_interleave_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only, load_format, attn_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -172,6 +181,13 @@ def _compare_cp_with_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
+    if not attn_backend:
+        cp_env = tp_env = {}
+    else:
+        cp_env = tp_env = {
+            "VLLM_ATTENTION_BACKEND": attn_backend,
+        }
+
     cp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -180,6 +196,8 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
+        "--dcp-kv-cache-interleave-size",
+        str(dcp_kv_cache_interleave_size),
         "--distributed-executor-backend",
         distributed_backend,
     ]
@@ -198,14 +216,20 @@ def _compare_cp_with_tp(
         model_id,
         cp_args,
         tp_args,
+        cp_env,
+        tp_env,
         method=method,
         max_wait_seconds=720,
     )
 
 
 CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(tp_base=2, dcp_kv_cache_interleave_size=64),
+    ],
+    "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
     ],
@@ -215,6 +239,7 @@ CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 
@@ -243,6 +268,17 @@ def test_cp_generation(
     test_options: CPTestOptions,
     num_gpus_available,
 ):
+    if (
+        model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
+        and torch.cuda.get_device_capability() < (9, 0)
+    ):
+        pytest.skip(reason="MLA+DCP requires compute capability of 9.0 or higher")
+    if (
+        model_id == "bigcode/gpt_bigcode-santacoder"
+        and torch.cuda.get_device_capability() != (9, 0)
+    ):
+        pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
+
     _compare_cp_with_tp(
         model_id,
         parallel_setup,

@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Mapping, MutableSequence
+from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
 from typing import (
     TYPE_CHECKING,
-    Callable,
     ClassVar,
     Literal,
-    Optional,
     Protocol,
-    Union,
+    TypeAlias,
     overload,
     runtime_checkable,
 )
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch import Tensor
-from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -26,18 +24,24 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.sequence import IntermediateTensors
+else:
+    VllmConfig = object
+    WeightsMapper = object
+    MultiModalFeatureSpec = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
-MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
 The output embeddings must be one of the following formats:
 
@@ -78,14 +82,19 @@ class SupportsMultiModal(Protocol):
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
     """
 
+    multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
+    """
+    A set indicating CPU-only multimodal fields.
+    """
+
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
         Get the placeholder text for the `i`th `modality` item in the prompt.
         """
         ...
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
@@ -95,7 +104,13 @@ class SupportsMultiModal(Protocol):
             the appearances of their corresponding multimodal data item in the
             input prompt.
         """
-        ...
+        if hasattr(self, "get_multimodal_embeddings"):
+            logger.warning_once(
+                "`get_multimodal_embeddings` for vLLM models is deprecated and will be "
+                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
+                "this method to `embed_multimodal`."
+            )
+            return self.get_multimodal_embeddings(**kwargs)
 
     def get_language_model(self) -> VllmModel:
         """
@@ -110,10 +125,10 @@ class SupportsMultiModal(Protocol):
         ...
 
     @overload
-    def get_input_embeddings(self, input_ids: Tensor) -> Tensor: ...
+    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
 
     @overload
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
         multimodal_embeddings: MultiModalEmbeddings,
@@ -122,17 +137,17 @@ class SupportsMultiModal(Protocol):
         handle_oov_mm_token: bool = False,
     ) -> Tensor: ...
 
-    def _get_text_embeddings(
+    def _embed_text_input_ids(
         self,
         input_ids: Tensor,
-        get_input_embeddings: Callable[[Tensor], Tensor],
+        embed_input_ids: Callable[[Tensor], Tensor],
         *,
-        is_multimodal: Optional[Tensor],
+        is_multimodal: Tensor | None,
         handle_oov_mm_token: bool,
     ) -> Tensor:
         if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
-            text_embeds = get_input_embeddings(input_ids[is_text])
+            text_embeds = embed_input_ids(input_ids[is_text])
 
             return torch.empty(
                 (input_ids.shape[0], text_embeds.shape[1]),
@@ -140,14 +155,14 @@ class SupportsMultiModal(Protocol):
                 device=text_embeds.device,
             ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
 
-        return get_input_embeddings(input_ids)
+        return embed_input_ids(input_ids)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[Tensor] = None,
+        is_multimodal: Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
@@ -158,15 +173,15 @@ class SupportsMultiModal(Protocol):
 
         In case the multi-modal token IDs exceed the vocabulary size of
         the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `get_input_embeddings` method
+        to avoid calling the language model's `embed_input_ids` method
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.get_language_model().get_input_embeddings,
+            self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
@@ -176,7 +191,7 @@ class SupportsMultiModal(Protocol):
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )
@@ -236,16 +251,16 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 
 
 def supports_multimodal(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
     return getattr(model, "supports_multimodal", False)
 
 
-def supports_multimodal_raw_input_only(model: Union[type[object], object]) -> bool:
+def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-def supports_multimodal_encoder_tp_data(model: Union[type[object], object]) -> bool:
+def supports_multimodal_encoder_tp_data(model: type[object] | object) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
 
 
@@ -260,8 +275,8 @@ def supports_multimodal_pruning(model: object) -> TypeIs[SupportsMultiModalPruni
 
 
 def supports_multimodal_pruning(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsMultiModalPruning]], TypeIs[SupportsMultiModalPruning]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModalPruning]] | TypeIs[SupportsMultiModalPruning]:
     return getattr(model, "supports_multimodal_pruning", False)
 
 
@@ -279,7 +294,7 @@ class SupportsScoreTemplate(Protocol):
     """
 
     @classmethod
-    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+    def get_score_template(cls, query: str, document: str) -> str | None:
         """
         Generate a full prompt by populating the score template with query and document content.
         """  # noqa: E501
@@ -304,8 +319,8 @@ def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]: ...
 
 
 def supports_score_template(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsScoreTemplate]] | TypeIs[SupportsScoreTemplate]:
     return getattr(model, "supports_score_template", False)
 
 
@@ -325,7 +340,7 @@ class SupportsLoRA(Protocol):
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
     embedding_padding_modules: ClassVar[list[str]] = []
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -348,8 +363,8 @@ def supports_lora(model: object) -> TypeIs[SupportsLoRA]: ...
 
 
 def supports_lora(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsLoRA]] | TypeIs[SupportsLoRA]:
     result = _supports_lora(model)
 
     if not result:
@@ -379,7 +394,7 @@ def supports_lora(
     return result
 
 
-def _supports_lora(model: Union[type[object], object]) -> bool:
+def _supports_lora(model: type[object] | object) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -404,15 +419,15 @@ class SupportsPP(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> "IntermediateTensors":
+    ) -> IntermediateTensors:
         """Called when PP rank > 0 for profiling purposes."""
         ...
 
     def forward(
         self,
         *,
-        intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[Tensor, "IntermediateTensors"]:
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> IntermediateTensors | None:
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -434,13 +449,13 @@ class _SupportsPPType(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> "IntermediateTensors": ...
+    ) -> IntermediateTensors: ...
 
     def forward(
         self,
         *,
-        intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[Tensor, "IntermediateTensors"]: ...
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> Tensor | IntermediateTensors: ...
 
 
 @overload
@@ -452,8 +467,8 @@ def supports_pp(model: object) -> TypeIs[SupportsPP]: ...
 
 
 def supports_pp(
-    model: Union[type[object], object],
-) -> Union[bool, TypeIs[type[SupportsPP]], TypeIs[SupportsPP]]:
+    model: type[object] | object,
+) -> bool | TypeIs[type[SupportsPP]] | TypeIs[SupportsPP]:
     supports_attributes = _supports_pp_attributes(model)
     supports_inspect = _supports_pp_inspect(model)
 
@@ -487,14 +502,14 @@ def supports_pp(
     return supports_attributes and supports_inspect
 
 
-def _supports_pp_attributes(model: Union[type[object], object]) -> bool:
+def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
 
-def _supports_pp_inspect(model: Union[type[object], object]) -> bool:
+def _supports_pp_inspect(model: type[object] | object) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
         return False
@@ -523,8 +538,8 @@ def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 def has_inner_state(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[HasInnerState]], TypeIs[HasInnerState]]:
+    model: type[object] | object,
+) -> TypeIs[type[HasInnerState]] | TypeIs[HasInnerState]:
     return getattr(model, "has_inner_state", False)
 
 
@@ -550,8 +565,8 @@ def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 def is_attention_free(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
+    model: type[object] | object,
+) -> TypeIs[type[IsAttentionFree]] | TypeIs[IsAttentionFree]:
     return getattr(model, "is_attention_free", False)
 
 
@@ -570,7 +585,7 @@ class IsHybrid(Protocol):
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
@@ -596,8 +611,8 @@ def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
 
 
 def is_hybrid(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[IsHybrid]], TypeIs[IsHybrid]]:
+    model: type[object] | object,
+) -> TypeIs[type[IsHybrid]] | TypeIs[IsHybrid]:
     return getattr(model, "is_hybrid", False)
 
 
@@ -639,6 +654,9 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
+    moe_layers: Iterable[nn.Module]
+    """List of MoE layers in this model."""
+
     def set_eplb_state(
         self,
         expert_load_view: Tensor,
@@ -661,7 +679,15 @@ class MixtureOfExperts(Protocol):
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
         """
-        ...
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def update_physical_experts_metadata(
         self,
@@ -671,7 +697,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable
@@ -688,9 +716,37 @@ def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 def has_noops(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[HasNoOps]], TypeIs[HasNoOps]]:
+    model: type[object] | object,
+) -> TypeIs[type[HasNoOps]] | TypeIs[HasNoOps]:
     return getattr(model, "has_noops", False)
+
+
+@runtime_checkable
+class SupportsMambaPrefixCaching(Protocol):
+    """The interface for models whose mamba layers support prefix caching.
+
+    This is currently experimental.
+    """
+
+    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+def supports_mamba_prefix_caching(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
+    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable
@@ -711,23 +767,23 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]: ...
 
 
 def _supports_cross_encoding(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
     return getattr(model, "supports_cross_encoding", False)
 
 
 def supports_cross_encoding(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar[Optional["WeightsMapper"]] = None
-    packed_modules_mapping: ClassVar[Optional[dict[str, list[str]]]] = None
-    quant_config: Optional[QuantizationConfig] = None
+    hf_to_vllm_mapper: ClassVar[WeightsMapper | None] = None
+    packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
+    quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
@@ -749,7 +805,7 @@ class SupportsQuant:
         return instance
 
     @staticmethod
-    def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+    def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
         """Find quant config passed through model constructor args"""
         from vllm.config import VllmConfig  # avoid circular import
 
@@ -797,10 +853,10 @@ class SupportsTranscription(Protocol):
         audio: np.ndarray,
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
-        language: Optional[str],
+        language: str | None,
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
-        to_language: Optional[str],
+        to_language: str | None,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
@@ -813,7 +869,7 @@ class SupportsTranscription(Protocol):
         return {k: v for k, v in LANGUAGES.items() if k not in cls.supported_languages}
 
     @classmethod
-    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+    def validate_language(cls, language: str | None) -> str | None:
         """
         Ensure the language specified in the transcription request
         is a valid ISO 639-1 language code. If the request language is
@@ -850,7 +906,7 @@ class SupportsTranscription(Protocol):
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
@@ -870,40 +926,79 @@ def supports_transcription(model: object) -> TypeIs[SupportsTranscription]: ...
 
 
 def supports_transcription(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
 
 
 @runtime_checkable
-class SupportsV0Only(Protocol):
-    """Models with this interface are not compatible with V1 vLLM."""
+class SupportsEagleBase(Protocol):
+    """Base interface for models that support EAGLE-based speculative decoding."""
 
-    supports_v0_only: ClassVar[Literal[True]] = True
+    has_own_lm_head: bool = False
+    """
+    A flag that indicates this model has trained its own lm_head.
+    """
+
+    has_own_embed_tokens: bool = False
+    """
+    A flag that indicates this model has trained its own input embeddings.
+    """
 
 
 @overload
-def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]: ...
+def supports_any_eagle(model: type[object]) -> TypeIs[type[SupportsEagleBase]]: ...
 
 
 @overload
-def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]: ...
+def supports_any_eagle(model: object) -> TypeIs[SupportsEagleBase]: ...
 
 
-def supports_v0_only(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
-    return getattr(model, "supports_v0_only", False)
+def supports_any_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
+    """Check if model supports any EAGLE variant (1, 2, or 3)."""
+    return supports_eagle(model) or supports_eagle3(model)
 
 
 @runtime_checkable
-class SupportsEagle3(Protocol):
+class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE3 speculative decoding."""
+    EAGLE-1 and EAGLE-2 speculative decoding."""
+
+    supports_eagle: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_eagle(model: type[object]) -> TypeIs[type[SupportsEagle]]: ...
+
+
+@overload
+def supports_eagle(model: object) -> TypeIs[SupportsEagle]: ...
+
+
+def supports_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagle]] | TypeIs[SupportsEagle]:
+    return isinstance(model, SupportsEagle)
+
+
+@runtime_checkable
+class SupportsEagle3(SupportsEagleBase, Protocol):
+    """The interface required for models that support
+    EAGLE-3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE3 
+    A flag that indicates this model supports EAGLE-3 
     speculative decoding.
 
     Note:
@@ -914,7 +1009,7 @@ class SupportsEagle3(Protocol):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
         Set which layers should output auxiliary
-        hidden states for EAGLE3.
+        hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
@@ -925,7 +1020,7 @@ class SupportsEagle3(Protocol):
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
         Get the layer indices that should output auxiliary hidden states
-        for EAGLE3.
+        for EAGLE-3.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
@@ -942,8 +1037,8 @@ def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]: ...
 
 
 def supports_eagle3(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagle3]] | TypeIs[SupportsEagle3]:
     return isinstance(model, SupportsEagle3)
 
 
@@ -963,14 +1058,7 @@ class SupportsMRoPE(Protocol):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        second_per_grid_ts: Optional[list[float]] = None,
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths: Optional[torch.Tensor] = None,
-        use_audio_in_video: bool = False,
+        mm_features: list["MultiModalFeatureSpec"],
     ) -> tuple[torch.Tensor, int]:
         """
         Get M-RoPE input positions and delta value for this specific model.
@@ -980,19 +1068,11 @@ class SupportsMRoPE(Protocol):
 
         Args:
             input_tokens: List of input token IDs
-            hf_config: HuggingFace model configuration
-            image_grid_thw: Image grid dimensions (t, h, w)
-            video_grid_thw: Video grid dimensions (t, h, w)
-            second_per_grid_ts: Seconds per grid timestep for videos
-            context_len: Context length
-            seq_len: Sequence length
-            audio_feature_lengths: Audio feature lengths for multimodal models
-            use_audio_in_video: Whether to use audio in video for interleaving
+            mm_features: Information about each multi-modal data item
 
         Returns:
-            Tuple of (llm_positions, mrope_position_delta)
-            - llm_positions: Tensor of shape [3, num_tokens]
-                with T/H/W positions
+            Tuple of `(llm_positions, mrope_position_delta)`
+            - llm_positions: Tensor of shape `[3, num_tokens]` with T/H/W positions
             - mrope_position_delta: Delta for position calculations
         """
         ...
@@ -1007,6 +1087,6 @@ def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]: ...
 
 
 def supports_mrope(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMRoPE]] | TypeIs[SupportsMRoPE]:
     return isinstance(model, SupportsMRoPE)

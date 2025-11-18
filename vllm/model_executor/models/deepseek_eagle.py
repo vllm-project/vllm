@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -25,8 +24,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
+from vllm.utils import init_logger
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
+
+logger = init_logger(__name__)
 
 
 @support_torch_compile
@@ -71,7 +73,7 @@ class DeepseekV2Model(nn.Module):
         self.hnorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -216,15 +218,19 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        # Set MoE hyperparameters
+        self.num_moe_layers = self.config.num_hidden_layers
+        self.set_moe_parameters()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
             raise NotImplementedError(
@@ -235,7 +241,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -244,6 +250,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(

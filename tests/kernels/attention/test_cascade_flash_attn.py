@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -85,7 +84,7 @@ def test_cascade(
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
     fa_version: int,
 ) -> None:
@@ -171,6 +170,7 @@ def test_cascade(
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
         common_prefix_len=common_prefix_len,
+        max_num_splits=0,  # no max
         fa_version=fa_version,
     )
 

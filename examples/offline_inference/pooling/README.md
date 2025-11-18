@@ -14,7 +14,7 @@ python examples/offline_inference/pooling/convert_model_to_seq_cls.py --model_na
 
 ## Embed jina_embeddings_v3 usage
 
-Only text matching task is supported for now. See <gh-pr:16120>
+Only text matching task is supported for now. See <https://github.com/vllm-project/vllm/pull/16120>
 
 ```bash
 python examples/offline_inference/pooling/embed_jina_embeddings_v3.py
@@ -26,10 +26,28 @@ python examples/offline_inference/pooling/embed_jina_embeddings_v3.py
 python examples/offline_inference/pooling/embed_matryoshka_fy.py
 ```
 
+## Multi vector retrieval usage
+
+```bash
+python examples/offline_inference/pooling/multi_vector_retrieval.py
+```
+
 ## Named Entity Recognition (NER) usage
 
 ```bash
 python examples/offline_inference/pooling/ner.py
+```
+
+## Prithvi Geospatial MAE usage
+
+```bash
+python examples/offline_inference/pooling/prithvi_geospatial_mae.py
+```
+
+## IO Processor Plugins for Prithvi Geospatial MAE
+
+```bash
+python examples/offline_inference/pooling/prithvi_geospatial_mae_io_processor.py
 ```
 
 ## Qwen3 reranker usage

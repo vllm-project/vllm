@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    MultipleOf,
+)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
@@ -20,9 +23,7 @@ logger = init_logger(__name__)
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return DeepseekV32IndexerMetadata
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -97,8 +98,8 @@ class DeepseekV32IndexerMetadata:
     num_prefills: int
     num_prefill_tokens: int
 
-    decode: Optional[DeepSeekV32IndexerDecodeMetadata] = None
-    prefill: Optional[DeepseekV32IndexerPrefillMetadata] = None
+    decode: DeepSeekV32IndexerDecodeMetadata | None = None
+    prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
 
 # TODO (zyongye) optimize this, this is now vibe coded
@@ -205,7 +206,7 @@ def split_prefill_chunks(
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 

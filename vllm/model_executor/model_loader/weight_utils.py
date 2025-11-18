@@ -11,10 +11,10 @@ import os
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any, Callable, Optional, Union
+from typing import IO, Any
 
 import filelock
 import huggingface_hub.constants
@@ -34,7 +34,7 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
 )
 from vllm.platforms import current_platform
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -82,10 +82,11 @@ enable_hf_transfer()
 
 class DisabledTqdm(tqdm):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs, disable=True)
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
 
 
-def get_lock(model_name_or_path: Union[str, Path], cache_dir: Optional[str] = None):
+def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     lock_dir = cache_dir or temp_dir
     model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
@@ -100,7 +101,7 @@ def get_lock(model_name_or_path: Union[str, Path], cache_dir: Optional[str] = No
 
 @contextmanager
 def atomic_writer(
-    filepath: Union[str, Path], mode: str = "w", encoding: Optional[str] = None
+    filepath: str | Path, mode: str = "w", encoding: str | None = None
 ) -> Generator[IO]:
     """
     Context manager that provides an atomic file writing routine.
@@ -143,11 +144,11 @@ def atomic_writer(
 
 def maybe_download_from_modelscope(
     model: str,
-    revision: Optional[str] = None,
-    download_dir: Optional[str] = None,
-    ignore_patterns: Optional[Union[str, list[str]]] = None,
-    allow_patterns: Optional[Union[list[str], str]] = None,
-) -> Optional[str]:
+    revision: str | None = None,
+    download_dir: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+    allow_patterns: list[str] | str | None = None,
+) -> str | None:
     """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
 
     Returns the path to the downloaded model, or None if the model is not
@@ -370,10 +371,10 @@ def get_sparse_attention_config(
 
 def download_weights_from_hf(
     model_name_or_path: str,
-    cache_dir: Optional[str],
+    cache_dir: str | None,
     allow_patterns: list[str],
-    revision: Optional[str] = None,
-    ignore_patterns: Optional[Union[str, list[str]]] = None,
+    revision: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
 
@@ -416,7 +417,7 @@ def download_weights_from_hf(
                 e,
             )
 
-    logger.info("Using model weights format %s", allow_patterns)
+    logger.debug("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
@@ -448,8 +449,8 @@ def download_weights_from_hf(
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     index_file: str,
-    cache_dir: Optional[str],
-    revision: Optional[str] = None,
+    cache_dir: str | None,
+    revision: str | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
 
@@ -540,7 +541,7 @@ def enable_tqdm(use_tqdm_on_load: bool):
 
 def np_cache_weights_iterator(
     model_name_or_path: str,
-    cache_dir: Optional[str],
+    cache_dir: str | None,
     hf_folder: str,
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -657,10 +658,22 @@ def multi_thread_safetensors_weights_iterator(
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    is_distributed: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        streamer.stream_files(hf_weights_files)
+        is_cuda_alike = current_platform.is_cuda_alike()
+        device = (
+            f"cuda:{current_platform.current_device()}"
+            if is_distributed and is_cuda_alike
+            else "cpu"
+        )
+
+        streamer.stream_files(
+            hf_weights_files,
+            device=device,
+            is_distributed=is_distributed,
+        )
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
@@ -672,6 +685,7 @@ def runai_safetensors_weights_iterator(
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not enable_tqdm(use_tqdm_on_load),
+            mininterval=2,
         )
 
         yield from tensor_iter
@@ -746,7 +760,7 @@ def fastsafetensors_weights_iterator(
 def pt_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
+    pt_load_map_location: str | dict[str, str] = "cpu",
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
@@ -765,7 +779,7 @@ def pt_weights_iterator(
 def multi_thread_pt_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
+    pt_load_map_location: str | dict[str, str] = "cpu",
     max_workers: int = 4,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model bin/pt files."""
@@ -985,7 +999,7 @@ def initialize_dummy_weights(
                 param.uniform_(low, high, generator=generator)
 
 
-def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
+def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     """Remap the name of FP8 k/v_scale parameters.
 
     This function handles the remapping of FP8 k/v_scale parameter names.

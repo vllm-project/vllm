@@ -5,21 +5,23 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
-from __future__ import annotations
-
 import contextlib
 import functools
 import importlib
 import importlib.util
 import os
 import shutil
-from typing import Any, Callable, NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import requests
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -34,16 +36,31 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 
 
 @functools.cache
+def has_flashinfer_cubin() -> bool:
+    """Return `True` if flashinfer-cubin package is available."""
+    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+        return True
+    if importlib.util.find_spec("flashinfer_cubin") is not None:
+        return True
+    logger.debug_once("flashinfer-cubin package was not found")
+    return False
+
+
+@functools.cache
 def has_flashinfer() -> bool:
-    """Return ``True`` if FlashInfer is available."""
+    """Return `True` if flashinfer-python package is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
+    # When not using flashinfer cubin,
     # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if shutil.which("nvcc") is None:
-        logger.debug_once("FlashInfer unavailable since nvcc was not found")
+    if not has_flashinfer_cubin() and shutil.which("nvcc") is None:
+        logger.debug_once(
+            "FlashInfer unavailable since nvcc was not found "
+            "and not using pre-downloaded cubins"
+        )
         return False
     return True
 
@@ -115,13 +132,13 @@ autotune = _lazy_import_wrapper(
 
 @functools.cache
 def has_flashinfer_comm() -> bool:
-    """Return ``True`` if FlashInfer comm module is available."""
+    """Return `True` if FlashInfer comm module is available."""
     return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
 
 
 @functools.cache
 def has_flashinfer_all2all() -> bool:
-    """Return ``True`` if FlashInfer mnnvl all2all is available."""
+    """Return `True` if FlashInfer mnnvl all2all is available."""
     if not has_flashinfer_comm():
         return False
 
@@ -142,7 +159,7 @@ def has_flashinfer_all2all() -> bool:
 
 @functools.cache
 def has_flashinfer_moe() -> bool:
-    """Return ``True`` if FlashInfer MoE module is available."""
+    """Return `True` if FlashInfer MoE module is available."""
     return (
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
@@ -151,7 +168,7 @@ def has_flashinfer_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -172,14 +189,13 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_nvidia_artifactory() -> bool:
-    """Return ``True`` if NVIDIA's artifactory is accessible.
+    """Return `True` if NVIDIA's artifactory is accessible.
 
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
-    # Since FLASHINFER_CUBIN_DIR defines the pre-downloaded cubins path, when
-    # it's true, we could assume the cubins are available.
-    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+    # If we have pre-downloaded cubins, we can assume the cubins are available.
+    if has_flashinfer_cubin():
         return True
 
     try:
@@ -202,9 +218,13 @@ def has_nvidia_artifactory() -> bool:
 @functools.cache
 def supports_trtllm_attention() -> bool:
     """
-    TRTLLM attention is supported if the platform is SM100 and
-    NVIDIA artifactory is accessible
+    TRTLLM attention is supported if the platform is SM100,
+    NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
+    # Batch-invariant mode disables TRTLLM attention
+    if vllm_is_batch_invariant():
+        return False
+
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
     return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
@@ -219,9 +239,9 @@ def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
 
 def force_use_trtllm_attention() -> bool | None:
     """
-    Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
-    return ``True`` if TRTLLM attention is forced to be used,
-    return ``False`` if TRTLLM attention is forced to be not used.
+    Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
+    return `True` if TRTLLM attention is forced to be used,
+    return `False` if TRTLLM attention is forced to be not used.
     """
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
@@ -239,17 +259,26 @@ def use_trtllm_attention(
     num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
+    dcp_world_size: int,
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
-    """Return ``True`` if TRTLLM attention is used."""
+    """Return `True` if TRTLLM attention is used."""
     force_use_trtllm = force_use_trtllm_attention()
 
     # Environment variable is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
+        return False
+
+    # Decode context parallel is not supported
+    if dcp_world_size > 1:
+        logger.warning_once(
+            "Trtllm does not support returning LSE and as a result "
+            "does not support DCP, reverting to FlashInfer"
+        )
         return False
 
     # The platform is not supported
@@ -290,14 +319,12 @@ def use_trtllm_attention(
         # Environment variable not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            use_trtllm = kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = (
-                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-            )
+            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm

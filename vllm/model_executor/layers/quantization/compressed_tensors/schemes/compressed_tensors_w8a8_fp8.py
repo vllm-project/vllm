@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
-    check_aiter_fp8_linear_support,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -61,7 +61,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
 
         if self.weight_block_size is not None:
             assert not self.is_static_input_scheme
@@ -173,13 +173,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = None
 
         if self.strategy == QuantizationStrategy.BLOCK:
-            maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
+            maybe_post_process_fp8_weight_block(layer)
 
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.weight_block_size is not None:
             return self.w8a8_block_fp8_linear.apply(

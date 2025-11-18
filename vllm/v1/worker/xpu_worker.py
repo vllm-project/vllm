@@ -39,6 +39,7 @@ class XPUWorker(Worker):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
@@ -61,7 +62,7 @@ class XPUWorker(Worker):
                 with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
                 with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True
+                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
         else:
@@ -158,12 +159,10 @@ class XPUWorker(Worker):
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
-        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "pidfd")
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv(
             "LOCAL_WORLD_SIZE", str(self.parallel_config.world_size)
         )
-        os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)

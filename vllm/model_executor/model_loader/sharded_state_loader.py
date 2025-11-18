@@ -5,7 +5,7 @@ import collections
 import glob
 import os
 from collections.abc import Generator
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -89,7 +89,7 @@ class ShardedStateLoader(BaseModelLoader):
                     result[k] = t
         return result
 
-    def _prepare_weights(self, model_name_or_path: str, revision: Optional[str]):
+    def _prepare_weights(self, model_name_or_path: str, revision: str | None):
         if is_s3(model_name_or_path) or os.path.isdir(model_name_or_path):
             return model_name_or_path
         else:
@@ -171,8 +171,8 @@ class ShardedStateLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
         from safetensors.torch import save_file
 

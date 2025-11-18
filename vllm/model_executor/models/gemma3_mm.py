@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
@@ -21,7 +20,12 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -72,7 +76,15 @@ class Gemma3ImagePixelInputs(TensorSchema):
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-Gemma3ImageInputs = Gemma3ImagePixelInputs
+class Gemma3ImageEmbeddingInputs(TensorSchema):
+    type: Literal["image_embeds"] = "image_embeds"
+    image_embeds: Annotated[
+        torch.Tensor,
+        TensorShape("ni", "nf", "hs"),
+    ]
+
+
+Gemma3ImageInputs: TypeAlias = Gemma3ImagePixelInputs | Gemma3ImageEmbeddingInputs
 
 
 class Gemma3ProcessingInfo(BaseProcessingInfo):
@@ -82,7 +94,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(Gemma3Processor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def _resolve_image_kwargs(
@@ -112,7 +124,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -137,11 +149,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if not do_pan_and_scan:
             return 0
 
-        if envs.VLLM_USE_V1:
-            logger.warning_once(
-                "`do_pan_and_scan=True` has suboptimal results on V1 "
-                "because of the simplified attention pattern being used."
-            )
+        logger.warning_once(
+            "`do_pan_and_scan=True` has suboptimal results on V1 "
+            "because of the simplified attention pattern being used."
+        )
 
         # Based on Gemma3ImageProcessor.pan_and_scan
         if image_width >= image_height:
@@ -180,20 +191,23 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_image_repl(
         self,
         *,
-        image_width: int,
-        image_height: int,
-        processor: Optional[Gemma3Processor],
+        image_width: int | None,
+        image_height: int | None,
+        num_crops: int | None = None,
+        processor: Gemma3Processor | None,
     ) -> PromptUpdateDetails[str]:
         if processor is None:
             processor = self.get_hf_processor()
 
         boi_token = processor.boi_token
 
-        num_crops = self.get_num_crops(
-            image_width=image_width,
-            image_height=image_height,
-            processor=processor,
-        )
+        if num_crops is None:
+            assert image_width is not None and image_height is not None
+            num_crops = self.get_num_crops(
+                image_width=image_width,
+                image_height=image_height,
+                processor=processor,
+            )
 
         if num_crops == 0:
             image_text = boi_token
@@ -217,7 +231,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -256,7 +270,7 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -323,6 +337,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
             num_patches=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -335,7 +350,19 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         image_token = hf_processor.boi_token
 
         def get_replacement_gemma3(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
+
+            if isinstance(images, ImageEmbeddingItems):
+                # For image embedding inputs, only support no crops cases
+                # since it's not supported in hf processor anyway
+                return self.info.get_image_repl(
+                    image_width=None,
+                    image_height=None,
+                    num_crops=0,
+                    processor=hf_processor,
+                )
 
             image_size = images.get_image_size(item_idx)
             return self.info.get_image_repl(
@@ -510,7 +537,7 @@ class Gemma3ForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<start_of_image>"
 
@@ -555,21 +582,23 @@ class Gemma3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Gemma3ImageInputs]:
+    ) -> Gemma3ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        assert image_embeds is None, "Gemma3 does not support image_embeds."
-        if pixel_values is None:
-            return None
 
-        image_size = self.config.vision_config.image_size
-
-        return Gemma3ImagePixelInputs(
-            pixel_values=pixel_values,
-            num_patches=num_patches,
-            resolve_bindings={"h": image_size, "w": image_size},
-        )
+        if pixel_values is not None:
+            image_size = self.config.vision_config.image_size
+            return Gemma3ImagePixelInputs(
+                pixel_values=pixel_values,
+                num_patches=num_patches,
+                resolve_bindings={"h": image_size, "w": image_size},
+            )
+        elif image_embeds is not None:
+            return Gemma3ImageEmbeddingInputs(
+                image_embeds=image_embeds,
+                type="image_embeds",
+            )
 
     def _image_pixels_to_features(
         self,
@@ -581,7 +610,9 @@ class Gemma3ForConditionalGeneration(
     def _process_image_input(
         self,
         image_input: Gemma3ImageInputs,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor | list[torch.Tensor]:
+        if image_input["type"] == "image_embeds":
+            return image_input["image_embeds"]
         assert self.vision_tower is not None
 
         pixel_values = image_input["pixel_values"]
@@ -598,7 +629,7 @@ class Gemma3ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -609,8 +640,8 @@ class Gemma3ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
@@ -692,7 +723,7 @@ class Gemma3ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

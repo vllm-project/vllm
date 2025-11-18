@@ -4,14 +4,13 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
 import regex as re
 import torch
-import torch.distributed
 from torch import nn
 from transformers import MiniMaxConfig
 
@@ -42,7 +41,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -83,7 +81,7 @@ class MiniMaxText01MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
         prefix: str = "mlp",
     ) -> None:
@@ -121,9 +119,9 @@ class MiniMaxText01MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
         layer_idx: int = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "moe",
     ) -> None:
         super().__init__()
@@ -191,10 +189,10 @@ class MiniMaxText01Attention(nn.Module):
         rotary_dim: int,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
-        sliding_window: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        sliding_window: int | None = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "mha",
     ) -> None:
         super().__init__()
@@ -273,12 +271,12 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MiniMaxConfig,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         expert_num: int = 1,
         layer_id: int = None,
-        linear_layer_id: Optional[int] = None,
+        linear_layer_id: int | None = None,
         prefix: str = "decoder",
     ) -> None:
         self._ilayer = layer_id
@@ -428,7 +426,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         is_warmup: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -622,17 +620,17 @@ class MiniMaxText01Model(nn.Module):
             )
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
@@ -670,16 +668,14 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
-        self.lora_config = lora_config
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
 
         self.CONCAT_FFN = True
 
-        self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxText01Model(
@@ -687,15 +683,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 self.config.hidden_size,
-                org_num_embeddings=self.config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
 
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size
+                config.vocab_size, self.config.vocab_size
             )
 
         else:
@@ -715,15 +709,15 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.model(

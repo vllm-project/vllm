@@ -3,7 +3,6 @@
 
 import os
 from collections.abc import Sequence
-from typing import Optional
 
 import librosa
 import pytest
@@ -12,7 +11,6 @@ from huggingface_hub import snapshot_download
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import rescale_image_size
-from vllm.platforms import current_platform
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -47,17 +45,11 @@ models = [model_path]
 
 target_dtype = "half"
 
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
 
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: Sequence[tuple[list[str], PromptImageInput, Optional[PromptAudioInput]]],
+    inputs: Sequence[tuple[list[str], PromptImageInput, PromptAudioInput | None]],
     model: str,
     *,
     max_model_len: int,
@@ -66,7 +58,7 @@ def run_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 

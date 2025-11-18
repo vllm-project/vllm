@@ -10,6 +10,8 @@ from vllm.platforms import current_platform
 # Test parameters
 NUM_ROWS = [1, 32, 2050]
 TOP_K_VALUES = [2048]
+BATCH_SIZE = [1, 2, 4, 2048, 4096]
+NEXT_N = [1, 2, 4, 8]
 
 
 def create_random_logits(
@@ -39,10 +41,9 @@ def create_row_boundaries(
 
 
 def compare_top_k_results(
+    logits: torch.Tensor,
     cuda_indices: torch.Tensor,
-    cuda_values: torch.Tensor,
     torch_indices: torch.Tensor,
-    torch_values: torch.Tensor,
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
     top_k: int,
@@ -70,8 +71,9 @@ def compare_top_k_results(
             continue
 
         # Any difference in elements, compare the values
-        cuda_row_values = cuda_values[row_idx][:num_valid].cpu()
-        torch_row_values = torch_values[row_idx][:num_valid].cpu()
+        logits_row = logits[row_idx]
+        cuda_row_values = [logits_row[i] for i in cuda_row_indices]
+        torch_row_values = [logits_row[i] for i in torch_row_indices]
 
         cuda_only_values, torch_only_values = [], []
         for idx in cuda_set - torch_set:
@@ -114,8 +116,7 @@ def test_top_k_per_row(
     logits = create_random_logits(row_starts, row_ends, vocab_size, torch.float32, 42)
 
     # Create output tensors
-    indices = torch.empty((num_rows, 2048), dtype=torch.int32, device="cuda")
-    values = torch.empty((num_rows, 2048), dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
     # Run CUDA implementation
     torch.ops._C.top_k_per_row(
@@ -123,15 +124,13 @@ def test_top_k_per_row(
         row_starts,
         row_ends,
         indices,
-        values,
         num_rows,
-        top_k,
         logits.stride(0),
         logits.stride(1),
     )
 
     # Run reference implementation
-    torch_values, torch_indices = logits.topk(min(top_k, max(row_ends)), dim=-1)
+    torch_indices = logits.topk(min(top_k, max(row_ends)), dim=-1)[1]
     mask_lo = torch_indices >= 0
     mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
     mask = mask_lo & mask_hi
@@ -139,5 +138,61 @@ def test_top_k_per_row(
 
     # Compare results
     assert compare_top_k_results(
-        indices, values, torch_indices, torch_values, row_starts, row_ends, top_k
+        logits, indices, torch_indices, row_starts, row_ends, top_k
+    ), "CUDA top_k_per_row results don't match torch.topk"
+
+
+@pytest.mark.parametrize("top_k", TOP_K_VALUES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZE)
+@pytest.mark.parametrize("next_n", NEXT_N)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_decode(
+    top_k: int,
+    batch_size: int,
+    next_n: int,
+) -> None:
+    """
+    Test top_k_per_row with seq_lens tensor.
+    """
+    torch.set_default_device("cuda:0")
+
+    # Create test data
+    num_rows = batch_size * next_n
+    vocab_size = 20000
+    seq_lens = torch.randint(
+        vocab_size, (batch_size,), dtype=torch.int32, device="cuda"
+    )
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    row_indices = torch.arange(num_rows, device="cuda") // next_n
+    next_n_offset = torch.arange(num_rows, device="cuda") % next_n
+    row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
+    logits = create_random_logits(row_starts, row_ends, vocab_size, torch.float32, 42)
+
+    # Create output tensors
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    # Run CUDA implementation
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+    )
+
+    torch.cuda.synchronize()
+
+    # Run reference implementation
+    torch_indices = logits.topk(min(top_k, max(row_ends)), dim=-1)[1]
+    mask_lo = torch_indices >= 0
+    mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
+    mask = mask_lo & mask_hi
+    torch_indices = torch_indices.masked_fill(~mask, -1)
+
+    # Compare results
+    assert compare_top_k_results(
+        logits, indices, torch_indices, row_starts, row_ends, top_k
     ), "CUDA top_k_per_row results don't match torch.topk"

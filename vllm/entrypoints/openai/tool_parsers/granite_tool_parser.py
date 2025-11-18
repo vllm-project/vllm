@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -20,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import (
     consume_space,
@@ -34,7 +32,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("granite")
 class GraniteToolParser(ToolParser):
     """
     Tool call parser for the granite 3.0 models. Intended
@@ -108,7 +105,7 @@ class GraniteToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_token):
             start_idx = consume_space(start_idx + len(self.bot_token), current_text)

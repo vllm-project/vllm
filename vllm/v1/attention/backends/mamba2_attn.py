@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
@@ -108,18 +107,18 @@ class Mamba2AttentionMetadata:
 
     # The following tensors only contain prefill requests and will be None if
     # the batch has no prefill request.
-    has_initial_states_p: Optional[torch.Tensor]
-    seq_idx_p: Optional[torch.Tensor]
+    has_initial_states_p: torch.Tensor | None
+    seq_idx_p: torch.Tensor | None
 
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
     # each chunk, its offests into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
-    cu_chunk_seqlen_p: Optional[torch.Tensor]
+    cu_chunk_seqlen_p: torch.Tensor | None
 
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
-    last_chunk_indices_p: Optional[torch.Tensor]
+    last_chunk_indices_p: torch.Tensor | None
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
     block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
@@ -128,9 +127,9 @@ class Mamba2AttentionMetadata:
     num_computed_tokens_p: torch.Tensor  # shape: [batch,]
 
     # The following attributes are for triton implementation of causal_conv1d
-    nums_dict: Optional[dict] = None
-    batch_ptr: Optional[torch.Tensor] = None
-    token_chunk_offset_ptr: Optional[torch.Tensor] = None
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -148,27 +147,6 @@ class Mamba2AttentionMetadataBuilder(
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            self.state_indices_tensor = torch.empty(
-                (
-                    self.decode_cudagraph_max_bs,
-                    cdiv(
-                        vllm_config.model_config.max_model_len, kv_cache_spec.block_size
-                    ),
-                ),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_scheduled_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_computed_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
 
     def build(
         self,
@@ -203,20 +181,13 @@ class Mamba2AttentionMetadataBuilder(
             num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
                 self.device
             )
-            # Block index of the last computed token
-            block_idx_last_computed_token = (
-                cdiv(num_computed_tokens, mamba_block_size) - 1
+            (
+                block_idx_last_computed_token,
+                block_idx_first_scheduled_token,
+                block_idx_last_scheduled_token,
+            ) = self._compute_prefix_caching_block_indices(
+                common_attn_metadata, mamba_block_size
             )
-            # which is <= block index for the first scheduled token
-            block_idx_first_scheduled_token = (
-                cdiv(num_computed_tokens + 1, mamba_block_size) - 1
-            )
-            # which is <= block index of the last scheduled token
-            block_idx_last_scheduled_token = (
-                cdiv(common_attn_metadata.seq_lens, mamba_block_size) - 1
-            )
-            # -1 in case it's non-computed and causes later issues with indexing
-            block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
@@ -331,7 +302,7 @@ class Mamba2AttentionMetadataBuilder(
 
         elif (
             num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad state tensor for CUDA graph
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)

@@ -10,7 +10,6 @@ import pytest
 from tests.quantization.utils import is_quant_method_supported
 
 MODELS = [
-    "microsoft/Phi-3-mini-4k-instruct",  # dense model
     "ai21labs/Jamba-tiny-dev",  # MoE model
 ]
 
@@ -30,5 +29,7 @@ def test_model_rtn_startup(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    with vllm_runner(model, dtype=dtype, quantization="rtn") as vllm_model:
+    with vllm_runner(
+        model, enforce_eager=True, dtype=dtype, quantization="rtn"
+    ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

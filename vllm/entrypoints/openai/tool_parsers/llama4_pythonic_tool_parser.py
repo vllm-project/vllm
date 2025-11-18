@@ -3,7 +3,7 @@
 import ast
 import json
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
@@ -31,7 +30,6 @@ class _UnexpectedAstError(Exception):
     pass
 
 
-@ToolParserManager.register_module("llama4_pythonic")
 class Llama4PythonicToolParser(ToolParser):
     """
     Toolcall parser for Llama4 that produce tool calls in a pythonic style
@@ -128,7 +126,7 @@ class Llama4PythonicToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not current_text.startswith("[") and not current_text.startswith(
             "<|python_start|>"
         ):
@@ -245,7 +243,7 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
-def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
+def _make_valid_python(text: str) -> tuple[str, str] | None:
     bracket_stack = []
     for index, char in enumerate(text):
         if char in {"[", "(", "{"}:
@@ -317,7 +315,7 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
 
 def _compute_tool_delta(
     previously_sent_args: str, new_call: ToolCall, index: int, withheld_suffix: str
-) -> Union[DeltaToolCall, None]:
+) -> DeltaToolCall | None:
     new_call_args = new_call.function.arguments
     if withheld_suffix:
         assert new_call_args.endswith(withheld_suffix)

@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Union
 
 import numpy as np
 import torch
 
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)
@@ -23,6 +22,7 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
         kernel_block_size: int,
+        dcp_kv_cache_interleave_size: int,
     ):
         """
         Args:
@@ -87,6 +87,7 @@ class BlockTable:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        self.dcp_kv_cache_interleave_size = dcp_kv_cache_interleave_size
 
     def append_row(
         self,
@@ -97,7 +98,9 @@ class BlockTable:
             return
 
         if self.use_hybrid_blocks:
-            block_ids = self._map_to_kernel_blocks(np.array(block_ids))
+            block_ids = self.map_to_kernel_blocks(
+                np.array(block_ids), self.blocks_per_kv_block, self._kernel_block_arange
+            )
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
@@ -145,9 +148,19 @@ class BlockTable:
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            mask = virtual_block_offsets % self.dcp_world_size == self.dcp_rank
+            mask = (
+                virtual_block_offsets
+                // self.dcp_kv_cache_interleave_size
+                % self.dcp_world_size
+                == self.dcp_rank
+            )
             # Calculate local block_offsets
-            block_offsets = virtual_block_offsets // self.dcp_world_size
+            block_offsets = (
+                virtual_block_offsets
+                // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
+                * self.dcp_kv_cache_interleave_size
+                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
+            )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
@@ -177,7 +190,12 @@ class BlockTable:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
 
-    def _map_to_kernel_blocks(self, kv_manager_block_ids: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def map_to_kernel_blocks(
+        kv_manager_block_ids: np.ndarray,
+        blocks_per_kv_block: int,
+        kernel_block_arange: np.ndarray,
+    ) -> np.ndarray:
         """Convert kv_manager_block_id IDs to kernel block IDs.
 
         Example:
@@ -192,12 +210,12 @@ class BlockTable:
             # kv_manager_block_id 1 → kernel block id [2, 3]
             # kv_manager_block_id 2 → kernel block id [4, 5]
         """
-        if not self.use_hybrid_blocks:
+        if blocks_per_kv_block == 1:
             return kv_manager_block_ids
 
         kernel_block_ids = (
-            kv_manager_block_ids.reshape(-1, 1) * self.blocks_per_kv_block
-            + self._kernel_block_arange
+            kv_manager_block_ids.reshape(-1, 1) * blocks_per_kv_block
+            + kernel_block_arange
         )
 
         return kernel_block_ids.reshape(-1)
@@ -215,7 +233,7 @@ class BlockTable:
         return self.block_table.np
 
     def _make_buffer(
-        self, *size: Union[int, torch.SymInt], dtype: torch.dtype
+        self, *size: int | torch.SymInt, dtype: torch.dtype
     ) -> CpuGpuBuffer:
         return CpuGpuBuffer(
             *size, dtype=dtype, device=self.device, pin_memory=self.pin_memory
@@ -235,6 +253,7 @@ class MultiGroupBlockTable:
         block_sizes: list[int],
         kernel_block_sizes: list[int],
         num_speculative_tokens: int = 0,
+        dcp_kv_cache_interleave_size: int = 1,
     ) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -264,6 +283,7 @@ class MultiGroupBlockTable:
                 pin_memory,
                 device,
                 kernel_block_size,
+                dcp_kv_cache_interleave_size,
             )
             for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]

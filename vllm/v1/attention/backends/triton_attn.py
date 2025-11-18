@@ -3,14 +3,13 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
 )
@@ -19,23 +18,20 @@ from vllm.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
 
 logger = init_logger(__name__)
 
@@ -61,17 +57,17 @@ class TritonAttentionMetadata:
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
+    cu_prefix_query_lens: torch.Tensor | None
+    prefix_kv_lens: torch.Tensor | None
+    suffix_kv_lens: torch.Tensor | None
 
     # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    scheduler_metadata: torch.Tensor | None = None
+    prefix_scheduler_metadata: torch.Tensor | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
@@ -153,25 +149,18 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
 class TritonAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        # Triton Attention supports any head size above 32
-        if head_size < 32:
-            raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention."
-                f"Head sizes need to be larger or equal 32 for this backend. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -180,10 +169,6 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TritonAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -205,10 +190,25 @@ class TritonAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
 
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size >= 32
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return True
+
 
 class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
+
+    def supports_quant_query_input(self) -> bool:
+        return current_platform.is_cuda()
 
     def __init__(
         self,
@@ -216,13 +216,13 @@ class TritonAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
-        sinks: Optional[torch.Tensor] = None,
+        kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -243,8 +243,6 @@ class TritonAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        TritonAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -272,9 +270,9 @@ class TritonAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with Paged Attention impl. in Triton.
 
@@ -298,7 +296,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         assert attn_metadata.use_cascade is False
 
@@ -338,19 +336,9 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-            num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
             )
-            if current_platform.is_cuda():
-                # Skip Q quantization on ROCm and XPU, enable this on cuda
-                # only, since dequantizing back to f32 in the attention kernel
-                # is not supported.
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape((num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale,
-                )
-                query = query.reshape((num_tokens, num_heads, head_size))
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens

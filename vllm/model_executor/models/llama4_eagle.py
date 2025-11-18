@@ -17,7 +17,6 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -36,7 +35,7 @@ from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausa
 from vllm.model_executor.models.utils import extract_layer_index
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -49,7 +48,7 @@ class LlamaModel(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         start_layer_id: int = 0,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -61,33 +60,40 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList(
-            [
-                Llama4DecoderLayer(
-                    vllm_config=vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                    config=self.config,
-                )
-                for i in range(self.config.num_hidden_layers)
-            ]
-        )
+        # Temporarily modify vllm_config.quant_config for draft model layers
+        original_quant_config = vllm_config.quant_config
+        vllm_config.quant_config = quant_config
+        try:
+            self.layers = nn.ModuleList(
+                [
+                    Llama4DecoderLayer(
+                        vllm_config=vllm_config,
+                        prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                        config=self.config,
+                    )
+                    for i in range(self.config.num_hidden_layers)
+                ]
+            )
+        finally:
+            # Restore original quant_config
+            vllm_config.quant_config = original_quant_config
         self.fc = torch.nn.Linear(
             self.config.hidden_size * 2, self.config.hidden_size, bias=False
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
@@ -136,7 +142,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
     def validate_and_update_config(
-        self, start_layer_id: int, quant_config: Optional[QuantizationConfig] = None
+        self, start_layer_id: int, quant_config: QuantizationConfig | None = None
     ) -> None:
         # yoco and moe is not supported by draft model yet
         assert self.config.yoco_global_kv_layer is None
@@ -183,17 +189,20 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    get_input_embeddings = SupportsMultiModal.get_input_embeddings  # type: ignore
+    embed_input_ids = SupportsMultiModal.embed_input_ids  # type: ignore
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
@@ -203,6 +212,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             name, weight = self.permute_qk_weight_for_rotary(name, loaded_weight)
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, weight
 
         loader = AutoWeightsLoader(

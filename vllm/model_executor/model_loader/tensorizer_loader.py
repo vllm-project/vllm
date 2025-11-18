@@ -3,7 +3,6 @@
 # ruff: noqa: SIM117
 import copy
 from collections.abc import Generator
-from typing import Union
 
 import torch
 from torch import nn
@@ -23,8 +22,8 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     initialize_model,
-    set_default_torch_dtype,
 )
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -140,7 +139,7 @@ class TensorizerLoader(BaseModelLoader):
     @staticmethod
     def save_model(
         model: torch.nn.Module,
-        tensorizer_config: Union[TensorizerConfig, dict],
+        tensorizer_config: TensorizerConfig | dict,
         model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):

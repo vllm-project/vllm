@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-from typing import Optional
 
 import uvloop
 
@@ -19,15 +18,13 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (
-    FlexibleArgumentParser,
-    decorate_logs,
-    get_tcp_uri,
-    set_process_title,
-)
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
 
@@ -92,9 +89,6 @@ def run_headless(args: argparse.Namespace):
         usage_context=usage_context, headless=True
     )
 
-    if not envs.VLLM_USE_V1:
-        raise ValueError("Headless mode is only supported for V1")
-
     if engine_args.data_parallel_hybrid_lb:
         raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
@@ -104,17 +98,39 @@ def run_headless(args: argparse.Namespace):
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
-    host = parallel_config.data_parallel_master_ip
-    port = engine_args.data_parallel_rpc_port  # add to config too
-    handshake_address = get_tcp_uri(host, port)
+    shutdown_requested = False
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
+        nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)
-        raise SystemExit
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+
+    if parallel_config.node_rank_within_dp > 0:
+        from vllm.version import __version__ as VLLM_VERSION
+
+        # Run headless workers (for multi-node PP/TP).
+        host = parallel_config.master_addr
+        head_node_address = f"{host}:{parallel_config.master_port}"
+        logger.info(
+            "Launching vLLM (v%s) headless multiproc executor, "
+            "with head node address %s for torch.distributed process group.",
+            VLLM_VERSION,
+            head_node_address,
+        )
+
+        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor.start_worker_monitor(inline=True)
+        return
+
+    host = parallel_config.data_parallel_master_ip
+    port = parallel_config.data_parallel_rpc_port
+    handshake_address = get_tcp_uri(host, port)
 
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
@@ -160,15 +176,10 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    if num_api_servers > 1:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("api_server_count > 1 is only supported for V1")
-
-        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-            raise ValueError(
-                "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
-                "with api_server_count > 1"
-            )
+    if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
+        )
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -179,7 +190,7 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
-    api_server_manager: Optional[APIServerProcessManager] = None
+    api_server_manager: APIServerProcessManager | None = None
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, num_api_servers

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -30,12 +29,12 @@ class ShortConvAttentionMetadata:
 
     query_start_loc: torch.Tensor
     state_indices_tensor: torch.Tensor
-    has_initial_states_p: Optional[torch.Tensor]
+    has_initial_states_p: torch.Tensor | None
 
     # For causal_conv1d
-    nums_dict: Optional[dict] = None
-    batch_ptr: Optional[torch.Tensor] = None
-    token_chunk_offset_ptr: Optional[torch.Tensor] = None
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
 
 
 class ShortConvAttentionMetadataBuilder(
@@ -82,7 +81,7 @@ class ShortConvAttentionMetadataBuilder(
         elif (
             num_decodes > 0
             and num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(

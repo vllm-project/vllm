@@ -4,7 +4,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from itertools import islice
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
@@ -94,7 +94,7 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(ChameleonProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_num_image_tokens(self) -> int:
@@ -115,7 +115,7 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         config = self.info.get_hf_config()
 
@@ -225,8 +225,9 @@ class ChameleonMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -234,12 +235,14 @@ class ChameleonMLP(nn.Module):
             output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -262,11 +265,11 @@ class ChameleonAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 4096,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -299,12 +302,14 @@ class ChameleonAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.q_norm = ChameleonLayerNorm((self.num_heads, self.head_dim))
         self.k_norm = ChameleonLayerNorm((self.num_kv_heads, self.head_dim))
@@ -357,8 +362,8 @@ class ChameleonDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -393,6 +398,7 @@ class ChameleonDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -403,8 +409,8 @@ class ChameleonDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -426,8 +432,8 @@ class ChameleonSwinDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -462,6 +468,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -472,7 +479,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -879,7 +886,7 @@ class ChameleonModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def get_image_tokens(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -896,16 +903,16 @@ class ChameleonModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -941,7 +948,7 @@ class ChameleonForConditionalGeneration(
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -956,9 +963,9 @@ class ChameleonForConditionalGeneration(
         self.model = ChameleonModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -966,16 +973,14 @@ class ChameleonForConditionalGeneration(
             self.lm_head.weight = self.model.embed_tokens.weight
 
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[ChameleonImagePixelInputs]:
+    ) -> ChameleonImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is None:
@@ -993,25 +998,25 @@ class ChameleonForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
         assert self.model.vqmodel is not None
         image_tokens = self.model.get_image_tokens(
-            image_input["data"].to(self.config.torch_dtype)
+            image_input["data"].to(self.config.dtype)
         )
-        vision_embeddings = self.model.get_input_embeddings(image_tokens)
+        vision_embeddings = self.model.embed_input_ids(image_tokens)
         return vision_embeddings
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -1023,7 +1028,7 @@ class ChameleonForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
 
         # Disallow image tokens which does not include special
