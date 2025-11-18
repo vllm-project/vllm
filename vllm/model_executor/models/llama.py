@@ -313,7 +313,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for LoRA training. Follows the order of operations as in Transformers."""
         residual = hidden_states
-        hidden_states, _ = self.input_layernorm(hidden_states, residual)
+        hidden_states, _ = self.input_layernorm(hidden_states, residual, is_training=True)
 
         # Self Attention
         hidden_states = self.self_attn(positions=positions,
@@ -322,7 +322,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states, is_training=True)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states, None
@@ -440,7 +440,7 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        ret = self.norm(hidden_states, residual)
+        ret = self.norm(hidden_states, residual, is_training=is_lora_training)
         if isinstance(ret, tuple):
             hidden_states, _ = ret
         else:

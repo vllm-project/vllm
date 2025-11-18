@@ -52,11 +52,11 @@ class CustomOp(nn.Module):
             self._forward_method_training = None
 
     def forward(self, *args, **kwargs):
+        is_training = kwargs.pop('is_training', False)
         if not self._supports_dynamic_dispatch:
             return self._forward_method(*args, **kwargs)
         # Dynamic dispatch.
-        is_training = torch.is_grad_enabled()
-        if is_training:
+        if torch.is_grad_enabled() or is_training:
             return self._forward_method_training(*args, **kwargs)
         else:
             return self._forward_method(*args, **kwargs)
