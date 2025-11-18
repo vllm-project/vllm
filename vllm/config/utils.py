@@ -219,7 +219,8 @@ def normalize_value(x):
         raise TypeError("normalize_value: function or callable instance unsupported")
 
     # Torch dtype: stringify (torch.float64 -> "torch.float64").
-    # Collisions with same literal ok; tag as ("torch.dtype", str(x)).
+    # We rely on the string form here; dtype-bearing fields that need additional
+    # disambiguation should encode that at the config layer.
     if isinstance(x, torch.dtype):
         return str(x)
 
@@ -258,7 +259,14 @@ def normalize_value(x):
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid
     # under-hashing.
-    raise TypeError(f"normalize_value: unsupported type '{type(x).__name__}'")
+    # If you hit this, either reshape your config to use supported primitives
+    # and containers, or extend normalize_value to provide a stable encoding
+    # (e.g., via uuid() or to_json_string()) for this type.
+    raise TypeError(
+        f"normalize_value: unsupported type '{type(x).__name__}'. "
+        "Ensure config values use supported primitives/containers or add a "
+        "stable representation for this type."
+    )
 
 
 def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:

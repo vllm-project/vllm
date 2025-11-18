@@ -44,6 +44,9 @@ def test_hash_factors_deterministic():
     hash2 = hash_factors(factors)
 
     assert hash1 == hash2
+    # Dict key insertion order should not affect the hash.
+    factors_reordered = {"b": "test", "a": 1}
+    assert hash_factors(factors_reordered) == hash1
     assert len(hash1) == 64
     assert all(c in "0123456789abcdef" for c in hash1)
 
