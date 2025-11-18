@@ -45,6 +45,13 @@ from vllm.v1.kv_cache_interface import (
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx9
+
+    if envs.VLLM_ROCM_USE_AITER:
+        VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = (
+            envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+        )
+    else:
+        VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = False
 else:
     on_gfx9 = lambda *args, **kwargs: False
 
@@ -235,6 +242,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        rotary_emb: nn.Module | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -310,6 +318,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        self.impl.rotary_emb = rotary_emb
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -365,6 +374,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -377,7 +387,6 @@ class Attention(nn.Module, AttentionLayerBase):
         """
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
-        output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -392,7 +401,15 @@ class Attention(nn.Module, AttentionLayerBase):
 
         if self.use_output:
             output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+            if positions is not None:
+                output = torch.empty(
+                    output_shape, dtype=query.dtype, device=query.device
+                )
+            else:
+                output = torch.zeros(
+                    output_shape, dtype=query.dtype, device=query.device
+                )
+
             hidden_size = output_shape[-1]
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -414,7 +431,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    None,
+                    positions=positions,
                 )
             return output.view(-1, hidden_size)
         else:
@@ -941,19 +964,44 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionImpl
+
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE and isinstance(
+        self.impl, AiterFlashAttentionImpl
+    ):
+        # fusing RoPE with flushing kv_cache operation
+        assert (
+            hasattr(self.impl, "rotary_emb")
+            and self.impl.rotary_emb is not None
+            and positions is not None
+        ), f"rotary_emb not found in {self.impl=} and positions cannot be None"
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            positions=positions,
+        )
+    else:
+        assert positions is None, f"positions must be None {positions=}"
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
 
 
 def unified_attention_with_output_fake(
@@ -964,6 +1012,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 

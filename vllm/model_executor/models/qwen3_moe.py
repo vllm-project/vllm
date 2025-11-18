@@ -31,6 +31,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -63,6 +64,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
@@ -77,6 +79,12 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = (
+        envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+    )
+else:
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = False
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -291,6 +299,11 @@ class Qwen3MoeAttention(nn.Module):
             }
             if dual_chunk_attention_config
             else {},
+            rotary_emb=(
+                self.rotary_emb
+                if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+                else None
+            ),
         )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -311,8 +324,12 @@ class Qwen3MoeAttention(nn.Module):
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+            attn_output = self.attn(q, k, v, positions=positions)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
+
         output, _ = self.o_proj(attn_output)
         return output
 
