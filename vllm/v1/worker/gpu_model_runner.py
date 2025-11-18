@@ -727,8 +727,10 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
 
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            if self.uses_mrope:
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL, OpenCUA)
+            # Check both config flag and SupportsMRoPE interface
+            model = self.get_model()
+            if self.uses_mrope or supports_mrope(model):
                 self._init_mrope_positions(req_state)
 
             reqs_to_add.append(req_state)

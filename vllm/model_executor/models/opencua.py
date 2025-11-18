@@ -217,9 +217,13 @@ class OpenCUAVisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rotary_pos_emb_1d(self, seq_len: int) -> torch.Tensor:
-        """Generate 1D-RoPE embeddings based on sequence length only."""
+        """Generate 1D-RoPE embeddings based on sequence length only.
+        
+        This is equivalent to Qwen2.5-VL's rotary_pos_emb but for 1D positions.
+        Returns shape: (seq_len, rotary_dim)
+        """
         rotary_pos_emb = self.rotary_pos_emb(seq_len)
-        # Reshape to match expected format: (seq_len, rotary_dim)
+        # rotary_pos_emb shape: (seq_len, rotary_dim)
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
@@ -259,49 +263,108 @@ class OpenCUAVisionTransformer(nn.Module):
 
         return index_new, cu_seqlens_tmp
 
-    @lru_cache(maxsize=1024)  # noqa: B019
-    def get_rope_by_thw(self, t, h, w):
-        """Generate 1D-RoPE based on total sequence length."""
-        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
+    def rotary_pos_emb_1d_thw(self, t, h, w):
+        """Generate 1D-RoPE for spatial structure, preserving spatial ordering.
         
-        # Calculate total sequence length for 1D-RoPE
+        Returns shape: (total_seq_len, spatial_merge_unit, rotary_dim)
+        
+        OpenCUA uses 1D-RoPE but must preserve spatial ordering like Qwen2.5-VL.
+        This follows Qwen2.5-VL's rotary_pos_emb_thw pattern exactly, but uses
+        1D sequential positions instead of 2D (H, W) positions.
+        
+        Key difference from Qwen2.5-VL:
+        - Qwen2.5-VL: Uses 2D positions (hpos_ids, wpos_ids) -> rotary_pos_emb_full[pos_ids]
+        - OpenCUA: Uses 1D sequential positions -> rotary_pos_emb_full[pos_1d]
+        
+        The spatial structure is preserved through row-major ordering:
+        pos = t * (llm_h * llm_w) + h * llm_w + w
+        
+        CRITICAL: The first dimension must be total_seq_len (t * llm_h * llm_w) to match
+        window_index_thw size, NOT total_seq_len // spatial_merge_unit.
+        This matches Qwen2.5-VL's rotary_pos_emb_thw exactly.
+        """
+        logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw called: t={t}, h={h}, w={w}")
         llm_h = h // self.spatial_merge_size
         llm_w = w // self.spatial_merge_size
         total_seq_len = t * llm_h * llm_w
+        logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: llm_h={llm_h}, llm_w={llm_w}, total_seq_len={total_seq_len}")
         
-        # Ensure rotary_pos_emb_1d is large enough for all indices in window_index_thw
-        # window_index_thw may have indices up to max_index, so we need at least max_index + 1
-        max_index = window_index_thw.max().item() if len(window_index_thw) > 0 else total_seq_len - 1
-        required_seq_len = max(total_seq_len, max_index + 1)
+        # Create 1D positions in row-major order to preserve spatial structure
+        # This matches Qwen2.5-VL's pattern but uses sequential positions
+        # For each frame t: positions go from (h=0, w=0) to (h=llm_h-1, w=llm_w-1)
+        # Position calculation: pos = t * (llm_h * llm_w) + h * llm_w + w
+        # This is equivalent to flattening a 3D grid (t, llm_h, llm_w) in row-major order
+        pos_1d = torch.arange(total_seq_len, dtype=torch.long)
+        # pos_1d shape: (total_seq_len,)
         
-        # Generate 1D-RoPE embeddings: (required_seq_len, rotary_dim)
-        rotary_pos_emb_1d = self.rotary_pos_emb_1d(required_seq_len)
+        # Generate RoPE embeddings for these positions
+        # Use max position to ensure cache is large enough (same as Qwen2.5-VL uses max(h, w))
+        max_pos = total_seq_len
+        rotary_pos_emb_full = self.rotary_pos_emb_1d(max_pos)
+        # rotary_pos_emb_full shape: (max_pos, rotary_dim)
         
-        # Reshape to match spatial structure: (t, llm_h, llm_w, rotary_dim)
-        # Then flatten to (total_seq_len, rotary_dim) for indexing
-        # If required_seq_len > total_seq_len, we need to pad or extend
-        if required_seq_len > total_seq_len:
-            # Extend rotary_pos_emb_1d to cover all indices
-            rotary_pos_emb_reshaped = rotary_pos_emb_1d[:required_seq_len]
-        else:
-            rotary_pos_emb_reshaped = rotary_pos_emb_1d.view(
-                t, llm_h, llm_w, -1
-            ).flatten(0, 2)  # (total_seq_len, rotary_dim)
+        # Index into the full RoPE cache using our 1D positions
+        rotary_pos_emb_1d = rotary_pos_emb_full[pos_1d]
+        # rotary_pos_emb_1d shape: (total_seq_len, rotary_dim)
         
-        # Apply window indexing: window_index_thw is already 1D indices
-        # rotary_pos_emb_reshaped[window_index_thw] -> (len(window_index_thw), rotary_dim)
-        rotary_pos_emb_thw = rotary_pos_emb_reshaped[window_index_thw]
+        # Match Qwen2.5-VL's exact structure:
+        # Qwen2.5-VL: [N, 2*rotary_dim] -> reshape to [N // spatial_merge_unit, spatial_merge_unit, 2*rotary_dim]
+        # OpenCUA: [N, rotary_dim] -> reshape to [N // spatial_merge_unit, spatial_merge_unit, rotary_dim]
+        # This matches Qwen2.5-VL's reshape pattern exactly
+        rotary_pos_emb_reshaped = rotary_pos_emb_1d.reshape(
+            rotary_pos_emb_1d.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )  # (total_seq_len // spatial_merge_unit, spatial_merge_unit, rotary_dim)
         
-        # Expand rotary_pos_emb_thw to match spatial_merge_unit
-        # Similar to Qwen2.5-VL, we need to repeat for each spatial_merge_unit
-        # rotary_pos_emb_thw: (len(window_index_thw), rotary_dim)
-        # After expansion: (len(window_index_thw) * spatial_merge_unit, rotary_dim)
-        rotary_pos_emb_thw = rotary_pos_emb_thw.unsqueeze(1).expand(
-            -1, self.spatial_merge_unit, -1
-        ).flatten(0, 1)  # (len(window_index_thw) * spatial_merge_unit, rotary_dim)
+        return rotary_pos_emb_reshaped
+
+    @lru_cache(maxsize=1024)  # noqa: B019
+    def get_rope_by_thw(self, t, h, w):
+        """Generate 1D-RoPE based on total sequence length.
         
+        Follows Qwen2.5-VL's get_rope_by_thw pattern exactly, but uses 1D-RoPE
+        instead of 2D (H, W) RoPE. The key is to match the structure:
+        1. Generate rotary_pos_emb_thw with shape (num_positions, spatial_merge_unit, rotary_dim)
+        2. Apply window indexing: rotary_pos_emb_thw[window_index_thw, :, :]
+        3. Flatten: flatten(start_dim=0, end_dim=1)
+        
+        IMPORTANT: Window indexing reorders tokens, so we must ensure RoPE positions
+        match the reordered sequence to preserve spatial relationships.
+        """
+        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
+        
+        # Generate 1D-RoPE with spatial_merge_unit expansion
+        # This matches Qwen2.5-VL's rotary_pos_emb_thw structure
+        rotary_pos_emb_thw = self.rotary_pos_emb_1d_thw(t, h, w)
+        # rotary_pos_emb_thw shape: (total_seq_len // spatial_merge_unit, spatial_merge_unit, rotary_dim)
+        
+        # CRITICAL: window_index_thw has values in range [0, total_seq_len - 1],
+        # but rotary_pos_emb_thw has first dimension = total_seq_len // spatial_merge_unit.
+        # We need to divide window_index_thw by spatial_merge_unit to match the indexing.
+        # This matches Qwen2.5-VL's behavior exactly.
+        window_index_thw_scaled = window_index_thw // self.spatial_merge_unit
+        
+        # Debug logging to verify shapes match
+        logger.info(f"[OpenCUA DEBUG] get_rope_by_thw: rotary_pos_emb_thw.shape={rotary_pos_emb_thw.shape}, window_index_thw.shape={window_index_thw.shape}, window_index_thw.max()={window_index_thw.max() if len(window_index_thw) > 0 else 'N/A'}, window_index_thw_scaled.max()={window_index_thw_scaled.max() if len(window_index_thw_scaled) > 0 else 'N/A'}")
+        
+        # CRITICAL: Apply window indexing to reorder RoPE positions
+        # window_index_thw_scaled contains the reordered indices after window partitioning,
+        # scaled to match rotary_pos_emb_thw's first dimension.
+        # We must index into rotary_pos_emb_thw using these scaled indices to match the
+        # reordered hidden states. This preserves spatial relationships after windowing.
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw_scaled, :, :]
+        # rotary_pos_emb_thw shape: (len(window_index_thw), spatial_merge_unit, rotary_dim)
+        
+        # Flatten: exactly like Qwen2.5-VL
+        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        # rotary_pos_emb_thw shape: (len(window_index_thw) * spatial_merge_unit, rotary_dim)
+        
+        # cu_seqlens_thw represents the number of patches (before spatial merge)
+        # This matches Qwen2.5-VL's implementation exactly
+        # Note: h * w is the patch count, not the token count after spatial merge
         cu_seqlens_thw = torch.repeat_interleave(
-            torch.tensor([llm_h * llm_w], dtype=torch.int32), t
+            torch.tensor([h * w], dtype=torch.int32), t
         )
         return (
             rotary_pos_emb_thw,
@@ -345,6 +408,7 @@ class OpenCUAVisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
+        logger.info(f"[OpenCUA DEBUG] VisionEncoder.forward called: x.shape={x.shape}, grid_thw={grid_thw}")
         seq_len, _ = x.size()
         rotary_pos_emb = []
         window_index: list = []
@@ -404,7 +468,12 @@ class OpenCUAVisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
-        hidden_states = hidden_states[window_index, :, :]
+        # CRITICAL: window_index has values in range [0, seq_len - 1],
+        # but hidden_states has first dimension = seq_len // spatial_merge_unit.
+        # We need to divide window_index by spatial_merge_unit to match the indexing.
+        # This matches Qwen2.5-VL's behavior exactly.
+        window_index_scaled = window_index // self.spatial_merge_unit
+        hidden_states = hidden_states[window_index_scaled, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
@@ -432,6 +501,7 @@ class OpenCUAVisionTransformer(nn.Module):
 
         hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
+        logger.info(f"[OpenCUA DEBUG] VisionEncoder.forward output: hidden_states.shape={hidden_states.shape}")
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -600,6 +670,13 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        """Get prompt updates for OpenCUA.
+        
+        Follows Qwen2.5-VL's pattern exactly. The key is to match the placeholder
+        token that appears in the tokenized prompt after chat_template processing.
+        OpenCUA uses <|media_placeholder|> which gets tokenized to media_placeholder_token_id.
+        """
+        logger.info(f"[OpenCUA DEBUG] _get_prompt_updates called: mm_items={len(mm_items) if mm_items else 0} items")
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -607,32 +684,40 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         hf_config = self.info.get_hf_config()
 
         # OpenCUA's chat_template uses <|media_placeholder|> for images
-        # This matches HF repo: https://huggingface.co/xlangai/OpenCUA-7B
-        # Use media_placeholder_token_id from config (default: 151664)
-        media_placeholder_token_id = getattr(
-            hf_config, "media_placeholder_token_id", 151664
+        # This is what actually appears in the tokenized prompt
+        # Get the token ID from vocab first, then fallback to config
+        media_placeholder_str = "<|media_placeholder|>"
+        media_placeholder_token_id = vocab.get(
+            media_placeholder_str,
+            getattr(hf_config, "media_placeholder_token_id", 151664)
         )
+        
+        # For video, use the processor's video_token or fallback
+        video_token_str = getattr(hf_processor, "video_token", "<|video_pad|>")
+        video_token_id = vocab.get(
+            video_token_str,
+            getattr(hf_config, "video_token_id", 151656)
+        )
+        
         placeholder = {
-            "image": vocab.get(
-                "<|media_placeholder|>",
-                vocab.get(
-                    hf_processor.image_token,
-                    getattr(hf_config, "image_token_id", media_placeholder_token_id),
-                ),
-            ),
-            "video": vocab.get(
-                hf_processor.video_token,
-                getattr(hf_config, "video_token_id", media_placeholder_token_id),
-            ),
+            "image": media_placeholder_token_id,
+            "video": video_token_id,
         }
 
         merge_length = image_processor.merge_size**2
 
         def get_replacement_opencua(item_idx: int, modality: str):
+            """Calculate replacement tokens for a multimodal item.
+            
+            This must match Qwen2.5-VL's calculation exactly:
+            num_tokens = (T * H * W) // (spatial_merge_size^2)
+            """
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
+            # Calculate number of tokens: total patches divided by merge_length
+            # This matches Qwen2.5-VL's calculation
             num_tokens = int(grid_thw.prod()) // merge_length
             return [placeholder[modality]] * num_tokens
 
@@ -704,23 +789,24 @@ class OpenCUAForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         """Get M-RoPE input positions for OpenCUA.
         
-        OpenCUA uses 1D-RoPE in the vision encoder, but the LLM still expects
-        3D positions (T, H, W) for multimodal tokens. We compute positions
-        similar to Qwen2.5-VL but simplified for 1D-RoPE.
+        Follows Qwen2.5-VL's pattern exactly for consistency.
+        OpenCUA uses 1D-RoPE in vision encoder, but LLM still needs 3D positions.
+        The key is to match Qwen2.5-VL's token detection and position calculation.
         """
+        logger.info(f"[OpenCUA DEBUG] ===== get_mrope_input_positions CALLED ===== input_tokens len={len(input_tokens)}, mm_features len={len(mm_features)}")
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
             {"image_grid_thw", "video_grid_thw"},
         )
         image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
         video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: image_grid_thw={image_grid_thw}, video_grid_thw={video_grid_thw}")
 
         hf_config = self.config
-        # OpenCUA uses media_placeholder_token_id (default: 151664) from HF repo
+        # OpenCUA uses media_placeholder_token_id, but we need to handle it like Qwen2.5-VL
         media_placeholder_token_id = getattr(
             hf_config, "media_placeholder_token_id", 151664
         )
-        # For backward compatibility, also check separate token IDs
         image_token_id = getattr(hf_config, "image_token_id", media_placeholder_token_id)
         video_token_id = getattr(hf_config, "video_token_id", media_placeholder_token_id)
         vision_start_token_id = getattr(
@@ -728,69 +814,81 @@ class OpenCUAForConditionalGeneration(
         )
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
-        # Count images and videos from grid_thw
-        image_nums = len(image_grid_thw)
-        video_nums = len(video_grid_thw)
-        total_mm_items = image_nums + video_nums
-
         input_tokens_tensor = torch.tensor(input_tokens)
-        # Find all media placeholder tokens in the input
-        # OpenCUA uses media_placeholder_token_id directly (no vision_start wrapper)
-        media_indices = torch.argwhere(
-            input_tokens_tensor == media_placeholder_token_id
-        ).squeeze(-1).tolist()
+        # Follow Qwen2.5-VL pattern: find vision_start_token_id first
+        # OpenCUA may use media_placeholder_token_id directly, so check both
+        vision_start_indices = torch.argwhere(
+            (input_tokens_tensor == vision_start_token_id)
+            | (input_tokens_tensor == media_placeholder_token_id)
+        ).squeeze(1)
         
-        # If no media_placeholder_token_id found, try vision_start_token_id pattern
-        if len(media_indices) == 0:
-            vision_start_indices = torch.argwhere(
-                input_tokens_tensor == vision_start_token_id
-            ).squeeze(-1).tolist()
-            if len(vision_start_indices) > 0:
-                # Next token after vision_start is the media token
-                media_indices = [idx + 1 for idx in vision_start_indices 
-                               if idx + 1 < len(input_tokens)]
+        # Get the token after vision_start (or the media token itself)
+        if len(vision_start_indices) > 0:
+            # If we found vision_start, next token is the media token
+            vision_tokens = input_tokens_tensor[
+                torch.clamp(vision_start_indices + 1, max=len(input_tokens_tensor) - 1)
+            ]
+            # Also check if the token itself is media_placeholder
+            vision_tokens_alt = input_tokens_tensor[vision_start_indices]
+            # Combine both checks
+            image_nums = ((vision_tokens == image_token_id) | (vision_tokens_alt == media_placeholder_token_id)).sum().item()
+            video_nums = (vision_tokens == video_token_id).sum().item()
+        else:
+            # Fallback: count media_placeholder_token_id directly
+            image_nums = (input_tokens_tensor == media_placeholder_token_id).sum().item()
+            video_nums = 0
         
-        # Match media tokens with grid_thw items in order
+        # Ensure counts match grid_thw
+        image_nums = min(image_nums, len(image_grid_thw))
+        video_nums = min(video_nums, len(video_grid_thw))
+        
         llm_pos_ids_list: list = []
         st = 0
+        remain_images, remain_videos = image_nums, video_nums
         image_index, video_index = 0, 0
-        media_token_index = 0
+        last_vision_position = -1  # Track last vision position for next text segment
 
-        for _ in range(total_mm_items):
-            # Find next media token
-            if media_token_index < len(media_indices):
-                ed = media_indices[media_token_index]
-                media_token_index += 1
-            else:
-                # Fallback: search for any media token from current position
-                try:
-                    ed = input_tokens.index(media_placeholder_token_id, st)
-                except ValueError:
-                    # Try image_token_id or video_token_id
-                    ed_image = len(input_tokens) + 1
-                    ed_video = len(input_tokens) + 1
-                    if image_index < image_nums:
-                        try:
-                            ed_image = input_tokens.index(image_token_id, st)
-                        except ValueError:
-                            pass
-                    if video_index < video_nums:
-                        try:
-                            ed_video = input_tokens.index(video_token_id, st)
-                        except ValueError:
-                            pass
-                    ed = min(ed_image, ed_video)
-                    if ed > len(input_tokens):
-                        break
+        for _ in range(image_nums + video_nums):
+            # Find next image or video token, following Qwen2.5-VL pattern
+            ed_image = len(input_tokens) + 1
+            ed_video = len(input_tokens) + 1
             
-            # Determine modality: use image_grid_thw first, then video_grid_thw
-            if image_index < image_nums:
+            if remain_images > 0 and image_index < len(image_grid_thw):
+                # Try to find media_placeholder_token_id or image_token_id
+                try:
+                    ed_media = input_tokens.index(media_placeholder_token_id, st)
+                except ValueError:
+                    ed_media = len(input_tokens) + 1
+                try:
+                    ed_img = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_img = len(input_tokens) + 1
+                ed_image = min(ed_media, ed_img)
+            
+            if remain_videos > 0 and video_index < len(video_grid_thw):
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            
+            # Both are invalid, break early
+            if ed_image > len(input_tokens) and ed_video > len(input_tokens):
+                logger.warning(f"[OpenCUA DEBUG] No more tokens found at st={st}, breaking loop")
+                break
+            
+            if ed_image <= ed_video and image_index < len(image_grid_thw):
                 t, h, w = image_grid_thw[image_index]
                 image_index += 1
-            elif video_index < video_nums:
+                remain_images -= 1
+                ed = ed_image
+            elif video_index < len(video_grid_thw):
                 t, h, w = video_grid_thw[video_index]
                 video_index += 1
+                remain_videos -= 1
+                ed = ed_video
             else:
+                # No valid token found, break
+                logger.warning(f"[OpenCUA DEBUG] No valid token found, breaking loop")
                 break
 
             llm_grid_t, llm_grid_h, llm_grid_w = (
@@ -799,34 +897,75 @@ class OpenCUAForConditionalGeneration(
                 w // spatial_merge_size,
             )
             text_len = ed - st
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: processing media at ed={ed}, st={st}, text_len={text_len}, grid_thw=({t},{h},{w}) -> llm_grid=({llm_grid_t},{llm_grid_h},{llm_grid_w})")
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: text segment st_idx={st_idx}, text_len={text_len}")
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             )
 
-            # For 1D-RoPE, we use sequential positions instead of 3D grid
-            # but still return 3D format for LLM compatibility
-            # OpenCUA uses 1D-RoPE, so we set t_index to sequential, h/w to 0
-            num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            t_index = torch.arange(num_vision_tokens).long()
-            h_index = torch.zeros_like(t_index)
-            w_index = torch.zeros_like(t_index)
-            
-            llm_pos_ids_list.append(
-                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+            # For OpenCUA: LLM still needs 3D positions for M-RoPE
+            # Even though vision encoder uses 1D-RoPE, the LLM's M-RoPE requires (T, H, W) positions
+            # Follow Qwen2.5-VL's pattern exactly for 3D position calculation
+            t_index = (
+                torch.arange(llm_grid_t)
+                .view(-1, 1)
+                .expand(-1, llm_grid_h * llm_grid_w)
+                .flatten()
             )
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
+            vision_st_idx = st_idx + text_len
+            num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            vision_positions = torch.stack([t_index, h_index, w_index]) + vision_st_idx
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: vision segment st_idx={vision_st_idx}, num_vision_tokens={num_vision_tokens}, vision_positions.shape={vision_positions.shape}, vision_positions.max()={vision_positions.max().item()}")
+            llm_pos_ids_list.append(vision_positions)
+            
+            # Update st: ed is the position of placeholder token in input_tokens
+            # After placeholder, we have num_vision_tokens virtual positions
+            # So next text starts after ed + num_vision_tokens
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: added {num_vision_tokens} vision tokens, next st={ed + num_vision_tokens}")
             st = ed + num_vision_tokens
+            # Track the last position after vision tokens for next text segment
+            # Vision positions are 3D (T, H, W), so we need to calculate the sequential position
+            # The last vision token position is vision_st_idx + num_vision_tokens - 1
+            last_vision_position = vision_st_idx + num_vision_tokens - 1
 
         if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            # Calculate st_idx from the last vision position
+            # For 3D positions, we need to use the sequential position, not the max of 3D coordinates
+            if len(llm_pos_ids_list) > 0:
+                # Use the last vision position we tracked, or fallback to max if not tracked
+                st_idx = last_vision_position + 1
+                logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: last_vision_position={last_vision_position}, calculated st_idx={st_idx}")
+            else:
+                st_idx = 0
             text_len = len(input_tokens) - st
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: final text segment st={st}, text_len={text_len}, st_idx={st_idx}")
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             )
 
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        if len(llm_pos_ids_list) == 0:
+            # No multimodal tokens found, return empty positions
+            llm_positions = torch.zeros((3, len(input_tokens)), dtype=torch.long)
+            mrope_position_delta = 0
+            logger.warning(f"[OpenCUA DEBUG] get_mrope_input_positions: No multimodal tokens found!")
+        else:
+            llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+            mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+            logger.info(f"[OpenCUA DEBUG] get_mrope_input_positions: final llm_positions.shape={llm_positions.shape}, mrope_position_delta={mrope_position_delta}, max_pos={llm_positions.max().item()}, input_tokens_len={len(input_tokens)}")
 
         return llm_positions, mrope_position_delta
 
@@ -846,6 +985,7 @@ class OpenCUAForConditionalGeneration(
         raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__ called: prefix={prefix}")
         super().__init__()
         # Use hf_config from vllm_config (already loaded with trust_remote_code)
         config = vllm_config.model_config.hf_config
@@ -874,6 +1014,7 @@ class OpenCUAForConditionalGeneration(
                 use_data_parallel=self.use_data_parallel,
                 attn_backend_override=attn_backend_override,
             )
+            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__: Created OpenCUAVisionTransformer, type={type(self.visual).__name__}")
         else:
             self.visual = None
 
@@ -947,17 +1088,25 @@ class OpenCUAForConditionalGeneration(
         self, image_input: Qwen2_5_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
+        if grid_thw is None:
+            raise ValueError("image_grid_thw is required for image input")
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
 
+        if self.visual is None:
+            raise ValueError("Visual encoder is not initialized")
+        
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
-                    # OpenCUA uses 1D-RoPE, but run_dp_sharded_mrope_vision_model
-                    # handles it the same way as rope_3d (else branch)
+                    # OpenCUA uses 1D-RoPE internally, but run_dp_sharded_mrope_vision_model
+                    # only supports "rope_3d" or "rope_2d". Since OpenCUA's vision model
+                    # handles 1D-RoPE internally via get_rope_by_thw, we use "rope_3d"
+                    # which matches the structure (T, H, W) even though RoPE is 1D.
+                    # The actual RoPE generation happens inside OpenCUAVisionTransformer.
                     return run_dp_sharded_mrope_vision_model(
                         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
                     )
@@ -966,23 +1115,33 @@ class OpenCUAForConditionalGeneration(
 
         merge_size = self.visual.spatial_merge_size
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return image_embeds.split(sizes)
+        image_embeds_split = image_embeds.split(sizes)
+        logger.info(f"[OpenCUA DEBUG] _process_image_input: image_embeds split into {len(image_embeds_split)} parts, sizes={sizes}, total tokens={sum(sizes)}")
+        return image_embeds_split
 
     def _process_video_input(
         self, video_input: Qwen2_5_VLVideoInputs
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
+        if grid_thw is None:
+            raise ValueError("video_grid_thw is required for video input")
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
 
+        if self.visual is None:
+            raise ValueError("Visual encoder is not initialized")
+        
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
-                    # OpenCUA uses 1D-RoPE, but run_dp_sharded_mrope_vision_model
-                    # handles it the same way as rope_3d (else branch)
+                    # OpenCUA uses 1D-RoPE internally, but run_dp_sharded_mrope_vision_model
+                    # only supports "rope_3d" or "rope_2d". Since OpenCUA's vision model
+                    # handles 1D-RoPE internally via get_rope_by_thw, we use "rope_3d"
+                    # which matches the structure (T, H, W) even though RoPE is 1D.
+                    # The actual RoPE generation happens inside OpenCUAVisionTransformer.
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values_videos,
@@ -1047,6 +1206,9 @@ class OpenCUAForConditionalGeneration(
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for OpenCUA."""
+        # Only log first forward call (prompt processing), not every generation step
+        if positions is not None and positions.shape[0] > 10:
+            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.forward (prompt): input_ids.shape={input_ids.shape if input_ids is not None else None}, positions.shape={positions.shape if positions is not None else None}")
 
         if intermediate_tensors is not None:
             inputs_embeds = None
