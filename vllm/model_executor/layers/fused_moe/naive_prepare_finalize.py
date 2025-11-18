@@ -19,7 +19,8 @@ class FusedMoENaivePrepareAndFinalize(MoEPrepareAndFinalizeNoEP):
         router_logits: torch.Tensor,
         layer: torch.nn.Module,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        is_sequence_parallel = getattr(layer, "is_sequence_parallel", False)
+        # Require is_sequence_parallel to be set to avoid silent misrouting
+        is_sequence_parallel = layer.is_sequence_parallel
         return get_ep_group().dispatch(
             hidden_states, router_logits, is_sequence_parallel
         )
@@ -44,5 +45,5 @@ class FusedMoENaivePrepareAndFinalize(MoEPrepareAndFinalizeNoEP):
     def _combine(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.Tensor:
         if tensor.numel() == 0:
             return tensor
-        is_sequence_parallel = getattr(layer, "is_sequence_parallel", False)
+        is_sequence_parallel = layer.is_sequence_parallel
         return get_ep_group().combine(tensor, is_sequence_parallel)
