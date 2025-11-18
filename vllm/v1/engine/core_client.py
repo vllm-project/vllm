@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import queue
 import sys
+import threading
 import time
 import uuid
 import weakref
@@ -355,6 +356,7 @@ class ClientSentinel:
         fault_pub_addr: str,
         engine_status_dict: ThreadSafeDict[int, str],
     ):
+        self.is_faulted = threading.Event()
         self.engine_registry = engine_registry
         self.zmq_ctx = zmq.Context()
         self.fault_receiver_socket = make_zmq_socket(
@@ -411,12 +413,15 @@ class ClientSentinel:
         to handle system anomalies, ensuring stable operation or graceful degradation
         of the relevant components.
         """
-        return await run_method(
+        result = await run_method(
             self.fault_handler,
             "handle_fault",
             args=(instruction, timeout),
             kwargs=kwargs,
         )
+        if result:
+            self.is_faulted.clear()
+        return result
 
     def fault_receiver(self):
         """
@@ -443,7 +448,7 @@ class ClientSentinel:
                 self.fault_pub_socket.send_string(
                     f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
                 )
-
+                self.is_faulted.set()
                 # Pause healthy engines on fault.
                 # Pause can be invoked again during fault-tolerance handling,
                 # so it's unnecessary to track whether all engines are currently

@@ -171,7 +171,7 @@ class EngineClient(ABC):
         """send fault tolerance instruction to the engine"""
         raise NotImplementedError
 
-    async def exception_reporter(self):
+    async def get_fault_info(self):
         """report exception from engine_core"""
         raise NotImplementedError
 
