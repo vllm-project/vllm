@@ -456,7 +456,7 @@ class Processor:
             # TODO: can we avoid cloning here in multiproc case?
             # Perform a shallow copy and manually copy mutable fields that are
             # modified by validation methods below. This avoids deepcopying
-            # large read-only structures like logit_bias.
+            # large read-only structures.
             sampling_params = copy(params)
             # update_from_generation_config calls .add() and .update().
             sampling_params._all_stop_token_ids = set(params._all_stop_token_ids)
