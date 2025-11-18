@@ -27,6 +27,19 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
+# print utilities
+def print_args_info(*args, **kwargs):
+    print("=== positional args ===")
+    for i, a in enumerate(args):
+        print(f"\narg[{i}]:")
+        # print tensor info only
+        if isinstance(a, torch.Tensor):
+            print(f"  shape : {tuple(a.shape)}")
+            print(f"  stride: {tuple(a.stride())}")
+            print(f"  dtype : {a.dtype}")
+            print(f"  device: {a.device}")
+
+
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -194,6 +207,24 @@ def run_cutlass_moe_fp8(
         # this rank handles only partial tokens, or when it is batched .
         mm1_out.fill_(0)
 
+    print(f'Printing information for first moe call')
+    print_args_info(
+        mm1_out,
+        a1q,
+        w1,
+        a1q_scale,
+        w1_scale,
+        expert_offsets,
+        problem_sizes1,
+        ab_strides1,
+        ab_strides1,
+        c_strides1,
+        per_act_token,
+        per_out_ch,
+    )
+    # print some stride info
+    print(f'{ab_strides1=}')
+    print(f'{c_strides1=}')
     ops.cutlass_moe_mm(
         mm1_out,
         a1q,
@@ -217,7 +248,22 @@ def run_cutlass_moe_fp8(
 
     if expert_map is not None:
         mm2_out.fill_(0)
-
+    # print('=========================')
+    # print(f'Printing information for second moe call...')
+    # print_args_info(
+    #     mm2_out,
+    #     a2q,
+    #     w2,
+    #     a2q_scale,
+    #     w2_scale,
+    #     expert_offsets,
+    #     problem_sizes2,
+    #     ab_strides2,
+    #     ab_strides2,
+    #     c_strides2,
+    #     per_act_token,
+    #     per_out_ch,
+    # )
     ops.cutlass_moe_mm(
         mm2_out,
         a2q,
