@@ -9,6 +9,7 @@ import functools
 import importlib
 import os
 from collections.abc import Callable
+from enum import Enum
 from typing import Any, NoReturn
 
 import torch
@@ -18,6 +19,28 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+
+
+class DeepGemmQuantScaleFMT(Enum):
+    # Float32 scales in Float32 tensor
+    FLOAT32 = 0
+    # Compute float32 scales and ceil the scales to UE8M0.
+    # Keep the scales in Float32 tensor.
+    FLOAT32_CEIL_UE8M0 = 1
+    # Compute float32 scales and ceil the scales to UE8M0.
+    # Pack the scales into a int32 tensor where each int32
+    # element contains 4 scale values.
+    UE8M0 = 2
+
+    @staticmethod
+    def from_oracle() -> "DeepGemmQuantScaleFMT":
+        if not is_deep_gemm_e8m0_used():
+            return DeepGemmQuantScaleFMT.FLOAT32
+        return (
+            DeepGemmQuantScaleFMT.UE8M0
+            if current_platform.is_device_capability(100)
+            else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+        )
 
 
 @functools.cache
