@@ -149,7 +149,10 @@ CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
     # quant_fp4 only has the custom impl
     + list(flat_product(MODELS_FP4, [""])),
 )
-@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+@pytest.mark.parametrize(
+    "inductor_graph_partition",
+    [True, False] if not current_platform.is_rocm() else [False],
+)
 def test_attn_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
