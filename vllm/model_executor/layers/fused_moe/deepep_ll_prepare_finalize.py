@@ -174,7 +174,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x = x[0].permute(2, 0, 1)
             num_experts, max_tokens, hidden_dim_by_2 = x.shape
             hidden_dim = hidden_dim_by_2 * 2
-            assert envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl"
+            assert envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm"
             logger.info_once(
                 "Quantization is fused with DeepEP nvfp4 dispatch for "
                 "FlashInfer CUTEDSL as VLLM_DEEPEPLL_NVFP4_DISPATCH==1"

@@ -294,7 +294,10 @@ def flashinfer_cutedsl_moe_masked(
     ab_dtype = "float4_e2m1fn"
     sf_dtype = "float8_e4m3fn"
 
-    c_dtype = get_cute_dtype(hidden_states)
+    if isinstance(hidden_states, tuple):
+        c_dtype = "bfloat16"
+    else:
+        c_dtype = get_cute_dtype(hidden_states)
 
     # Gemm1
     flashinfer_cutedsl_grouped_gemm_nt_masked(
