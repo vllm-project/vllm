@@ -20,7 +20,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfApi, HfFileSystem, hf_hub_download, snapshot_download
+from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -367,67 +367,6 @@ def get_sparse_attention_config(
     logger.info("Loaded sparse attention config from %s", config_file)
 
     return config
-
-
-def _list_local_hf_repo_files(repo_id: str, revision: str | None) -> list[str]:
-    """list the files of a local Hugging Face repo."""
-    repo_cache = Path(
-        huggingface_hub.constants.HF_HUB_CACHE
-    ) / huggingface_hub.constants.REPO_ID_SEPARATOR.join(
-        ["models", *repo_id.split("/")]
-    )
-
-    if revision is None:
-        revision_file = repo_cache / "refs" / huggingface_hub.constants.DEFAULT_REVISION
-        if revision_file.is_file():
-            with revision_file.open("r") as file:
-                revision = file.read().strip()
-
-    if revision:
-        revision_dir = repo_cache / "snapshots" / revision
-        if revision_dir.is_dir():
-            return [str(file) for file in revision_dir.glob("**/*") if file.is_file()]
-
-    return []
-
-
-def list_files_from_hf_or_path(
-    model_name_or_path: str,
-    allow_patterns: list[str],
-    revision: str | None = None,
-) -> list[str]:
-    """List files from Hugging Face Hub or local directory."""
-    assert len(allow_patterns) > 0
-    file_list = []
-    # Local dir
-    if os.path.isdir(model_name_or_path):
-        all_files = [
-            str(file)
-            for file in Path(model_name_or_path).glob("**/*")
-            if file.is_file()
-        ]
-    # Local HF repo
-    elif huggingface_hub.constants.HF_HUB_OFFLINE:
-        all_files = _list_local_hf_repo_files(
-            repo_id=model_name_or_path, revision=revision
-        )
-    # Remote HF repo
-    else:
-        hf_api = HfApi()
-        all_files = hf_api.list_repo_files(
-            repo_id=model_name_or_path, revision=revision
-        )
-    for pattern in allow_patterns:
-        file_list.extend(
-            [
-                file
-                for file in all_files
-                if fnmatch.fnmatch(
-                    os.path.basename(file), pattern
-                )  # Patterns are on file names.
-            ]
-        )
-    return file_list
 
 
 def download_weights_from_hf(

@@ -15,10 +15,9 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_utils import list_files_from_hf_or_path
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, list_files_from_hf_or_path
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

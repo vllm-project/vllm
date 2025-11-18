@@ -23,7 +23,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
     get_quant_config,
-    list_files_from_hf_or_path,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -32,6 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.utils import list_files_from_hf_or_path
 
 logger = init_logger(__name__)
 
