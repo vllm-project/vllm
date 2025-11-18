@@ -6,6 +6,7 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._ops import OpOverload
 
 from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
 from vllm.config import VllmConfig
@@ -29,6 +30,7 @@ AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
 AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
 
 AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
+TRITON_GROUP_FP8_QUANT_OP = torch.ops.vllm.triton_per_token_group_quant_fp8.default
 
 FUSED_SILU_MUL_QUANT_OP = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
 
@@ -39,10 +41,10 @@ class AiterRMSFp8GroupQuantPattern:
     ops into an aiter rms_norm_group_fp8_quant op.
     """
 
-    def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
+    def __init__(self, epsilon: float, quant_dtype: torch.dtype, quant_op: OpOverload):
         self.epsilon = epsilon
         self.quant_dtype = quant_dtype
-        self.use_triton = use_triton
+        self.quant_op = quant_op
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -51,7 +53,7 @@ class AiterRMSFp8GroupQuantPattern:
         ):
             at1 = AITER_RMS_OP(x=input, weight=weight, variance_epsilon=self.epsilon)
 
-            at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
+            at2 = self.quant_op(at1, 128)
 
             return at2[0], at2[1]
 
@@ -82,10 +84,10 @@ class AiterFusedAddRMSFp8GroupQuantPattern:
     into a aiter rms_norm_with_add_group_fp8_quant op.
     """
 
-    def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
+    def __init__(self, epsilon: float, quant_dtype: torch.dtype, quant_op: OpOverload):
         self.epsilon = epsilon
         self.quant_dtype = quant_dtype
-        self.use_triton = use_triton
+        self.quant_op = quant_op
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -100,7 +102,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern:
                 variance_epsilon=self.epsilon,
             )
 
-            at2 = AITER_GROUP_FP8_QUANT_OP(at1[0], 128, self.use_triton)
+            at2 = self.quant_op(at1[0], 128)
 
             # result, scale, residual
             return at2[0], at2[1], at1[1]
@@ -148,13 +150,13 @@ class RocmAiterRMSNormFp8GroupQuantFusionPass(VllmPatternMatcherPass):
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
             # Fuse rms_norm + dynamic group fp8 quant
-            for use_triton in [False, True]:
-                AiterRMSFp8GroupQuantPattern(epsilon, FP8_DTYPE, use_triton).register(
+            for quant_op in [AITER_GROUP_FP8_QUANT_OP, TRITON_GROUP_FP8_QUANT_OP]:
+                AiterRMSFp8GroupQuantPattern(epsilon, FP8_DTYPE, quant_op).register(
                     self.patterns
                 )
 
                 AiterFusedAddRMSFp8GroupQuantPattern(
-                    epsilon, FP8_DTYPE, use_triton
+                    epsilon, FP8_DTYPE, quant_op
                 ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
@@ -178,16 +180,16 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
     ops into an aiter silu_and_mul_group_fp8_quant op.
     """
 
-    def __init__(self, use_triton: bool):
+    def __init__(self, quant_op: OpOverload):
         self.silu_and_mul_matcher = MatcherSiluAndMul()
-        self.use_triton = use_triton
+        self.quant_op = quant_op
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
             input: torch.Tensor,
         ):
             at1 = self.silu_and_mul_matcher(input)
-            at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
+            at2 = self.quant_op(at1, 128)
             return at2[0], at2[1]
 
         def replacement(
@@ -221,8 +223,8 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_silu_mul_fp8_group_quant_fusion_pass"
         )
 
-        for use_triton in [False, True]:
-            AiterSiluMulFp8GroupQuantPattern(use_triton).register(self.patterns)
+        for quant_op in [AITER_GROUP_FP8_QUANT_OP, TRITON_GROUP_FP8_QUANT_OP]:
+            AiterSiluMulFp8GroupQuantPattern(quant_op).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

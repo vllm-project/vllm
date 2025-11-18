@@ -371,7 +371,9 @@ class W8A8BlockFp8LinearOp:
                 self.act_quant_group_shape.col,
             )
         else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
+                input_2d, self.act_quant_group_shape.col
+            )
 
         return gemm_a8w8_blockscale_op(
             q_input,
