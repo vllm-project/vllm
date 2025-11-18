@@ -397,10 +397,13 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-
+            # For data integrity when async scheduling, we shouldn't use in place
+            # operations in case they are modified in next step's `prepare_input`
+            # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            # This is an out-of-place operation to avoid modifying the original tensor.
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 
