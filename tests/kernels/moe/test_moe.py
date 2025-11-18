@@ -785,7 +785,7 @@ def test_fused_marlin_moe(
     act_order,
     is_k_full,
 ):
-    torch.cuda.manual_seed(0)
+    torch.cuda.manual_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
 
     if c_type == scalar_types.float16:
