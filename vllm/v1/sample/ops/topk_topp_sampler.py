@@ -627,8 +627,15 @@ def top_k_top_p_filter(
         p_fil_pivot = float("inf")
         # For duplicate pivot detection
         min_larger_p_fil_pivot = float("inf")
-        num_min_larger_p_fil_pivot = tl.zeros((), dtype=tl.uint32)
+        num_deduplicate_to_keep = tl.zeros((), dtype=tl.uint32)
         do_deduplicate = tl.zeros((), dtype=tl.int32)
+        num_min_larger_p_fil_pivot = tl.zeros((), dtype=tl.uint32)
+        min_larger_p_fil_pivot_2 = float("inf")
+        num_min_larger_p_fil_pivot_2 = tl.zeros((), dtype=tl.uint32)
+        min_larger_p_fil_pivot_1 = float("inf")
+        num_min_larger_p_fil_pivot_1 = tl.zeros((), dtype=tl.uint32)
+        min_larger_p_fil_pivot_0 = float("inf")
+        num_min_larger_p_fil_pivot_0 = tl.zeros((), dtype=tl.uint32)
         if k == VOCAB_SIZE:
             k_pivot = -float("inf")
         if P_FIL == VOCAB_SIZE:
@@ -654,8 +661,13 @@ def top_k_top_p_filter(
             p_fil_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
             p_fil_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
 
-            min_larger_p_fil_pivot = float("inf")
-            num_min_larger_p_fil_pivot = tl.zeros((), dtype=tl.uint32)
+            if p_fil_pivot == float("inf"):
+                min_larger_p_fil_pivot_2 = float("inf")
+                num_min_larger_p_fil_pivot_2 = tl.zeros((), dtype=tl.uint32)
+                min_larger_p_fil_pivot_1 = float("inf")
+                num_min_larger_p_fil_pivot_1 = tl.zeros((), dtype=tl.uint32)
+                min_larger_p_fil_pivot_0 = float("inf")
+                num_min_larger_p_fil_pivot_0 = tl.zeros((), dtype=tl.uint32)
 
             for i in range(0, search_iters):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -672,23 +684,49 @@ def top_k_top_p_filter(
                 p_fil_pivots_num_1 += tl.sum(logits_blk > p_fil_pivot_1)
                 p_fil_pivots_num_2 += tl.sum(logits_blk > p_fil_pivot_2)
 
-                larger_p_fil_pivot_2 = tl.where(
-                    logits_blk > p_fil_pivot_2, logits_blk, float("inf")
-                )
-                min_larger_p_fil_pivot = tl.minimum(
-                    min_larger_p_fil_pivot, tl.min(larger_p_fil_pivot_2)
-                )
+                if p_fil_pivot == float("inf"):
+                    larger_p_fil_pivot = tl.where(
+                        (logits_blk > p_fil_pivot_2) & mask_n, logits_blk, float("inf")
+                    )
+                    min_larger_p_fil_pivot_2 = tl.minimum(
+                        min_larger_p_fil_pivot_2, tl.min(larger_p_fil_pivot)
+                    )
 
-            for i in range(0, search_iters):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < search_range
-                logits_blk = tl.load(
-                    search_addr + offs_n, mask=mask_n, other=-float("inf")
-                )
-                min_larger_p_fil_pivot_mask = (
-                    tl.abs(logits_blk - min_larger_p_fil_pivot) < 1e-12
-                ) & mask_n
-                num_min_larger_p_fil_pivot += tl.sum(min_larger_p_fil_pivot_mask)
+                    larger_p_fil_pivot = tl.where(
+                        (logits_blk > p_fil_pivot_1) & mask_n, logits_blk, float("inf")
+                    )
+                    min_larger_p_fil_pivot_1 = tl.minimum(
+                        min_larger_p_fil_pivot_1, tl.min(larger_p_fil_pivot)
+                    )
+
+                    larger_p_fil_pivot = tl.where(
+                        (logits_blk > p_fil_pivot_0) & mask_n, logits_blk, float("inf")
+                    )
+                    min_larger_p_fil_pivot_0 = tl.minimum(
+                        min_larger_p_fil_pivot_0, tl.min(larger_p_fil_pivot)
+                    )
+
+            if p_fil_pivot == float("inf"):
+                for i in range(0, search_iters):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < search_range
+                    logits_blk = tl.load(
+                        search_addr + offs_n, mask=mask_n, other=-float("inf")
+                    )
+                    min_larger_p_fil_pivot_mask = (
+                        tl.abs(logits_blk - min_larger_p_fil_pivot_2) < 1e-12
+                    ) & mask_n
+                    num_min_larger_p_fil_pivot_2 += tl.sum(min_larger_p_fil_pivot_mask)
+
+                    min_larger_p_fil_pivot_mask = (
+                        tl.abs(logits_blk - min_larger_p_fil_pivot_1) < 1e-12
+                    ) & mask_n
+                    num_min_larger_p_fil_pivot_1 += tl.sum(min_larger_p_fil_pivot_mask)
+
+                    min_larger_p_fil_pivot_mask = (
+                        tl.abs(logits_blk - min_larger_p_fil_pivot_0) < 1e-12
+                    ) & mask_n
+                    num_min_larger_p_fil_pivot_0 += tl.sum(min_larger_p_fil_pivot_mask)
 
             # Check if any of the pivots are equal to k
             if k_pivot == float("inf"):
@@ -722,19 +760,41 @@ def top_k_top_p_filter(
                     p_fil_pivot = p_fil_pivot_2
                 # If none of the pivots are equal to P_FIL, we update the range
                 elif p_fil_pivots_num_2 > P_FIL:
-                    if p_fil_pivots_num_2 - num_min_larger_p_fil_pivot < P_FIL:
+                    if p_fil_pivots_num_2 - num_min_larger_p_fil_pivot_2 < P_FIL:
                         # Duplicate pivot detected
                         p_fil_pivot = p_fil_pivot_2
                         # Number of duplicate pivots to keep in the filtered set
-                        num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot - (
+                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_2 - (
                             p_fil_pivots_num_2 - P_FIL
                         )
+                        min_larger_p_fil_pivot = min_larger_p_fil_pivot_2
+                        num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_2
                         do_deduplicate = 1
                     p_fil_min_range = p_fil_pivot_2
                 elif p_fil_pivots_num_1 > P_FIL:
                     p_fil_min_range = p_fil_pivot_1
+                    if p_fil_pivots_num_1 - num_min_larger_p_fil_pivot_1 < P_FIL:
+                        # Duplicate pivot detected
+                        p_fil_pivot = p_fil_pivot_1
+                        # Number of duplicate pivots to keep in the filtered set
+                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_1 - (
+                            p_fil_pivots_num_1 - P_FIL
+                        )
+                        min_larger_p_fil_pivot = min_larger_p_fil_pivot_1
+                        num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_1
+                        do_deduplicate = 1
                 elif p_fil_pivots_num_0 > P_FIL:
                     p_fil_min_range = p_fil_pivot_0
+                    if p_fil_pivots_num_0 - num_min_larger_p_fil_pivot_0 < P_FIL:
+                        # Duplicate pivot detected
+                        p_fil_pivot = p_fil_pivot_0
+                        # Number of duplicate pivots to keep in the filtered set
+                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_0 - (
+                            p_fil_pivots_num_0 - P_FIL
+                        )
+                        min_larger_p_fil_pivot = min_larger_p_fil_pivot_0
+                        num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_0
+                        do_deduplicate = 1
                 if p_fil_pivots_num_0 < P_FIL:
                     p_fil_max_range = p_fil_pivot_0
                 elif p_fil_pivots_num_1 < P_FIL:
@@ -799,12 +859,16 @@ def top_k_top_p_filter(
                 duplicate_mask = (
                     tl.abs(logits_blk - min_larger_p_fil_pivot) < 1e-12
                 ) & mask_n
+
                 duplicate_count = tl.cumsum(duplicate_mask) + current_num_duplicates
-                duplicate_mask = duplicate_mask & (
-                    duplicate_count <= num_min_larger_p_fil_pivot
+                duplicate_remove_mask = duplicate_mask & (
+                    duplicate_count > num_deduplicate_to_keep
                 )
-                keep_mask = keep_mask & duplicate_mask
-                current_num_duplicates += tl.sum(duplicate_mask)
+                keep_mask = keep_mask & (~duplicate_remove_mask)
+                current_num_duplicates += tl.sum(
+                    duplicate_mask & (~duplicate_remove_mask)
+                )
+
             keep_mask = keep_mask & mask_n
             cpos = tl.cumsum(keep_mask) - 1 + write_pos
             f_mask = keep_mask
@@ -861,7 +925,7 @@ def apply_top_k_top_p_filtered(
     )
     p_filter = (
         # vocab_size
-        min(int(max_k * 1.5), vocab_size - 1) if k is not None else int(vocab_size / 20)
+        min(int(max_k * 1.5), vocab_size - 1) if k is not None else int(vocab_size / 32)
     )
     filtered_logits = torch.full(
         (batch_size, p_filter + 5), -float("inf"), device=logits.device
