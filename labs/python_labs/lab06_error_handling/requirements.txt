@@ -1,0 +1,6 @@
+vllm>=0.6.0
+torch>=2.1.0
+transformers>=4.35.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+tenacity>=8.2.0
