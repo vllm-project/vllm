@@ -202,14 +202,14 @@ class SamplingParams(
     the sampled token, so there may be up to `logprobs+1` elements in the
     response. When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprobs: int | None = None
+    """Number of log probabilities to return per prompt token.
+    When set to -1, return all `vocab_size` log probabilities."""
+    flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
     NOTE: GC costs of FlatLogprobs is significantly smaller than
     list[dict[int, Logprob]]. After enabled, PromptLogprobs and
     SampleLogprobs would populated as FlatLogprobs."""
-    flat_logprobs: bool = False
-    """Number of log probabilities to return per prompt token.
-    When set to -1, return all `vocab_size` log probabilities."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
