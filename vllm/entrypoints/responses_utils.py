@@ -39,11 +39,11 @@ def construct_chat_message_with_tool_call(
             ],
         )
     elif isinstance(item, ResponseReasoningItem):
-        reasoning_content = None
-        if item.content and len(item.content) == 1:
-            reasoning_content = item.content[0].text
-        elif len(item.summary) == 1:
+        reasoning_content = ""
+        if len(item.summary) == 1:
             reasoning_content = item.summary[0].text
+        elif item.content and len(item.content) == 1:
+            reasoning_content = item.content[0].text
         return {
             "role": "assistant",
             "reasoning_content": reasoning_content,

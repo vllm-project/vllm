@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from openai.types.responses.response_reasoning_item import (
+    Content,
+    ResponseReasoningItem,
+    Summary,
+)
+
 from vllm.entrypoints.responses_utils import (
+    construct_chat_message_with_tool_call,
     convert_tool_responses_to_completions_format,
 )
 
@@ -28,3 +35,42 @@ class TestResponsesUtils:
         result = convert_tool_responses_to_completions_format(input_tool)
 
         assert result == {"type": "function", "function": input_tool}
+
+    def test_construct_chat_message_with_tool_call(self):
+        item = ResponseReasoningItem(
+            id="lol",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Leroy Jenkins",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted_item = construct_chat_message_with_tool_call(item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["reasoning_content"] == "Leroy Jenkins"
+
+        item = ResponseReasoningItem(
+            id="lol",
+            summary=[
+                Summary(
+                    text='Hmm, the user has just started with a simple "Hello,"',
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+
+        formatted_item = construct_chat_message_with_tool_call(item)
+        assert formatted_item["role"] == "assistant"
+        assert (
+            formatted_item["reasoning_content"]
+            == 'Hmm, the user has just started with a simple "Hello,"'
+        )
