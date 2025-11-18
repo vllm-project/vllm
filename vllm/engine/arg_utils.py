@@ -569,7 +569,7 @@ class EngineArgs:
     enable_schedule_capacity_profiling: bool = (
         SchedulerConfig.enable_schedule_capacity_profiling
     )
-      
+
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill

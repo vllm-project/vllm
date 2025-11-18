@@ -41,7 +41,9 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    prefill_max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
+    prefill_max_num_batched_tokens: int = Field(
+        default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1
+    )
     """Maximum number of tokens to be processed in a single iteration when there
     are no decode requests. If not set (None), defaults to max_num_batched_tokens.
     Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
@@ -154,7 +156,7 @@ class SchedulerConfig:
     This tracks both the token demand (from running and waiting requests) and
     the memory capacity limit (based on available KV cache memory). Statistics
     will be logged at shutdown showing the distribution of bottlenecks."""
-    
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
