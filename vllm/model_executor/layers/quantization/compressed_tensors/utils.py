@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 import regex as re
+import torch.nn as nn
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
 
@@ -228,14 +229,12 @@ def check_quantization_consistency(
     such as shared experts fusion.
 
     :param quant_config: CompressedTensorsConfig instance
-    :param layer_name_1: First layer name (e.g., "model.layers.0.mlp.shared_experts.gate_up_proj")
-    :param layer_name_2: Second layer name (e.g., "model.layers.0.mlp.experts.w13")
+    :param layer_name_1:(e.g., "model.layers.0.mlp.shared_experts.gate_up_proj")
+    :param layer_name_2:(e.g., "model.layers.0.mlp.experts.w13")
     :return: (is_consistent, error_message) tuple
     """
     if quant_config is None:
         return True, ""
-
-    from torch import nn
 
     ignore_list = getattr(quant_config, "ignore", [])
     fused_mapping = getattr(quant_config, "packed_modules_mapping", {})
@@ -274,7 +273,17 @@ def check_quantization_consistency(
     layer1_weight_quant = layer1_scheme.get("weights") if layer1_scheme else None
     layer2_weight_quant = layer2_scheme.get("weights") if layer2_scheme else None
 
-    if not layer1_weight_quant or not layer2_weight_quant:
+    # Both must have quantization schemes or both must not have
+    if (layer1_weight_quant is None) != (layer2_weight_quant is None):
+        return False, (
+            f"Quantization mismatch: {layer_name_1} "
+            f"{'is not quantized' if layer1_weight_quant is None else 'is quantized'}, "
+            f"but {layer_name_2} "
+            f"{'is not quantized' if layer2_weight_quant is None else 'is quantized'}."
+        )
+
+    # If both have no quantization scheme, they are consistent
+    if layer1_weight_quant is None:
         return True, ""
 
     # Compare quantization parameters
@@ -293,7 +302,7 @@ def check_quantization_consistency(
     if params1 != params2:
         diff = set(params1.items()) ^ set(params2.items())
         return False, (
-            f"Quantization parameters mismatch between {layer_name_1} and {layer_name_2}. "
+            f"Quantization mismatch between {layer_name_1} and {layer_name_2}. "
             f"Differences: {diff}"
         )
 
