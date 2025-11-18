@@ -185,7 +185,7 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
     ]
-    # bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)
+    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
     if not on_gfx9():
         supported_quantization += ["bitsandbytes"]
 

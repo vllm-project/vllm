@@ -19,7 +19,7 @@ if current_platform.is_rocm():
 
     pytestmark = pytest.mark.skipif(
         on_gfx9(),
-        reason="bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)",
+        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
     )
 
 models_4bit_to_test = [
