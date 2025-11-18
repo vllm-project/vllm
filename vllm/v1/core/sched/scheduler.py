@@ -37,6 +37,9 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 import numpy as np
+import math
+import torch
+
 from vllm.distributed.parallel_state import (
     get_tknp_rank, 
     get_tknp_world_size, 
@@ -49,6 +52,77 @@ logger = init_logger(__name__)
 
 # TKNP-BEGIN: token parallel scheduling helper
 
+# class TokenParallelScheduler:
+    
+#     def __init__(self, vllm_config: VllmConfig):
+#         self.vllm_config = vllm_config
+#         self.parallel_config = vllm_config.parallel_config
+#         self.tknp_world_size = get_tknp_world_size()
+#         self.rank = get_tknp_rank()
+#         # TODO: root rank will store different tokens, fix later
+#         self.next_tknp_rank_assignment = 0  # For round-robin block assignment
+        
+#         # token parallel data structures
+#         self.req_to_tknp_rank: dict[str, int] = {}
+#         self.tknp_tokens_per_rank_cache = np.zeros(self.tknp_world_size, dtype=np.int32)
+#         self.tknp_reqs_per_rank = np.zeros(self.tknp_world_size, dtype=np.int32)
+
+#     def assign_ranks(self, waiting_requests):
+#         """
+#         Assign token parallel ranks to new requests using block-wise assignment.
+#         Updates self.req_to_tknp_rank cache.
+        
+#         Args:
+#             waiting_requests: The waiting queue containing new requests.
+#         """
+#         total_requests = len(waiting_requests)
+#         block_size = max(1, total_requests // self.tknp_world_size) # TODO: fix continuous batching
+#         for idx, requests in enumerate(waiting_requests):
+#             req_id = requests.request_id
+            
+#             # skip if already assigned
+#             if req_id in self.req_to_tknp_rank:
+#                 continue
+
+#             assigned_rank = (idx // block_size) % self.tknp_world_size
+#             self.req_to_tknp_rank[req_id] = assigned_rank
+#             self.tknp_reqs_per_rank[assigned_rank] += 1
+#             self.tknp_tokens_per_rank_cache[assigned_rank] += len(requests.prompt_token_ids)
+
+#             # DEBUG
+#             # logger.info(f"==== [RANK : {self.rank}] Assigned request {req_id} to token parallel rank {assigned_rank} with {len(requests.prompt_token_ids)} tokens, tknp_tokens_per_rank_cache: {self.tknp_tokens_per_rank_cache}.")
+        
+#     def free_requests(self, request: Request):
+#         """
+#         Remove requests from token parallel scheduling cache when they are finished.
+#         """
+#         req_id = request.request_id
+#         if req_id in self.req_to_tknp_rank:
+#             assigned_rank = self.req_to_tknp_rank.pop(req_id)
+#             self.tknp_reqs_per_rank[assigned_rank] -= 1
+#             self.tknp_tokens_per_rank_cache[assigned_rank] -= len(request.prompt_token_ids)
+
+#     def print_debug_info(self):
+#         logger.info(f"[TokenParallelScheduler] Token parallel rank assignments: {self.req_to_tknp_rank}")
+#         logger.info(f"[TokenParallelScheduler] Requests per rank: {self.tknp_reqs_per_rank}")
+#         logger.info(f"[TokenParallelScheduler] Tokens per rank: {self.tknp_tokens_per_rank_cache}")
+
+#     def tknp_allocations(self):
+#         return TokenParallelAllocation(
+#             req_to_tknp_rank=self.req_to_tknp_rank,
+#             tknp_tokens_per_rank_cache=self.tknp_tokens_per_rank_cache,
+#             tknp_reqs_per_rank=self.tknp_reqs_per_rank,
+#         )
+
+#     def is_current_rank_assigned(self, request: Request) -> bool:
+#         """
+#         Check if the current rank is assigned to the given request.
+#         """
+#         req_id = request.request_id
+#         assigned_rank = self.req_to_tknp_rank.get(req_id, None)
+#         return assigned_rank == self.rank
+    
+
 class TokenParallelScheduler:
     
     def __init__(self, vllm_config: VllmConfig):
@@ -56,39 +130,130 @@ class TokenParallelScheduler:
         self.parallel_config = vllm_config.parallel_config
         self.tknp_world_size = get_tknp_world_size()
         self.rank = get_tknp_rank()
-        # TODO: root rank will store different tokens, fix later
-        self.next_tknp_rank_assignment = 0  # For round-robin block assignment
-        
+
+        # Kept for compatibility (not used for scheduling anymore)
+        self.next_tknp_rank_assignment = 0  
+
         # token parallel data structures
         self.req_to_tknp_rank: dict[str, int] = {}
-        self.tknp_tokens_per_rank_cache = np.zeros(self.tknp_world_size, dtype=np.int32)
-        self.tknp_reqs_per_rank = np.zeros(self.tknp_world_size, dtype=np.int32)
+        self.tknp_tokens_per_rank_cache = np.zeros(self.tknp_world_size,
+                                                   dtype=np.int32)
+        self.tknp_reqs_per_rank = np.zeros(self.tknp_world_size,
+                                           dtype=np.int32)
 
-    def assign_ranks(self, waiting_requests):
+    # --- helper ------------------------------------------------------------
+    def _assign_request_to_rank(self, request, assigned_rank: int) -> None:
+        """Internal helper to update bookkeeping when assigning a request."""
+        req_id = request.request_id
+        self.req_to_tknp_rank[req_id] = assigned_rank
+        self.tknp_reqs_per_rank[assigned_rank] += 1
+        # Assumption: prompt lengths are roughly equal, so counting prompt tokens is OK.
+        self.tknp_tokens_per_rank_cache[assigned_rank] += len(
+            request.prompt_token_ids
+        )
+
+    # ----------------------------------------------------------------------
+    def assign_ranks(self, waiting_requests, free_blocks_per_rank=None):
         """
         Assign token parallel ranks to new requests using block-wise assignment.
-        Updates self.req_to_tknp_rank cache.
-        
+
         Args:
-            waiting_requests: The waiting queue containing new requests.
+            waiting_requests: The waiting queue containing new requests
+                              (iterable; order is respected).
+            free_blocks_per_rank: Optional array-like of length tknp_world_size.
+                Each entry is the number of free KV blocks on that rank.
+                If None or invalid, we fall back to equal blocks.
         """
-        total_requests = len(waiting_requests)
-        block_size = max(1, total_requests // self.tknp_world_size) # TODO: fix continuous batching
-        for idx, requests in enumerate(waiting_requests):
-            req_id = requests.request_id
-            
-            # skip if already assigned
-            if req_id in self.req_to_tknp_rank:
-                continue
+        # Turn waiting queue into a list to allow indexed access
+        waiting_list = list(waiting_requests)
 
-            assigned_rank = (idx // block_size) % self.tknp_world_size
-            self.req_to_tknp_rank[req_id] = assigned_rank
-            self.tknp_reqs_per_rank[assigned_rank] += 1
-            self.tknp_tokens_per_rank_cache[assigned_rank] += len(requests.prompt_token_ids)
+        # Indices of requests that don't yet have an assignment
+        unassigned_indices: list[int] = []
+        for idx, req in enumerate(waiting_list):
+            if req.request_id not in self.req_to_tknp_rank:
+                unassigned_indices.append(idx)
 
-            # DEBUG
-            # logger.info(f"==== [RANK : {self.rank}] Assigned request {req_id} to token parallel rank {assigned_rank} with {len(requests.prompt_token_ids)} tokens, tknp_tokens_per_rank_cache: {self.tknp_tokens_per_rank_cache}.")
+        num_unassigned = len(unassigned_indices)
+        if num_unassigned == 0:
+            return  # nothing to do
+
+        # ------------------------------------------------------------------
+        # 1) Decide target number of NEW requests per rank based on free blocks.
+        # ------------------------------------------------------------------
+        use_capacity_aware = (
+            free_blocks_per_rank is not None
+            and len(free_blocks_per_rank) == self.tknp_world_size
+        )
+
+        if use_capacity_aware:
+            free = np.asarray(free_blocks_per_rank, dtype=np.float64)
+            total_free = float(free.sum())
+
+            if total_free <= 0.0:
+                # Every rank reports 0 free blocks → fallback to equal distribution.
+                use_capacity_aware = False
+            else:
+                # Ideal (non-integer) allocation of new requests per rank
+                ideal = free * (num_unassigned / total_free)
+                base = np.floor(ideal).astype(np.int32)
+                assigned_counts = base.copy()
+
+                # Distribute leftover (due to rounding) to ranks
+                # with the largest fractional part of `ideal`.
+                remaining = num_unassigned - int(base.sum())
+                if remaining > 0:
+                    frac = ideal - base
+                    order = np.argsort(-frac)  # descending fractional parts
+                    for r in order[:remaining]:
+                        assigned_counts[r] += 1
+        # ------------------------------------------------------------------
+        # 2) Fallback: equal (old-style) block assignment.
+        # ------------------------------------------------------------------
+        if not use_capacity_aware:
+            assigned_counts = np.zeros(self.tknp_world_size, dtype=np.int32)
+            # Simple equal blocks over *unassigned* requests
+            block_size = max(
+                1, math.ceil(num_unassigned / self.tknp_world_size)
+            )
+            for r in range(self.tknp_world_size):
+                remaining = num_unassigned - int(assigned_counts.sum())
+                if remaining <= 0:
+                    break
+                assigned_counts[r] = min(block_size, remaining)
+
+        # Sanity: sum of target counts must match number of unassigned
+        assert int(assigned_counts.sum()) == num_unassigned, \
+            f"assigned_counts sum={assigned_counts.sum()} != num_unassigned={num_unassigned}"
+
+        # ------------------------------------------------------------------
+        # 3) Block-wise assignment in waiting order.
+        #    Example: assigned_counts = [4, 6] →
+        #      - first 4 unassigned → rank 0
+        #      - next 6 unassigned → rank 1
+        # ------------------------------------------------------------------
+        current_rank = 0
+        used_for_rank = 0
+
+        for idx in unassigned_indices:
+            # Advance to next rank if current rank's quota is filled
+            while current_rank < self.tknp_world_size and \
+                  used_for_rank >= assigned_counts[current_rank]:
+                current_rank += 1
+                used_for_rank = 0
+
+            if current_rank >= self.tknp_world_size:
+                # Should not happen because of the sum check above,
+                # but be defensive.
+                current_rank = self.tknp_world_size - 1
+
+            req = waiting_list[idx]
+            self._assign_request_to_rank(req, current_rank)
+            used_for_rank += 1
         
+        # print debug info
+        if self.rank == 0:
+            self.print_debug_info()
+
     def free_requests(self, request: Request):
         """
         Remove requests from token parallel scheduling cache when they are finished.
@@ -97,12 +262,20 @@ class TokenParallelScheduler:
         if req_id in self.req_to_tknp_rank:
             assigned_rank = self.req_to_tknp_rank.pop(req_id)
             self.tknp_reqs_per_rank[assigned_rank] -= 1
-            self.tknp_tokens_per_rank_cache[assigned_rank] -= len(request.prompt_token_ids)
+            self.tknp_tokens_per_rank_cache[assigned_rank] -= len(
+                request.prompt_token_ids
+            )
 
     def print_debug_info(self):
-        logger.info(f"[TokenParallelScheduler] Token parallel rank assignments: {self.req_to_tknp_rank}")
-        logger.info(f"[TokenParallelScheduler] Requests per rank: {self.tknp_reqs_per_rank}")
-        logger.info(f"[TokenParallelScheduler] Tokens per rank: {self.tknp_tokens_per_rank_cache}")
+        logger.info(
+            f"[TokenParallelScheduler] Token parallel rank assignments: {self.req_to_tknp_rank}"
+        )
+        logger.info(
+            f"[TokenParallelScheduler] Requests per rank: {self.tknp_reqs_per_rank}"
+        )
+        logger.info(
+            f"[TokenParallelScheduler] Tokens per rank: {self.tknp_tokens_per_rank_cache}"
+        )
 
     def tknp_allocations(self):
         return TokenParallelAllocation(
@@ -117,8 +290,8 @@ class TokenParallelScheduler:
         """
         req_id = request.request_id
         assigned_rank = self.req_to_tknp_rank.get(req_id, None)
-        return assigned_rank == self.rank
-    
+        return assigned_rank == self.rank    
+
 # TKNP-END
 
 
@@ -250,6 +423,33 @@ class Scheduler(SchedulerInterface):
             self.token_parallel_scheduler = TokenParallelScheduler(vllm_config)
             self.current_rank = get_tknp_rank()
         # TKNP-END
+
+    # --- NEW helper -------------------------------------------------------
+    def _gather_tknp_free_blocks(self) -> list[int]:
+        """
+        Gather the number of free KV blocks from all token-parallel ranks.
+
+        Returns:
+            A list of length tknp_world_size with free block counts per rank.
+        """
+        # local free blocks on *this* rank
+        local_free = self.kv_cache_manager.block_pool.get_num_free_blocks()
+        world_size = get_tknp_world_size()
+
+        # all_gather into a tensor (CUDA or CPU; must be same device on all ranks)
+        local_tensor = torch.tensor([local_free], dtype=torch.int64, device="cuda")
+        gathered = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+
+        tknp_group = get_tknp_group()
+        torch.distributed.all_gather(gathered, local_tensor, group=tknp_group.device_group)
+
+        free_blocks_per_rank = [t.item() for t in gathered]
+        
+        # Debug print
+        # if is_root_rank():
+        #     print(f"[Rank {self.current_rank}] KV free blocks per rank: {free_blocks_per_rank}")
+        
+        return free_blocks_per_rank
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -422,7 +622,12 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             if is_tknp_initialized():
-                self.token_parallel_scheduler.assign_ranks(self.waiting)
+                # self.token_parallel_scheduler.assign_ranks(self.waiting)
+                free_blocks_per_rank = self._gather_tknp_free_blocks()
+                self.token_parallel_scheduler.assign_ranks(
+                    self.waiting,
+                    free_blocks_per_rank=free_blocks_per_rank,
+                )
             while self.waiting and token_budget > 0:
                 
                 if len(self.running) == self.max_num_running_reqs:
