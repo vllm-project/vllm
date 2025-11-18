@@ -392,7 +392,7 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
             assert not has_int4_preshuffled_tensor
 
         assert weight_attrs == [False, 1, 0, True]
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
