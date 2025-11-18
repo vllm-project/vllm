@@ -54,10 +54,29 @@ class BlockStored(KVCacheEvent):
     lora_id: int | None
     medium: str | None
 
+    def __eq__(self, other):
+        if isinstance(other, BlockStored):
+            return (
+                self.block_hashes == other.block_hashes
+                and self.parent_block_hash == other.parent_block_hash
+                and self.token_ids == other.token_ids
+                and self.block_size == other.block_size
+                and self.lora_id == other.lora_id
+                and self.medium == other.medium
+            )
+        return False
+
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
+
+    def __eq__(self, other):
+        if isinstance(other, BlockRemoved):
+            return (
+                self.block_hashes == other.block_hashes and self.medium == other.medium
+            )
+        return False
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -66,6 +85,17 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+
+    def combine_unique_ordered_events(self, other: "KVEventBatch") -> "KVEventBatch":
+        """
+        Combine non duplicated events with another `KVEventBatch` object.
+        """
+        combined_events = self.events[:]
+        for item in other.events:
+            if item not in combined_events:
+                combined_events.append(item)
+        self.events = combined_events
+        return self
 
 
 class EventPublisher(ABC):
