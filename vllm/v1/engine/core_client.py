@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import gc
 import multiprocessing
 import queue
 import sys
@@ -588,9 +589,21 @@ class MPClient(EngineCoreClient):
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
             died = multiprocessing.connection.wait(sentinels)
+            
+            gc.collect()
             _self = self_ref()
             if not _self or _self.resources.engine_dead:
                 return
+            
+            refs = gc.get_referrers(self_ref())
+            import inspect
+            for r in refs:
+                logger.error("Object referencing to client. object: %s", r)
+
+                # If r is a call frame: show info
+                if inspect.isframe(r):
+                    logger.error("Frame at:", r.f_code.co_name, "locals:", r.f_locals.keys())
+
             _self.resources.engine_dead = True
             proc_name = next(
                 proc.name for proc in engine_processes if proc.sentinel == died[0]
