@@ -496,6 +496,9 @@ def _fused_moe_lora(
                 a_intermediate_cache1
             )
 
+            # reset max_lora_rank to the full rank after allgather
+            max_lora_rank = a_intermediate_cache1.shape[-1]
+
     _fused_moe_lora_expand(
         output,
         a_intermediate_cache1,

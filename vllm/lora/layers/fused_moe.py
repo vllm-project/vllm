@@ -252,7 +252,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 sorted_token_ids_lora = sorted_token_ids_lora.view(max_loras, -1)
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
-                max_lora_rank = self.w2_lora_b_stacked.shape[-1]
+                max_lora_rank = self.w2_lora_a_stacked.shape[-2]
 
                 shard_size_w2 = divide(self.base_layer.hidden_size, self.tp_size)
 
