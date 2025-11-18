@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
+    int4_w4afp8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
@@ -207,6 +208,11 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
             return CompressedTensorsW4A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
+            )
+        elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+            logger.info_once("Using CompressedTensorsW4A8Fp8MoEMethod")
+            return CompressedTensorsW4A8Fp8MoEMethod(
+                quant_config, layer.moe_config, layer_name
             )
         else:
             raise RuntimeError(
@@ -2428,3 +2434,91 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             apply_router_weight_on_input,
             int(_act_kind(activation)),
         )
+
+
+class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method using 4-bit weights and FP8 activations
+    - Weights: int4 (stored as int8 values in [-8,7], packed to uint8 nibbles)
+    - Scales: Fp32 for Channelwise , bf16 for groupwise quantization
+    - Bias: Same data type as original weights
+    - Activations: FP8 (E4M3/F4M4)
+    """
+    def __init__(
+        self,
+        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+    ):
+        super().__init__(moe)
+        # need bunch of validation and stuff
+    
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # implement weight creation
+        pass
+
+    def process_weights_after_loading(self, layer):
+        pass
+
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+        # double check this pass needed for cutlass moe kernels?
+        return super().maybe_make_prepare_finalize()
+    
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        # should be like dense w4a8; input is token, weights are per-chan but also per group
+        per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
+        # TODO: we gotta add per-channel but also per-group scales for the weights
+        return int4_w4afp8_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=layer.w13_input_scale, # shouldnt this be dynamic
+            a2_scale=layer.w2_input_scale,
+            per_act_token_quant=per_act_token,
+            per_out_ch_quant=per_channel_quant,
+            block_shape=layer.weight_block_size,
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ):
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
+            )
+        assert activation == "silu", "Only SiLU activation is supported."
+
+    @property
+    def supports_eplb(self) -> bool:
+        # dont support it for now
+        return False

@@ -1072,7 +1072,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         )
 
         num_chunks, CHUNK_SIZE = self._chunk_info(M_full)
-
+        # print(f'[czhu-log] got {num_chunks=}, {CHUNK_SIZE=}, {M_full=}')
         def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
             if num_chunks == 1:
                 # Use a1q.size(0) here since batched format does not
