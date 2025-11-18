@@ -382,6 +382,8 @@ class KVConnectorBase_V1(ABC):
     def get_kv_connector_kv_cache_events(self) -> Optional["KVEventBatch"]:
         """
         Get the KV connector kv cache events collected during the last interval.
+        This function should be called by the model runner every time after the
+        model execution and before cleanup.
         """
         return None
 
