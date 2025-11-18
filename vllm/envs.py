@@ -3,6 +3,7 @@
 
 import functools
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -426,6 +427,8 @@ def get_vllm_port() -> int | None:
 # to extract the used env vars.
 
 # --8<-- [start:env-vars-definition]
+
+logger = logging.getLogger(__name__)
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
@@ -1599,6 +1602,21 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
+        "VLLM_MEDIA_CONNECTOR",
+        "VLLM_ASSETS_CACHE",
+        "VLLM_ASSETS_CACHE_MODEL_CLEAN",
+        "VLLM_MM_INPUT_CACHE_GIB",
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_ENABLE_V1_MULTIPROCESSING",
+        "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
+        "VLLM_CPU_KVCACHE_SPACE",
+        "VLLM_CPU_OMP_THREADS_BIND",
+        "VLLM_CPU_NUM_OF_RESERVED_CPU",
+        "VLLM_CPU_MOE_PREPACK",
+        "VLLM_CPU_SGL_KERNEL",
+        "VLLM_TEST_FORCE_LOAD_FORMAT",
+        "LOCAL_RANK",
+        "CUDA_VISIBLE_DEVICES",
     }
 
     from vllm.config.utils import normalize_value
@@ -1608,7 +1626,15 @@ def compile_factors() -> dict[str, object]:
         if factor in ignored_factors:
             continue
 
-        raw = getter()
+        try:
+            raw = getter()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Skipping environment variable %s while hashing compile factors: %s",
+                factor,
+                exc,
+            )
+            continue
 
         factors[factor] = normalize_value(raw)
 
