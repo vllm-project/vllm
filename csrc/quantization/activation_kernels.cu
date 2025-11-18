@@ -686,6 +686,13 @@ void persistent_masked_m_silu_mul_quant(
       static constexpr int SILU_V2_BLOCK_COUNT = 144 * 32;                     \
       LAUNCH_ON_H(uint8_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
                   CEIL_UE8M0);                                                 \
+    } else if (num_sms == 108) {                                               \
+      static constexpr int SILU_V2_BLOCK_COUNT = 108 * 32;                     \
+      LAUNCH_ON_H(uint8_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
+                  CEIL_UE8M0);                                                 \
+    } else {                                                                   \
+      TORCH_CHECK(false, "Unsupported num_sms: ", num_sms,                     \
+                  ". Only 108, 132 and 144 are supported.");                   \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);
