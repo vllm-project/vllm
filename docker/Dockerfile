@@ -280,20 +280,72 @@ ARG GDRCOPY_OS_VERSION=Ubuntu22_04
 
 SHELL ["/bin/bash", "-c"]
 
+COPY --from=base /opt/venv /opt/venv
+COPY --from=base /root/.local /root/.local
+
+ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
+RUN rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
+    && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
+    && ln -sf /opt/venv/bin/python3-config /usr/bin/python3-config \
+    && ln -sf /opt/venv/bin/pip /usr/bin/pip
+
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
-RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
-    echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
+# RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
+#     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
-# Install Python and other dependencies
+RUN echo "=== Detailed Debug Information---1 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
+
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
-    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+    && apt-get install -y ccache software-properties-common git curl wget sudo vim \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1
+
+
+RUN echo "=== Detailed Debug Information---1-1===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
+
+RUN if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
             curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
@@ -307,22 +359,68 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         done ; \
     fi \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && apt-get install -y libibverbs-dev python${PYTHON_VERSION}-dev \
+    && apt-get install -y libibverbs-dev \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
+
+RUN echo "=== Detailed Debug Information---1-2===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
+
+
+RUN rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
+    && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
+    && ln -sf /opt/venv/bin/python3-config /usr/bin/python3-config \
+    && ln -sf /opt/venv/bin/pip /usr/bin/pip
+
+RUN echo "=== Python environment verification after dev package installation ===" \
+    && python3 --version \
+    && pip --version \
+    && python3 -c "import sys; print('Python executable:', sys.executable); print('Python prefix:', sys.prefix)" \
+    && ls -la /usr/include/python* 2>/dev/null | head -5 || echo "No Python headers found" \
+    && ls -la /usr/lib/python* 2>/dev/null | head -5 || echo "No Python libs found" \
+    && which python3 && python3 --version
+
+RUN echo "=== Detailed Debug Information---2===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
 ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
-
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
-    python3 -m pip install uv
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -343,35 +441,111 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # after this step
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system \
+        uv pip install \
             --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319" ; \
-        uv pip install --system \
+        uv pip install \
             --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
+
+RUN echo "=== Detailed Debug Information---3 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
+
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
+    uv pip install dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+RUN echo "=== Detailed Debug Information---4 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
 
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==0.5.2 \
-    && uv pip install --system flashinfer-jit-cache==0.5.2 \
+    uv pip install flashinfer-cubin==0.5.2 \
+    && uv pip install flashinfer-jit-cache==0.5.2 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
+
+RUN echo "=== Detailed Debug Information---5 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
 
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 
+RUN echo "=== Detailed Debug Information---6 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-uv pip list
+    uv pip list
 
 # Even when we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
@@ -379,15 +553,22 @@ uv pip list
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
+    uv pip install -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        
 
-# Install DeepGEMM from source
+RUN echo "=== Package installation verification ===" \
+    && python3 -c "import vllm; print('vLLM imported successfully from:', vllm.__file__)" \
+    && python3 -c "import flashinfer; print('FlashInfer imported successfully from:', flashinfer.__file__)" \
+    && python3 -c "import torch; print('Torch imported successfully from:', torch.__file__)" \
+    && echo "All packages are installed in the correct virtual environment"
+
+        # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
-
+    
 COPY tools/install_gdrcopy.sh install_gdrcopy.sh
 RUN set -eux; \
     case "${TARGETPLATFORM}" in \
@@ -397,7 +578,7 @@ RUN set -eux; \
     esac; \
     ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
     rm ./install_gdrcopy.sh
-
+    
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
@@ -410,6 +591,24 @@ RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
+RUN echo "=== Detailed Debug Information---7 ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
