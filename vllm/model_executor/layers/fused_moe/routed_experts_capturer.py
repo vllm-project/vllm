@@ -113,7 +113,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_experts_per_tok,
                 )
                 nbytes = int(np.prod(shape)) * np.dtype(np.int32).itemsize
-                self.lock_file = f"{LOCK_FILE_PREFIX}.{instance_id}.lock"
+                self.lock_file = f"{LOCK_FILE_PREFIX}_{instance_id}.lock"
 
                 # 创建共享内存
                 with open(self.lock_file, "wb") as fp:
@@ -233,7 +233,9 @@ class RoutedExpertsReader(ABC):
         return _global_experts_reader
 
     @abstractmethod
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
+    def attach_buffer(
+        self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -248,7 +250,9 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
         self._shm: shared_memory.SharedMemory | None = None
         self._host_buffer_view: np.ndarray | None = None
 
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
+    def attach_buffer(
+        self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str
+    ) -> None:
         if self._shm is None:
             shape = (
                 max_num_kv_tokens,
@@ -256,7 +260,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
                 model_config.hf_text_config.num_experts_per_tok,
             )
 
-            self.lock_file = f"{LOCK_FILE_PREFIX}.{instance_id}.lock"
+            self.lock_file = f"{LOCK_FILE_PREFIX}_{instance_id}.lock"
 
             # Attach to existing shared memory
             with open(self.lock_file, "rb+") as fp:
@@ -303,7 +307,9 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
 
 
 class _RoutedExpertsReaderNoop(RoutedExpertsReader):
-    def attach_buffer(self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str) -> None:
+    def attach_buffer(
+        self, max_num_kv_tokens: int, model_config: ModelConfig, instance_id: str
+    ) -> None:
         return None
 
     def get_routed_experts(self, indices: np.ndarray) -> np.ndarray | None:
