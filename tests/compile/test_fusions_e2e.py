@@ -48,9 +48,7 @@ if current_platform.is_cuda():
             # Use smaller model for L40s in CI
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            backend=AttentionBackendEnum.TRITON_ATTN
-            if is_blackwell()
-            else AttentionBackendEnum.TRITON_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=32,
                 allreduce_fusion=65,
