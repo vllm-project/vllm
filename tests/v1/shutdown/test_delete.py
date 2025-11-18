@@ -4,7 +4,7 @@
 
 import pytest
 
-from tests.utils import wait_for_gpu_memory_to_clear
+from tests.utils import check_gpu_memory_usage, wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
@@ -37,6 +37,9 @@ async def test_async_llm_delete(
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
+    devices = list(range(tensor_parallel_size))
+    check_gpu_memory_usage(devices)
+
     engine_args = AsyncEngineArgs(
         model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
     )
@@ -57,7 +60,7 @@ async def test_async_llm_delete(
 
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
-        devices=list(range(tensor_parallel_size)),
+        devices=devices,
         threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
     )
 
@@ -86,6 +89,9 @@ def test_llm_delete(
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
+    devices = list(range(tensor_parallel_size))
+    check_gpu_memory_usage(devices)
+
     with monkeypatch.context() as m:
         MP_VALUE = "1" if enable_multiprocessing else "0"
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
@@ -103,6 +109,6 @@ def test_llm_delete(
 
         # Confirm all the processes are cleaned up.
         wait_for_gpu_memory_to_clear(
-            devices=list(range(tensor_parallel_size)),
+            devices=devices,
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
         )
