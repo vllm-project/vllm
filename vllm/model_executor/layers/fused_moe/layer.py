@@ -782,7 +782,7 @@ class FusedMoE(CustomOp):
         ep_rank: int,
         local_num_experts: int,
         device: torch.device | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device_kwargs = {"device": device} if device is not None else {}
         global_indices = torch.arange(
             global_num_experts, dtype=torch.long, **device_kwargs
