@@ -67,7 +67,7 @@ async def test_async_llm_delete(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-@pytest.mark.parametrize("enable_multiprocessing", [True])
+@pytest.mark.parametrize("enable_multiprocessing", [False, True])
 @pytest.mark.parametrize("send_one_request", [False, True])
 def test_llm_delete(
     monkeypatch,
@@ -77,7 +77,6 @@ def test_llm_delete(
     send_one_request: bool,
 ) -> None:
     """Test that LLM frees GPU memory upon deletion.
-    TODO(andy) - LLM without multiprocessing.
 
     Args:
       model: model under test
