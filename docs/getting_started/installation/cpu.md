@@ -104,7 +104,7 @@ Currently, there are no pre-built CPU wheels.
 
 ### Which `dtype` should be used?
 
-- Currently vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
+- Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
 
 ### How to launch a vLLM service on CPU?
 
@@ -170,6 +170,8 @@ This value is 4GB by default. Larger space can support more concurrent requests,
 ### How to do performance tuning for vLLM CPU?
 
 First of all, please make sure the thread-binding and KV cache space are properly set and take effect. You can check the thread-binding by running a vLLM benchmark and observing CPU cores usage via `htop`.
+
+Use multiples of 32 as `--block-size`, which is 128 by default.
 
 Inference batch size is an important parameter for the performance. A larger batch usually provides higher throughput, a smaller batch provides lower latency. Tuning the max batch size starting from the default value to balance throughput and latency is an effective way to improve vLLM CPU performance on specific platforms. There are two important related parameters in vLLM:
 
