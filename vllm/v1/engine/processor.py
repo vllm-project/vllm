@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -148,6 +149,23 @@ class Processor:
         if params.logits_processors:
             raise ValueError(
                 "vLLM V1 does not support per request user provided logits processors."
+            )
+        # Async scheduling + spec decode currently incompatible with some
+        # sampling parameters.
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.scheduler_config.async_scheduling
+            and (
+                params.frequency_penalty != 0.0
+                or params.presence_penalty != 0.0
+                or params.repetition_penalty != 1.0
+                or params.bad_words_token_ids
+                or params.structured_outputs
+            )
+        ):
+            raise ValueError(
+                "async scheduling with spec decoding doesn't yet support "
+                "penalties, bad words or structured outputs in sampling parameters."
             )
 
     def _validate_params(
@@ -340,7 +358,12 @@ class Processor:
 
         mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
-            n = len(data) if isinstance(data, list) else 1
+            # Hash each item for embedding inputs.
+            n = (
+                len(data)
+                if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
+                else 1
+            )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 

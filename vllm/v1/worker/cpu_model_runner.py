@@ -80,9 +80,6 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
-        return sampled_token_ids.tolist()
-
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
