@@ -596,7 +596,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                     mi_dict = json.load(file)
             except FileNotFoundError:
                 logger.debug(
-                    ("Cached model info file for class %s.%s not found"),
+                    "Cached model info file for class %s.%s not found",
                     self.module_name,
                     self.class_name,
                 )
@@ -604,7 +604,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
             if mi_dict["hash"] != module_hash:
                 logger.debug(
-                    ("Cached model info file for class %s.%s is stale"),
+                    "Cached model info file for class %s.%s is stale",
                     self.module_name,
                     self.class_name,
                 )
@@ -614,7 +614,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
             logger.debug(
-                ("Cached model info for class %s.%s error. "),
+                "Cached model info for class %s.%s error. ",
                 self.module_name,
                 self.class_name,
             )
@@ -649,14 +649,14 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
-                    ("Loaded model info for class %s.%s from cache"),
+                    "Loaded model info for class %s.%s from cache",
                     self.module_name,
                     self.class_name,
                 )
                 return mi
             else:
                 logger.debug(
-                    ("Cache model info for class %s.%s miss. Loading model instead."),
+                    "Cache model info for class %s.%s miss. Loading model instead.",
                     self.module_name,
                     self.class_name,
                 )
