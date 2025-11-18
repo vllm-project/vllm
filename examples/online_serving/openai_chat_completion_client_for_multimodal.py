@@ -66,7 +66,7 @@ def run_text_only(model: str, max_completion_tokens: int) -> None:
 # Single-image input inference
 def run_single_image(model: str, max_completion_tokens: int) -> None:
     ## Use image url in the payload
-    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
     chat_completion_from_url = client.chat.completions.create(
         messages=[
             {

@@ -293,7 +293,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
             base_url="http://localhost:8000/v1",
             api_key="EMPTY",
         )
-        image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
         response = create_chat_embeddings(
             client,
