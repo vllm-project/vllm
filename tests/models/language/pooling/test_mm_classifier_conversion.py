@@ -75,7 +75,7 @@ def test_gemma_multimodal(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Set_of_fourteen_side_chairs_MET_DP110780.jpg"
+                        "url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/red_chair.jpg"
                     },
                 },
                 {"type": "text", "text": "A fine 19th century piece of furniture."},

@@ -266,7 +266,7 @@ def get_query(modality: QueryModality):
         return ImageQuery(
             modality="image",
             image=fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/American_Eskimo_Dog.jpg/360px-American_Eskimo_Dog.jpg"  # noqa: E501
+                "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/eskimo.jpg"  # noqa: E501
             ),
         )
 
@@ -275,7 +275,7 @@ def get_query(modality: QueryModality):
             modality="text+image",
             text="A cat standing in the snow.",
             image=fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Felis_catus-cat_on_snow.jpg/179px-Felis_catus-cat_on_snow.jpg"  # noqa: E501
+                "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"  # noqa: E501
             ),
         )
 
