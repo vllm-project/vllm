@@ -60,6 +60,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
@@ -90,7 +91,6 @@ from .qwen2_5_omni_thinker import (
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
-    Qwen2_5_VisionRotaryEmbedding,
     Qwen2_5_VLProcessingInfo,
 )
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
@@ -221,14 +221,16 @@ class Qwen3_VisionBlock(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
@@ -332,7 +334,13 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
-        self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb = get_rope(
+            head_size=head_dim,
+            rotary_dim=head_dim // 2,
+            max_position=8192,
+            base=10000.0,
+            is_neox_style=True,
+        )
 
         self.blocks = nn.ModuleList(
             [
@@ -416,9 +424,19 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
+        cos_h = cos[pos_ids[:, 0]]  # (num_tokens, rotary_dim // 2)
+        cos_w = cos[pos_ids[:, 1]]
+        sin_h = sin[pos_ids[:, 0]]
+        sin_w = sin[pos_ids[:, 1]]
+
+        cos_combined = torch.cat([cos_h, cos_w], dim=-1)
+        sin_combined = torch.cat([sin_h, sin_w], dim=-1)
+
+        return cos_combined, sin_combined
 
     def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
         num_grid_per_side = self.num_grid_per_side
@@ -508,7 +526,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         if self.apply_vit_abs_pos_embed:
             pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
             hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
@@ -519,7 +537,8 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
+        rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
+        rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
 
         hidden_states_list = []
@@ -529,7 +548,8 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
-                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
                 seqlens=seqlens,
             )
