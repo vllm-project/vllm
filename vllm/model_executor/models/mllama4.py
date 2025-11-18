@@ -31,7 +31,7 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -255,7 +255,7 @@ class Llama4VisionAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_local_heads, self.head_dim, self.scaling
         )
 

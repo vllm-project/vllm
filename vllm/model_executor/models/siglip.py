@@ -18,8 +18,8 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -380,7 +380,7 @@ class SiglipAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -482,7 +482,7 @@ class SiglipEncoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -528,7 +528,7 @@ class SiglipEncoder(nn.Module):
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
-        attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
+        attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
 
@@ -701,7 +701,7 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_cls=MultiHeadAttention,
+            attn_cls=MMEncoderAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers
