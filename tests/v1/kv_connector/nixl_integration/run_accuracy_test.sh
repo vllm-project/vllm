@@ -55,7 +55,7 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi)
+SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
@@ -91,8 +91,13 @@ get_model_args() {
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
     echo "$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)"
-  else
+  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
     echo "$($SMI_BIN -l | grep GPU | wc -l)"
+  else
+    # works for non-cuda platforms,
+    # assuming at least 1 device and
+    # let system to decide which card to use
+    echo "1"
   fi
 }
 
