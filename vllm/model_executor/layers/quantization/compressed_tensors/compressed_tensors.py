@@ -644,38 +644,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         raise NotImplementedError("No compressed-tensors compatible scheme was found.")
 
-    def get_scheme_dict(
-        self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> dict[str, QuantizationArgs | str | None] | None:
-        """
-        Extract the QuantizationArgs for a given layer.
-
-        Returns:
-            dict with {
-                "weights": QuantizationArgs,
-                "input_activations": QuantizationArgs | None,
-                "format": str | None
-            } | None
-        """
-        # TODO (@kylesayrs): support ignore module names with ct matching utils
-        if should_ignore_layer(
-            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
-        ):
-            return None
-
-        # Will be empty for models with only sparsity
-        if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
-            )
-
-            return self.target_scheme_map[matched_target]
-
-        return None
-
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
     ) -> Optional["CompressedTensorsScheme"]:
@@ -695,12 +663,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Use the new get_quant_args method to extract QuantizationArgs
         scheme_dict = self.get_scheme_dict(layer, layer_name)
 
-        if scheme_dict is None:
-            return None
-
-        weight_quant = scheme_dict.get("weights")
-        input_quant = scheme_dict.get("input_activations")
-        format = scheme_dict.get("format")
+        weight_quant = None
+        input_quant = None
+        format = None
+        if scheme_dict:
+            weight_quant = scheme_dict.get("weights")
+            input_quant = scheme_dict.get("input_activations")
+            format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
         # assume that fused layers inherit first component's sparsity scheme
@@ -755,6 +724,38 @@ class CompressedTensorsConfig(QuantizationConfig):
         self._check_scheme_supported(scheme.get_min_capability())
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
         return scheme
+
+    def get_scheme_dict(
+        self, layer: torch.nn.Module, layer_name: str | None = None
+    ) -> dict[str, QuantizationArgs | str | None] | None:
+        """
+        Extract the QuantizationArgs for a given layer.
+
+        Returns:
+            dict with {
+                "weights": QuantizationArgs,
+                "input_activations": QuantizationArgs | None,
+                "format": str | None
+            } | None
+        """
+        # TODO (@kylesayrs): support ignore module names with ct matching utils
+        if should_ignore_layer(
+            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+        ):
+            return None
+
+        # Will be empty for models with only sparsity
+        if self.target_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.target_scheme_map.keys(),
+                fused_mapping=self.packed_modules_mapping,
+            )
+
+            return self.target_scheme_map[matched_target]
+
+        return None
 
     def get_cache_scale(self, name: str) -> str | None:
         """
