@@ -439,7 +439,7 @@ def rms_norm_dynamic_per_token_quant(
     return output, scales
 
 
-# fused quant layer norm ops bloked
+# fused quant layer norm ops blocked
 def rms_norm_per_block_quant(
     input: torch.Tensor,
     weight: torch.Tensor,

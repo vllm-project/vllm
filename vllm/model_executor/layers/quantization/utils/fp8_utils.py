@@ -363,7 +363,6 @@ class W8A8BlockFp8LinearOp:
         assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
-        assert input_scale is not None
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
             weight,
@@ -599,9 +598,13 @@ def per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty(x.shape, device=x.device, dtype=dtype)
 
-    # Allocate the scale tensor in row-major format.
-    shape = x.shape[:-1] + (x.shape[-1] // group_size,)
-    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    # Allocate the scale tensor in either row- or column-major format.
+    if column_major_scales:
+        shape = (x.shape[-1] // group_size,) + x.shape[:-1]
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     # prefer CUDA kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
@@ -618,28 +621,42 @@ def per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8[(M,)](
-        x,
-        x_q,
-        x_s,
-        group_size,
-        x.shape[1],
-        x.stride(0),
-        eps,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        use_ue8m0=use_ue8m0,
-        BLOCK=BLOCK,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-
-    # Permute the scales only at the end of this function to enable quant
-    # RMS norm fusion
     if column_major_scales:
-        return x_q, x_s.permute(-1, -2)
+        x_s = x_s.permute(-1, -2)
+        _per_token_group_quant_fp8_colmajor[(M,)](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            x.shape[1],
+            x.stride(0),
+            x_s.stride(1),
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=use_ue8m0,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
     else:
-        return x_q, x_s
+        _per_token_group_quant_fp8[(M,)](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            x.shape[1],
+            x.stride(0),
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=use_ue8m0,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+
+    return x_q, x_s
 
 
 @triton.jit
