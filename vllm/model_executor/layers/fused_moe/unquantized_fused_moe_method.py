@@ -110,7 +110,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
-            return None
+            return self._maybe_add_dp_ep_naive_fallback(None)
         else:
             return super().maybe_make_prepare_finalize()
 
