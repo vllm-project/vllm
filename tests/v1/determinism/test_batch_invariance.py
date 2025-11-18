@@ -16,6 +16,18 @@ BACKENDS: list[str] = [
     "FLASHINFER",
 ]
 
+DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
+MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+
+
+def resolve_model_name(backend: str) -> str:
+    """Resolve the model name for the given backend, respecting env overrides."""
+    model = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
+    if backend.endswith("MLA") and model == DEFAULT_MODEL:
+        return MLA_MODEL
+    return model
+
+
 capability = current_platform.get_device_capability()  # type: ignore[attr-defined]
 if capability is not None and capability.major == 9:
     BACKENDS.append("FLASH_ATTN_MLA")
@@ -57,11 +69,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
-    model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
-    # if an MLA backend is requested but the model is still the default Qwen3,
-    # switch to a known DeepSeek-V2-Lite-Chat
-    if backend.endswith("MLA") and model == "Qwen/Qwen3-1.7B":
-        model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    model = resolve_model_name(backend)
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
@@ -174,9 +182,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
-    if backend.endswith("MLA") and model_name == "Qwen/Qwen3-1.7B":
-        model_name = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
@@ -393,9 +399,7 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     Useful for quick smoke testing and debugging.
     """
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
-    model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
-    if backend.endswith("MLA") and model == "Qwen/Qwen3-1.7B":
-        model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    model = resolve_model_name(backend)
 
     llm = LLM(
         model=model,
@@ -462,9 +466,7 @@ def test_logprobs_without_batch_invariance_should_fail(
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
-    if backend.endswith("MLA") and model_name == "Qwen/Qwen3-1.7B":
-        model_name = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     print(f"\n{'=' * 80}")
@@ -682,7 +684,7 @@ def test_decode_logprobs_match_prefill_logprobs(
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     from vllm.model_executor.layers.batch_invariant import (
