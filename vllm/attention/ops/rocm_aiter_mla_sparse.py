@@ -82,7 +82,8 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    # TODO(ganyi): Uncomment this after aiter merge this kernel into main
+    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
+    # path after aiter merge this kernel into main
     @lru_cache
     def has_mqa_logits_module():
         return importlib.util.find_spec("aiter.ops.triton.fp8_mqa_logits") is not None
@@ -183,6 +184,8 @@ def rocm_fp8_paged_mqa_logits(
         `torch.float32`.
     """
 
+    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
+    # path after aiter merge this kernel into main
     @lru_cache
     def has_paged_mqa_logits_module():
         return importlib.util.find_spec("aiter.ops.triton.pa_mqa_logits") is not None
