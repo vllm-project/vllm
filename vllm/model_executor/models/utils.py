@@ -12,14 +12,17 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -118,9 +121,10 @@ class AutoWeightsLoader:
     environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
     """
 
-    # Models trained using early version ColossalAI
-    # may include these tensors in checkpoint. Skip them.
+    # Models trained using early version ColossalAI or quantized by
+    # GPTQModel may include these tensors in checkpoint. Skip them.
     ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_pos_emb.inv_freq",
         "rotary_emb.inv_freq",
         "rotary_emb.cos_cached",
         "rotary_emb.sin_cached",
@@ -475,7 +479,7 @@ def _merge_multimodal_embeddings(
 
 @deprecated(
     "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.get_input_embeddings` and will be "
+    "`SupportsMultiModal.embed_input_ids` and will be "
     "removed in v0.12."
 )
 def merge_multimodal_embeddings(
@@ -576,11 +580,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    if envs.VLLM_USE_V1:
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
-    else:
-        uva_offloading = False
+    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+    uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -717,6 +718,30 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
+def get_draft_quant_config(
+    vllm_config: VllmConfig,
+) -> QuantizationConfig | None:
+    """Get quantization config for Draft models.
+
+    Draft models should use their own quantization config instead of the verifier/target
+    model's config. This helper retrieves the draft model's quantization config.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The draft model's config if available, None otherwise.
+    """
+    draft_model_config = vllm_config.speculative_config.draft_model_config
+    draft_load_config = vllm_config.load_config
+
+    return (
+        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+        if draft_model_config
+        else None
+    )
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """
     Extract the layer index from the module name.
@@ -828,3 +853,25 @@ direct_register_custom_op(
     fake_impl=sequence_parallel_chunk_impl_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def process_eagle_weight(
+    model: nn.Module,
+    name: str,
+) -> None:
+    """
+    Update EAGLE model flags based on loaded weight name.
+    This should be called during weight loading to detect if a model
+    has its own lm_head or embed_tokens weight.
+    Args:
+        model: The model instance (must support EAGLE)
+        name: The name of the weight to process
+    """
+    if not supports_any_eagle(model):
+        return
+
+    # To prevent overriding with target model's layers
+    if "lm_head" in name:
+        model.has_own_lm_head = True
+    if "embed_tokens" in name:
+        model.has_own_embed_tokens = True

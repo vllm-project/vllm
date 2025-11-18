@@ -77,6 +77,7 @@ class EngineClient(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
@@ -124,7 +125,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
+    async def reset_prefix_cache(self) -> None:
         """Reset the prefix cache"""
         ...
 

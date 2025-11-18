@@ -7,7 +7,7 @@ from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
 class BenchmarkServingSubcommand(BenchmarkSubcommandBase):
-    """The `serve` subcommand for vllm bench."""
+    """The `serve` subcommand for `vllm bench`."""
 
     name = "serve"
     help = "Benchmark the online serving throughput."

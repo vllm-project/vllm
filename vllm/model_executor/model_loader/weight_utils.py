@@ -82,7 +82,8 @@ enable_hf_transfer()
 
 class DisabledTqdm(tqdm):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs, disable=True)
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
 
 
 def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
@@ -657,10 +658,22 @@ def multi_thread_safetensors_weights_iterator(
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    is_distributed: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        streamer.stream_files(hf_weights_files)
+        is_cuda_alike = current_platform.is_cuda_alike()
+        device = (
+            f"cuda:{current_platform.current_device()}"
+            if is_distributed and is_cuda_alike
+            else "cpu"
+        )
+
+        streamer.stream_files(
+            hf_weights_files,
+            device=device,
+            is_distributed=is_distributed,
+        )
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
@@ -672,6 +685,7 @@ def runai_safetensors_weights_iterator(
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not enable_tqdm(use_tqdm_on_load),
+            mininterval=2,
         )
 
         yield from tensor_iter
@@ -822,7 +836,11 @@ def gguf_quant_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors
+    them to torch tensors.
+    Be careful of the order of yielding weight types and weights data,
+    we have to yield all weight types first before yielding any weights.
+    Otherwise it would cause issue when loading weights with for packed
+    layer with different quant types.
     """
 
     reader = gguf.GGUFReader(gguf_file)
@@ -832,7 +850,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -842,7 +860,7 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param

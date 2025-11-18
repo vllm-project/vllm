@@ -38,10 +38,10 @@ def main():
     # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
     response = client.chat.completions.create(model=model, messages=messages)
 
-    reasoning_content = response.choices[0].message.reasoning_content
+    reasoning = response.choices[0].message.reasoning
     content = response.choices[0].message.content
 
-    print("reasoning_content for Round 1:", reasoning_content)
+    print("reasoning for Round 1:", reasoning)
     print("content for Round 1:", content)
 
     # Round 2
@@ -54,10 +54,10 @@ def main():
     )
     response = client.chat.completions.create(model=model, messages=messages)
 
-    reasoning_content = response.choices[0].message.reasoning_content
+    reasoning = response.choices[0].message.reasoning
     content = response.choices[0].message.content
 
-    print("reasoning_content for Round 2:", reasoning_content)
+    print("reasoning for Round 2:", reasoning)
     print("content for Round 2:", content)
 
 
