@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
 
@@ -122,6 +123,7 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
+    PydanticMsgspecMixin,
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
     # required for @cached_property.
@@ -251,6 +253,8 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+
+    skip_reading_prefix_cache: bool = None
 
     @staticmethod
     def from_optional(
@@ -411,6 +415,12 @@ class SamplingParams(
             )
             self.structured_outputs = self.guided_decoding
             self.guided_decoding = None
+
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of prompt logprobs may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
