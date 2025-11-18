@@ -204,7 +204,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
             }
         },
     )
-    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("reasoning: ", completion.choices[0].message.reasoning)
     print("content: ", completion.choices[0].message.content)
     ```
 

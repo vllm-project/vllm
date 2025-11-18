@@ -482,6 +482,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             self.quant_type = scalar_types.uint8b128
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
+        self.use_marlin = True
 
     def create_weights(
         self,
@@ -742,8 +743,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet."

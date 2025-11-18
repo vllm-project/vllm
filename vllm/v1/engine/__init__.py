@@ -15,6 +15,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -122,16 +123,13 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
+    # The number of NaNs in logits.
+    # A value greater than 0 indicates that the output is corrupted.
+    num_nans_in_logits: int = 0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-
-class UtilityResult:
-    """Wrapper for special handling when serializing/deserializing."""
-
-    def __init__(self, r: Any = None):
-        self.result = r
 
 
 class UtilityOutput(
