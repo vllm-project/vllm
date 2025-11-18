@@ -1030,11 +1030,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
+# For CUDA and HIP builds also build the triton_kernels external package.
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+    include(cmake/external_projects/triton_kernels.cmake)
+endif()
+
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
-    include(cmake/external_projects/triton_kernels.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
