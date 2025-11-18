@@ -451,31 +451,13 @@ class LLM:
         # Tokenization control
         is_tokenized: bool = False,
     ) -> Sequence[dict[str, Any]]:
-        # Tokenize the dataset if not already tokenized
         if is_tokenized:
             # Data is already tokenized, use directly
             tokenized_train_dataset = Dataset.from_dict(train_dataset) if isinstance(train_dataset, dict) else Dataset.from_list(train_dataset)
             if eval_dataset is not None:
                 tokenized_eval_dataset = Dataset.from_dict(eval_dataset) if isinstance(eval_dataset, dict) else Dataset.from_list(eval_dataset)
-            
-            # TEMPORARY DEBUG: Save first 20 samples from converted dataset
-            import pandas as pd
-            import os
-            debug_dir = "debug_batches"
-            os.makedirs(debug_dir, exist_ok=True)
-            
-            train_samples = []
-            for i in range(min(20, len(tokenized_train_dataset))):
-                train_samples.append(tokenized_train_dataset[i]['input_ids'])
-            df_train = pd.DataFrame(train_samples)
-            df_train.to_csv(f"{debug_dir}/vllm_llm_train_converted_dataset_first20_input_ids.csv", index=False)
-            print(f"[DEBUG LLM.train] Saved first 20 converted train samples to {debug_dir}/vllm_llm_train_converted_dataset_first20_input_ids.csv")
-            print(f"[DEBUG LLM.train] Dataset columns: {tokenized_train_dataset.column_names}")
-            print(f"[DEBUG LLM.train] Dataset features: {tokenized_train_dataset.features}")
-            print(f"[DEBUG LLM.train] First sample keys: {list(tokenized_train_dataset[0].keys())}")
-            # END TEMPORARY DEBUG
         else:
-            # Tokenize the dataset
+            # Tokenize the dataset if not already tokenized
             tokenizer = self.get_tokenizer()
             self.set_tokenizer_pad_token(tokenizer.eos_token)
 
@@ -495,12 +477,12 @@ class LLM:
         # Use RandomSampler with seed to match PEFT Trainer behavior
         import torch
         from torch.utils.data import RandomSampler
-        
+
         # Set seed for reproducible sampling (matches PEFT's data_seed=42)
         generator = torch.Generator()
-        generator.manual_seed(42)
+        generator.manual_seed(42) # TODO(girfan): Take the data_seed from the TrainingArguments
         train_sampler = RandomSampler(tokenized_train_dataset, generator=generator)
-        
+
         train_dataloader = DataLoader(
             tokenized_train_dataset,
             batch_size=batch_size,
@@ -508,20 +490,20 @@ class LLM:
             collate_fn=default_data_collator,
             drop_last=False,
         )
-        
+
         if eval_dataset is not None:
             max_eval_batch_size = 8
             eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
             eval_dataloader = DataLoader(
                 tokenized_eval_dataset,
                 batch_size=eval_batch_size,
-                shuffle=False,  # Deterministic ordering
+                shuffle=False,  # TODO(girfan): Does PEFT take this as an arg?
                 collate_fn=default_data_collator,
                 drop_last=False,
             )
         else:
             eval_dataloader = None
-        
+
         # Check if this is eval-only mode (no training data)
         is_eval_only = len(train_dataloader) == 0
         
@@ -532,20 +514,6 @@ class LLM:
             # Eval-only mode: no training steps
             num_steps_per_epoch = 0
             num_training_steps = 0
-
-        # num_examples = 800
-        # batch_size = 4
-        # len_dataloader = num_examples / batch_size = 200
-        # gradient_accumulation_steps = 2
-        # num_updates_per_epoch = len_dataloader / gradient_accumulation_steps = 100
-        # max_steps = num_updates_per_epoch * num_epochs = 100 * 3 = 300
-        # num_training_examples = num_examples * num_epochs = 800 * 3 = 2400
-        # ==
-        # steps_in_epoch = len_dataloader = 200
-        # num_batches = gradient_accumulation_steps = 2
-        # ==
-        # step every batch, do_sync_step every gradient_accumulation_steps
-        # tr_loss is always accumulated and reset after eval
 
         def _run_batch(batch: dict[str, Any], lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
             """Process a single batch from the DataLoader."""
@@ -642,40 +610,9 @@ class LLM:
         
         We need to unbatch it and add individual requests.
         """
-        global BATCH_NUM
-
-        # TEMPORARY DEBUG: Write batch input_ids to CSV
-        import pandas as pd
-        import os
-        
-        debug_dir = "debug_batches"
-        os.makedirs(debug_dir, exist_ok=True)
-        
-        # Convert batch input_ids to numpy for easier CSV writing
-        batch_input_ids = batch['input_ids'].cpu().numpy()
-        batch_labels = batch['labels'].cpu().numpy()
-        batch_attention_mask = batch['attention_mask'].cpu().numpy()
-        
-        # Count how many batches we've seen
-        batch_num = BATCH_NUM
-        BATCH_NUM += 1
-        
-        # Write to CSV with batch number
-        df = pd.DataFrame(batch_input_ids)
-        df.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_input_ids.csv", index=False)
-        
-        df_labels = pd.DataFrame(batch_labels)
-        df_labels.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_labels.csv", index=False)
-        
-        df_attention = pd.DataFrame(batch_attention_mask)
-        df_attention.to_csv(f"{debug_dir}/vllm_batch_{batch_num:04d}_attention_mask.csv", index=False)
-        
-        # print(f"[DEBUG] Wrote batch {batch_num} to {debug_dir}/ (shape: {batch_input_ids.shape})")
-        # END TEMPORARY DEBUG
-        
         # Get batch size from the first tensor
         batch_size = batch['input_ids'].shape[0]
-        
+
         request_ids = []
         for i in range(batch_size):
             # Extract the i-th sample from the batch
@@ -685,7 +622,7 @@ class LLM:
                 'attention_mask': batch['attention_mask'][i].tolist(),
                 'labels': batch['labels'][i].tolist(),
             }
-            
+
             request_id = self._add_training_request(
                 sample=sample,
                 training_params=training_params,

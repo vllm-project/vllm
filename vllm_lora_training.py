@@ -216,7 +216,7 @@ eval_losses = results["eval_losses"]
 if train_losses:
     print(f"Final train loss: {train_losses[-1]['loss']:.6f}")
 if eval_losses:
-    print(f"Final eval loss: {eval_losses[-1]['eval_loss']:.6f}")
+    print(f"Final eval loss: {eval_losses[-1]:.6f}")
 
 # Save loss history
 loss_history = {
@@ -226,7 +226,7 @@ loss_history = {
         "total_steps": len(train_losses),
         "num_epochs": NUM_EPOCHS,
         "final_train_loss": train_losses[-1]['loss'] if train_losses else None,
-        "final_eval_loss": eval_losses[-1]['eval_loss'] if eval_losses else None,
+        "final_eval_loss": eval_losses[-1] if eval_losses else None,
     },
 }
 
