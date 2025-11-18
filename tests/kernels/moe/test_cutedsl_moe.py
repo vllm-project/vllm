@@ -135,7 +135,9 @@ def prepare_inputs(
         masked_m.append(mask.sum())
 
     masked_m = torch.tensor(masked_m, dtype=torch.int32)
-    hidden_states_3d = torch.empty(
+    # Intialize the hidden_states_3d with ones instead of empty to avoid nan
+    # issue.
+    hidden_states_3d = torch.ones(
         (num_experts, max(masked_m), hidden_states.shape[1]), dtype=hidden_states.dtype
     )
     for i in range(num_experts):
