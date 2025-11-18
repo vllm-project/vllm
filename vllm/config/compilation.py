@@ -100,8 +100,9 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config.
 
-    This dataclass is only meant to be within the vllm config.
-    If used outside of the vllm config, some fields may be left in an
+    You must pass PassConfig to VLLMConfig constructor via the CompilationConfig
+    constructor. VLLMConfig's post_init does further initialization.
+    If used outside of the VLLMConfig, some fields may be left in an
     improper state.
     """
 
@@ -219,9 +220,9 @@ class PassConfig:
 class CompilationConfig:
     """Configuration for compilation.
 
-    This dataclass is only meant to be within the vllm config.
-    If used outside of the vllm config, some fields will be left in
-    an improper state.
+    You must pass CompilationConfig to VLLMConfig constructor.
+    VLLMConfig's post_init does further initialization. If used outside of the
+    VLLMConfig, some fields will be left in an improper state.
 
     It has three parts:
 
@@ -955,15 +956,6 @@ class CompilationConfig:
                 )
 
     def is_custom_op_enabled(self, op: str) -> bool:
-        """
-        Determine if a custom op is enabled.
-
-        Args:
-            op: The name of the op.
-
-        Returns:
-            A flag indicating if the op is enabled.
-        """
         if "all" in self.custom_ops:
             return f"-{op}" not in self.custom_ops
 

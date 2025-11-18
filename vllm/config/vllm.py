@@ -64,10 +64,10 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation but no
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
     cudagraphs"""
     O2 = 2
-    """O2: Full optimizations. -O1 as well as cudagraphs."""
+    """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
     O3 = 3
     """O3: Currently the same as -O2s."""
 
@@ -408,6 +408,10 @@ class VllmConfig:
             value: Default value (static or callable).
         """
         if getattr(config_obj, key) is None:
+            # Some config values are known before initialization and are
+            # hard coded.
+            # Other values depend on the user given configuration, so they are
+            # implemented with lambda functions and decided at run time.
             setattr(config_obj, key, value(self) if callable(value) else value)
 
     def _apply_optimization_level_defaults(self, defaults: dict[str, Any]) -> None:
@@ -415,6 +419,11 @@ class VllmConfig:
 
         Recursively applies values from defaults into nested config objects.
         Only fields present in defaults are overwritten.
+
+        If the user configuration does not specify a value for a default field
+        and if the default field is still None after all user selections are
+        applied, then default values will be applied to the field. User speciied
+        fields will not be overridden by the default.
 
         Args:
             defaults: Dictionary of default values to apply.

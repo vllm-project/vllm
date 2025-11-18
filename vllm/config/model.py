@@ -1748,19 +1748,9 @@ class ModelConfig:
     def is_model_moe(
         self,
     ) -> bool:
-        """
-        Parse model configuration to determine if it is MOE.
-        """
         return self.get_num_experts() > 1
 
     def is_quantized(self) -> bool:
-        """
-        Check if a PretrainedConfig is quantized.
-
-        Returns:
-            True if model is quantized.
-            False otherwise.
-        """
         return getattr(self.hf_config, "quantization_config", None) is not None
 
 
