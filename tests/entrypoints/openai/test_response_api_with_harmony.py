@@ -563,7 +563,7 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
                 "content": [
                     {
                         "type": "reasoning_text",
-                        "text": "We need to respond: greeting. Perhaps ask how can help.",
+                        "text": "We need to respond: greeting.",
                     }
                 ],
                 "summary": [],

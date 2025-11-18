@@ -54,7 +54,7 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
                 "content": [
                     {
                         "type": "reasoning_text",
-                        "text": "We need to respond: greeting. Perhaps ask how can help.",
+                        "text": "We need to respond: greeting.",
                     }
                 ],
                 "summary": [],
@@ -67,4 +67,4 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
     # make sure we get a reasoning and text output
     assert response.output[0].type == "reasoning"
     assert response.output[1].type == "message"
-    assert type(response.output[1].content[0].text) == str
+    assert type(response.output[1].content[0].text) is str
