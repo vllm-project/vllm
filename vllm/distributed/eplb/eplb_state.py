@@ -696,7 +696,6 @@ class EplbState:
         # Log: Detailed physical_to_logical_map state per rank (controlled by log_stats)
         if log_stats and self.masked_ranks and self.global_step % 100 == 0:
             if logger.isEnabledFor(DEBUG):
-                import logging
                 ep_group = get_ep_group().device_group
                 for model_name, eplb_model_state in self.model_states.items():
                     # Log physical_to_logical_map to show -1 slots

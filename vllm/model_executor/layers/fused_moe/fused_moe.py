@@ -16,6 +16,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -1296,7 +1297,6 @@ def select_valid_physical_experts(
         # Only log if DEBUG enabled
         if logger.isEnabledFor(DEBUG):
             # Get current EP rank
-            from vllm.distributed.parallel_state import get_ep_group
             ep_rank = get_ep_group().rank
             
             # Calculate which logical experts had masked replicas selected
@@ -1403,7 +1403,6 @@ def eplb_map_to_physical_and_record(
     # Log: Per-rank token distribution after physical selection
     if logger.isEnabledFor(DEBUG):
         # Get EP rank and size
-        from vllm.distributed.parallel_state import get_ep_group
         ep_group = get_ep_group()
         ep_rank = ep_group.rank
         ep_size = ep_group.size()
@@ -1475,7 +1474,6 @@ def eplb_map_to_physical_and_record(
         load_delta = expert_load_view - old_loads
         
         # Get current EP rank
-        from vllm.distributed.parallel_state import get_ep_group
         ep_rank = get_ep_group().rank
         
         # Identify experts with load increase
