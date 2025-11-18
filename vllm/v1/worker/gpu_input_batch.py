@@ -265,7 +265,7 @@ class InputBatch:
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
-        self.async_copy_ready_event: torch.cuda.Event | None = None
+        self.async_copy_ready_event: torch.Event | None = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -891,7 +891,7 @@ class InputBatch:
     def set_async_sampled_token_ids(
         self,
         sampled_token_ids_cpu: torch.Tensor,
-        async_copy_ready_event: torch.cuda.Event,
+        async_copy_ready_event: torch.Event,
     ) -> None:
         """
         In async scheduling case, store ref to sampled_token_ids_cpu
