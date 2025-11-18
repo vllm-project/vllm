@@ -496,6 +496,8 @@ steps:
   # Run unit tests defined directly under compile/,
   # not including subdirectories, which are usually heavier
   # tests covered elsewhere.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \;
 
 - label: PyTorch Fullgraph Smoke Test # 15min
@@ -510,6 +512,8 @@ steps:
   commands:
   # Run smoke tests under fullgraph directory, except test_full_graph.py
   # as it is a heavy test that is covered in other steps.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - find compile/fullgraph/ -name 'test_*.py' -not name 'test_full_graph.py' -exec pytest -s -v {} \;
 
 - label: PyTorch Fullgraph Test # 27min
