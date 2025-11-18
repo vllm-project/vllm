@@ -324,6 +324,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -2346,6 +2347,24 @@ class GPUModelRunner(
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+
+            # Generate custom attention masks for models that require them.
+            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
+            # Check mm_features (mm_embeds is empty during decode).
+            has_mm_features = any(
+                req_state.mm_features for req_state in self.requests.values()
+            )
+            if (
+                self.uses_custom_attention_masks
+                and has_mm_features
+                and hasattr(self.model, "generate_attention_masks")
+            ):
+                mask_kwargs = self.model.generate_attention_masks(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    self.positions.gpu[:num_scheduled_tokens],
+                    mask_dtype=self.model.dtype,
+                )
+                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -2663,6 +2682,18 @@ class GPUModelRunner(
                         return make_empty_encoder_model_runner_output(scheduler_output)
 
                 if not num_scheduled_tokens:
+                    if (
+                        self.parallel_config.distributed_executor_backend
+                        == "external_launcher"
+                        and self.parallel_config.data_parallel_size > 1
+                    ):
+                        # this is a corner case when both external launcher
+                        # and DP are enabled, num_scheduled_tokens could be
+                        # 0, and has_unfinished_requests in the outer loop
+                        # returns True. before returning early here we call
+                        # dummy run to ensure coordinate_batch_across_dp
+                        # is called into to avoid out of sync issues.
+                        self._dummy_run(1)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT

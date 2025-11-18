@@ -60,6 +60,11 @@ def test_extract_tool_calls_no_tools(kimi_k2_tool_parser):
     ids=[
         "tool_call_with_content_before",
         "multi_tool_call_with_content_before",
+        "concatenated_tool_calls_bug_fix",
+        "three_concatenated_tool_calls",
+        "mixed_spacing_tool_calls",
+        "angle_brackets_in_json",
+        "newlines_in_json",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -113,6 +118,123 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ),
             ],
             "I'll help you check the weather. ",
+        ),
+        (
+            """I'll get the weather and news for LA today. First, let me get the weather using Los Angeles coordinates, and then get the latest news. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"latitude": 34.0522, "longitude": -118.2437}<|tool_call_end|><|tool_call_begin|>functions.get_news:1<|tool_call_argument_begin|>{"content": "Los Angeles today"}<|tool_call_end|><|tool_calls_section_end|>""",
+            [
+                ToolCall(
+                    id="functions.get_weather:0",
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {"latitude": 34.0522, "longitude": -118.2437}
+                        ),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.get_news:1",
+                    function=FunctionCall(
+                        name="get_news",
+                        arguments=json.dumps({"content": "Los Angeles today"}),
+                    ),
+                    type="function",
+                ),
+            ],
+            "I'll get the weather and news for LA today. First, let me get the weather using Los Angeles coordinates, and then get the latest news. ",
+        ),
+        (
+            """I'll help you with multiple tasks. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "New York"}<|tool_call_end|><|tool_call_begin|>functions.get_news:1<|tool_call_argument_begin|>{"topic": "technology"}<|tool_call_end|><|tool_call_begin|>functions.send_email:2<|tool_call_argument_begin|>{"to": "user@example.com", "subject": "Daily Update"}<|tool_call_end|><|tool_calls_section_end|>""",
+            [
+                ToolCall(
+                    id="functions.get_weather:0",
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps({"city": "New York"}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.get_news:1",
+                    function=FunctionCall(
+                        name="get_news",
+                        arguments=json.dumps({"topic": "technology"}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.send_email:2",
+                    function=FunctionCall(
+                        name="send_email",
+                        arguments=json.dumps(
+                            {"to": "user@example.com", "subject": "Daily Update"}
+                        ),
+                    ),
+                    type="function",
+                ),
+            ],
+            "I'll help you with multiple tasks. ",
+        ),
+        (
+            """Mixed spacing test. <|tool_calls_section_begin|> <|tool_call_begin|> functions.test:0 <|tool_call_argument_begin|> {} <|tool_call_end|><|tool_call_begin|>functions.test2:1<|tool_call_argument_begin|>{}<|tool_call_end|> <|tool_calls_section_end|>""",
+            [
+                ToolCall(
+                    id="functions.test:0",
+                    function=FunctionCall(
+                        name="test",
+                        arguments=json.dumps({}),
+                    ),
+                    type="function",
+                ),
+                ToolCall(
+                    id="functions.test2:1",
+                    function=FunctionCall(
+                        name="test2",
+                        arguments=json.dumps({}),
+                    ),
+                    type="function",
+                ),
+            ],
+            "Mixed spacing test. ",
+        ),
+        (
+            """I need to process HTML content. <|tool_calls_section_begin|><|tool_call_begin|>functions.process_html:0<|tool_call_argument_begin|>{"html": "<div>content</div>", "text": "normal text"}<|tool_call_end|><|tool_calls_section_end|>""",
+            [
+                ToolCall(
+                    id="functions.process_html:0",
+                    function=FunctionCall(
+                        name="process_html",
+                        arguments=json.dumps(
+                            {"html": "<div>content</div>", "text": "normal text"}
+                        ),
+                    ),
+                    type="function",
+                )
+            ],
+            "I need to process HTML content. ",
+        ),
+        (
+            """I need to process formatted JSON. <|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{
+  "name": "test",
+  "value": 123,
+  "nested": {
+    "key": "value"
+  }
+}<|tool_call_end|><|tool_calls_section_end|>""",
+            [
+                ToolCall(
+                    id="functions.process_data:0",
+                    function=FunctionCall(
+                        name="process_data",
+                        arguments=json.dumps(
+                            {"name": "test", "value": 123, "nested": {"key": "value"}},
+                            indent=2,
+                        ),
+                    ),
+                    type="function",
+                )
+            ],
+            "I need to process formatted JSON. ",
         ),
     ],
 )
