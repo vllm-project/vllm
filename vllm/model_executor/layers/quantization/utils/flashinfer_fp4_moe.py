@@ -9,6 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
@@ -110,3 +111,102 @@ def select_nvfp4_gemm_impl(
         "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
         "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
     )
+
+def flashinfer_trtllm_fp4_moe(
+                              layer: torch.nn.Module,
+                              x: torch.Tensor,
+                              router_logits: torch.Tensor,
+                              top_k: int,
+                              global_num_experts: int,
+                              num_expert_group: int | None,
+                              topk_group: int | None,
+                              custom_routing_function: object | None,
+                              e_score_correction_bias: torch.Tensor | None,
+                              ) -> torch.Tensor:
+    """
+        Apply FlashInfer TensorRT-LLM FP4 MoE kernel.
+
+        Args:
+            layer: The MoE layer with weights and scales
+            x: Input tensor
+            router_logits: Router logits for expert selection
+            top_k: Number of experts to select per token
+            global_num_experts: Total number of experts across all ranks
+            num_expert_group: Number of expert groups (for grouped routing)
+            topk_group: Top-k within each group
+            custom_routing_function: Custom routing function (e.g., Llama4)
+            e_score_correction_bias: Optional routing bias correction
+
+        Returns:
+            Output tensor from the MoE layer
+        """
+    import flashinfer
+
+    from vllm.model_executor.models.llama4 import Llama4MoE
+
+    # Quantize input to FP4
+    a1_gscale = layer.w13_input_scale_quant
+    (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
+        x,
+        a1_gscale,
+        is_sf_swizzled_layout=False,
+    )
+
+    # Determine routing method type
+    use_llama4_routing = (
+            custom_routing_function is Llama4MoE.custom_routing_function
+    )
+    routing_method_type = layer.routing_method_type
+    if use_llama4_routing:
+        routing_method_type = flashinfer.RoutingMethodType.Llama4
+
+    # Prepare routing bias
+    routing_bias = e_score_correction_bias
+    if routing_bias is not None:
+        routing_bias = routing_bias.to(torch.bfloat16)
+
+    router_logits = (
+        router_logits.to(torch.float32)
+        if routing_method_type == RoutingMethodType.DeepSeekV3
+        else router_logits
+    )
+
+    # Call TRT-LLM FP4 block-scale MoE kernel
+    out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        routing_logits=router_logits,
+        routing_bias=routing_bias,
+        hidden_states=hidden_states_fp4,
+        hidden_states_scale=hidden_states_scale_linear_fp4.view(
+            torch.float8_e4m3fn
+        ).flatten(),
+        gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
+        gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(
+            torch.float8_e4m3fn
+        ),
+        gemm1_bias=None,
+        gemm1_alpha=None,
+        gemm1_beta=None,
+        gemm1_clamp_limit=None,
+        gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
+        gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(
+            torch.float8_e4m3fn
+        ),
+        gemm2_bias=None,
+        output1_scale_scalar=layer.g1_scale_c.data,
+        output1_scale_gate_scalar=layer.g1_alphas.data,
+        output2_scale_scalar=layer.g2_alphas.data,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        n_group=num_expert_group if num_expert_group is not None else 0,
+        topk_group=topk_group if topk_group is not None else 0,
+        intermediate_size=layer.intermediate_size_per_partition,
+        local_expert_offset=layer.ep_rank * layer.local_num_experts,
+        local_num_experts=layer.local_num_experts,
+        routed_scaling_factor=None,
+        tile_tokens_dim=None,
+        routing_method_type=routing_method_type,
+        do_finalize=True,
+    )[0]
+
+    return out
+

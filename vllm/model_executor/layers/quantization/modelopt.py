@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
+    flashinfer_trtllm_fp4_moe
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -373,7 +374,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
         self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
@@ -385,7 +385,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
         else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+            return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
@@ -1180,10 +1180,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 " for ModelOptNvFp4FusedMoE."
             )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1200,7 +1197,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
         else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+            return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
@@ -1468,10 +1465,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-        ):
+        if self.allow_flashinfer:
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2
             )
@@ -1650,68 +1644,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
-            import flashinfer
-
-            from vllm.model_executor.models.llama4 import Llama4MoE
-
-            a1_gscale = layer.w13_input_scale_quant
-            (hidden_states_fp4, hidden_states_scale_linear_fp4) = (
-                flashinfer.fp4_quantize(
-                    x,
-                    a1_gscale,
-                    is_sf_swizzled_layout=False,
-                )
-            )
-            use_llama4_routing = (
-                custom_routing_function is Llama4MoE.custom_routing_function
-            )
-            routing_method_type = layer.routing_method_type
-            if use_llama4_routing:
-                routing_method_type = RoutingMethodType.Llama4
-            router_logits = (
-                router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits
-            )
-            routing_bias = e_score_correction_bias
-            if routing_bias is not None:
-                routing_bias = routing_bias.to(torch.bfloat16)
-            out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-                routing_logits=router_logits,
-                routing_bias=routing_bias,
-                hidden_states=hidden_states_fp4,
-                hidden_states_scale=hidden_states_scale_linear_fp4.view(
-                    torch.float8_e4m3fn
-                ).flatten(),
-                gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
-                gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(
-                    torch.float8_e4m3fn
-                ),
-                gemm1_bias=None,
-                gemm1_alpha=None,
-                gemm1_beta=None,
-                gemm1_clamp_limit=None,
-                gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
-                gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(
-                    torch.float8_e4m3fn
-                ),
-                gemm2_bias=None,
-                output1_scale_scalar=layer.g1_scale_c.data,
-                output1_scale_gate_scalar=layer.g1_alphas.data,
-                output2_scale_scalar=layer.g2_alphas.data,
-                num_experts=global_num_experts,
+            return flashinfer_trtllm_fp4_moe(
+                layer=layer,
+                x=x,
+                router_logits=router_logits,
                 top_k=top_k,
-                n_group=num_expert_group,
+                global_num_experts=global_num_experts,
+                num_expert_group=num_expert_group,
                 topk_group=topk_group,
-                intermediate_size=layer.intermediate_size_per_partition,
-                local_expert_offset=layer.ep_rank * layer.local_num_experts,
-                local_num_experts=layer.local_num_experts,
-                routed_scaling_factor=1.0,
-                tile_tokens_dim=None,
-                routing_method_type=routing_method_type,
-                do_finalize=True,
-            )[0]
-            return out
+                custom_routing_function=custom_routing_function,
+                e_score_correction_bias=e_score_correction_bias,
+            )
 
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
@@ -1749,26 +1692,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif self.allow_flashinfer:
-            assert self.flashinfer_moe_backend in (
-                FlashinferMoeBackend.CUTLASS,
-                FlashinferMoeBackend.CUTEDSL,
+        elif (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        ):
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                flashinfer_cutlass_moe_fp4,
             )
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-                from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                    flashinfer_cutlass_moe_fp4,
-                )
-
-                flashinfer_fn_moe_fp4 = flashinfer_cutlass_moe_fp4
-            else:
-                from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (  # noqa: E501
-                    flashinfer_cutedsl_moe_fp4,
-                )
-
-                flashinfer_fn_moe_fp4 = flashinfer_cutedsl_moe_fp4
 
             assert self.moe_quant_config is not None
-            return flashinfer_fn_moe_fp4(
+
+            return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
