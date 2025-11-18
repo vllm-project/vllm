@@ -184,13 +184,7 @@ def rocm_fp8_paged_mqa_logits(
         `torch.float32`.
     """
 
-    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
-    # path after aiter merge this kernel into main
-    @lru_cache
-    def has_paged_mqa_logits_module():
-        return importlib.util.find_spec("aiter.ops.triton.pa_mqa_logits") is not None
-
-    if rocm_aiter_ops.is_enabled() and has_paged_mqa_logits_module():
+    if rocm_aiter_ops.is_enabled():
         from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits_stage1
 
         batch_size, next_n, heads, _ = q_fp8.shape
