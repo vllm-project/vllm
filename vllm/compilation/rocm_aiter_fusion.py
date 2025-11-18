@@ -8,6 +8,7 @@ from torch import fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
+import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
