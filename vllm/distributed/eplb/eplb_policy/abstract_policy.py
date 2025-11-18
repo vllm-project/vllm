@@ -39,4 +39,4 @@ class EplbPolicy(ABC):
             expert_count: [layers, num_logical_experts], number of
                 physical replicas for each logical expert
         """
-        pass
+        raise NotImplementedError
