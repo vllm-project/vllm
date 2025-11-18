@@ -284,12 +284,10 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 " the format is experimental and could change."
             )
 
-    @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(self) -> QuantizationMethods:
         return "modelopt"
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -813,12 +811,10 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
 
-    @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
 
     @classmethod
