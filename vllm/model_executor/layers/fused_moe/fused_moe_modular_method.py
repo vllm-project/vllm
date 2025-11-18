@@ -34,8 +34,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             "disable_expert_map",
             not self.fused_experts.supports_expert_map(),
         )
-        self.w13_weight = getattr(old_quant_method, "w13_weight", None)
-        self.w2_weight = getattr(old_quant_method, "w2_weight", None)
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
@@ -146,8 +144,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
         result = self.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight if self.w13_weight is None else self.w13_weight,
-            w2=layer.w2_weight if self.w2_weight is None else self.w2_weight,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=self.allow_inplace,
