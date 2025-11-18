@@ -162,6 +162,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "LMCacheMPConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector",
+    "LMCacheMPConnector",
+)
+
+KVConnectorFactory.register_connector(
     "NixlConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
     "NixlConnector",

@@ -29,6 +29,8 @@ from vllm.config import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from ...utils import create_new_process_for_each_test
+
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
 
@@ -334,6 +336,7 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
         ("inductor", True),  # Inductor, Inductor partition
     ],
 )
+@create_new_process_for_each_test("spawn")
 def test_toy_llama(
     backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
 ):
@@ -449,7 +452,6 @@ def benchmark():
         if piecewise:
             compilation_config = CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
@@ -514,4 +516,8 @@ def benchmark():
 
 
 if __name__ == "__main__":
-    benchmark()
+    # Protect against subprocess reimport when using spawn_new_process_for_each_test
+    import os
+
+    if os.environ.get("RUNNING_IN_SUBPROCESS") != "1":
+        benchmark()

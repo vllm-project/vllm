@@ -3,6 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -17,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -30,15 +32,14 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-    from aiter.ops.triton.utils.device_info import get_num_sms
 
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
-    def num_programs(head_dim):
-        return min(head_dim, get_num_sms())
+    def num_programs(total_tokens):
+        return min(total_tokens, get_cu_count())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
@@ -57,11 +58,11 @@ if current_platform.is_rocm():
         x,
         max_block_num,
         num_tokens,
+        num_programs,
         DEQUANT: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
-        NUM_PRGMS: tl.constexpr,
     ):
         bid = tl.program_id(0)
         col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -69,7 +70,7 @@ if current_platform.is_rocm():
             k_scale = tl.load(k_scale_ptr)
             v_scale = tl.load(v_scale_ptr)
 
-        for token_id in tl.range(bid, num_tokens, NUM_PRGMS):
+        for token_id in tl.range(bid, num_tokens, num_programs):
             key_ptr_offset = key_ptr + token_id * head_size * num_heads
             value_ptr_offset = value_ptr + token_id * head_size * num_heads
             batch_idx = tl.load(token_to_batch_ptr + token_id)
@@ -161,11 +162,11 @@ if current_platform.is_rocm():
             x,
             block_tables.size(1),
             total_tokens,
+            NUM_PRGMS,
             DEQUANT=dequant,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
             BLOCK_SIZE=BLOCK_SIZE,
-            NUM_PRGMS=NUM_PRGMS,
         )
 
 
@@ -250,7 +251,7 @@ class AiterFlashAttentionMetadata:
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
-    cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -445,30 +446,12 @@ class AiterFlashAttentionMetadataBuilder(
 
 class AiterFlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [64, 128, 256]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
 
     @staticmethod
     def get_name() -> str:
@@ -530,8 +513,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        AiterFlashAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -748,7 +729,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.prefill_metadata.min_query_len,
+                    min_seqlen_q=1,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
                     causal=True,
@@ -778,7 +759,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.extend_metadata.min_query_len,
+                    min_seqlen_q=1,
                     block_table=attn_metadata.block_table[
                         num_decodes : num_decodes + num_extends
                     ],
