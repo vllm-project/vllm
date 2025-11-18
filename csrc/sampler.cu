@@ -54,15 +54,10 @@ static inline __device__ uint16_t extractBinIdx(float x) {
   return 511 - (tmp.u16 >> 7);
 }
 
-template <int kNumThreadsPerBlock = 512>
-static __global__ void topKPerRow(const float* logits, const int* rowStarts,
-                                  const int* rowEnds, int* outIndices,
-                                  int stride0, int stride1) {
-  // The number of bins in the histogram.
-  static constexpr int kNumBins = 512;
-
-  // The top-k width.
-  static constexpr int kTopK = 2048;
+template <int kNumThreadsPerBlock = 512, int kNumBins = 512, int kTopK = 2048>
+__device__ void topKPerRowJob(const float* logits, const int rowStart,
+                              const int rowEnd, const int rowIdx,
+                              int* outIndices, int stride0, int stride1) {
   // The number of elements per thread for the final top-k sort.
   static constexpr int kNumTopKItemsPerThread = kTopK / kNumThreadsPerBlock;
   // The class to sort the elements during the final top-k sort.
@@ -108,10 +103,6 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
   // Shared memory counter to register the candidates for the final phase.
   __shared__ int smemFinalDstIdx[1];
 
-  // The row computed by this block.
-  int rowIdx = blockIdx.x;
-  // The range of logits within the row.
-  int rowStart = rowStarts[rowIdx], rowEnd = rowEnds[rowIdx];
   // The length of the row.
   int rowLen = rowEnd - rowStart;
 
@@ -260,6 +251,49 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
   }
 }
 
+template <int kNumThreadsPerBlock = 512>
+static __global__ void topKPerRow(const float* logits, const int* rowStarts,
+                                  const int* rowEnds, int* outIndices,
+                                  int stride0, int stride1) {
+  // The number of bins in the histogram.
+  static constexpr int kNumBins = 512;
+
+  // The top-k width.
+  static constexpr int kTopK = 2048;
+
+  // The row computed by this block.
+  int rowIdx = blockIdx.x;
+
+  // The range of logits within the row.
+  int rowStart = rowStarts[rowIdx];
+  int rowEnd = rowEnds[rowIdx];
+
+  topKPerRowJob<kNumThreadsPerBlock, kNumBins, kTopK>(
+      logits, rowStart, rowEnd, rowIdx, outIndices, stride0, stride1);
+}
+
+template <int kNumThreadsPerBlock = 512>
+static __global__ void topKPerRowDecode(const float* logits, const int* seqLens,
+                                        int* outIndices, int stride0,
+                                        int stride1, int next_n) {
+  // The number of bins in the histogram.
+  static constexpr int kNumBins = 512;
+
+  // The top-k width.
+  static constexpr int kTopK = 2048;
+
+  // The row computed by this block.
+  int rowIdx = blockIdx.x;
+
+  // The range of logits within the row.
+  int rowStart = 0;
+  int seq_len = seqLens[rowIdx / next_n];
+  int rowEnd = seq_len - next_n + (rowIdx % next_n) + 1;
+
+  topKPerRowJob<kNumThreadsPerBlock, kNumBins, kTopK>(
+      logits, rowStart, rowEnd, rowIdx, outIndices, stride0, stride1);
+}
+
 }  // namespace vllm
 
 void apply_repetition_penalties_(
@@ -301,6 +335,20 @@ void apply_repetition_penalties_(
                 repetition_penalties.data_ptr<scalar_t>(), num_seqs, vocab_size,
                 tile_size);
       });
+}
+
+void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
+                          const torch::Tensor& seqLens, torch::Tensor& indices,
+                          int64_t numRows, int64_t stride0, int64_t stride1) {
+  // Compute the results on the device.
+  constexpr int kNumThreadsPerBlock = 512;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  vllm::topKPerRowDecode<kNumThreadsPerBlock>
+      <<<numRows, kNumThreadsPerBlock, 0, stream>>>(
+          logits.data_ptr<float>(), seqLens.data_ptr<int>(),
+          indices.data_ptr<int>(), static_cast<int>(stride0),
+          static_cast<int>(stride1), static_cast<int>(next_n));
 }
 
 void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,

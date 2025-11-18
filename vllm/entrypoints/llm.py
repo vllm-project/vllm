@@ -23,6 +23,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     is_init_field,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -66,6 +67,7 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -75,8 +77,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device
 from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -257,7 +259,9 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(mode=compilation_config)
+                compilation_config_instance = CompilationConfig(
+                    mode=CompilationMode(compilation_config)
+                )
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{
@@ -284,6 +288,21 @@ class LLM:
                 structured_outputs_instance = structured_outputs_config
         else:
             structured_outputs_instance = StructuredOutputsConfig()
+
+        # warn about single-process data parallel usage.
+        _dp_size = int(kwargs.get("data_parallel_size", 1))
+        _distributed_executor_backend = kwargs.get("distributed_executor_backend")
+        if (
+            _dp_size > 1
+            and not _distributed_executor_backend == "external_launcher"
+            and not current_platform.is_tpu()
+        ):
+            raise ValueError(
+                f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
+                "process usage and may hang. Please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
 
         engine_args = EngineArgs(
             model=model,
@@ -1014,19 +1033,6 @@ class LLM:
                 "pooling model."
             )
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-
-        for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
-            # for backwards compatibility
-            if truncate_prompt_tokens is not None:
-                param.truncate_prompt_tokens = truncate_prompt_tokens
-
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
             io_processor_prompt = True
@@ -1043,6 +1049,34 @@ class LLM:
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
+        if io_processor_prompt:
+            assert self.io_processor is not None
+            if is_list_of(pooling_params, PoolingParams):
+                validated_pooling_params: list[PoolingParams] = []
+                for param in as_iter(pooling_params):
+                    validated_pooling_params.append(
+                        self.io_processor.validate_or_generate_params(param)
+                    )
+                pooling_params = validated_pooling_params
+            else:
+                assert not isinstance(pooling_params, Sequence)
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    pooling_params
+                )
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1068,6 +1102,9 @@ class LLM:
                 PoolingRequestOutput[Any](
                     request_id="",
                     outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
                     prompt_token_ids=[],
                     finished=True,
                 )
@@ -1461,8 +1498,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> bool:
-        return self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         """
@@ -1535,6 +1572,12 @@ class LLM:
             raise ValueError(
                 "The lengths of prompts and lora_request must be the same."
             )
+        if priority is not None and len(priority) != num_requests:
+            raise ValueError(
+                "The lengths of prompts "
+                f"({num_requests}) and priority ({len(priority)}) "
+                "must be the same."
+            )
 
         for sp in params if isinstance(params, Sequence) else (params,):
             if isinstance(sp, SamplingParams):
@@ -1547,20 +1590,27 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
-        for i, prompt in enumerate(it):
-            if isinstance(prompt, dict):
-                self._validate_mm_data_and_uuids(
-                    prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
-                )
+        added_request_ids: list[str] = []
 
-            self._add_request(
-                prompt,
-                params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request[i]
-                if isinstance(lora_request, Sequence)
-                else lora_request,
-                priority=priority[i] if priority else 0,
-            )
+        try:
+            for i, prompt in enumerate(it):
+                if isinstance(prompt, dict):
+                    self._validate_mm_data_and_uuids(
+                        prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
+                    )
+                request_id = self._add_request(
+                    prompt,
+                    params[i] if isinstance(params, Sequence) else params,
+                    lora_request=lora_request[i]
+                    if isinstance(lora_request, Sequence)
+                    else lora_request,
+                    priority=priority[i] if priority else 0,
+                )
+                added_request_ids.append(request_id)
+        except Exception as e:
+            if added_request_ids:
+                self.llm_engine.abort_request(added_request_ids)
+            raise e
 
     def _validate_mm_data_and_uuids(
         self,
@@ -1643,7 +1693,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
-    ) -> None:
+    ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
@@ -1664,6 +1714,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
+        return request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True

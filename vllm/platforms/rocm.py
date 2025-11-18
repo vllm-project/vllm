@@ -14,10 +14,10 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.config import VllmConfig
 else:
-    _Backend = None
+    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -49,30 +49,18 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = (
-    "Sliding window attention (SWA) is not yet supported in "
-    "Triton flash attention. For half-precision SWA support, "
-    "please use CK flash attention by setting "
-    "`VLLM_USE_TRITON_FLASH_ATTN=0`"
-)
-_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
-    "Qwen2ForCausalLM": _ROCM_SWA_REASON,
-    "MistralForCausalLM": _ROCM_SWA_REASON,
-    "MixtralForCausalLM": _ROCM_SWA_REASON,
-    "Phi3VForCausalLM": (
-        "ROCm Triton flash attention may run into compilation errors due to "
-        "excessive use of shared memory. If this happens, disable Triton FA "
-        "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`"
-    ),
-}
+_ROCM_SWA_REASON = ()
+_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
+    "0x74a2": "AMD_Instinct_MI308X",
     "0x74a5": "AMD_Instinct_MI325X",
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    "0x744c": "AMD_Radeon_RX7900XTX",
 }
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
@@ -137,6 +125,8 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
+
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
@@ -145,25 +135,21 @@ def use_rocm_custom_paged_attention(
     # disabled due to observed numerical discrepancy.
     if ON_GFX9:
         return (
-            (not envs.VLLM_USE_V1 or sliding_window == 0 or sliding_window == (-1, -1))
+            (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN and envs.VLLM_ROCM_USE_AITER)
+            and not (rocm_aiter_ops.is_pa_attn_enabled())
             and sinks is None
         )
 
     else:
         return (
             ON_GFX11_GFX12
-            and (
-                not envs.VLLM_USE_V1
-                or sliding_window == 0
-                or sliding_window == (-1, -1)
-            )
+            and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
             and block_size == 16
@@ -201,14 +187,23 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        from vllm.attention.backends.registry import _Backend
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> AttentionBackendEnum:
+        from importlib.util import find_spec
 
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            return _Backend.ROCM_AITER_FA
-        if on_gfx9():
-            return _Backend.FLASH_ATTN
-        return _Backend.TORCH_SDPA
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
+        if rocm_aiter_ops.is_mha_enabled():
+            # Note: AITER FA is only supported for Qwen-VL models.
+            # TODO: Add support for other VL models in their model class.
+            return AttentionBackendEnum.ROCM_AITER_FA
+
+        if on_gfx9() and find_spec("flash_attn") is not None:
+            return AttentionBackendEnum.FLASH_ATTN
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
@@ -218,92 +213,66 @@ class RocmPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
+
         if use_mla:
-            if not use_v1:
-                raise RuntimeError(
-                    "MLA attention backends require the V1 engine. "
-                    "Set VLLM_USE_V1=1 to enable them."
-                )
-
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-                is_aiter_mla_enabled,
-            )
-
             if selected_backend is None:
                 selected_backend = (
-                    _Backend.ROCM_AITER_MLA
-                    if is_aiter_mla_enabled() or block_size == 1
-                    else _Backend.TRITON_MLA
+                    AttentionBackendEnum.ROCM_AITER_MLA
+                    if rocm_aiter_ops.is_mla_enabled() or block_size == 1
+                    else AttentionBackendEnum.TRITON_MLA
                 )
 
-            if selected_backend == _Backend.TRITON_MLA:
+            if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
-                    logger.info_once("Using Triton MLA backend on V1 engine.")
-                    return "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
+                    logger.info_once("Using Triton MLA backend.")
+                    return AttentionBackendEnum.TRITON_MLA.get_path()
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}."
                 )
-            if selected_backend == _Backend.ROCM_AITER_MLA:
-                if block_size == 1:
-                    logger.info("Using AITER MLA backend on V1 engine.")
-                    return (
-                        "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                    )
-                raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"does not support block size {block_size}."
-                    "(currently only supports block size 1)"
-                )
+            if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
+                logger.info("Using AITER MLA backend.")
+                return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
             )
 
-        if envs.VLLM_USE_V1:
-            if selected_backend == _Backend.FLEX_ATTENTION:
-                logger.info("Using FlexAttention backend on V1 engine.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
-            ) or selected_backend == _Backend.ROCM_AITER_FA:
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
-                return (
-                    "vllm.v1.attention.backends."
-                    "rocm_aiter_fa.AiterFlashAttentionBackend"
-                )
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-            ) or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
-                logger.info("Using Aiter Unified Attention backend on V1 engine.")
-                return (
-                    "vllm.v1.attention.backends."
-                    "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
-                )
-            if (
-                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-                or selected_backend == _Backend.ROCM_ATTN
-            ):
-                # rocm specific backend, with aiter and/or
-                #   triton prefix-prefill
-                logger.info("Using Rocm Attention backend on V1 engine.")
-                return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
-            # default case, using triton unified attention
-            logger.info("Using Triton Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
-        raise RuntimeError(
-            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-            "to select a supported backend."
-        )
+        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend.")
+            return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+        ) or selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            logger.info("Using Aiter Flash Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_FA.get_path()
+        if (
+            rocm_aiter_ops.is_triton_unified_attn_enabled()
+        ) or selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            logger.info("Using Aiter Unified Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
+        if (
+            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            or selected_backend == AttentionBackendEnum.ROCM_ATTN
+        ):
+            # rocm specific backend, with aiter and/or
+            #   triton prefix-prefill
+            logger.info("Using Rocm Attention backend.")
+            return AttentionBackendEnum.ROCM_ATTN.get_path()
+        # default case, using triton unified attention
+        logger.info("Using Triton Attention backend.")
+        return AttentionBackendEnum.TRITON_ATTN.get_path()
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -357,6 +326,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
@@ -364,10 +334,7 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
 
-        use_v1 = envs.VLLM_USE_V1
-        use_aiter_rms_norm = (
-            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        )
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -376,8 +343,7 @@ class RocmPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         if (
-            use_v1
-            and use_aiter_rms_norm
+            use_aiter_rms_norm
             and not is_eager_execution
             and "-rms_norm" not in compilation_config.custom_ops
         ):
@@ -406,7 +372,7 @@ class RocmPlatform(Platform):
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                 " is not set, enabling VLLM_USE_TRITON_AWQ."
             )
-        envs.VLLM_USE_TRITON_AWQ = True
+        os.environ["VLLM_USE_TRITON_AWQ"] = "1"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -459,10 +425,6 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
-
-    @classmethod
     def is_navi(cls) -> bool:
         return "gfx1" in torch.cuda.get_device_properties(0).gcnArchName
 
@@ -473,12 +435,6 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        return True
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

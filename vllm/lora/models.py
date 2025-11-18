@@ -31,8 +31,8 @@ from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
-from vllm.utils import is_pin_memory_available
 from vllm.utils.cache import LRUCache
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -426,7 +426,6 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
-                module_lora.optimize()
                 # Note (gnovack) - If MOE lora weights are not split into
                 # num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
