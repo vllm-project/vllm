@@ -41,8 +41,10 @@ jobs:
       - name: Smoke test vllm serve
         run: |
           # Start server in background
-          vllm serve trl-internal-testing/tiny-random-LlamaForCausalLM \
+          vllm serve Qwen/Qwen3-0.6B \
+            --max-model-len=2K
             --load-format=dummy \
+            --hf-overrides '{"num_hidden_layers": 2}'
             --enforce-eager \
             --port 8000 &
 
@@ -69,7 +71,7 @@ jobs:
           curl -f http://localhost:8000/v1/completions \
             -H "Content-Type: application/json" \
             -d '{
-              "model": "trl-internal-testing/tiny-random-LlamaForCausalLM",
+              "model": "Qwen/Qwen3-0.6B",
               "prompt": "Hello",
               "max_tokens": 5
             }'
