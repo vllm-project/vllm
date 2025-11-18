@@ -380,9 +380,17 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
+
+COPY --from=base /opt/venv /opt/venv
+COPY --from=base /root/.local /root/.local
+
+ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
-
 
 # Python version string for paths (e.g., "312" for 3.12)
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
@@ -396,7 +404,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         software-properties-common \
         curl \
         sudo \
-        python3-pip \
         ffmpeg \
         libsm6 \
         libxext6 \
@@ -416,17 +423,18 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     fi \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION} \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
         libibverbs-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION}
 
+#Prefer the virtualenv tools via update-alternatives
+RUN update-alternatives --install /usr/bin/python3 python3 /opt/venv/bin/python3 1 \
+    && update-alternatives --set python3 /opt/venv/bin/python3 \
+    && python3 --version && python3 -m pip --version
+    
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
@@ -442,9 +450,6 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
         libnccl-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# Install uv for faster pip installs
-RUN python3 -m pip install uv
 
 # Environment for uv
 ENV UV_HTTP_TIMEOUT=500
@@ -465,7 +470,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/requirements-cuda.txt \
+    uv pip install -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
@@ -474,8 +479,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # https://docs.flashinfer.ai/installation.html
 ARG FLASHINFER_VERSION=0.5.3
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+    uv pip install flashinfer-cubin==${FLASHINFER_VERSION} \
+    && uv pip install flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 
@@ -507,7 +512,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope \
+    uv pip install accelerate hf_transfer modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.3'
 
 # ============================================================
@@ -522,18 +527,17 @@ ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
+    uv pip install dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
 uv pip list
 
 # Install deepgemm wheel that has been built in the `build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
     sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
-              uv pip install --system /tmp/deepgemm/dist/*.whl; \
+              uv pip install /tmp/deepgemm/dist/*.whl; \
            else \
               echo "No DeepGEMM wheels to install; skipping."; \
            fi'
@@ -544,7 +548,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
+    uv pip install ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
@@ -557,6 +561,24 @@ ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
+RUN echo "=== Detailed Environment Information ===" \
+    && echo "1. Current PATH: $PATH" \
+    && echo "2. VIRTUAL_ENV: $VIRTUAL_ENV" \
+    && echo "3. UV installation:" \
+    && ls -la /root/.local/bin/uv \
+    && echo "4. UV version:" \
+    && /root/.local/bin/uv --version || echo "Cannot run uv directly" \
+    && echo "5. Python installation:" \
+    && ls -la /usr/bin/python* \
+    && echo "6. Virtual environment:" \
+    && ls -la /opt/venv/bin/ \
+    && echo "7. Environment file contents:" \
+    && cat /etc/environment || echo "No /etc/environment" \
+    && echo "8. Try to run uv with full path:" \
+    && /root/.local/bin/uv --version && echo "UV works with full path" \
+    && echo "9. Try to run uv from PATH:" \
+    && which uv && uv --version || echo "UV not in PATH" \
+    && which python3 && python3 --version && python3 -m pip --version
 #################### vLLM installation IMAGE ####################
 #################### TEST IMAGE ####################
 # image to run unit testing suite
@@ -587,17 +609,17 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        uv pip install --system -r requirements/dev.txt \
+        uv pip install -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e tests/vllm_test_utils
+    uv pip install -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
+    uv pip install hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
@@ -627,7 +649,7 @@ ENV UV_HTTP_TIMEOUT=500
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt || true; \
+        uv pip install -r /tmp/kv_connectors.txt || true; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
