@@ -1169,7 +1169,8 @@ def grouped_topk(
     num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     use_fused_moe_grouped_topk = envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
-    if num_fused_shared_experts > 0 and use_fused_moe_grouped_topk:
+    enable_fused_shared_experts = num_fused_shared_experts > 0
+    if enable_fused_shared_experts and use_fused_moe_grouped_topk:
         logger.info(
             "Fused MoE grouped topk is enabled with fused shared experts.",
             "Only one of these options can be used at a time",
@@ -1235,15 +1236,23 @@ def grouped_topk(
     tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=use_sorted)[1]
+        topk_ids = torch.topk(
+            tmp_scores,
+            k=topk,
+            dim=-1,
+            sorted=(use_sorted or enable_fused_shared_experts),
+        )[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
         topk_weights, topk_ids = torch.topk(
-            tmp_scores, k=topk, dim=-1, sorted=use_sorted
+            tmp_scores,
+            k=topk,
+            dim=-1,
+            sorted=(use_sorted or enable_fused_shared_experts),
         )
 
-    if num_fused_shared_experts > 0:
+    if enable_fused_shared_experts:
         assert routed_scaling_factor is not None, "With num_fused_shared_experts>0"
         ", routed_scaling_factor need to be provided"
         topk_ids[:, -1] = torch.randint(
@@ -1253,16 +1262,19 @@ def grouped_topk(
             dtype=topk_ids.dtype,
             device=topk_ids.device,
         )
-        topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
+        if routed_scaling_factor != 1.0:
+            topk_weights[:, -1] = (
+                topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
+            )
 
     if renormalize:
-        if num_fused_shared_experts == 0:
+        if not enable_fused_shared_experts:
             topk_weights_sum = topk_weights.sum(dim=-1, keepdim=True)
         else:
             topk_weights_sum = topk_weights[:, :-1].sum(dim=-1, keepdim=True)
         topk_weights = topk_weights / topk_weights_sum
 
-    if num_fused_shared_experts == 0 and routed_scaling_factor != 1.0:
+    if not enable_fused_shared_experts and routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
