@@ -1046,10 +1046,18 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
-            "--max-num-batched-tokens", **scheduler_kwargs["max_num_batched_tokens"]
+            "--max-num-batched-tokens",
+            **{
+                **scheduler_kwargs["max_num_batched_tokens"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
-            "--max-num-seqs", **scheduler_kwargs["max_num_seqs"]
+            "--max-num-seqs",
+            **{
+                **scheduler_kwargs["max_num_seqs"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
@@ -1071,7 +1079,11 @@ class EngineArgs:
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
         scheduler_group.add_argument(
-            "--enable-chunked-prefill", **scheduler_kwargs["enable_chunked_prefill"]
+            "--enable-chunked-prefill",
+            **{
+                **scheduler_kwargs["enable_chunked_prefill"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
