@@ -654,9 +654,15 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            spec_token_ids = self.spec_token_ids[last_req_index]
-            self.spec_token_ids[empty_index] = spec_token_ids
-            self.spec_token_ids[last_req_index].clear()
+            if last_req_index != empty_index:
+                (
+                    self.spec_token_ids[last_req_index],
+                    self.spec_token_ids[empty_index],
+                ) = (
+                    self.spec_token_ids[empty_index],
+                    self.spec_token_ids[last_req_index],
+                )
+                self.spec_token_ids[last_req_index].clear()
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
