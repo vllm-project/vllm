@@ -1522,6 +1522,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self.moe.is_act_and_mul:
+            assert (
+                self.allow_flashinfer
+                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            ), (
+                "Non-gated activations are only supported by the"
+                " flashinfer CUTLASS backend for modelopt checkpoints"
+            )
+
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
