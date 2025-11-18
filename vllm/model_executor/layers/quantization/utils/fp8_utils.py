@@ -622,7 +622,6 @@ def per_token_group_quant_fp8(
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
     if column_major_scales:
-        x_s = x_s.permute(-1, -2)
         _per_token_group_quant_fp8_colmajor[(M,)](
             x,
             x_q,
