@@ -1538,6 +1538,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
             
+            
+            # print input ids shape 
+            # print(f" Rank : {get_tknp_rank()} Input IDs shape: {input_ids.shape if input_ids is not None else 'None'}, Positions shape: {positions.shape}, Inputs Embeds shape: {inputs_embeds.shape if inputs_embeds is not None else 'None'}")
+            
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,

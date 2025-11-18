@@ -1,0 +1,153 @@
+# Example usage:
+# Without token parallelism: torchrun --nproc-per-node=2 TKNP/tknp_inference_benchmarks.py --tensor-parallel-size 1 --enable-token-parallel --token-parallel-size 2
+# With token parallelism: torchrun --nproc-per-node=8 TKNP/tknp_inference_benchmarks.py --tensor-parallel-size 4 --pipeline-parallel-size 1 --data-parallel-size 1 --enable-token-parallel --token-parallel-size 2
+# General tests: torchrun --nproc-per-node=1 TKNP/tknp_inference_benchmarks.py --tensor-parallel-size 1
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+"""
+experimental support for tensor-parallel + token-parallel inference with torchrun,
+see https://github.com/vllm-project/vllm/issues/11400 for
+the motivation and use case for this example.
+run the script with `torchrun --nproc-per-node=2 torchrun_example.py`,
+the argument 2 should match the `tensor_parallel_size` below.
+see `tests/distributed/test_torchrun_example.py` for the unit test.
+
+"""
+
+import argparse
+import torch.distributed as dist
+
+from vllm import LLM, SamplingParams
+from prompt_generator import generate_benchmark_prompts
+
+import torch
+import random
+import numpy as np
+
+def parse_args():
+    """Parse command line arguments for distributed vLLM inference."""
+    parser = argparse.ArgumentParser(description="Distributed vLLM inference with torchrun")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1,
+                        help="Number of tensor parallel processes (default: 1)")
+    parser.add_argument("--pipeline-parallel-size", type=int, default=1,
+                        help="Number of pipeline parallel processes (default: 1)")
+    parser.add_argument("--data-parallel-size", type=int, default=1,
+                        help="Number of data parallel processes (default: 1)")
+    parser.add_argument("--token-parallel-size", type=int, default=1,
+                        help="Number of token parallel processes (default: 1)")
+    parser.add_argument("--enable-token-parallel", action="store_true",
+                        help="Enable token parallelism")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B",
+                        help="Model name (default: meta-llama/Llama-3.1-8B)")
+    parser.add_argument("--max-model-len", type=int, default=32768,
+                        help="Maximum model length (default: 32768)")
+    parser.add_argument("--seed", type=int, default=1,
+                        help="Random seed (default: 1)")
+    # batch size and seq length for prompts
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="Batch size for prompts (default: 8)")
+    parser.add_argument("--seq-length", type=int, default=128,
+                        help="Sequence length for prompts (default: 128)")
+
+    return parser.parse_args()
+
+
+torch.manual_seed(42)
+random.seed(42)
+np.random.seed(42)
+
+def main():
+    args = parse_args()
+
+    # prompts = [
+    #     "Hello, my name is",
+    #     "The president of the United States is",
+    #     "The capital of France is",
+    #     "The future of AI is very",
+    #     "Hello, my name is Jobs",
+    #     "The president of the United States is very",
+    #     "The capital of France is also",
+    #     "The future of AI is very interesting",
+    # ]
+
+    # Create sampling parameters, the same across all ranks
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16)
+
+    # Use `distributed_executor_backend="external_launcher"` so that
+    # this llm engine/instance only creates one worker.
+    # it is important to set an explicit seed to make sure that
+    # all ranks have the same random seed, so that sampling can be
+    # deterministic across ranks.
+    
+    # Prepare LLM kwargs - only include token parallel args if enabled
+    llm_kwargs = {
+        "model": args.model,
+        "dtype": "bfloat16",
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "pipeline_parallel_size": args.pipeline_parallel_size,
+        "data_parallel_size": args.data_parallel_size,
+        "distributed_executor_backend": "external_launcher",
+        "max_model_len": args.max_model_len,
+        "seed": args.seed,
+        "enforce_eager": True,
+        "enable_prefix_caching": False,  # Disable prefix caching for benchmarking
+    }
+    
+    # Only add token parallel configs if token parallelism is enabled
+    if args.enable_token_parallel:
+        if args.token_parallel_size <= 1:
+            raise ValueError("Token parallelism requires token_parallel_size > 1")
+        llm_kwargs["enable_token_parallel"] = True
+        llm_kwargs["token_parallel_size"] = args.token_parallel_size
+    
+    llm = LLM(**llm_kwargs)
+
+    if dist.get_rank() == 0:
+        if args.enable_token_parallel:
+            print(f"LLM initialized with tensor_parallel_size={args.tensor_parallel_size}, pipeline_parallel_size={args.pipeline_parallel_size}, data_parallel_size={args.data_parallel_size}, token_parallel_size={args.token_parallel_size}, enable_token_parallel={args.enable_token_parallel}")
+        else:
+            print(f"LLM initialized with tensor_parallel_size={args.tensor_parallel_size}, pipeline_parallel_size={args.pipeline_parallel_size}, data_parallel_size={args.data_parallel_size}")
+        
+        # Generate benchmark prompts
+        prompts = generate_benchmark_prompts(
+        batch_size=args.batch_size,
+        seq_length=args.seq_length,
+        tokenizer=None,
+        model_name=args.model,
+        vocab_style="natural",
+        seed=42
+        )
+    else:
+        prompts = None
+    
+    # Broadcast prompts to all ranks
+    prompts_list = [prompts]
+    dist.broadcast_object_list(prompts_list, src=0)
+    prompts = prompts_list[0]
+    
+    # print(f"Rank {dist.get_rank()} received {len(prompts)} prompts.")
+    # print(f"Rank {dist.get_rank()} prompts: {prompts}")
+    # assert False, "Debugging: Stop execution here to check prompt distribution."
+    
+    outputs = llm.generate(prompts, sampling_params)
+
+    # all ranks will have the same outputs
+    if dist.get_rank() == 0:
+        print("-" * 50)
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}\n")
+            print("-" * 50)
+            
+    # destroy the process group
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
+
+

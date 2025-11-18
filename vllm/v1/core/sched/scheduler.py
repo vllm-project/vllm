@@ -85,6 +85,9 @@ class TokenParallelScheduler:
             self.req_to_tknp_rank[req_id] = assigned_rank
             self.tknp_reqs_per_rank[assigned_rank] += 1
             self.tknp_tokens_per_rank_cache[assigned_rank] += len(requests.prompt_token_ids)
+
+            # DEBUG
+            # logger.info(f"==== [RANK : {self.rank}] Assigned request {req_id} to token parallel rank {assigned_rank} with {len(requests.prompt_token_ids)} tokens, tknp_tokens_per_rank_cache: {self.tknp_tokens_per_rank_cache}.")
         
     def free_requests(self, request: Request):
         """
@@ -290,13 +293,6 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             
-            # TKNP-BEGIN: skip requests not assigned to current rank
-            # if is_tknp_initialized():
-            #     if not self.token_parallel_scheduler.is_current_rank_assigned(request):
-            #         req_index += 1
-            #         continue
-            # TKNP-END
-            
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
@@ -410,14 +406,6 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
-
-        # total_scheduled_requests = len(scheduled_running_reqs)
-        
-        # TKNP 
-        # logger.info(f"Token Parallel Scheduler: total_scheduled_requests = {total_scheduled_requests}")
-        # self._token_parallel._init_scheduler(total_scheduled_requests)
-        # for req in scheduled_running_reqs:
-        #     self._token_parallel.on_request_scheduled(req)
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()

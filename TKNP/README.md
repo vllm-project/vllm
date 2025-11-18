@@ -135,8 +135,9 @@ Key components that might require changes:
 
 
 ## Limitations
-+ vllm/model_executor/layers/token_parallel_linear.py: TokenParallelQKVLinear
-    * Number of tokens must be divisible by tknp world size, need to update this in the future with scheduler data
++ Scheduling: Block wise scheduling
+    * Need to support continuous batching and token aware scheduling
+    
 
 ## End to end generation 
 
@@ -169,12 +170,6 @@ torchrun --nproc-per-node=2 TKNP/test_torchrun.py --tensor-parallel-size 1 --ena
     + [---- Root Node Tokens -----][---- Attn Node 1 Tokens ----][----Attn Node 2 Tokens ----][ ....... ]
     + We also need to update the positions tensor to only include the position data for local tokens.
     + Added new methods in gpu_model_runner : _maybe_reorder_requests_for_token_parallel, _build_token_parallel_metadata_prefill, 
-
-
-5. Attention & End to end system
-    + With the changes made, the attention computation needs to be accurate. 
-    + The default mode is to use the FlashAttn backend. The KV cache is stitched using the bind_kv_cahce function in gpu_model_runner.py.
-    + The end to end system should work to serve LLM requests. 
 
 
 #### Debug script 

@@ -136,6 +136,10 @@ class TokenParallelQKVLinear(QKVParallelLinear):
                 raise RuntimeError(
                     "Root rank must receive hidden states for TKNP prefill.")
             if total_tokens != x.size(0):
+                logger.info(
+                    f"Root rank expected total tokens {total_tokens}, got {x.size(0)}. "
+                )
+                assert False, "TokenParallelQKVLinear: total tokens mismatch on root rank."
                 return self._fallback_forward(x, metadata)
         elif x is not None and total_tokens != x.size(0):
             return self._fallback_forward(x, metadata)

@@ -207,3 +207,10 @@ InfiniteBench/results/
 InfiniteBench/.gitignore
 archive/
 vllm-inference-bench/sbatch_logs/
+
+# TKNP
+prompt_cache/
+evals/
+compiled_cache.db
+TKNP/experiments.ipynb
+tknp_out.txt
