@@ -415,7 +415,10 @@ async def pause_generation(
             wait_for_inflight_requests=wait_for_inflight_requests,
             clear_cache=clear_cache,
         )
-        return Response(status_code=200)
+        return JSONResponse(
+            content={"status": "paused"},
+            status_code=HTTPStatus.OK.value,
+        )
 
     except ValueError as err:
         return JSONResponse(
@@ -438,7 +441,10 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
 
     try:
         await engine.resume_generation()
-        return Response(status_code=200)
+        return JSONResponse(
+            content={"status": "resumed"},
+            status_code=HTTPStatus.OK.value,
+        )
     except Exception as err:  # pragma: no cover - defensive
         logger.exception("Failed to resume generation")
         return JSONResponse(
