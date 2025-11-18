@@ -579,7 +579,7 @@ class AsyncLLM(EngineClient):
 
         # Wait for running requests to drain before clearing cache.
         if self.output_processor.has_unfinished_requests():
-            await self.output_processor.wait_for_requests_drained()
+            await self.output_processor.wait_for_requests_to_drain()
 
         # Clear cache
         if clear_cache:
@@ -785,7 +785,7 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
-    async def wait_for_requests_drained(self, drain_timeout: int = 300):
+    async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
@@ -823,7 +823,7 @@ class AsyncLLM(EngineClient):
             "Waiting for requests to drain before scaling up to %s engines...",
             new_data_parallel_size,
         )
-        await self.wait_for_requests_drained(drain_timeout)
+        await self.wait_for_requests_to_drain(drain_timeout)
         logger.info(
             "Requests have been drained, proceeding with scale to %s engines",
             new_data_parallel_size,

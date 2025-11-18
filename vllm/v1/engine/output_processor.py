@@ -359,7 +359,7 @@ class OutputProcessor:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
-    async def wait_for_requests_drained(self) -> None:
+    async def wait_for_requests_to_drain(self) -> None:
         if not self.request_states:
             return
         await self._requests_drained.wait()
