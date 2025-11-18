@@ -552,6 +552,31 @@ def call_function(name, args):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_reasoning_item(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"type": "message", "content": "Hello.", "role": "user"},
+            {
+                "type": "reasoning",
+                "id": "lol",
+                "content": [
+                    {
+                        "type": "reasoning_text",
+                        "text": "We need to respond: greeting. Perhaps ask how can help.",
+                    }
+                ],
+                "summary": [],
+            },
+        ],
+        temperature=0.0,
+    )
+    assert response is not None
+    assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling(client: OpenAI, model_name: str):
     tools = [GET_WEATHER_SCHEMA]
 
