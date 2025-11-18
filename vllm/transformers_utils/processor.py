@@ -18,7 +18,7 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.transformers_utils.utils import convert_model_repo_to_path
+from vllm.transformers_utils.utils import check_gguf_file, convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
@@ -236,9 +236,20 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
+    if check_gguf_file(model_config.model):
+        assert not check_gguf_file(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load processor."
+        )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
+    else:
+        model = model_config.model
+        revision = model_config.revision
+
     return cached_get_processor_without_dynamic_kwargs(
-        model_config.model,
-        revision=model_config.revision,
+        model,
+        revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
@@ -339,9 +350,19 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
+    if check_gguf_file(model_config.model):
+        assert not check_gguf_file(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load image processor."
+        )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
+    else:
+        model = model_config.model
+        revision = model_config.revision
     return cached_get_image_processor(
-        model_config.model,
-        revision=model_config.revision,
+        model,
+        revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
     )
