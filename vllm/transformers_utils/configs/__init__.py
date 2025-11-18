@@ -9,10 +9,11 @@ Model configs may be defined in this directory for the following reasons:
   config in Transformers library, ex., deepseek-ai/DeepSeek-V3.2-Exp.
 """
 
+from transformers import DeepseekV3Config
+
 from vllm.transformers_utils.configs.afmoe import AfmoeConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from transformers import DeepseekV3Config
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
