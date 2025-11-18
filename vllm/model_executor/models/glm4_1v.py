@@ -56,7 +56,7 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
-from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -734,7 +734,7 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_conv_layernorm = RMSNorm(
             vision_config.hidden_size, eps=vision_config.rms_norm_eps
         )
-        self.downsample = nn.Conv2d(
+        self.downsample = Conv2dLayer(
             in_channels=vision_config.hidden_size,
             out_channels=vision_config.out_hidden_size,
             kernel_size=vision_config.spatial_merge_size,
