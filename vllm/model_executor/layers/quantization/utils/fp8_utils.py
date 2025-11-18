@@ -194,6 +194,39 @@ direct_register_custom_op(
 )
 
 
+def _triton_per_token_group_quant_fp8_impl(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return per_token_group_quant_fp8(
+        x, group_size, column_major_scales=False, use_ue8m0=False
+    )
+
+
+def _triton_per_token_group_quant_fp8_fake(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    x_fp8 = torch.empty((M, N), dtype=current_platform.fp8_dtype(), device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
+direct_register_custom_op(
+    "triton_per_token_group_quant_fp8",
+    _triton_per_token_group_quant_fp8_impl,
+    fake_impl=_triton_per_token_group_quant_fp8_fake,
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -332,10 +365,13 @@ class W8A8BlockFp8LinearOp:
 
         if input_scale is not None:
             q_input = input_2d
-        else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
-                input_2d, self.act_quant_group_shape.col, use_triton
+        elif use_triton:
+            q_input, input_scale = torch.ops.vllm.triton_per_token_group_quant_fp8(
+                input_2d,
+                self.act_quant_group_shape.col,
             )
+        else:
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
 
         return gemm_a8w8_blockscale_op(
             q_input,

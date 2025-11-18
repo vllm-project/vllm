@@ -514,29 +514,17 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
-    use_triton: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
-    if use_triton:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            per_token_group_quant_fp8,
-        )
+    from aiter import QuantType, get_hip_quant
 
-        return per_token_group_quant_fp8(
-            x, group_size, column_major_scales=False, use_ue8m0=False
-        )
-    else:
-        assert group_size == 128, "Group size must be 128"
-        from aiter import QuantType, get_hip_quant
-
-        aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-        return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
+    aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
+    return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
 
 
 def _rocm_aiter_group_fp8_quant_fake(
     x: torch.Tensor,
     group_size: int,
-    use_triton: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     x_fp8 = torch.empty((M, N), dtype=AITER_FP8_DTYPE, device=x.device)
@@ -1094,12 +1082,10 @@ class rocm_aiter_ops:
     @staticmethod
     def group_fp8_quant(
         input_2d: torch.Tensor,
-        group_size: int,
-        use_triton: bool,
+        group_size: int = 128,
     ) -> tuple[torch.Tensor, ...]:
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
-            input_2d, group_size, use_triton
-        )
+        assert group_size == 128, "Group size must be 128"
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
