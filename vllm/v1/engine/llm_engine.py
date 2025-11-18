@@ -409,6 +409,8 @@ class LLMEngine:
         return self.collective_rpc("apply_model", args=(func,))
 
     def __del__(self):
+        self.engine_core.shutdown()
+
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
