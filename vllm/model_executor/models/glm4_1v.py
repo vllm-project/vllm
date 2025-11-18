@@ -37,7 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
+from transformers import BatchFeature, Glm4vProcessor
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
@@ -1116,8 +1116,12 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         assert isinstance(grid_thw, torch.Tensor)
         timestamps = self._get_video_second_idx(metadata, len(video_array))
+        timestamp_format = (
+            "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
+        )
         frames_idx_token = [
-            tokenizer.encode(str(i), add_special_tokens=False) for i in timestamps
+            tokenizer.encode(timestamp_format.format(i), add_special_tokens=False)
+            for i in timestamps
         ]
         T, H, W = grid_thw
         num_tokens_per_frame = int(H * W) // merge_length
