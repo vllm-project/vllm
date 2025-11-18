@@ -24,7 +24,7 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -80,7 +80,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32=DeepseekV3Config,
+    deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
