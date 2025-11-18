@@ -81,7 +81,7 @@ To make your model compatible with the Transformers modeling backend, it needs:
         1. Your sparse MoE block must have an attribute called `experts`.
         2. The class of `experts` (`MyExperts`) must either:
             - Inherit from `nn.ModuleList` (naive).
-            - Or contain all 3D parameters (packed).
+            - Or contain all 3D `nn.Parameters` (packed).
         3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
