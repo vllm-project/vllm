@@ -1328,9 +1328,9 @@ class Scheduler(SchedulerInterface):
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
-        # For logging.
-        timestamp = time.monotonic()
         if reset_running_requests:
+            # For logging.
+            timestamp = time.monotonic()
             # Invalidate all the current running requests KV's by pushing them to
             # the waiting queue. In this case, we can reduce the ref count of all
             # the kv blocks to 0 and thus we can make sure the reset is successful.
