@@ -176,6 +176,91 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if self.exclude_modules is not None:
             self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        group_size: int | None,
+    ) -> "ModelOptQuantConfigBase":
+        raise NotImplementedError("Please implement this function in sub classes")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptQuantConfigBase":
+        # Handle both ModelOpt format and compressed-tensors style format
+        if "quantization" in config:
+            # Traditional ModelOpt format:
+            # {"quantization": {"quant_algo": "..."}}
+            quant_config = cls.get_from_keys(config, ["quantization"])
+            if not isinstance(quant_config, dict):
+                raise ValueError("Expected 'quantization' to be a dictionary in config")
+
+            quant_method = quant_config.get("quant_algo")
+
+            # Handle kv_cache_quant_algo with proper type validation
+            kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+
+            # Handle group_size with proper type validation
+            group_size_raw = quant_config.get("group_size")
+
+            # "exclude_modules" is the key in the legacy hf_quant_config.json
+            exclude_modules = quant_config.get("exclude_modules", [])
+        else:
+            # Compressed-tensors style format:
+            # {"quant_algo": "...", "quant_method": "modelopt"}
+            quant_method = config.get("quant_algo")
+            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+            # "ignore" is the key in config.json
+            exclude_modules = config.get("ignore", [])
+            group_size_raw = config.get("group_size")
+
+        if not quant_method:
+            raise ValueError("Missing 'quant_algo' in quantization config")
+
+        if kv_cache_quant_method is None:
+            # No KV cache quantization, keep this branch just to have this comment
+            pass
+        elif not isinstance(kv_cache_quant_method, str):
+            raise ValueError(
+                f"kv_cache_quant_algo must be a string, got "
+                f"{type(kv_cache_quant_method)}"
+            )
+
+        if not isinstance(exclude_modules, list):
+            raise ValueError(
+                f"exclude_modules must be a list, got {type(exclude_modules)}"
+            )
+
+        if group_size_raw is None:
+            group_size = None
+        elif isinstance(group_size_raw, int):
+            group_size = group_size_raw
+        else:
+            try:
+                group_size = int(group_size_raw)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"group_size must be an integer, got {type(group_size_raw)}"
+                ) from None
+
+        if quant_method not in QUANT_ALGOS:
+            raise ValueError(
+                f"ModelOpt currently only supports: {QUANT_ALGOS} "
+                "quantizations in vLLM. Please check the "
+                "`hf_quant_config.json` file for your model's "
+                "quant configuration."
+            )
+        return cls._from_config(
+            quant_method=quant_method,
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=exclude_modules,
+            group_size=group_size,
+            original_config=config,
+        )
+
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):
     """Config class for ModelOpt FP8."""
@@ -244,34 +329,20 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         return None
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
-        # Handle both ModelOpt format and compressed-tensors style format
-        if "quantization" in config:
-            # ModelOpt format: {"quantization": {"quant_algo": "..."}}
-            quant_config = cls.get_from_keys(config, ["quantization"])
-            if not isinstance(quant_config, dict):
-                raise ValueError("Expected 'quantization' to be a dictionary in config")
-            quant_method = quant_config.get("quant_algo", "")
-            if not quant_method:
-                raise ValueError("Missing 'quant_algo' in quantization config")
-            kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
-            # "exclude_modules" is the key in the legacy hf_quant_config.json
-            exclude_modules = quant_config.get("exclude_modules") or []
-        else:
-            # Compressed-tensors style format:
-            # {"quant_algo": "...", "quant_method": "modelopt"}
-            quant_method = config.get("quant_algo", "")
-            kv_cache_quant_method = config.get("kv_cache_quant_algo")
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore") or []
+    def is_matching_quant_method(cls, quant_method: str) -> bool:
+        # Check if the quant method matches with this config
+        return "FP8" in quant_method
 
-        if quant_method not in QUANT_ALGOS:
-            raise ValueError(
-                f"ModelOpt currently only supports: {QUANT_ALGOS} "
-                "quantizations in vLLM. Please check the "
-                "`hf_quant_config.json` file for your model's "
-                "quant configuration."
-            )
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        **kwargs: Any,
+    ) -> "ModelOptFp8Config":
         is_checkpoint_fp8_serialized = "FP8" in quant_method
 
         return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, exclude_modules)
@@ -796,105 +867,30 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         return None
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
-        # Handle both traditional ModelOpt format and compressed-tensors
-        # style format
-        if "quantization" in config:
-            # Traditional ModelOpt format:
-            # {"quantization": {"quant_algo": "..."}}
-            quant_config = cls.get_from_keys(config, ["quantization"])
-            if not isinstance(quant_config, dict):
-                raise ValueError("Expected 'quantization' to be a dictionary in config")
+    def is_matching_quant_method(cls, quant_method: str) -> bool:
+        # Check if the quant method matches with this config
+        return "NVFP4" in quant_method
 
-            quant_method = quant_config.get("quant_algo", "")
-            if not quant_method:
-                raise ValueError("Missing 'quant_algo' in quantization config")
-
-            # Handle kv_cache_quant_algo with proper type validation
-            kv_cache_quant_algo_raw = quant_config.get("kv_cache_quant_algo")
-            if kv_cache_quant_algo_raw is None:
-                # No KV cache quantization by default
-                kv_cache_quant_algo = None
-            elif isinstance(kv_cache_quant_algo_raw, str):
-                kv_cache_quant_algo = kv_cache_quant_algo_raw
-            else:
-                raise ValueError(
-                    f"kv_cache_quant_algo must be a string, got "
-                    f"{type(kv_cache_quant_algo_raw)}"
-                )
-
-            # Handle group_size with proper type validation
-            group_size_raw = quant_config.get("group_size")
-            if group_size_raw is None:
-                group_size = 16  # Default value
-            elif isinstance(group_size_raw, int):
-                group_size = group_size_raw
-            else:
-                try:
-                    group_size = int(group_size_raw)
-                except (ValueError, TypeError):
-                    raise ValueError(
-                        f"group_size must be an integer, got {type(group_size_raw)}"
-                    ) from None
-
-            # "exclude_modules" is the key in the legacy hf_quant_config.json
-            exclude_modules = quant_config.get("exclude_modules", [])
-            if not isinstance(exclude_modules, list):
-                raise ValueError(
-                    f"exclude_modules must be a list, got {type(exclude_modules)}"
-                )
-        else:
-            # Compressed-tensors style format:
-            # {"quant_algo": "...", "quant_method": "modelopt"}
-            quant_method = config.get("quant_algo", "")
-
-            # Handle kv_cache_quant_algo with proper type validation
-            kv_cache_quant_algo_raw = config.get("kv_cache_quant_algo")
-            if kv_cache_quant_algo_raw is None:
-                # No KV cache quantization by default
-                kv_cache_quant_algo = None
-            elif isinstance(kv_cache_quant_algo_raw, str):
-                kv_cache_quant_algo = kv_cache_quant_algo_raw
-            else:
-                raise ValueError(
-                    f"kv_cache_quant_algo must be a string, got "
-                    f"{type(kv_cache_quant_algo_raw)}"
-                )
-
-            # Handle group_size with proper type validation
-            group_size_raw = config.get("group_size")
-            if group_size_raw is None:
-                group_size = 16  # Default value
-            elif isinstance(group_size_raw, int):
-                group_size = group_size_raw
-            else:
-                try:
-                    group_size = int(group_size_raw)
-                except (ValueError, TypeError):
-                    raise ValueError(
-                        f"group_size must be an integer, got {type(group_size_raw)}"
-                    ) from None
-
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore", [])
-            if not isinstance(exclude_modules, list):
-                raise ValueError(
-                    f"exclude_modules must be a list, got {type(exclude_modules)}"
-                )
-
-        if quant_method not in QUANT_ALGOS:
-            raise ValueError(
-                f"ModelOpt currently only supports: {QUANT_ALGOS} "
-                "quantizations in vLLM. Please check the "
-                "`hf_quant_config.json` file for your model's "
-                "quant configuration."
-            )
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        group_size: int | None,
+        **kwargs: Any,
+    ) -> "ModelOptNvFp4Config":
         is_checkpoint_nvfp4_serialized = "NVFP4" in quant_method
 
+        if group_size is None:
+            group_size = 16  # Default value
+
         # For FP4, these fields are required
-        if is_checkpoint_nvfp4_serialized and "quantization" in config:
+        if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
             # Check if required fields are present in the quantization config
-            quant_config = config["quantization"]
+            quant_config = original_config["quantization"]
             required_fields = ["group_size", "kv_cache_quant_algo", "exclude_modules"]
             missing_fields = [
                 field for field in required_fields if field not in quant_config
@@ -907,7 +903,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         return cls(
             is_checkpoint_nvfp4_serialized,
-            kv_cache_quant_algo,
+            kv_cache_quant_method,
             exclude_modules,
             group_size,
         )
