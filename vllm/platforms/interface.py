@@ -136,6 +136,7 @@ class Platform:
 
     @property
     def pass_key(self) -> str:
+        """Inductor config key for the PassManager custom pass"""
         return "post_grad_custom_post_pass"
 
     @property
@@ -183,7 +184,10 @@ class Platform:
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
-        """Get the pass manager class of a device."""
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
         return "vllm.compilation.pass_manager.PostGradPassManager"
 
     @classmethod
