@@ -176,6 +176,10 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if self.exclude_modules is not None:
             self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
+    @staticmethod
+    def get_config_filenames() -> list[str]:
+        return ["hf_quant_config.json"]
+
     @classmethod
     def _from_config(
         cls,
@@ -293,10 +297,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         return 89
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
-        return ["hf_quant_config.json"]
-
-    @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
@@ -327,11 +327,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 return "modelopt"
 
         return None
-
-    @classmethod
-    def is_matching_quant_method(cls, quant_method: str) -> bool:
-        # Check if the quant method matches with this config
-        return "FP8" in quant_method
 
     @classmethod
     def _from_config(
@@ -831,10 +826,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> list[str]:
-        return ["hf_quant_config.json"]
-
-    @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
@@ -865,11 +856,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                 return "modelopt_fp4"
 
         return None
-
-    @classmethod
-    def is_matching_quant_method(cls, quant_method: str) -> bool:
-        # Check if the quant method matches with this config
-        return "NVFP4" in quant_method
 
     @classmethod
     def _from_config(
