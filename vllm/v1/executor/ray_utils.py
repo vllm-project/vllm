@@ -147,9 +147,6 @@ class FutureWrapper(Future):
         self.aggregator = aggregator
 
     def result(self, timeout=None):
-        if timeout is not None:
-            raise NotImplementedError("timeout is not supported")
-
         outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
             return outputs

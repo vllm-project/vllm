@@ -48,7 +48,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return input_ids
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -61,7 +61,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
             delta_text = "<think>" + delta_text
         return DeltaMessage(content=delta_text)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         return None, "<think>" + model_output

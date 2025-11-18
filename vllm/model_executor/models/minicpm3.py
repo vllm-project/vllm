@@ -96,6 +96,7 @@ class MiniCPM3Attention(nn.Module):
             self.num_heads * self.qk_head_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.q_b_proj",
         )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -103,6 +104,7 @@ class MiniCPM3Attention(nn.Module):
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -110,6 +112,7 @@ class MiniCPM3Attention(nn.Module):
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj",
         )
         # O projection.
         self.o_proj = RowParallelLinear(
@@ -117,6 +120,7 @@ class MiniCPM3Attention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
