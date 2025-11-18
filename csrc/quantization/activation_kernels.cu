@@ -602,7 +602,7 @@ void persistent_masked_m_silu_mul_quant(
     const at::Tensor& tokens_per_expert,  // (E)
     at::Tensor& y_q,                      // (E, T, H) [OUT]
     at::Tensor& y_s,                      // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0) {
+    bool cast_scale_ue8m0, int64_t num_sms) {
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -637,7 +637,6 @@ void persistent_masked_m_silu_mul_quant(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // TODO: Get this from cuda_arch ?
-  static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
 
   #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,  \
                  STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, STAGES)                \
@@ -677,21 +676,33 @@ void persistent_masked_m_silu_mul_quant(
              STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 2);          \
     }
 
+  #define LAUNCH_ON_SMS(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,        \
+                        STRIDE_YS_P, CEIL_UE8M0)                               \
+    if (num_sms == 132) {                                                      \
+      static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;                     \
+      LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p, \
+                  true);                                                       \
+    } else if (num_sms == 144) {                                               \
+      static constexpr int SILU_V2_BLOCK_COUNT = 144 * 32;                     \
+      LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p, \
+                  true);                                                       \
+    }
+
   Idx_t stride_ys_e = y_s.stride(0);
   Idx_t stride_ys_t = y_s.stride(1);
   Idx_t stride_ys_g = y_s.stride(2);
   Idx_t stride_ys_p = 0;
   if (!cast_scale_ue8m0) {
     TORCH_CHECK(!is_packed_ue8m0);
-    LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-                false);
+    LAUNCH_ON_SMS(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  false);
     return;
   }
 
   if (!is_packed_ue8m0) {
     // UE8M0 but not packed
-    LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-                true);
+    LAUNCH_ON_SMS(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  true);
     return;
   }
 
@@ -728,8 +739,8 @@ void persistent_masked_m_silu_mul_quant(
   stride_ys_t = sizeof(int32_t);
   stride_ys_g = 1;
 
-  LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-              true);
+  LAUNCH_ON_SMS(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                true);
 
 #endif
 }

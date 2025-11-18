@@ -35,7 +35,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s,"
-      "bool use_ue8m0) -> ()");
+      "bool use_ue8m0, int num_sms) -> ()");
   ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
            &persistent_masked_m_silu_mul_quant);
 

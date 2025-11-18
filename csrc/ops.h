@@ -149,7 +149,7 @@ void persistent_masked_m_silu_mul_quant(
     const at::Tensor& counts,  // (E)
     at::Tensor& y_q,           // (E, T, H) [OUT]
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    bool use_ue8m0);
+    bool use_ue8m0, int64_t num_sms);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
