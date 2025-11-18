@@ -340,19 +340,8 @@ class P2pNcclEngine:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote_address.decode()]
                     self.recv(comm, tensor, rank ^ 1, self.recv_stream)
-                    tensor_size = tensor.element_size() * tensor.numel()
-                    if (self.buffer_size + tensor_size
-                            > self.buffer_size_threshold):
-                        # Store Tensor in memory pool
-                        addr = self.pool.store_tensor(tensor)
-                        tensor = (addr, tensor.dtype, tensor.shape)
-                        logger.warning(
-                            "🔴[PUT]Recv Tensor, Out Of Threshold, "
-                            "%s👈%s, data:%s, addr:%d", self.zmq_address,
-                            remote_address.decode(), data, addr)
-                    else:
-                        self.buffer_size += tensor_size
-
+                    tensor = self._finalize_received_tensor(
+                        tensor_id, tensor, remote_address.decode(), data)
                 except torch.cuda.OutOfMemoryError:
                     self.router_socket.send_multipart([remote_address, b"1"])
                     tensor = None
@@ -365,6 +354,62 @@ class P2pNcclEngine:
                     self.recv_store[tensor_id] = tensor
                     self.have_received_tensor_id(tensor_id)
                     self.recv_store_cv.notify()
+
+            elif data["cmd"] == "PUT_BATCH":
+                tensors_meta = data["tensors"]
+                allocated: list[tuple[dict[str, Any], torch.Tensor]] = []
+                failed_ids: list[str] = []
+                try:
+                    with torch.cuda.stream(self.recv_stream):
+                        for tensor_meta in tensors_meta:
+                            tensor = torch.empty(tensor_meta["shape"],
+                                                 dtype=getattr(
+                                                     torch,
+                                                     tensor_meta["dtype"]),
+                                                 device=self.device)
+                            allocated.append((tensor_meta, tensor))
+                    self.router_socket.send_multipart(
+                        [remote_address,
+                         msgpack.dumps({"ret": 0})])
+                except torch.cuda.OutOfMemoryError:
+                    failed_ids = [
+                        tensor_meta["tensor_id"]
+                        for tensor_meta in tensors_meta
+                    ]
+                    self.router_socket.send_multipart([
+                        remote_address,
+                        msgpack.dumps({
+                            "ret": 1,
+                            "failed_tensor_ids": failed_ids
+                        })
+                    ])
+                    logger.warning(
+                        "🔴[PUT_BATCH]Recv Tensor, Out Of Memory, %s👈%s, "
+                        "tensor_ids:%s", self.zmq_address,
+                        remote_address.decode(), failed_ids)
+                    continue
+
+                comm, rank = self.comms[remote_address.decode()]
+                self.nccl.ncclGroupStart()
+                try:
+                    for _, tensor in allocated:
+                        self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                finally:
+                    self.nccl.ncclGroupEnd()
+
+                tensors_to_store: list[tuple[str, Any]] = []
+                for tensor_meta, tensor in allocated:
+                    tensor_id = tensor_meta["tensor_id"]
+                    stored_tensor = self._finalize_received_tensor(
+                        tensor_id, tensor, remote_address.decode(),
+                        tensor_meta)
+                    tensors_to_store.append((tensor_id, stored_tensor))
+
+                with self.recv_store_cv:
+                    for tensor_id, stored_tensor in tensors_to_store:
+                        self.recv_store[tensor_id] = stored_tensor
+                        self.have_received_tensor_id(tensor_id)
+                    self.recv_store_cv.notify_all()
 
             elif data["cmd"] == "GET":
                 tensor_id = data["tensor_id"]
@@ -411,10 +456,17 @@ class P2pNcclEngine:
             with self.send_queue_cv:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
-                item = self.send_queue.popleft()
+                first_item = self.send_queue.popleft()
+                batch: list[SendQueueItem] = [first_item]
+                while (self.send_queue and self.send_queue[0].remote_address
+                       == first_item.remote_address):
+                    batch.append(self.send_queue.popleft())
                 if not self.send_queue:
                     self.send_queue_cv.notify()
-            self.send_sync(item)
+            if len(batch) == 1:
+                self.send_sync(batch[0])
+            else:
+                self.send_sync_batch(batch)
 
     def wait_for_sent(self):
         if self.send_type == "PUT_ASYNC":
@@ -432,10 +484,7 @@ class P2pNcclEngine:
             return False
         if item.remote_address not in self.socks:
             self.create_connect(item.remote_address)
-
-        with self.send_stream:
-            tensor = self.extract_kv_from_layer(item.is_mla, item.tensor,
-                                                item.slot_mapping)
+        tensor = self._prepare_tensor_for_send(item)
 
         sock = self.socks[item.remote_address]
         comm, rank = self.comms[item.remote_address]
@@ -443,7 +492,7 @@ class P2pNcclEngine:
             "cmd": "PUT",
             "tensor_id": item.tensor_id,
             "shape": tensor.shape,
-            "dtype": str(tensor.dtype).replace("torch.", "")
+            "dtype": str(tensor.dtype).replace("torch.", ""),
         }
         sock.send(msgpack.dumps(data))
 
@@ -464,6 +513,87 @@ class P2pNcclEngine:
             self.have_sent_tensor_id(item.tensor_id)
 
         return True
+
+    def send_sync_batch(self, items: list[SendQueueItem]) -> bool:
+        if not items:
+            return True
+
+        remote_address = items[0].remote_address
+        if remote_address is None:
+            return False
+        if remote_address not in self.socks:
+            self.create_connect(remote_address)
+
+        prepared: list[tuple[SendQueueItem, torch.Tensor]] = []
+        for item in items:
+            tensor = self._prepare_tensor_for_send(item)
+            prepared.append((item, tensor))
+
+        sock = self.socks[remote_address]
+        comm, rank = self.comms[remote_address]
+        batch_payload = []
+        for item, tensor in prepared:
+            batch_payload.append({
+                "tensor_id":
+                item.tensor_id,
+                "shape":
+                tensor.shape,
+                "dtype":
+                str(tensor.dtype).replace("torch.", ""),
+            })
+
+        sock.send(msgpack.dumps({
+            "cmd": "PUT_BATCH",
+            "tensors": batch_payload
+        }))
+        response = sock.recv()
+        response_obj = msgpack.loads(response) if response != b"0" else {
+            "ret": 0
+        }
+        if response_obj.get("ret", 1) != 0:
+            logger.error(
+                "🔴Send Tensor Batch, Peer Out Of Memory/Threshold, "
+                "%s 👉 %s, MyRank:%s, failed:%s", self.zmq_address,
+                remote_address, rank, response_obj.get("failed_tensor_ids"))
+            return False
+
+        self.nccl.ncclGroupStart()
+        try:
+            for idx, (item, tensor) in enumerate(prepared):
+                if tensor.device != self.device:
+                    tensor = tensor.to(self.device)
+                    prepared[idx] = (item, tensor)
+                self.send(comm, tensor, rank ^ 1, self.send_stream)
+        finally:
+            self.nccl.ncclGroupEnd()
+
+        if self.send_type == "PUT_ASYNC":
+            for item in items:
+                self.have_sent_tensor_id(item.tensor_id)
+
+        return True
+
+    def _prepare_tensor_for_send(self, item: SendQueueItem) -> torch.Tensor:
+        with torch.cuda.stream(self.send_stream):
+            tensor = self.extract_kv_from_layer(
+                item.is_mla, item.tensor, item.slot_mapping).contiguous()
+
+        return tensor
+
+    def _finalize_received_tensor(self, tensor_id: str, tensor: torch.Tensor,
+                                  remote_address: str,
+                                  metadata: dict[str, Any]) -> Any:
+        tensor_size = tensor.element_size() * tensor.numel()
+        if (self.buffer_size + tensor_size > self.buffer_size_threshold):
+            addr = self.pool.store_tensor(tensor)
+            logger.warning(
+                "🔴[PUT]Recv Tensor, Out Of Threshold, "
+                "%s👈%s, data:%s, addr:%d", self.zmq_address, remote_address,
+                metadata, addr)
+            return (addr, tensor.dtype, tensor.shape)
+
+        self.buffer_size += tensor_size
+        return tensor
 
     def get_finished(
             self, finished_req_ids: set[str], no_compile_layers
@@ -527,7 +657,7 @@ class P2pNcclEngine:
             self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), dst,
                                comm, cudaStream_t(stream.cuda_stream))
-        stream.synchronize()
+        torch.cuda.default_stream(self.device).wait_stream(stream)
 
     def recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -540,7 +670,7 @@ class P2pNcclEngine:
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
-        stream.synchronize()
+        torch.cuda.default_stream(self.device).wait_stream(stream)
 
     def close(self) -> None:
         self._listener_thread.join()
