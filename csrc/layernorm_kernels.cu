@@ -171,22 +171,6 @@ fused_add_rms_norm_kernel(
 
 }  // namespace vllm
 
-#define LAUNCH_RMS_NORM_KERNEL(NUM_DIMS)                                      \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {  \
-    const int calculated_vec_size =                                           \
-        std::gcd(16 / sizeof(scalar_t), hidden_size);                         \
-    const int block_size =                                                    \
-        std::min(hidden_size / calculated_vec_size, max_block_size);          \
-    dim3 block(block_size);                                                   \
-    VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {                         \
-      vllm::rms_norm_kernel<scalar_t, vec_size, NUM_DIMS>                     \
-          <<<grid, block, 0, stream>>>(                                       \
-              out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),           \
-              input_stride_inner, input_stride_outer, input_shape_inner,      \
-              weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size); \
-    });                                                                       \
-  });
-
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
@@ -209,11 +193,22 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   dim3 grid(num_tokens);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (num_dims == 2) {
-    LAUNCH_RMS_NORM_KERNEL(2);
-  } else {
-    LAUNCH_RMS_NORM_KERNEL(3);
-  }
+  VLLM_DISPATCH_RANK23(num_dims, [&] {
+    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
+      const int calculated_vec_size =
+          std::gcd(16 / sizeof(scalar_t), hidden_size);
+      const int block_size =
+          std::min(hidden_size / calculated_vec_size, max_block_size);
+      dim3 block(block_size);
+      VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
+        vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank>
+            <<<grid, block, 0, stream>>>(
+                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+                input_stride_inner, input_stride_outer, input_shape_inner,
+                weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+      });
+    });
+  });
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \

@@ -117,3 +117,21 @@
       break;                                  \
     }                                         \
   }
+
+#define VLLM_DISPATCH_RANK23(NUM_DIMS, ...)                  \
+  switch (NUM_DIMS) {                                        \
+    case 2: {                                                \
+      constexpr int tensor_rank = 2;                         \
+      __VA_ARGS__();                                         \
+      break;                                                 \
+    }                                                        \
+    case 3: {                                                \
+      constexpr int tensor_rank = 3;                         \
+      __VA_ARGS__();                                         \
+      break;                                                 \
+    }                                                        \
+    default:                                                 \
+      TORCH_CHECK(false,                                     \
+                  "Expects rank 2 or 3 tensors but got %ld", \
+                  static_cast<long>(NUM_DIMS));              \
+  }
