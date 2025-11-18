@@ -227,15 +227,13 @@ def run_combs(
             else contextlib.nullcontext()
         ) as server:
             for bench_comb in bench_params:
-                filter = True
-                for serve_key, bench_key in links:
-                    if serve_key not in serve_comb or bench_key not in bench_comb:
-                        filter = False
-                        break
-                    if serve_comb[serve_key] != bench_comb[bench_key]:
-                        filter = False
-                        break
-                if not filter:
+                should_run = all(
+                    serve_key in serve_comb
+                    and bench_key in bench_comb
+                    and serve_comb[serve_key] == bench_comb[bench_key]
+                    for serve_key, bench_key in links
+                )
+                if not should_run:
                     continue
                 base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
 
@@ -401,6 +399,7 @@ class SweepServeArgs:
 
         return parser
 
+    @staticmethod
     def parse_link_vars(s: str) -> list[tuple[str, str]]:
         if not s:
             return []
