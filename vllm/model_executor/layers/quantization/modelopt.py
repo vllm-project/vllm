@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
@@ -354,12 +355,18 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
-        if (
-            envs.VLLM_USE_FLASHINFER_MOE_FP8
-            and has_flashinfer_moe()
-            and self.moe.is_act_and_mul
-        ):
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            if (
+                self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                and not self.moe.is_act_and_mul
+            ):
+                logger.info_once(
+                    "Non-gated MoE is not supported for min-latency mode,"
+                    "falling back to high-throughput mode"
+                )
+                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
@@ -557,10 +564,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         if self.flashinfer_moe_backend is not None:
-            layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-            register_moe_scaling_factors(layer)
+            if self.moe.is_act_and_mul:
+                layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+        register_moe_scaling_factors(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -570,13 +578,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
-            g1_alphas=(layer.w13_weight_scale * layer.w13_input_scale).squeeze(),
+            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
             w2_scale=layer.w2_weight_scale,
-            g2_alphas=(layer.w2_weight_scale * layer.w2_input_scale).squeeze(),
+            g2_alphas=layer.output2_scales_scalar.squeeze(),
             a1_scale=layer.w13_input_scale,
             a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            a2_gscale=1.0 / layer.w2_input_scale,
+            a2_gscale=layer.w2_input_scale_inv,
             per_act_token_quant=False,
         )
 
@@ -642,9 +650,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert not renormalize
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
+            assert activation in ("silu", "relu2_no_mul"), (
+                "Expected activation to be in ('silu', 'relu2_no_mul'),"
+                f"but got {activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
@@ -1650,16 +1658,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             use_llama4_routing = (
                 custom_routing_function is Llama4MoE.custom_routing_function
             )
-            routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+            routing_method_type = layer.routing_method_type
             if use_llama4_routing:
-                routing_method_type = flashinfer.RoutingMethodType.Llama4
+                routing_method_type = RoutingMethodType.Llama4
+            router_logits = (
+                router_logits.to(torch.float32)
+                if routing_method_type == RoutingMethodType.DeepSeekV3
+                else router_logits
+            )
             routing_bias = e_score_correction_bias
             if routing_bias is not None:
                 routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-                routing_logits=router_logits
-                if use_llama4_routing
-                else router_logits.to(torch.float32),
+                routing_logits=router_logits,
                 routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
@@ -1683,8 +1694,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 output2_scale_scalar=layer.g2_alphas.data,
                 num_experts=global_num_experts,
                 top_k=top_k,
-                n_group=num_expert_group if num_expert_group is not None else 0,
-                topk_group=topk_group if topk_group is not None else 0,
+                n_group=num_expert_group,
+                topk_group=topk_group,
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,

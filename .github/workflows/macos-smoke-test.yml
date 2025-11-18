@@ -1,6 +1,9 @@
 name: macOS Apple Silicon Smoke Test
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:  # Manual trigger
 
 jobs:
@@ -19,13 +22,15 @@ jobs:
             pyproject.toml
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Create virtual environment
         run: |
-          uv pip install -r requirements/cpu-build.txt
-          uv pip install -r requirements/cpu.txt
+          uv venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Build vLLM
-        run: uv pip install -v -e .
+      - name: Install dependencies and build vLLM
+        run: |
+          uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
+          uv pip install -e .
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
