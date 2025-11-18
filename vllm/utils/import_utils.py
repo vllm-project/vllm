@@ -75,15 +75,15 @@ def import_triton_kernels():
     if _has_module("triton_kernels"):
         import triton_kernels
 
-        logger.info_once(
+        logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
             scope="local",
         )
     elif _has_module("vllm.third_party.triton_kernels"):
         import vllm.third_party.triton_kernels as triton_kernels
 
-        logger.info_once(
-            "Loading module triton_kernels from vllm.third_party.triton_kernels",
+        logger.debug_once(
+            f"Loading module triton_kernels from {triton_kernels.__file__}.",
             scope="local",
         )
         sys.modules["triton_kernels"] = triton_kernels
