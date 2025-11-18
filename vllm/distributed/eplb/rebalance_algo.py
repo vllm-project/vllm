@@ -101,28 +101,58 @@ def rebalance_masked_experts(
         device=active_phy2log.device,
     )
     
-    # Map active ranks to their physical positions
+    # Create mapping from active physical index to full physical index
+    # We need to remap active_log2phy indices from active space to full physical space
+    # Example: rank_mapping = {0:-1, 1:0, 2:1, 3:2} with experts_per_rank=2
+    # active_log2phy contains indices in active space: [0, 1, 2, 3, 4, 5] (for 3 active ranks)
+    # But we need indices in full physical space: [2, 3, 4, 5, 6, 7] (skipping masked rank 0)
+    active_to_full_map = torch.full(
+        (active_num_replicas,),
+        -1,
+        dtype=torch.int64,
+        device=active_log2phy.device,
+    )
+    
+    # Map active ranks to their physical positions (consolidated loop)
     # Example: rank_mapping = {0:0, 1:1, 2:-1, 3:2} with experts_per_rank=2
-    # Physical rank 0 → new rank 0 → copy active[0:2] to full[0:2]
-    # Physical rank 1 → new rank 1 → copy active[2:4] to full[2:4]
-    # Physical rank 2 → masked (-1) → full[4:6] stays as -1
-    # Physical rank 3 → new rank 2 → copy active[4:6] to full[6:8]
+    # Physical rank 0 → new rank 0 → copy active[0:2] to full[0:2], map [0,1]→[0,1]
+    # Physical rank 1 → new rank 1 → copy active[2:4] to full[2:4], map [2,3]→[2,3]
+    # Physical rank 2 → masked (-1) → full[4:6] stays as -1, no mapping
+    # Physical rank 3 → new rank 2 → copy active[4:6] to full[6:8], map [4,5]→[6,7]
     for physical_rank in range(full_ep_size):  # 0, 1, 2, 3
         new_rank = rank_mapping[physical_rank]
         if new_rank != -1:
-            # This physical rank is active - copy its expert assignments from active tensor
-            phys_start = physical_rank * experts_per_rank  # Physical position in output
-            phys_end = (physical_rank + 1) * experts_per_rank
-            active_start = new_rank * experts_per_rank     # Active position in input
-            active_end = (new_rank + 1) * experts_per_rank
+            # This physical rank is active - compute position offsets once
+            phys_start = physical_rank * experts_per_rank  # Physical position in full space
+            active_start = new_rank * experts_per_rank     # Position in active space
             
-            full_phy2log[:, phys_start:phys_end] = active_phy2log[:, active_start:active_end]
-        # else: masked rank, leave as -1 (already initialized above)
+            # Copy expert assignments from active tensor to full tensor
+            full_phy2log[:, phys_start:phys_start + experts_per_rank] = \
+                active_phy2log[:, active_start:active_start + experts_per_rank]
+            
+            # Build active-to-full mapping for logical_to_physical_map remapping
+            for i in range(experts_per_rank):
+                active_to_full_map[active_start + i] = phys_start + i
+        # else: masked rank, leave full_phy2log as -1 (already initialized above)
     
-    # For log2phy and logcnt, we can use the active versions directly
-    # since they map logical experts to physical indices (which are the same)
-    # These remain unchanged because logical expert IDs don't change due to masking
-    return full_phy2log, active_log2phy, active_logcnt
+    # Remap active_log2phy indices to full physical space
+    full_log2phy = active_log2phy.clone()
+    
+    # For each entry in active_log2phy, if it's >= 0, remap it to full physical space
+    mask = active_log2phy >= 0
+    if mask.any():
+        # Ensure indices are within bounds of active_to_full_map
+        valid_active_indices = active_log2phy[mask]
+        assert valid_active_indices.max() < active_num_replicas, (
+            f"Invalid active index {valid_active_indices.max()} >= {active_num_replicas}"
+        )
+        full_log2phy[mask] = active_to_full_map[valid_active_indices]
+    
+    # Replica counts remain unchanged (we only remapped positions, not counts)
+    # Rename for consistency with full_phy2log and full_log2phy
+    full_logcnt = active_logcnt
+    
+    return full_phy2log, full_log2phy, full_logcnt
 
 
 def balanced_packing(
