@@ -110,7 +110,11 @@ json2envs() {
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  timeout 1200 bash -c '
+  local timeout_val="1200"
+  if [ "$TEST_MODE" == "1" ];then
+    timeout_val="1"
+  fi
+  timeout "$timeout_val" bash -c '
     until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
@@ -238,7 +242,11 @@ run_latency_tests() {
     echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval "$latency_command"
+    if [ "$TEST_MODE" == "1" ];then
+      echo "TEST MODE for '$latency_command'"
+    else
+      eval "$latency_command"
+    fi
 
     kill_gpu_processes
 
@@ -306,7 +314,11 @@ run_throughput_tests() {
     echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval "$throughput_command"
+    if [ "$TEST_MODE" == "1" ];then
+      echo "TEST MODE for '$throughput_command'"
+    else
+      eval "$throughput_command"
+    fi
 
     kill_gpu_processes
 
@@ -386,8 +398,13 @@ run_serving_tests() {
     # support remote vllm server
     client_remote_args=""
     if [[ -z "${REMOTE_HOST}" ]]; then
-      bash -c "$server_command" &
-      server_pid=$!
+      if [ "$TEST_MODE" == "1" ];then
+        echo "TEST MODE for '$server_command'"
+        server_pid=''
+      else
+        bash -c "$server_command" &
+        server_pid=$!
+      fi
       # wait until the server is alive
       if wait_for_server; then
         echo ""
@@ -432,7 +449,11 @@ run_serving_tests() {
         echo "Running test case $test_name with qps $qps"
         echo "Client command: $client_command"
 
-        bash -c "$client_command"
+        if [ "$TEST_MODE" == "1" ];then
+          echo "TEST MODE for '$client_command'"
+        else
+          bash -c "$client_command"
+        fi
 
         # record the benchmarking commands
         jq_output=$(jq -n \
