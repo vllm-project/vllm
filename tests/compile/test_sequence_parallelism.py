@@ -30,7 +30,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
@@ -119,7 +118,6 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             for i in range(3)
         ]
 
-
     def forward(self, hidden_states):
         # avoid having graph input be an arg to a pattern directly
         z = torch.relu(hidden_states)
@@ -159,9 +157,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             return [
                 torch.ops._C.fused_add_rms_norm.default,
             ]
-        elif any(
-            layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers
-        ):
+        elif any(layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers):
             return [
                 torch.ops._C.static_scaled_fp8_quant.default,
             ]
