@@ -238,7 +238,8 @@ class EplbState:
         
         # Health monitoring and timeout-based masking (global across all models)
         """
-        Global step counter that never resets. Used for mask_out_gpu_after feature.
+        Global step counter that never resets. Used for mask_out_gpu_after feature
+        to determine when to mask out specific GPU ranks for fault tolerance testing.
         Incremented on every step() call.
         """
         self.global_step: int = 0
@@ -247,12 +248,12 @@ class EplbState:
         self.health_timeout_threshold: float = 100.0
         
         """
-        List of step counts after which to mask out each GPU rank.
-        For example, [100, 200] will mask out rank 0 after 100 steps
-        and rank 1 after 200 steps. Empty list means no GPUs will be masked out.
+        Dictionary mapping GPU ranks to step counts at which to mask them out.
+        For example, {0: 100, 2: 200} will mask out rank 0 after 100 steps
+        and rank 2 after 200 steps. Empty dict means no GPUs will be masked out.
         From EPLBConfig, used for testing fault tolerance.
         """
-        self.mask_out_gpu_after: list[int] = []
+        self.mask_out_gpu_after: dict[int, int] = {}
         
         """
         Set of ranks that have been masked out via mask_out_gpu_after.
@@ -731,9 +732,10 @@ class EplbState:
         
         This is used for testing fault tolerance by simulating GPU failures/timeouts at specific steps.
         
-        The mask_out_gpu_after list uses indices as rank IDs and values as global step counts:
-        - mask_out_gpu_after[0] = 100 means rank 0 will be masked at global step 100
-        - mask_out_gpu_after[1] = 200 means rank 1 will be masked at global step 200
+        The mask_out_gpu_after dict maps rank IDs to global step counts:
+        - mask_out_gpu_after = {0: 100, 2: 200} means:
+          * rank 0 will be masked at global step 100
+          * rank 2 will be masked at global step 200
         
         Returns:
             (rank_mapping, has_new_mask):
@@ -749,9 +751,13 @@ class EplbState:
         
         # Check if any ranks should be masked at this global step
         newly_masked_ranks = set()
-        for rank_idx, mask_step in enumerate(self.mask_out_gpu_after):
+        for rank_idx, mask_step in self.mask_out_gpu_after.items():
             if rank_idx >= ep_size:
-                break  # Invalid rank index
+                logger.warning(
+                    "Skipping invalid rank %d in mask_out_gpu_after (ep_size=%d)",
+                    rank_idx, ep_size
+                )
+                continue  # Invalid rank index
             if (self.global_step >= mask_step and 
                 rank_idx not in self.masked_ranks):
                 # Mask out this rank starting from this step

@@ -69,15 +69,21 @@ class EPLBConfig:
     """Absolute timeout threshold in milliseconds. Expert is unhealthy and will be
     immediately masked out if current latency exceeds this threshold."""
 
-    mask_out_gpu_after: list[int] = Field(default_factory=list)
-    """List of step counts after which to mask out each GPU rank.
-    For example, [100, 200] will mask out rank 0 after 100 steps
-    and rank 1 after 200 steps. Empty list means no GPUs will be masked out.
-    This is used for testing fault tolerance.
+    mask_out_gpu_after: dict[int, int] = Field(default_factory=dict)
+    """Dictionary mapping GPU ranks to step counts at which to mask them out.
     
-    Note: Uses the same step counter as periodic rearrangement (expert_rearrangement_step),
-    which ensures all ranks (including dummy ranks) stay synchronized.
-    After masking, coverage enforcement runs on all ranks collectively."""
+    This is used for testing fault tolerance by simulating GPU failures/timeouts at specific steps.
+    
+    Examples:
+        - {3: 50, 1: 150}: Mask out rank 3 after 50 steps and rank 1 after 150 steps
+        - {} or omit: No GPUs will be masked out (default)
+    
+    CLI Usage:
+        --eplb-config.mask_out_gpu_after '{"3": 50, "1": 150}'
+    
+    Note: Uses the global_step counter (incremented on every step() call),
+    which ensures all ranks stay synchronized. After masking, coverage enforcement 
+    runs on all ranks collectively."""
 
 
 @config
