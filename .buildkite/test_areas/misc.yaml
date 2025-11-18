@@ -8,7 +8,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - uv pip install -r /vllm-workspace/requirements/kv_connectors.txt
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -148,7 +148,7 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - uv pip install 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: Batch Invariance (H100)
