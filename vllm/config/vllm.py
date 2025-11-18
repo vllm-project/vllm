@@ -82,7 +82,7 @@ IS_DENSE = False
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
-def enable_fusion(cfg):
+def enable_fusion(cfg: "VllmConfig") -> bool:
     """Returns True if RMS norm or quant FP8 is enabled."""
     return cfg.compilation_config.is_custom_op_enabled(
         "rms_norm"
@@ -559,18 +559,21 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning("Enforce eager set, overriding optimization level to -O0")
-            self.optimization_level = OptimizationLevel.O0
-        if (
-            self.compilation_config.mode is not None
-            and self.compilation_config.mode < CompilationMode.VLLM_COMPILE
-        ):
-            logger.warning_once(
-                "Compilation Mode is not VLLM_COMPILE, so optimization will be"
-                "set to level 0. This may result in reduced performance."
-            )
-            self.optimization_level = OptimizationLevel.O0
+        if self.optimization_level > OptimizationLevel.O0:
+            if self.model_config is not None and self.model_config.enforce_eager:
+                logger.warning(
+                    "Enforce eager set, overriding optimization level to -O0"
+                )
+                self.optimization_level = OptimizationLevel.O0
+            if (
+                self.compilation_config.mode is not None
+                and self.compilation_config.mode < CompilationMode.VLLM_COMPILE
+            ):
+                logger.warning_once(
+                    "Compilation Mode is not VLLM_COMPILE, so optimization will be"
+                    "set to level 0. This may result in reduced performance."
+                )
+                self.optimization_level = OptimizationLevel.O0
 
         if (
             self.compilation_config.backend == "eager"
@@ -616,8 +619,6 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
-        assert self.compilation_config.mode >= CompilationMode.NONE
-        assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.

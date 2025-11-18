@@ -173,6 +173,22 @@ class PassConfig:
         """
         return InductorPass.hash_dict(asdict(self))
 
+    @field_validator(
+        "enable_fusion",
+        "enable_attn_fusion",
+        "enable_noop",
+        "enable_sequence_parallelism",
+        "enable_async_tp",
+        "enable_fi_allreduce_fusion",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     def __post_init__(self) -> None:
         if not self.enable_noop:
             if self.enable_fusion:
@@ -254,7 +270,7 @@ class CompilationConfig:
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int = Field(default=None)
+    mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -615,6 +631,20 @@ class CompilationConfig:
                 f"got: {value}"
             )
         return value
+
+    @field_validator(
+        "level",
+        "mode",
+        "cudagraph_mode",
+        "use_inductor_graph_partition",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
 
     def __post_init__(self) -> None:
         if self.level is not None:

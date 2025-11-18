@@ -620,22 +620,24 @@ def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: boo
 
 def test_vllm_config_defaults_are_none():
     """Verify that optimization-level defaults are None when not set by user."""
-    config = object.__new__(VllmConfig)
-    config.compilation_config = CompilationConfig()
-    config.optimization_level = OptimizationLevel.O0
-    config.model_config = None
+    # Test all optimization levels to ensure defaults work correctly
+    for opt_level in OptimizationLevel:
+        config = object.__new__(VllmConfig)
+        config.compilation_config = CompilationConfig()
+        config.optimization_level = opt_level
+        config.model_config = None
 
-    # Use the global optimization level defaults
-    default_config = OPTIMIZATION_LEVEL_TO_CONFIG[OptimizationLevel.O0]
+        # Use the global optimization level defaults
+        default_config = OPTIMIZATION_LEVEL_TO_CONFIG[opt_level]
 
-    # Verify that all pass_config values are None before defaults are applied
-    for pass_k in default_config["pass_config"]:
-        assert getattr(config.compilation_config.pass_config, pass_k) is None
+        # Verify that all pass_config values are None before defaults are applied
+        for pass_k in default_config["compilation_config"]["pass_config"]:
+            assert getattr(config.compilation_config.pass_config, pass_k) is None
 
-    # Verify that other config values are None before defaults are applied
-    for k in default_config:
-        if k != "pass_config":
-            assert getattr(config.compilation_config, k) is None
+        # Verify that other config values are None before defaults are applied
+        for k in default_config["compilation_config"]:
+            if k != "pass_config":
+                assert getattr(config.compilation_config, k) is None
 
 
 @pytest.mark.parametrize(
