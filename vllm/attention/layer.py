@@ -8,6 +8,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -22,12 +23,13 @@ from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -213,6 +215,17 @@ def _init_kv_cache_quant(
         # values after weight loading.
         layer.quant_method = quant_method
         layer.quant_method.create_weights(layer)
+
+
+def dynamic_per_batched_tensor_quant(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+):
+    DTYPE_MAX = torch.finfo(dtype).max
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+    scale = DTYPE_MAX / amax
+    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -683,6 +696,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.kv_b_proj = kv_b_proj
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -824,7 +838,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         has_context = attn_metadata.prefill.chunked_context is not None
 
         # KV projection and splitting
-        kv_nope = self.impl.kv_b_proj(k_c_normed)[0].view(  # type: ignore[attr-defined]
+        kv_nope = self.kv_b_proj(k_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
@@ -898,14 +912,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     cur_allgather_kvcache.copy_(
                         get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
                     )
-                    assert (
-                        cur_allgather_kvcache.shape[-1]
-                        == self.impl.kv_lora_rank + self.qk_rope_head_dim  # type: ignore[attr-defined]
+                    assert cur_allgather_kvcache.shape[-1] == (
+                        self.kv_lora_rank + self.qk_rope_head_dim
                     )
                     allgatered_kv_c_normed, allgatered_k_pe = (
                         cur_allgather_kvcache.unsqueeze(1).split(
-                            [self.impl.kv_lora_rank, self.qk_rope_head_dim],  # type: ignore[attr-defined]
-                            dim=-1,
+                            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
                         )
                     )
 
@@ -929,16 +941,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         block_table=prefill_metadata.block_table,
                         cu_seq_lens=chunked_context.cu_seq_lens[i],
                         batch_size=attn_metadata.num_prefills,
-                        kv_cache_dtype=self.impl.kv_cache_dtype,  # type: ignore[attr-defined]
+                        kv_cache_dtype=self.kv_cache_dtype,
                         scale=self._k_scale,
                         seq_starts=chunked_context.starts[i],
                     )
 
-                    kv_c_normed = workspace[:toks][..., : self.impl.kv_lora_rank]  # type: ignore[attr-defined]
-                    k_pe = workspace[:toks][..., self.impl.kv_lora_rank :].unsqueeze(1)  # type: ignore[attr-defined]
+                    kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
+                    k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
                 # KV projection and splitting
-                kv_nope = self.impl.kv_b_proj(kv_c_normed)[0].view(  # type: ignore[attr-defined]
+                kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                     -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
                 )
                 k_nope, v_chunk = kv_nope.split(
@@ -1022,14 +1034,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
             decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 decode_q_nope,
-                self.impl.W_K,  # type: ignore[attr-defined]
-                self.impl.W_K_scale,  # type: ignore[attr-defined]
+                self.W_K,  # type: ignore[attr-defined]
+                self.W_K_scale,  # type: ignore[attr-defined]
                 group_size=128,
                 transpose_bm=True,
             )
         else:
             N, B, P = decode_q_nope.shape
-            _, _, L = self.impl.W_UK_T.shape  # type: ignore[attr-defined]
+            _, _, L = self.W_UK_T.shape  # type: ignore[attr-defined]
             if self.impl.q_pad_num_heads is not None:  # type: ignore[attr-defined]
                 decode_ql_nope = decode_q_nope.new_empty(
                     (self.impl.q_pad_num_heads, B, L)  # type: ignore[attr-defined]
@@ -1037,7 +1049,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 decode_ql_nope.resize_((N, B, L))
             else:
                 decode_ql_nope = decode_q_nope.new_empty((N, B, L))
-            torch.bmm(decode_q_nope, self.impl.W_UK_T, out=decode_ql_nope)  # type: ignore[attr-defined]
+            torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)  # type: ignore[attr-defined]
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
         if fp8_attention:
@@ -1074,7 +1086,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=q.dtype,
             device=q.device,
         )
-        self.impl._v_up_proj(attn_out, out=out)  # type: ignore[attr-defined]
+        self._v_up_proj(attn_out, out=out)
         return out
 
     def forward_impl(
@@ -1140,8 +1152,121 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
+        def get_layer_weight(layer):
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
+            )
+
+        def get_and_maybe_dequant_weights(layer: LinearBase):
+            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                # NOTE: This should only be used offline, since it's O(N^3)
+                eye = torch.eye(
+                    layer.input_size_per_partition,
+                    dtype=act_dtype,
+                    device=get_layer_weight(layer).device,
+                )
+                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
+                del eye
+                # standardize to (output, input)
+                return dequant_weights.T
+            return layer.weight
+
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), (
+            f"{kv_b_proj_weight.shape=}, "
+            f"{self.kv_lora_rank=}, "
+            f"{self.num_heads=}, "
+            f"{self.qk_nope_head_dim=}, "
+            f"{self.v_head_dim=}"
+        )
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+
+        W_UK, W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            W_K = W_UK.transpose(0, 1)  # 16 512 128
+            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+                W_K, dtype=FP8_DTYPE
+            )
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+                W_V, dtype=FP8_DTYPE
+            )
+
+            # The kernel operates on non-padded inputs. Hence, pre-compiling
+            # triton kernel to avoid runtime compilation for unseen batch sizes
+            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+            # On DS-R1, this step adds roughly 50s to the model loading time.
+            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+            pre_compilation_list = list(range(1, max_batch_size + 1))
+            if is_global_first_rank():
+                pre_compilation_list = tqdm(
+                    pre_compilation_list,
+                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                    total=max_batch_size,
+                )
+
+            for m in pre_compilation_list:
+                x = torch.empty(
+                    (self.W_K.shape[0], m, self.W_K.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_K.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                )
+
+                x = torch.empty(
+                    (self.W_V.shape[0], m, self.W_V.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_V.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                )
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
+
+    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        if self.impl.is_aiter_triton_fp8_bmm_enabled:  # type: ignore[attr-defined]
+            # (N, B, L) x (N, L, V) -> (N, B, V) -> (B, N, V)
+            x = rocm_aiter_ops.triton_fp8_bmm(
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+            )
+            # Convert from (B, N, V) to (B, N * V)
+            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            out.copy_(x)
+        else:
+            # Convert out buffer from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
+            torch.bmm(x, self.W_UV, out=out)
+            # Convert back to (B, N * V)
+            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)
 
     def calc_kv_scales(
         self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
