@@ -39,51 +39,110 @@ logger = init_logger(__name__)
 # does not require direct registeration.
 # use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
 @cache
-def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
+def is_rocm_aiter_fp4_preshuffled_gemm_enabled() -> bool:
     return (
         current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+        and envs.VLLM_ROCM_USE_AITER_FP4_PRESHUFFLED_GEMM
         and envs.VLLM_ROCM_USE_AITER
     )
 
 
 try:
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.gemm_afp4wfp4 import (
+        gemm_afp4wfp4,
+        gemm_afp4wfp4_preshuffled_weight_scales,
+    )
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.utils.torch_utils import direct_register_custom_op
 
-    if is_rocm_aiter_fp4_asm_gemm_enabled():
+    if is_rocm_aiter_fp4_preshuffled_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    # triton FP4 gemm supports preshuffled weight
+    # but prefer below shapes for performance
+    def _prefer_triton_fp4_preshuffled_gemm(M: int, N: int, K: int) -> bool:
+        if M <= 64:
+            _preferred_shapes = {
+                (8192, 8192),
+                (10240, 8192),
+                (57344, 8192),
+                (8192, 28672),
+            }
+            return (N, K) in _preferred_shapes
+        return False
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        rocm_use_aiter_fp4_preshuffled_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         M = x.shape[0]
-        if rocm_use_aiter_fp4_asm_gemm:
-            if x_scales is None:
-                # use hip quant kernel for performance
-                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+
+        # use fp4 preshuffled gemm kernel(asm, triton)
+        if rocm_use_aiter_fp4_preshuffled_gemm:
+            N = weight.shape[0]
+            K = x.shape[1]
+
+            if x_scales is not None:
+                K *= 2
+
+            # use triton fp4 preshuffled gemm kernel
+            if _prefer_triton_fp4_preshuffled_gemm(M, N, K):
+                if x_scales is None:
+                    # use hip quant kernel for performance
+                    if M >= 32:
+                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                    else:
+                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                else:
+                    x_q = x
+                    x_s = x_scales
+
+                if M >= 32:
+                    x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
+                else:
+                    x_s = x_s[:M, ...].view(torch.uint8)
+
+                y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
+
+                gemm_afp4wfp4_preshuffled_weight_scales(
+                    x_q.view(torch.uint8),
+                    weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
+                    x_s,
+                    weight_scale.view(torch.uint8).view(
+                        weight_scale.shape[0] // 32, -1
+                    ),
+                    out_dtype,
+                    y,
+                )
+                return y
             else:
-                x_q = x
-                x_s = x_scales
+                # use asm fp4 preshuffled gemm kernel
+                if x_scales is None:
+                    # use hip quant kernel for performance
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                else:
+                    x_q = x
+                    x_s = x_scales
 
-            # 32 alignment is enough for dim0 padding of output for
-            # gemm_a4w4 kernel
-            y = torch.empty(
-                (M + 31) // 32 * 32, weight.shape[0], device=x_q.device, dtype=out_dtype
-            )
+                # 32 alignment is enough for dim0 padding of output for
+                # gemm_a4w4 kernel
+                y = torch.empty(
+                    (M + 31) // 32 * 32,
+                    weight.shape[0],
+                    device=x_q.device,
+                    dtype=out_dtype,
+                )
 
-            gemm_a4w4(
-                x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
-            )
-            return y[:M]
+                gemm_a4w4(
+                    x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
+                )
+                return y[:M]
         else:
             if x_scales is None:
                 x_q, x_s = dynamic_mxfp4_quant(x)
@@ -102,7 +161,7 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         x_scales: torch.Tensor = None,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        rocm_use_aiter_fp4_preshuffled_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.empty(
@@ -165,7 +224,9 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
-        self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
+        self.rocm_use_aiter_fp4_preshuffled_gemm = (
+            is_rocm_aiter_fp4_preshuffled_gemm_enabled()
+        )
 
         if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
             # Currently need these kernels if not emulating
@@ -222,7 +283,7 @@ class QuarkOCP_MX(QuarkScheme):
                 layer.weight_scale.data, requires_grad=False
             )
         else:
-            if self.rocm_use_aiter_fp4_asm_gemm:
+            if self.rocm_use_aiter_fp4_preshuffled_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
@@ -301,6 +362,6 @@ class QuarkOCP_MX(QuarkScheme):
                 x,
                 layer.weight,
                 layer.weight_scale,
-                self.rocm_use_aiter_fp4_asm_gemm,
+                self.rocm_use_aiter_fp4_preshuffled_gemm,
                 self.out_dtype,
             )

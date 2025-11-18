@@ -446,7 +446,7 @@ class rocm_aiter_ops:
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
-    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+    _FP4_PRESHUFFLED_GEMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4_PRESHUFFLED_GEMM
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -517,8 +517,8 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+    def is_fp4_preshuffled_gemm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP4_PRESHUFFLED_GEMM_ENABLED
 
     @classmethod
     @if_aiter_supported
