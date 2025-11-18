@@ -109,6 +109,7 @@ class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     attn_backend_name: str
     kv_cache_layout: str
     block_size: int
+    logic_block_size: int
 
 
 @dataclass
@@ -699,6 +700,8 @@ class NixlConnectorWorker:
             attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
             self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
 
+            self.logic_block_size = self.block_size
+
         @property
         def is_kv_layout_blocks_first(self) -> bool:
             return self._is_kv_layout_blocks_first
@@ -1160,6 +1163,7 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         self.device_id = self.tp_rank
+        logic_block_size = self.block_size
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
@@ -1291,6 +1295,7 @@ class NixlConnectorWorker:
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
+            logic_block_size=logic_block_size,
         )
 
     def register_local_xfer_handler(
@@ -1563,6 +1568,15 @@ class NixlConnectorWorker:
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
             )
 
+        if (
+            self._physical_blocks_per_logical_kv_block > 1
+            and self.kv_topo.logic_block_size != nixl_agent_meta.logic_block_size
+        ):
+            raise NotImplementedError(
+                "Heterogeneous Block Size does not work when physical "
+                "kv_block_size is smaller than logic kv_block_size case."
+            )
+
         # TP workers have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
 
@@ -1742,7 +1756,7 @@ class NixlConnectorWorker:
                 and self.kv_cache_layout == "HND"
             ):
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
-                    meta.local_block_ids
+                    meta.local_physical_block_ids
                 )
         self.blocksize_post_process(block_ids_for_blocksize_post_process)
         if len(block_ids_to_permute) > 0:
