@@ -680,12 +680,12 @@ void persistent_masked_m_silu_mul_quant(
                         STRIDE_YS_P, CEIL_UE8M0)                               \
     if (num_sms == 132) {                                                      \
       static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;                     \
-      LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p, \
-                  true);                                                       \
+      LAUNCH_ON_H(uint8_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
+                  CEIL_UE8M0);                                                 \
     } else if (num_sms == 144) {                                               \
       static constexpr int SILU_V2_BLOCK_COUNT = 144 * 32;                     \
-      LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p, \
-                  true);                                                       \
+      LAUNCH_ON_H(uint8_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
+                  CEIL_UE8M0);                                                 \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);
