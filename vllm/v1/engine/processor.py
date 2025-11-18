@@ -3,6 +3,7 @@
 
 import time
 from collections.abc import Mapping
+from copy import copy
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
@@ -453,7 +454,19 @@ class Processor:
         pooling_params = None
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
-            sampling_params = params.clone()
+            # Perform a shallow copy and manually copy mutable fields that are
+            # modified by validation methods below. This avoids deepcopying
+            # large read-only structures like logit_bias.
+            sampling_params = copy(params)
+            # update_from_generation_config calls .add() and .update().
+            sampling_params._all_stop_token_ids = set(params._all_stop_token_ids)
+            # _validate_structured_output modifies _backend and _backend_was_auto
+            # attributes on the nested structured_outputs object.
+            if sampling_params.structured_outputs:
+                sampling_params.structured_outputs = copy(
+                    sampling_params.structured_outputs
+                )
+
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 seq_len = length_from_prompt_token_ids_or_embeds(
