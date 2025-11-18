@@ -36,6 +36,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.model_arch import ModelArchitectureTextConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -116,7 +117,7 @@ class LlamaMLP(nn.Module):
 class LlamaAttention(nn.Module):
     def __init__(
         self,
-        config: LlamaConfig,
+        config: ModelArchitectureTextConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -286,7 +287,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        config = config or vllm_config.model_config.hf_config
+        config = config or vllm_config.model_config.model_arch_config.text_config
         cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
 
@@ -384,7 +385,7 @@ class LlamaModel(nn.Module):
     ):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.model_arch_config.text_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
@@ -578,7 +579,7 @@ class LlamaForCausalLM(
         layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.model_arch_config.text_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config
@@ -730,3 +731,12 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+    @classmethod
+    def get_per_layer_attention_cls(cls, text_config: ModelArchitectureTextConfig):
+        if getattr(text_config, "is_causal", True):
+            attn_cls = Attention
+        else:
+            attn_cls = EncoderOnlyAttention
+
+        return [attn_cls] * text_config.num_hidden_layers

@@ -35,6 +35,10 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config,
     uses_mrope,
 )
+from vllm.transformers_utils.model_arch_config import (
+    SUPPORTED_ARCHITECTURES as MODEL_ARCH_CONFIG_SUPPORTED_ARCHITECTURES,
+)
+from vllm.transformers_utils.model_arch_config import get_model_arch_config
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -520,6 +524,20 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
+        self.model_arch_config = None
+        if (
+            len(self.architectures) == 1
+            and self.architectures[0] in MODEL_ARCH_CONFIG_SUPPORTED_ARCHITECTURES
+        ):
+            assert hf_overrides_fn is None, "Not supported yet"
+            self.model_arch_config = get_model_arch_config(
+                self.hf_config_path or self.model,
+                self.trust_remote_code,
+                self.revision,
+                self.code_revision,
+                self.config_format,
+                model_arch_overrides_kw=hf_overrides_kw,
+            )
 
         architectures = self.architectures
         registry = self.registry
@@ -1203,6 +1221,8 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
+        if self.model_arch_config:
+            return self.model_arch_config.text_config.use_deepseek_mla
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
@@ -1228,6 +1248,9 @@ class ModelConfig:
         return False
 
     def get_head_size(self) -> int:
+        if self.model_arch_config:
+            return self.model_arch_config.text_config.head_dim
+
         # TODO remove hard code
         if self.is_deepseek_mla:
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
@@ -1261,6 +1284,9 @@ class ModelConfig:
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
+        if self.model_arch_config:
+            return self.model_arch_config.text_config.num_key_value_heads
+
         # For GPTBigCode & Falcon:
         # NOTE: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
@@ -1339,6 +1365,9 @@ class ModelConfig:
 
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
+        if self.model_arch_config:
+            return self.model_arch_config.text_config.num_experts
+
         num_expert_names = [
             "num_experts",  # Jamba
             "moe_num_experts",  # Dbrx
@@ -1353,30 +1382,41 @@ class ModelConfig:
         # Coerce to 0 if explicitly set to None
         return num_experts or 0
 
+    def get_num_hidden_layers(self) -> int:
+        if self.model_arch_config:
+            total_num_hidden_layers = (
+                self.model_arch_config.text_config.num_hidden_layers
+            )
+        else:
+            if (
+                self.hf_text_config.model_type == "deepseek_mtp"
+                or self.hf_config.model_type == "mimo_mtp"
+                or self.hf_config.model_type == "glm4_moe_mtp"
+                or self.hf_config.model_type == "ernie_mtp"
+                or self.hf_config.model_type == "qwen3_next_mtp"
+                or self.hf_config.model_type == "qwen3_next_mtp"
+                or self.hf_config.model_type == "pangu_ultra_moe_mtp"
+            ):
+                total_num_hidden_layers = getattr(
+                    self.hf_text_config, "num_nextn_predict_layers", 0
+                )
+            elif self.hf_config.model_type == "longcat_flash_mtp":
+                total_num_hidden_layers = getattr(
+                    self.hf_text_config, "num_nextn_predict_layers", 1
+                )
+            else:
+                total_num_hidden_layers = getattr(
+                    self.hf_text_config, "num_hidden_layers", 0
+                )
+        return total_num_hidden_layers
+
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
     ) -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
 
-        if (
-            self.hf_text_config.model_type == "deepseek_mtp"
-            or self.hf_config.model_type == "mimo_mtp"
-            or self.hf_config.model_type == "glm4_moe_mtp"
-            or self.hf_config.model_type == "ernie_mtp"
-            or self.hf_config.model_type == "qwen3_next_mtp"
-            or self.hf_config.model_type == "pangu_ultra_moe_mtp"
-        ):
-            total_num_hidden_layers = getattr(
-                self.hf_text_config, "num_nextn_predict_layers", 0
-            )
-        elif self.hf_config.model_type == "longcat_flash_mtp":
-            total_num_hidden_layers = getattr(
-                self.hf_text_config, "num_nextn_predict_layers", 1
-            )
-        else:
-            total_num_hidden_layers = getattr(
-                self.hf_text_config, "num_hidden_layers", 0
-            )
+        total_num_hidden_layers = self.get_num_hidden_layers()
+
         # the layout order is: DP x PP x TP
         pp_rank = (
             parallel_config.rank // parallel_config.tensor_parallel_size
