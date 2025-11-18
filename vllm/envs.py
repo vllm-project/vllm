@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
+    VLLM_LOGGING_COLOR: str = "auto"
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -614,6 +615,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_STREAM": lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+    # Controls colored logging output. Options: "auto" (default, colors when terminal),
+    # "always" (always use colors), "never" (never use colors)
+    "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val

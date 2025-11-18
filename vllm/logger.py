@@ -22,6 +22,7 @@ VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
+VLLM_LOGGING_COLOR = envs.VLLM_LOGGING_COLOR
 
 _FORMAT = (
     f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -29,10 +30,17 @@ _FORMAT = (
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
+# Choose formatter based on color setting
+_FORMATTER_CLASS = (
+    "vllm.logging_utils.ColoredFormatter"
+    if VLLM_LOGGING_COLOR.lower() != "never"
+    else "vllm.logging_utils.NewLineFormatter"
+)
+
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging_utils.NewLineFormatter",
+            "class": _FORMATTER_CLASS,
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },

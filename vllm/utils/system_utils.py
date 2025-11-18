@@ -22,7 +22,7 @@ from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
 logger = init_logger(__name__)
 
-CYAN = "\033[1;36m"
+CYAN = "\033[0;36m"
 RESET = "\033[0;0m"
 
 
