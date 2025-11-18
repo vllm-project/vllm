@@ -172,7 +172,7 @@ Recommended flags:
     1. The official format that is used by default with `auto` or `mistral` arguments:
 
         `--tokenizer_mode mistral --config_format mistral --load_format mistral`
-        This format uses `[mistral-common](https://github.com/mistralai/mistral-common)`, the Mistral AI's tokenizer backend.
+        This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
 
     2. The Transformers format, when available, that is used with `hf` arguments:
 
