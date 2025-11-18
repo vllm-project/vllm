@@ -144,7 +144,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=True)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-    topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=td.hidden_states,
             router_logits=score,
             use_grouped_topk=False,
@@ -212,7 +212,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         )
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-    topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=td.hidden_states,
             router_logits=score,
             use_grouped_topk=False,

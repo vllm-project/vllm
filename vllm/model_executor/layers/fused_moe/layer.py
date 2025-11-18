@@ -1378,11 +1378,15 @@ class FusedMoE(CustomOp):
         elif e_score_correction_bias is not None:
             # Align router_logits dimension with e_score_correction_bias if needed
             # This handles cases where router_logits includes zero_experts but bias doesn't
-            bias_dim = e_score_correction_bias.shape[-1] if e_score_correction_bias.dim() > 0 else len(e_score_correction_bias)
+            bias_dim = (
+                e_score_correction_bias.shape[-1]
+                if e_score_correction_bias.dim() > 0
+                else len(e_score_correction_bias)
+            )
             router_logits_dim = router_logits.shape[-1]
             if router_logits_dim > bias_dim:
                 router_logits = router_logits[..., :bias_dim]
-            
+
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -1771,6 +1775,7 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
+
             def combine_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
