@@ -535,7 +535,7 @@ def apply_top_k_only_triton(
 @triton.jit
 def top_k_top_p_filter(
     DO_DEDUPLICATE,
-    CURRENT_NUM_DUPLICATES,
+    NUM_DUPLICATES_REMOVED,
     NUM_DUPLICATES,
     MIN_LARGER_P_FIL_PIVOT,
     FILTERED_LOGITS_NO_TOP_K,
@@ -627,7 +627,7 @@ def top_k_top_p_filter(
         p_fil_pivot = float("inf")
         # For duplicate pivot detection
         min_larger_p_fil_pivot = float("inf")
-        num_deduplicate_to_keep = tl.zeros((), dtype=tl.uint32)
+        num_duplicate_to_remove = tl.zeros((), dtype=tl.uint32)
         do_deduplicate = tl.zeros((), dtype=tl.int32)
         num_min_larger_p_fil_pivot = tl.zeros((), dtype=tl.uint32)
         min_larger_p_fil_pivot_2 = float("inf")
@@ -764,9 +764,7 @@ def top_k_top_p_filter(
                         # Duplicate pivot detected
                         p_fil_pivot = p_fil_pivot_2
                         # Number of duplicate pivots to keep in the filtered set
-                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_2 - (
-                            p_fil_pivots_num_2 - P_FIL
-                        )
+                        num_duplicate_to_remove = p_fil_pivots_num_2 - P_FIL
                         min_larger_p_fil_pivot = min_larger_p_fil_pivot_2
                         num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_2
                         do_deduplicate = 1
@@ -777,9 +775,7 @@ def top_k_top_p_filter(
                         # Duplicate pivot detected
                         p_fil_pivot = p_fil_pivot_1
                         # Number of duplicate pivots to keep in the filtered set
-                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_1 - (
-                            p_fil_pivots_num_1 - P_FIL
-                        )
+                        num_duplicate_to_remove = p_fil_pivots_num_1 - P_FIL
                         min_larger_p_fil_pivot = min_larger_p_fil_pivot_1
                         num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_1
                         do_deduplicate = 1
@@ -789,9 +785,7 @@ def top_k_top_p_filter(
                         # Duplicate pivot detected
                         p_fil_pivot = p_fil_pivot_0
                         # Number of duplicate pivots to keep in the filtered set
-                        num_deduplicate_to_keep = num_min_larger_p_fil_pivot_0 - (
-                            p_fil_pivots_num_0 - P_FIL
-                        )
+                        num_duplicate_to_remove = p_fil_pivots_num_0 - P_FIL
                         min_larger_p_fil_pivot = min_larger_p_fil_pivot_0
                         num_min_larger_p_fil_pivot = num_min_larger_p_fil_pivot_0
                         do_deduplicate = 1
@@ -844,7 +838,7 @@ def top_k_top_p_filter(
         # Fifth pass : Gather filtered values with top-k mask
         write_pos = tl.zeros((), dtype=tl.int32)
         sum_excluded_probs = tl.zeros((), dtype=tl.float32)
-        current_num_duplicates = tl.zeros((), dtype=tl.uint32)
+        num_duplicates_removed = tl.zeros((), dtype=tl.uint32)
         FILTERED_LOGITS_ROW = FILTERED_LOGITS + row_id * (P_FIL + 5)
         FILTERED_INDICES_ROW = FILTERED_INDICES + row_id * (P_FIL + 5)
         FILTERED_PROBS_ROW = FILTERED_PROBS + row_id * (P_FIL + 5)
@@ -860,14 +854,12 @@ def top_k_top_p_filter(
                     tl.abs(logits_blk - min_larger_p_fil_pivot) < 1e-12
                 ) & mask_n
 
-                duplicate_count = tl.cumsum(duplicate_mask) + current_num_duplicates
+                duplicate_count = tl.cumsum(duplicate_mask) + num_duplicates_removed
                 duplicate_remove_mask = duplicate_mask & (
-                    duplicate_count > num_deduplicate_to_keep
+                    duplicate_count <= num_duplicate_to_remove
                 )
                 keep_mask = keep_mask & (~duplicate_remove_mask)
-                current_num_duplicates += tl.sum(
-                    duplicate_mask & (~duplicate_remove_mask)
-                )
+                num_duplicates_removed += tl.sum(duplicate_remove_mask)
 
             keep_mask = keep_mask & mask_n
             cpos = tl.cumsum(keep_mask) - 1 + write_pos
@@ -894,7 +886,7 @@ def top_k_top_p_filter(
         tl.store(PFIL_PIVOT + row_id, p_fil_pivot)
         tl.store(SUM_EXCLUDED_PROBS + row_id, sum_excluded_probs)
         tl.store(NUM_FILTERED + row_id, write_pos)
-        tl.store(CURRENT_NUM_DUPLICATES + row_id, current_num_duplicates)
+        tl.store(NUM_DUPLICATES_REMOVED + row_id, num_duplicates_removed)
         tl.store(NUM_DUPLICATES + row_id, num_min_larger_p_fil_pivot)
         tl.store(MIN_LARGER_P_FIL_PIVOT + row_id, min_larger_p_fil_pivot)
         tl.store(DO_DEDUPLICATE + row_id, do_deduplicate)
@@ -937,9 +929,7 @@ def apply_top_k_top_p_filtered(
     filtered_indices = torch.full(
         (batch_size, p_filter + 5), p_filter, dtype=torch.int64, device=logits.device
     )
-    filtered_probs = torch.full(
-        (batch_size, p_filter + 5), -float("inf"), device=logits.device
-    )
+    filtered_probs = torch.full((batch_size, p_filter + 5), 0.0, device=logits.device)
     sum_excluded_probs = torch.zeros(
         (batch_size,), device=logits.device, dtype=torch.float32
     )
@@ -949,7 +939,7 @@ def apply_top_k_top_p_filtered(
     min_larger_p_fil_pivot = torch.zeros(
         (batch_size,), device=logits.device, dtype=torch.float32
     )
-    current_num_duplicates = torch.zeros(
+    num_duplicates_removed = torch.zeros(
         (batch_size,), device=logits.device, dtype=torch.uint32
     )
     do_deduplicate = torch.zeros(
@@ -963,7 +953,7 @@ def apply_top_k_top_p_filtered(
 
     top_k_top_p_filter[(NUM_PROGRAMS,)](
         do_deduplicate,
-        current_num_duplicates,
+        num_duplicates_removed,
         num_duplicates,
         min_larger_p_fil_pivot,
         filtered_logits_no_top_k,
@@ -988,7 +978,7 @@ def apply_top_k_top_p_filtered(
 
     print(f"p {p}")
     print(f"do_deduplicate {do_deduplicate}")
-    print(f"current_num_duplicates {current_num_duplicates}")
+    print(f"num_duplicates_removed {num_duplicates_removed}")
     print(f"num_duplicates {num_duplicates}")
     print(f"min_larger_p_fil_pivot {min_larger_p_fil_pivot}")
     print(f"num_filtered {num_filtered}")
