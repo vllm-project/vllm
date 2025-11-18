@@ -95,6 +95,7 @@ def install_system_dependencies():
         "meson",
         "libtool",
         "libtool-bin",
+        "pkg-config",
     ]
     run_command(["apt-get", "update"])
     run_command(["apt-get", "install", "-y"] + apt_packages)
