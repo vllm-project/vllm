@@ -972,7 +972,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
-        return attn_metadata
+        return attn_metadata  # type: ignore
 
 
 def reorg_kvcache(
