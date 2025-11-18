@@ -43,10 +43,10 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -640,9 +640,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.merger",
             )
-
-        self._persistent_hidden_states_buffer = torch.empty((8192, 1176), device=self.device, dtype=self.dtype)
-        self._persistent_rotary_pos_emb_buffer = torch.empty((8192, 40), device=self.device, dtype=torch.float32)
+        vllm_config: VllmConfig = get_current_vllm_config()
+        self._persistent_hidden_states_buffer = None
+        self._persistent_rotary_pos_emb_buffer = None
+        if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
+            max_compile_size = vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
+            self._persistent_hidden_states_buffer = torch.empty(
+                (max_compile_size, self.patch_embed.proj.input_size), device=self.device, dtype=self.dtype
+            )
+            self._persistent_rotary_pos_emb_buffer = torch.empty(
+                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.float32
+            )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -787,8 +795,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        # logger.info(f"X Shape: {x.shape}")
-        if seq_len < 8192:
+        fwd_ctx = get_forward_context()
+        if self._persistent_hidden_states_buffer is not None and \
+            fwd_ctx and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
             hidden_states = self._persistent_hidden_states_buffer[:seq_len]
             hidden_states.copy_(x, non_blocking=True)
         else:
@@ -850,21 +859,19 @@ class Qwen2_5_VisionTransformer(nn.Module):
             device=self.device, non_blocking=True
         )
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-        if seq_len < 8192:
+        if self._persistent_rotary_pos_emb_buffer is not None and \
+            fwd_ctx and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
             rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(rotary_pos_emb)
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
         )
         original_hidden_states = hidden_states  # 这只是引用，不是拷贝
-        # logger.info(f"Before Copy, original address: {original_hidden_states.storage().data_ptr()}")
-        # logger.info(f"Original Numel: {original_hidden_states.numel()}")
         # Step 2: 执行一些转换操作（这些会创建新张量）
         tmp = original_hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         tmp = tmp[window_index, :, :]
         tmp = tmp.reshape(seq_len, -1)
         tmp = tmp.unsqueeze(1)
-        # logger.info(f"Tmp Numel: {tmp.numel()}")
         # Step 3: 将结果拷贝回原始张量的显存地址中（这是原地拷贝！）
         original_storage = original_hidden_states.storage()
         tmp_storage = tmp.storage()
@@ -875,10 +882,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         new_shape = tmp.shape  # (seq_len, 1, new_hidden_dim)
         hidden_states = original_hidden_states.view(new_shape)
         # 现在 hidden_states.shape == new_shape，且使用和 original 相同的显存
-        # logger.info(f"After Copy, original address: {original_hidden_states.storage().data_ptr()}")
-        # logger.info(f"After Copy, tmp address: {tmp.storage().data_ptr()}")
 
-        # logger.info(f"Before Input to Vision Block, Shape: {hidden_states.shape}")
         with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(False):
             for layer_num, blk in enumerate(self.blocks):
                 if layer_num in self.fullatt_block_indexes:
