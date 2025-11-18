@@ -1006,7 +1006,7 @@ class AsyncLLM(EngineClient):
         """send fault tolerance instruction to the engine"""
         return await self.engine_core.handle_fault(instruction, timeout, **kwargs)
 
-    async def exception_reporter(self):
+    async def get_fault_info(self):
         """report exception in engine core"""
         return await self.engine_core.fault_reporter()
 

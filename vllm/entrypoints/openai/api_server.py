@@ -154,6 +154,18 @@ async def build_async_engine_client_from_engine_args(
         if async_llm:
             async_llm.shutdown()
 
+async def check_engine_fault(raw_request: Request):
+    client = engine_client(raw_request)
+    assert hasattr(client, "engine_core")
+    core_client = client.engine_core
+    if (
+        hasattr(core_client, "client_sentinel")
+        and core_client.client_sentinel.is_faulted.is_set()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Service is in faulted state, cannot process requests.",
+        )
 
 def build_app(
     args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
