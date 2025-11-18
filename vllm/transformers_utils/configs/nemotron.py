@@ -173,7 +173,7 @@ class NemotronConfig(PretrainedConfig):
             or partial_rotary_factor
         )
         self.partial_rotary_factor = partial_rotary_factor
-        self._rope_scaling_validation()
+        self._rope_parameters_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
