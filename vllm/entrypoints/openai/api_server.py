@@ -159,7 +159,7 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    stat_loggers: Optional[list[StatLoggerFactory]] = None,
+    stat_loggers: list[StatLoggerFactory] | None = None,
     disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
