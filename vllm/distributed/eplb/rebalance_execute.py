@@ -321,15 +321,19 @@ def rearrange_expert_weights_inplace(
             )
         return
 
+    old_global_expert_indices_cpu = old_global_expert_indices.cpu()
+    new_global_expert_indices_cpu = new_global_expert_indices.cpu()
+
+    # NOTE(bowen): We need this synchronize to run, but I don't know why.
+    # If you figure out the reason, please let me know -- thank you!
+    torch.cuda.synchronize()
+
     for layer in range(num_moe_layers):
-        # NOTE(bowen): We need this synchronize to run, but I don't know why.
-        # If you figure out the reason, please let me know -- thank you!
-        torch.cuda.synchronize()
         shuffle_layer(
             num_local_physical_experts,
             ep_rank,
-            old_global_expert_indices[layer].tolist(),
-            new_global_expert_indices[layer].tolist(),
+            old_global_expert_indices_cpu[layer].tolist(),
+            new_global_expert_indices_cpu[layer].tolist(),
             expert_weights[layer],
             expert_weights_buffer,
             ep_group,

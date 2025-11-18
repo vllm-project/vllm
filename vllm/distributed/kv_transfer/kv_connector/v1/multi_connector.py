@@ -171,16 +171,22 @@ class MultiConnector(KVConnectorBase_V1):
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.
+    #
+    # Note: Call the base class method to ensure metadata is also set on the
+    # MultiConnector instance itself; otherwise, `has_connector_metadata()` will
+    # always return False.
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
+        super().bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
         for c in self._connectors:
             c.clear_connector_metadata()
+        super().clear_connector_metadata()
 
     def shutdown(self):
         exception: Exception | None = None

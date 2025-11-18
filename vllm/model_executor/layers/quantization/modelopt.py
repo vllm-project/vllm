@@ -86,9 +86,19 @@ QUANT_ALGOS = ["FP8", "NVFP4"]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
 
+class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from FP8 checkpoints.
+    """
+
+    def __init__(self, quant_config: "ModelOptQuantConfigBase"):
+        super().__init__(quant_config)
+
+
 class ModelOptQuantConfigBase(QuantizationConfig):
     LinearMethodCls: type = LinearMethodBase
     FusedMoEMethodCls: type = FusedMoEMethodBase
+    KVCacheMethodCls: type = BaseKVCacheMethod
 
     def __init__(
         self,
@@ -112,6 +122,20 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
             return True
 
+        # TODO: this special hard coded logic is not needed after the next release of
+        # ModelOpt where they are handled natually by the exclude_modules config.
+        # But need to keep them for older modelopt versions
+        for module in self.exclude_modules:
+            # Skip exact matches already handled above
+            if module != prefix and (
+                module in prefix
+                or (
+                    prefix.startswith("language_model.")
+                    and module in prefix.removeprefix("language_model.")
+                )
+            ):
+                return True
+
         # modelopt exclude modules are not simple strings, they are wildcards
         for wildcard_pattern in self.exclude_modules:
             if fnmatch(prefix, wildcard_pattern):
@@ -126,7 +150,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, Attention):
-            return ModelOptFp8KVCacheMethod(self)
+            return self.KVCacheMethodCls(self)
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
@@ -583,9 +607,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
+            g1_alphas=(layer.w13_weight_scale * layer.w13_input_scale).squeeze(),
             w2_scale=layer.w2_weight_scale,
+            g2_alphas=(layer.w2_weight_scale * layer.w2_input_scale).squeeze(),
             a1_scale=layer.w13_input_scale,
+            a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            a2_gscale=1.0 / layer.w2_input_scale,
             per_act_token_quant=False,
         )
 
@@ -688,6 +716,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
 ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
+ModelOptFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
 
 
 class ModelOptNvFp4Config(ModelOptQuantConfigBase):
@@ -882,15 +911,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
-class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 checkpoints.
-    """
-
-    def __init__(self, quant_config: ModelOptQuantConfigBase):
-        super().__init__(quant_config)
-
-
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
     Supports loading NVFP4 checkpoints with the following structure:
@@ -916,6 +936,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
             self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
             assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
+            self.backend = "cutlass"
+            assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
@@ -1117,8 +1140,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> None:
-        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
-            detect_nvfp4_moe_support,
+        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (
+            detect_nvfp4_moe_support,  # noqa: E501
         )
 
         super().__init__(moe)
@@ -1745,3 +1768,4 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
+ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod

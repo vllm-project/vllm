@@ -150,11 +150,15 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(
+                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+            ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata,
                 )
@@ -275,7 +279,7 @@ class EagleProposer:
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
-            self.inputs_embeds[:num_tokens] = self.model.get_input_embeddings(
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
                 self.input_ids[:num_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -443,9 +447,7 @@ class EagleProposer:
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
-                self.inputs_embeds[:batch_size] = self.model.get_input_embeddings(
-                    input_ids
-                )
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
@@ -968,9 +970,7 @@ class EagleProposer:
             # text-only draft models
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.get_input_embeddings(
-                    dummy_input_ids, multimodal_embeddings=None
-                )
+                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
             except (NotImplementedError, AttributeError, TypeError):
                 logger.warning(
                     "Draft model does not support multimodal inputs, "

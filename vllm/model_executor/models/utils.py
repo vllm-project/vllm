@@ -12,7 +12,6 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -118,9 +117,10 @@ class AutoWeightsLoader:
     environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
     """
 
-    # Models trained using early version ColossalAI
-    # may include these tensors in checkpoint. Skip them.
+    # Models trained using early version ColossalAI or quantized by
+    # GPTQModel may include these tensors in checkpoint. Skip them.
     ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_pos_emb.inv_freq",
         "rotary_emb.inv_freq",
         "rotary_emb.cos_cached",
         "rotary_emb.sin_cached",
@@ -475,7 +475,7 @@ def _merge_multimodal_embeddings(
 
 @deprecated(
     "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.get_input_embeddings` and will be "
+    "`SupportsMultiModal.embed_input_ids` and will be "
     "removed in v0.12."
 )
 def merge_multimodal_embeddings(
@@ -576,11 +576,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    if envs.VLLM_USE_V1:
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
-    else:
-        uva_offloading = False
+    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+    uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
