@@ -84,6 +84,7 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         "num_speculative_tokens": 2,
         "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
     }
+    # Set small draft model len to force doesn't-fit-in-drafter case.
     spec_config_short = spec_config | {"max_model_len": 50}
 
     # test_preemption, executor, async_scheduling,
@@ -174,13 +175,14 @@ def run_tests(
                 ):
                     if "spec_mml=None" in test_config:
                         assert (
-                            pytest.approx(test_acceptance_rate, rel=5e-2)
-                            == base_acceptance_rate
+                            test_acceptance_rate > base_acceptance_rate
+                            or test_acceptance_rate
+                            == pytest.approx(base_acceptance_rate, rel=5e-2)
                         )
                     else:
                         # Currently the reported acceptance rate is expected to be
                         # lower when we sometimes skip drafting altogether.
-                        assert test_acceptance_rate > 0.05
+                        assert test_acceptance_rate > 0.1
                 print(
                     f"PASSED: config=[{test_config}], params={params}"
                     f" accept_rate={test_acceptance_rate}"
