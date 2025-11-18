@@ -15,6 +15,7 @@ from .linear_scaling_rope import LinearScalingRotaryEmbedding
 from .llama3_rope import Llama3RotaryEmbedding
 from .llama4_vision_rope import Llama4VisionRotaryEmbedding
 from .mrope import MRotaryEmbedding
+from .xdrope import XDRotaryEmbedding
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
@@ -184,6 +185,18 @@ def get_rope(
                 raise ValueError(
                     "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
                 )
+        elif scaling_type == "xdrope":
+            scaling_alpha = rope_scaling["alpha"]
+            rotary_emb = XDRotaryEmbedding(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                scaling_alpha,
+                dtype,
+                xdrope_section=rope_scaling["xdrope_section"]
+            )
         elif scaling_type == "yarn":
             scaling_factor = rope_scaling["factor"]
             original_max_position = rope_scaling["original_max_position_embeddings"]

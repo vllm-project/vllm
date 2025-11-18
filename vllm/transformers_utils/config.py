@@ -457,6 +457,24 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None:
+        if isinstance(xdrope_section, list):
+            return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    xdrope_section = getattr(rope_scaling, "xdrope_section", None)
+    if xdrope_section is not None:
+        if isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
+
+
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
 

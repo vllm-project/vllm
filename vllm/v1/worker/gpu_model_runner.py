@@ -57,6 +57,7 @@ from vllm.model_executor.models.interfaces import (
     is_mixture_of_experts,
     supports_eagle3,
     supports_mrope,
+    supports_xdrope,
     supports_multimodal_pruning,
     supports_transcription,
 )
@@ -317,6 +318,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_xdrope_dim = model_config.uses_xdrope_dim
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -490,6 +492,13 @@ class GPUModelRunner(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
 
+        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+        if self.uses_xdrope_dim > 0:
+            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
+            self.xdrope_positions = self._make_buffer(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+            )
+
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
 
@@ -560,10 +569,14 @@ class GPUModelRunner(
         if isinstance(num_tokens, int):
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, :num_tokens]
+            if self.uses_xdrope_dim > 0:
+                return self.xdrope_positions.gpu[:, :num_tokens]
             return self.positions.gpu[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
+            if self.uses_xdrope_dim > 0:
+                return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions.gpu[num_tokens]
 
     def _make_buffer(
@@ -731,6 +744,10 @@ class GPUModelRunner(
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
 
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            if self.uses_xdrope_dim > 0:
+                self._init_xdrope_positions(req_state)
+
             reqs_to_add.append(req_state)
 
         # Update the states of the running/resumed requests.
@@ -896,6 +913,17 @@ class GPUModelRunner(
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
             model.get_mrope_input_positions(
+                req_state.prompt_token_ids,
+                req_state.mm_features,
+            )
+        )
+
+    def _init_xdrope_positions(self, req_state: CachedRequestState):
+        model = self.get_model()
+        assert supports_xdrope(model), "XD-RoPE support is not implemented."
+
+        req_state.xdrope_positions = (
+            model.get_xdrope_input_positions(
                 req_state.prompt_token_ids,
                 req_state.mm_features,
             )
@@ -1097,6 +1125,11 @@ class GPUModelRunner(
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
+        # Calculate XD-RoPE positions.
+        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+        if self.uses_xdrope_dim > 0:
+            self._calc_xdrope_positions(scheduler_output)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -1224,6 +1257,12 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True,
+            )
+        elif self.uses_xdrope_dim > 0:
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
         else:
@@ -1650,6 +1689,53 @@ class GPUModelRunner(
 
                 mrope_pos_ptr += completion_part_len
 
+    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
+        xdrope_pos_ptr = 0
+        for index, req_id in enumerate(self.input_batch.req_ids):
+            req = self.requests[req_id]
+            assert req.xdrope_positions is not None
+
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                req.prompt_token_ids, req.prompt_embeds
+            )
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's xdrope_positions are pre-computed
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.xdrope_positions.cpu[:, dst_start:dst_end] = req.xdrope_positions[
+                    :, src_start:src_end
+                ]
+                xdrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's xdrope_positions on-the-fly
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + completion_part_len
+
+                XDRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.xdrope_positions.np,
+                    out_offset=dst_start,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
+
+                xdrope_pos_ptr += completion_part_len
+
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -1888,6 +1974,7 @@ class GPUModelRunner(
 
         req_start_idx = 0
         should_sync_mrope_positions = False
+        should_sync_xdrope_positions = False
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -1952,6 +2039,19 @@ class GPUModelRunner(
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
 
+            if self.is_multimodal_pruning_enabled and self.uses_xdrope_dim > 0:
+                assert req_state.xdrope_positions is not None
+                should_sync_xdrope_positions = True
+                mm_embeds_req, new_xdrope_positions = (
+                    self.model.recompute_xdrope_positions(
+                        input_ids=req_state.prompt_token_ids,
+                        multimodal_embeddings=mm_embeds_req,
+                        xdrope_positions=req_state.xdrope_positions,
+                        num_computed_tokens=req_state.num_computed_tokens,
+                    )
+                )
+                req_state.xdrope_positions.copy_(new_xdrope_positions)
+
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
@@ -1960,6 +2060,10 @@ class GPUModelRunner(
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        if should_sync_xdrope_positions:
+            self._calc_xdrope_positions(scheduler_output)
+            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
@@ -2269,6 +2373,8 @@ class GPUModelRunner(
             model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
@@ -3576,6 +3682,8 @@ class GPUModelRunner(
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
+            elif self.uses_xdrope_dim > 0:
+                positions = self.xdrope_positions.gpu[:, :num_tokens_after_padding]
             else:
                 positions = self.positions.gpu[:num_tokens_after_padding]
 

@@ -43,6 +43,8 @@ class CachedRequestState:
     mrope_positions: torch.Tensor | None = None
     mrope_position_delta: int | None = None
 
+    xdrope_positions: torch.Tensor | None = None
+
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
