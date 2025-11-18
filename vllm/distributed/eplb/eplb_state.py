@@ -593,7 +593,7 @@ class EplbState:
                     logger.info(
                         "[MASKING] Rank=%d Model=%s Step=%d: Per-rank expert token counts: %s. "
                         "Masked ranks: %s (should have 0 tokens)",
-                        ep_group.rank,
+                        ep_group.rank(),
                         eplb_model_state.model_name,
                         self.global_step,
                         rank_loads.tolist(),
@@ -717,7 +717,7 @@ class EplbState:
                             "[MASKING] Rank=%d Model=%s Layer=%d: "
                             "Physical experts masked: %s (belong to ranks: %s). "
                             "physical_to_logical_map shape=%s, -1 count=%d",
-                            ep_group.rank,
+                            ep_group.rank(),
                             model_name, layer_idx,
                             masked_expert_ids,
                             sorted(masked_ranks_for_layer),

@@ -1405,7 +1405,7 @@ def eplb_map_to_physical_and_record(
         # Get EP rank and size
         ep_group = get_ep_group()
         ep_rank = ep_group.rank
-        ep_size = ep_group.size()
+        ep_size = ep_group.world_size
         
         # Calculate which experts belong to which ranks
         # Assuming linear placement: rank = expert_id // num_local_experts
