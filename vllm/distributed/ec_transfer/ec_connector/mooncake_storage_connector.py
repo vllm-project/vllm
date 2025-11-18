@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -111,16 +111,22 @@ class ECMooncakeStorageConnector(ECConnectorBase):
     def has_caches(
         self,
         request: "Request",
-    ) -> list[bool]:
+        index: Optional[int] = None,
+    ) -> Union[bool, list[bool]]:
         """
         Check if cache exist externally for each mm_data of request
 
         Args:
             request (Request): the request object.
+            index (Optional[int]) the index of mm data to check.
 
         Returns:
             List of bool indicate that ith mm_data exist in cache or not
         """
+        if index is not None:
+            return self.store.batch_exists(
+                [request.mm_features[index].identifier])[0]
+
         mm_hashes = [feature.identifier for feature in request.mm_features]
         return self.store.batch_exists(mm_hashes)
 
