@@ -154,8 +154,8 @@ def test_rope_module_cache():
             head_size,
             rotary_dim,
             max_position,
-            rope_parameters,
             is_neox_style,
+            rope_parameters,
             dtype,
         )
         # different settings cannot share the same rope module
