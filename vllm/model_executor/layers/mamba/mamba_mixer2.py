@@ -518,12 +518,6 @@ class MambaMixer2(MambaBase, CustomOp):
             projected_states = projected_states * mup_vector
 
         # 2. Prepare inputs for conv + SSM
-        hidden_states_B_C, dt = torch.split(
-            projected_states[..., self.tped_intermediate_size :],
-            [self.tped_conv_size, self.tped_dt_size],
-            dim=-1,
-        )
-
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
@@ -534,16 +528,15 @@ class MambaMixer2(MambaBase, CustomOp):
         )
 
         # 3. conv + SSM
+        # (split `projected_states` into hidden_states_B_C, dt in the custom op to
+        # ensure it is not treated as an intermediate tensor by torch compile)
         torch.ops.vllm.mamba_mixer2(
-            hidden_states_B_C,
-            dt,
+            projected_states,
             ssm_output,
             self.prefix,
         )
 
         # 4. gated MLP
-        # (extract gate after the custom op to ensure `projected_states`
-        #  is not treated as an intermediate tensor by torch compile)
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
@@ -557,10 +550,15 @@ class MambaMixer2(MambaBase, CustomOp):
 
     def conv_ssm_forward(
         self,
-        hidden_states_B_C: torch.Tensor,
-        dt: torch.Tensor,
+        projected_states: torch.Tensor,
         output: torch.Tensor,
     ):
+        hidden_states_B_C, dt = torch.split(
+            projected_states[..., self.tped_intermediate_size :],
+            [self.tped_conv_size, self.tped_dt_size],
+            dim=-1,
+        )
+
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -917,19 +915,17 @@ class MambaMixer2(MambaBase, CustomOp):
 
 
 def mamba_mixer2(
-    hidden_states_B_C: torch.Tensor,
-    dt: torch.Tensor,
+    projected_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.conv_ssm_forward(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
+    self.conv_ssm_forward(projected_states=projected_states, output=output)
 
 
 def mamba_mixer2_fake(
-    hidden_states_B_C: torch.Tensor,
-    dt: torch.Tensor,
+    projected_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
