@@ -42,9 +42,9 @@ jobs:
         run: |
           # Start server in background
           vllm serve Qwen/Qwen3-0.6B \
-            --max-model-len=2K
+            --max-model-len=2K \
             --load-format=dummy \
-            --hf-overrides '{"num_hidden_layers": 2}'
+            --hf-overrides '{"num_hidden_layers": 2}' \
             --enforce-eager \
             --port 8000 &
 
