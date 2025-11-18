@@ -458,6 +458,8 @@ class XFormersAttentionImpl(AttentionImpl):
         # Reshape the output tensor.
         return output
 
+    # TODO(girfan): This is NOT xformers. It is a copy of Transformers' SDPA.
+    # We should use the cpu_attn backend for training which does the same thing.
     def forward_training(
         self,
         layer: torch.nn.Module,
