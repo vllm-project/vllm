@@ -126,6 +126,10 @@ class TTPlatform(Platform):
                 "models.demos.llama3_70b_galaxy.tt.generator_vllm"):
             cls.non_greedy_decoding_on_device = True  # type: ignore[attr-defined]
 
+        if model_class.__module__.startswith(
+                "models.tt_transformers.tt.generator_vllm"):
+            cls.non_greedy_decoding_on_device = True  # type: ignore[attr-defined]
+
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on TT is experimental.
