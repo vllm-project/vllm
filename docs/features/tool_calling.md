@@ -343,14 +343,14 @@ Supported models:
 
 Flags: `--tool-call-parser glm45`
 
-### Qwen3-Coder Models (`qwen3_xml`)
+### Qwen3-Coder Models (`qwen3_coder`)
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
-Flags: `--tool-call-parser qwen3_xml`
+Flags: `--tool-call-parser qwen3_coder`
 
 ### Olmo 3 Models (`olmo3`)
 
