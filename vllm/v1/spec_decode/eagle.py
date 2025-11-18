@@ -228,11 +228,9 @@ class EagleProposer:
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
-            # Do not combine hidden states if eagle3 head does not use aux hidden states
-            if self.eagle3_use_aux_hidden_state:
-                target_hidden_states = self.model.combine_hidden_states(
-                    target_hidden_states
-                )
+            target_hidden_states = self.model.combine_hidden_states(
+                target_hidden_states
+            )
             assert target_hidden_states.shape[-1] == self.hidden_size
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
