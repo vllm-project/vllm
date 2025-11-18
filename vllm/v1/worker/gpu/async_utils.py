@@ -17,12 +17,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self,
         model_runner_output: ModelRunnerOutput,
         sampler_output: SamplerOutput,
-        num_sampled_tokens: np.ndarray,
+        num_sampled_tokens: torch.Tensor,
         copy_stream: torch.cuda.Stream,
     ):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
-        self.num_sampled_tokens = num_sampled_tokens
         self.copy_stream = copy_stream
         self.copy_event = torch.cuda.Event()
 
@@ -41,6 +40,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             else:
                 self.logprobs_tensors = None
+            self.num_sampled_tokens = num_sampled_tokens.to("cpu", non_blocking=True)
             self.prompt_logprobs_dict = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
@@ -49,6 +49,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        num_sampled_tokens_np = self.num_sampled_tokens.numpy()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -57,8 +58,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         sampled_token_ids_np = self.sampled_token_ids.numpy()
         num_reqs = sampled_token_ids_np.shape[0]
         sampled_token_ids: list[np.ndarray] = [
-            sampled_token_ids_np[i, : self.num_sampled_tokens[i]]
-            for i in range(num_reqs)
+            sampled_token_ids_np[i, : num_sampled_tokens_np[i]] for i in range(num_reqs)
         ]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 

@@ -85,8 +85,12 @@ class RequestState:
             dtype=np.int32,
         )
         self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        self.num_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+
+        # Number of computed tokens.
+        self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -145,8 +149,9 @@ class RequestState:
         )
         self.prefill_len.np[req_idx] = prefill_len
         self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
-        self.num_tokens[req_idx] = prefill_len
-        self.num_computed_tokens[req_idx] = num_computed_tokens
+
+        self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens.np[req_idx] = num_computed_tokens
 
         if lora_request is not None:
             self.lora_ids[req_idx] = lora_request.lora_int_id
