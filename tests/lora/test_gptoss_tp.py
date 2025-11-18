@@ -77,6 +77,7 @@ def test_gpt_oss_lora(gptoss20b_lora_files):
         max_loras=4,
         max_lora_rank=8,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            max_cudagraph_capture_size=48,
             cudagraph_specialize_lora=False,
         ),
     )
@@ -98,6 +99,7 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            max_cudagraph_capture_size=48,
             cudagraph_specialize_lora=False,
         ),
     )

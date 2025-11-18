@@ -5,10 +5,14 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -376,3 +380,140 @@ class OAITritonExperts(BaseOAITritonExperts):
             intermediate_cache=workspace2,
             a1q_scale=a1q_scale,
         )
+
+
+class UnfusedOAITritonExperts(BaseOAITritonExperts):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        # TODO (varun) : Enable activation quantization
+        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        super().__init__(quant_config)
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_chunking(self) -> bool:
+        return True
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # workspace are allocated inside the kernel
+        workspace1 = (M * topk, N // 2)
+        workspace2 = (M * topk, max(N, K))
+        output = (M, K)
+        return (workspace1, workspace2, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        if self.quant_config is None:
+            self.quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+        if expert_map is not None:
+            topk_ids = expert_map[topk_ids]
+
+        local_num_experts = w1.size(0)
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
+
+        routing_data, gather_indx, scatter_indx = self._make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+
+        topk = topk_ids.size(1)
+
+        # type check, uint8 means mxfp4
+        assert hidden_states.dtype == torch.bfloat16
+        assert (
+            self.quant_config.w1_bias is None
+            or self.quant_config.w1_bias.dtype == torch.float32
+        )
+        assert (
+            self.quant_config.w2_bias is None
+            or self.quant_config.w2_bias.dtype == torch.float32
+        )
+
+        # Shape check, only check non-mxfp4
+        assert hidden_states.shape[-1] == w1.shape[-2]
+        assert w2.shape[-1] == w1.shape[1]
+
+        batch_dim = hidden_states.shape[0] if hidden_states.ndim == 3 else 1
+        M, K = hidden_states.shape[-2:]
+        E, _, N = w1.shape
+
+        if global_num_experts == -1:
+            global_num_experts = E
+
+        # Add batch_dim to output buffer because matmul_ogs expects 3D output
+        # Note that the output tensor might be in workspace1
+        intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
+        intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
+        intermediate_cache2 = _resize_cache(workspace13, (M * topk, N // 2))
+
+        gammas = routing_data.gate_scal if routing_data else None
+
+        matmul_ogs(
+            hidden_states,
+            w1,
+            self.quant_config.w1_bias,
+            routing_data,
+            gather_indx=gather_indx,
+            precision_config=self.quant_config.w1_precision,
+            gammas=gammas if apply_router_weight_on_input else None,
+            fused_activation=None,
+            y=intermediate_cache1,
+        )
+
+        self.activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
+
+        n_expts_act = routing_data.n_expts_act
+        routing_data.n_expts_act = 1
+
+        matmul_ogs(
+            intermediate_cache2,
+            w2,
+            self.quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=self.quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=intermediate_cache3,
+        )
+
+        self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
+
+        # Set the original n_expts_act back
+        routing_data.n_expts_act = n_expts_act
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
+        ops.moe_sum(input, output)
