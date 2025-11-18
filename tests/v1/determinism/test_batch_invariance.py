@@ -452,6 +452,9 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+    vllm_is_batch_invariant.cache_clear()
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # CRITICAL: Disable batch invariance for this test
@@ -460,6 +463,8 @@ def test_logprobs_without_batch_invariance_should_fail(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    if backend.endswith("MLA") and model_name == "Qwen/Qwen3-1.7B":
+        model_name = "deepseek-ai/DeepSeek-V2-Lite-Chat"
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     print(f"\n{'=' * 80}")
