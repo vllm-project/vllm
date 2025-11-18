@@ -1554,12 +1554,10 @@ def is_set(name: str):
 
 
 def compile_factors() -> dict[str, object]:
-    """
-    Return environment variables used to compute the compile cache key.
-    This includes all known vLLM environment variables.
-    This then excludes variables that cannot affect graph structure, codegen, or kernel
-      selection (see ignored_factors)
-    """
+    """Return env vars used for torch.compile cache keys.
+
+    Start with every known vLLM env var; drop entries in `ignored_factors`;
+    hash everything else. This keeps the cache key aligned across workers."""
 
     ignored_factors: set[str] = {
         "MAX_JOBS",
