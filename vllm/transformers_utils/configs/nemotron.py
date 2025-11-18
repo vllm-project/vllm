@@ -193,27 +193,22 @@ class NemotronConfig(PretrainedConfig):
         if self.rope_parameters is None:
             return
 
-        if not isinstance(self.rope_parameters, dict) or len(self.rope_parameters) != 3:
+        rope_type: str | None = self.rope_parameters.get("rope_type", None)
+        factor: float | None = self.rope_parameters.get("factor", None)
+
+        if rope_type not in {"default", "linear", "dynamic"}:
             raise ValueError(
-                "`rope_parameters` must be a dictionary with three fields, "
-                f"`rope_theta`, `rope_type` and `factor`, got {self.rope_parameters}"
+                "`rope_type` must be one of ['default', 'linear', 'dynamic'], "
+                f"got {rope_type}"
             )
-        rope_parameters_type = self.rope_parameters.get("rope_type", None)
-        rope_parameters_factor = self.rope_parameters.get("factor", None)
-        if rope_parameters_type is None or rope_parameters_type not in [
-            "linear",
-            "dynamic",
-        ]:
-            raise ValueError(
-                "`rope_parameters`'s type field must be one of ['linear', "
-                f"'dynamic'], got {rope_parameters_type}"
-            )
-        if (
-            rope_parameters_factor is None
-            or not isinstance(rope_parameters_factor, float)
-            or rope_parameters_factor <= 1.0
-        ):
-            raise ValueError(
-                "`rope_parameters`'s factor field must be a float > 1, got "
-                f"{rope_parameters_factor}"
-            )
+        if rope_type != "default":
+            if factor is None:
+                raise ValueError(
+                    "If `rope_type` is not 'default', `rope_parameters` "
+                    "must include a `factor` field. Got `None`."
+                )
+            if not isinstance(factor, float) or factor <= 1.0:
+                raise ValueError(
+                    "`rope_parameters`'s factor field must be a float > 1, got "
+                    f"{factor}"
+                )
