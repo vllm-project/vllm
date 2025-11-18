@@ -18,6 +18,10 @@ class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     def __repr__(self) -> str:
         return repr(self.block_ids)
 
+    @property
+    def num_blocks(self):
+        return len(self.block_ids)
+
 
 class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
     """
