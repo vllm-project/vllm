@@ -208,13 +208,17 @@ def apply_top_k_top_p(
 
     if p is not None:
         # Apply top-p.
+        # Note: Running softmax on "logits_sort" produces different probability
+        # values compared to running softmax on the original unsorted logits as the
+        # non-associativity of floating-points yields different sum(exp(logits)).
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+        print(f"original probs_sum {probs_sum[:, -100:]}")
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
+        print(f"original logits_sort {logits_sort[:, -100:]}")
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
@@ -904,7 +908,14 @@ def apply_top_k_top_p_filtered(
 
     # If k is too large, speedup is not significant as the filtered set is large.
     max_k = k.max().item() if k is not None else 0
-    if max_k > vocab_size / 10:
+    # Our softmax result is different from the original PyTorch top-p implementation ,
+    # as it runs softmax after a sort which produces different sum(exp(logits))
+    # compared to our softmax result which runs softmax on the original unsorted logits.
+    # If p is too large, the top-p cutoff falls in the tail section of the distribution,
+    # which consists of very small probabilities which has larger relative errors
+    # compared to the sorted PyTorch top-p probabilities. As such, we fallback to
+    # the original PyTorch top-p implementation for accuracy when p is too large.
+    if max_k > vocab_size / 10 or (k is None and p.max().item() > 0.97):
         return apply_top_k_top_p(logits, k, p)
 
     BLOCK_SIZE = 8192
@@ -916,7 +927,6 @@ def apply_top_k_top_p_filtered(
         (NUM_PROGRAMS, vocab_size), device=logits.device, dtype=torch.float32
     )
     p_filter = (
-        # vocab_size
         min(int(max_k * 1.5), vocab_size - 1) if k is not None else int(vocab_size / 32)
     )
     filtered_logits = torch.full(
@@ -976,18 +986,19 @@ def apply_top_k_top_p_filtered(
         num_stages=NUM_STAGES,
     )
 
-    print(f"p {p}")
-    print(f"do_deduplicate {do_deduplicate}")
-    print(f"num_duplicates_removed {num_duplicates_removed}")
-    print(f"num_duplicates {num_duplicates}")
-    print(f"min_larger_p_fil_pivot {min_larger_p_fil_pivot}")
-    print(f"num_filtered {num_filtered}")
-    print(f"pfil_pivot {pfil_pivot}")
-    print(f"Filtered logits no top k {filtered_logits_no_top_k}")
-    print(f"Filtered logits {filtered_logits}")
-    print(f"Filtered indices {filtered_indices}")
-    print(f"Filtered probs {filtered_probs}")
-    print(f"Sum excluded probs {sum_excluded_probs}")
+    # print(f"p {p}")
+    # print(f"p_filter {p_filter}")
+    # print(f"do_deduplicate {do_deduplicate}")
+    # print(f"num_duplicates_removed {num_duplicates_removed}")
+    # print(f"num_duplicates {num_duplicates}")
+    # print(f"min_larger_p_fil_pivot {min_larger_p_fil_pivot}")
+    # print(f"num_filtered {num_filtered}")
+    # print(f"pfil_pivot {pfil_pivot}")
+    # print(f"Filtered logits no top k {filtered_logits_no_top_k}")
+    # print(f"Filtered logits {filtered_logits}")
+    # print(f"Filtered indices {filtered_indices}")
+    # print(f"Filtered probs {filtered_probs}")
+    # print(f"Sum excluded probs {sum_excluded_probs}")
 
     filtered_logits = filtered_logits[:, :p_filter]
     filtered_indices = filtered_indices[:, :p_filter]
@@ -1003,20 +1014,22 @@ def apply_top_k_top_p_filtered(
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
     sorted_probs = torch.gather(filtered_probs, -1, sort_indices)
 
-    print("logits_sort", logits_sort)
-    print("sorted_probs", sorted_probs)
-    print("logits_sort_indices", logits_sort_indices)
+    torch.set_printoptions(threshold=float("inf"))
+    print("logits_sort", logits_sort[:, -100:])
+    print("sorted_probs", sorted_probs[:, -100:])
+    print("logits_sort_indices", logits_sort_indices[:, -100:])
+    torch.set_printoptions(threshold=None)
 
     sorted_probs[:, 0] = sorted_probs[:, 0] + sum_excluded_probs
     probs_sum = torch.cumsum(sorted_probs, dim=-1)
-    print("probs_sum", probs_sum)
+    print("probs_sum", probs_sum[:, -100:])
     top_p_mask = probs_sum <= (1 - p.unsqueeze(dim=-1))
     print("threashold", 1 - p.unsqueeze(dim=-1))
     top_p_mask[:, -1] = False
-    print("top_p_mask", top_p_mask)
+    print("top_p_mask", top_p_mask[:, -100:])
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
-    print("logits_sort_masked", logits_sort)
+    print("logits_sort_masked", logits_sort[:, -100:])
 
     logits.fill_(-float("inf"))
     logits.scatter_(dim=1, index=logits_sort_indices, src=logits_sort)
