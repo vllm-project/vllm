@@ -38,6 +38,28 @@ class ActivationMethod(IntEnum):
 aiter_topK_meta_data = None
 
 
+def validate_quantization_for_aiter_fusion_shared_experts(
+    quant_config,
+    shared_experts_layer_name: str,
+    experts_layer_name: str,
+) -> None:
+    """Validate quantization consistency for AITER shared experts fusion."""
+    if quant_config is None:
+        return
+
+    is_consistent, error_msg = quant_config.check_layer_quantization_consistency(
+        layer_name_1=shared_experts_layer_name,
+        layer_name_2=experts_layer_name,
+    )
+
+    assert is_consistent, (
+        f"AITER_FUSION_SHARED_EXPERTS requires matching quantization "
+        f"for shared_experts and experts.\n"
+        f"{error_msg}\n"
+        f"Set VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to disable."
+    )
+
+
 @lru_cache(maxsize=1)
 def init_aiter_topK_meta_data(
     n_routed_experts: int,

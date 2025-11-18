@@ -53,6 +53,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
     get_linear_transform_schemes,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    check_quantization_consistency,
     find_matched_target,
     is_activation_quantization_format,
     should_ignore_layer,
@@ -160,6 +161,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             return CompressedTensorsMoEMethod.get_moe_method(self, layer)
         return None
+
+    def check_layer_quantization_consistency(
+        self, layer_name_1: str, layer_name_2: str
+    ) -> tuple[bool, str]:
+        """
+        Check if two layers have consistent quantization configurations.
+
+        :param layer_name_1: First layer name
+        :param layer_name_2: Second layer name
+        :return: (is_consistent, error_message) tuple
+        """
+        return check_quantization_consistency(self, layer_name_1, layer_name_2)
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":

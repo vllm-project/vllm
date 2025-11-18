@@ -168,3 +168,21 @@ class QuantizationConfig(ABC):
         Interface to update values after config initialization.
         """
         pass
+
+    def check_layer_quantization_consistency(
+        self, layer_name_1: str, layer_name_2: str
+    ) -> tuple[bool, str]:
+        """
+        Check if two layers have consistent quantization configurations.
+
+        Used for operations that require fusing layers with matching quantization,
+        such as shared experts fusion in MoE models.
+
+        Default implementation assumes consistency. Subclasses should override
+        this method to provide specific validation logic.
+
+        :param layer_name_1: First layer name
+        :param layer_name_2: Second layer name
+        :return: (is_consistent, error_message) tuple
+        """
+        return True, ""

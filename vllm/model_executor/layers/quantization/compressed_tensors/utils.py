@@ -214,3 +214,87 @@ def _match_fused_layer(
             unfused_matches.append(None)
 
     return unfused_matches[0] if all(unfused_matches) else None
+
+
+def check_quantization_consistency(
+    quant_config,
+    layer_name_1: str,
+    layer_name_2: str,
+) -> tuple[bool, str]:
+    """
+    Check if two layers have consistent quantization configurations.
+
+    Used for operations that require fusing layers with matching quantization,
+    such as shared experts fusion.
+
+    :param quant_config: CompressedTensorsConfig instance
+    :param layer_name_1: First layer name (e.g., "model.layers.0.mlp.shared_experts.gate_up_proj")
+    :param layer_name_2: Second layer name (e.g., "model.layers.0.mlp.experts.w13")
+    :return: (is_consistent, error_message) tuple
+    """
+    if quant_config is None:
+        return True, ""
+
+    from torch import nn
+
+    ignore_list = getattr(quant_config, "ignore", [])
+    fused_mapping = getattr(quant_config, "packed_modules_mapping", {})
+    target_scheme_map = getattr(quant_config, "target_scheme_map", {})
+
+    # Check if layers are ignored
+    layer1_ignored = should_ignore_layer(layer_name_1, ignore_list, fused_mapping)
+    layer2_ignored = should_ignore_layer(layer_name_2, ignore_list, fused_mapping)
+
+    # Both must be quantized or both must be unquantized
+    if layer1_ignored != layer2_ignored:
+        return False, (
+            f"Quantization mismatch: {layer_name_1} is "
+            f"{'ignored' if layer1_ignored else 'quantized'}, but {layer_name_2} is "
+            f"{'ignored' if layer2_ignored else 'quantized'}. "
+            f"Ignore list: {ignore_list}"
+        )
+
+    # If both ignored, no need to check further
+    if layer1_ignored:
+        return True, ""
+
+    # Get quantization schemes for both layers
+    def get_scheme(layer_name: str):
+        try:
+            matched_target = find_matched_target(
+                layer_name, nn.Linear(1, 1), target_scheme_map.keys(), fused_mapping
+            )
+            return target_scheme_map.get(matched_target)
+        except (ValueError, KeyError):
+            return None
+
+    layer1_scheme = get_scheme(layer_name_1)
+    layer2_scheme = get_scheme(layer_name_2)
+
+    layer1_weight_quant = layer1_scheme.get("weights") if layer1_scheme else None
+    layer2_weight_quant = layer2_scheme.get("weights") if layer2_scheme else None
+
+    if not layer1_weight_quant or not layer2_weight_quant:
+        return True, ""
+
+    # Compare quantization parameters
+    def get_quant_params(weight_quant):
+        return {
+            "num_bits": weight_quant.num_bits,
+            "type": weight_quant.type,
+            "symmetric": weight_quant.symmetric,
+            "group_size": weight_quant.group_size,
+            "strategy": weight_quant.strategy,
+        }
+
+    params1 = get_quant_params(layer1_weight_quant)
+    params2 = get_quant_params(layer2_weight_quant)
+
+    if params1 != params2:
+        diff = set(params1.items()) ^ set(params2.items())
+        return False, (
+            f"Quantization parameters mismatch between {layer_name_1} and {layer_name_2}. "
+            f"Differences: {diff}"
+        )
+
+    return True, ""
