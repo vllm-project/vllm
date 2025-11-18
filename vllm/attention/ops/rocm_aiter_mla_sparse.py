@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
+
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -80,7 +82,9 @@ def rocm_fp8_mqa_logits(
     """
 
     # TODO(ganyi): Uncomment this after aiter merge this kernel into main
-    has_mqa_logits = hasattr("aiter.ops.triton", "fp8_mqa_logits")
+    has_mqa_logits = (
+        importlib.util.find_spec("aiter.ops.triton.fp8_mqa_logits") is not None
+    )
     if rocm_aiter_ops.is_enabled() and has_mqa_logits:
         from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
 
@@ -176,7 +180,9 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
-    has_paged_mqa_logits = hasattr("aiter.ops.triton", "pa_mqa_logits")
+    has_paged_mqa_logits = (
+        importlib.util.find_spec("aiter.ops.triton.pa_mqa_logits") is not None
+    )
     if rocm_aiter_ops.is_enabled() and has_paged_mqa_logits:
         from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits_stage1
 

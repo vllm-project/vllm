@@ -229,7 +229,9 @@ class RocmPlatform(Platform):
                 raise ValueError(
                     "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                 )
-
+            assert block_size == 1, (
+                "Sparse MLA backend on ROCm only supports block size 1 for now."
+            )
             logger.info_once("Using Sparse MLA backend on V1 engine.")
             return (
                 "vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse."
