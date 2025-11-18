@@ -334,7 +334,6 @@ class EplbState:
         policy_type = self.parallel_config.eplb_config.policy
         self.policy = PolicyFactory.generate_policy(policy_type)
         logger.debug(f"Generated EPLB policy instance of type: {policy_type}")
-        assert self.policy is not None, "EplbPolicy must be initialized"
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (
