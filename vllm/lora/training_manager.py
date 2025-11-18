@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from typing import List, Optional, Set
 
 import torch
@@ -18,31 +17,6 @@ from transformers import get_scheduler
 
 
 logger = init_logger(__name__)
-
-
-def get_parameter_names(model, forbidden_layer_types, forbidden_layer_names=None):
-    """
-    Returns the names of the model parameters that are not inside a forbidden layer.
-    """
-    forbidden_layer_patterns = (
-        [re.compile(pattern) for pattern in forbidden_layer_names] if forbidden_layer_names is not None else []
-    )
-    print(f"forbidden: {forbidden_layer_patterns}")
-    result = []
-    for name, child in model.named_children():
-        child_params = get_parameter_names(child, forbidden_layer_types, forbidden_layer_names)
-        result += [
-            f"{name}.{n}"
-            for n in child_params
-            if not isinstance(child, tuple(forbidden_layer_types))
-            and not any(pattern.search(f"{name}.{n}".lower()) for pattern in forbidden_layer_patterns)
-        ]
-    # Add model specific parameters that are not in any child
-    result += [
-        k for k in model._parameters if not any(pattern.search(k.lower()) for pattern in forbidden_layer_patterns)
-    ]
-    print(f"result: {result}")
-    return result
 
 
 class TrainingManager:
@@ -93,7 +67,8 @@ class TrainingManager:
 
         self.training_state = TrainingState()
 
-        # Initially set to None, will be set when the first training request is added and must be the same for all training requests later
+        # Initially set to None, will be set when the first training request is added.
+        # Must be the same for all training requests later.
         self._num_training_steps: Optional[int] = None
         self._num_warmup_steps: Optional[int] = None
 
@@ -245,8 +220,6 @@ class TrainingManager:
 
 
     def should_run_optimizer_step(self) -> bool:
-        # TODO(girfan): Maybe this check should be in the GPUModelRunner so we can access steps_in_epoch?
-        # do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
         return self.training_state.steps % self.grad_accumulation_steps == 0 and self.training_state.steps > 0
 
 
@@ -460,7 +433,6 @@ class TrainingManager:
         return optimizer
 
 
-    # TODO(girfan): Pass scheduler type as an argument from earlier.
     def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4):
         if self.optimizer is not None and self.scheduler is not None:
             return
@@ -476,21 +448,11 @@ class TrainingManager:
         )
 
 
-    def optimizer_step(self) -> float:
-        """Perform optimizer step with optional gradient clipping."""
+    def _clip_gradients(self):
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
-            # Clip gradients to prevent exploding gradients during training
-            # This matches PEFT's TrainingArguments(max_grad_norm=1.0) default
             trainable_params = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
-
-            # TODO(girfan): Confirm this?
-            # combine model parameters and trainable parameters
-            all_params = trainable_params + list(self.model.parameters())
-            # trainable_params only?
-
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 trainable_params,
-                # all_params,
                 max_norm=self.max_grad_norm,
             )
             self.grad_norm = grad_norm
@@ -504,32 +466,14 @@ class TrainingManager:
             total_norm = total_norm**0.5
             self.grad_norm = total_norm
 
-        # import pandas as pd
-        # # save the weights before step as pandas dataframe to csv
-        # for i, param in enumerate(self.optimizer.param_groups[0]['params']):
-        #     if param.data is not None:
-        #         df = pd.DataFrame({
-        #             "weight": param.data.flatten().tolist(),
-        #         })
-        #         df.to_csv(f"vllm_weights_before_step_{i}.csv", index=False)
-        # ss
 
+    def optimizer_step(self) -> float:
+        """Perform optimizer step with gradient clipping."""
+        self._clip_gradients()
         self.optimizer.step()
-
-        # import pandas as pd
-        # for i, param in enumerate(self.optimizer.param_groups[0]['params']):
-        #     if param.data is not None:
-        #         df = pd.DataFrame({
-        #             "weight": param.data.flatten().tolist(),
-        #         })
-        #         df.to_csv(f"vllm_weights_after_step_{i}.csv", index=False)
-        # ss
-
         # Save learning rate before update
         learning_rate = self.get_learning_rate()
-
         self.scheduler.step()
-
         return learning_rate
 
 

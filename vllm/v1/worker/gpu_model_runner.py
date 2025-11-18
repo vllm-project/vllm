@@ -2485,7 +2485,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.training_manager.num_training_steps = num_training_steps
             self.training_manager.num_warmup_steps = num_warmup_steps
 
-        # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -2513,15 +2512,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **model_kwargs,
                 )
 
-                # save model_output to a csv file
-                # import pandas as pd
-                # # print(f"vLLM model_output shape: {model_output.shape}")
-                # # print(f"vLLM model_output first few values: {model_output[0, :5]}")
-                # df = pd.DataFrame({
-                #     "model_output": model_output.flatten().tolist(),
-                # })
-                # df.to_csv(f"vllm_model_output.csv", index=False)
-
                 # For training, model_output should be hidden states
                 hidden_states = model_output
 
@@ -2534,25 +2524,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Select the hidden states for the tokens we want
                 # (logits_indices was prepared in _prepare_inputs - for training it includes ALL tokens)
                 hidden_states = hidden_states[logits_indices]
-                # save hidden_states to a csv file
-                # import pandas as pd
-                # df = pd.DataFrame({
-                #     "hidden_states": hidden_states.flatten().tolist(),
-                # })
-                # df.to_csv(f"vllm_slices_hidden_states.csv", index=False)
-                # ss
 
                 # Compute logits for loss calculation
                 # For training, we need logits for all tokens (achieved via logits_indices)
                 logits = self.model.compute_logits(hidden_states, None)
-
-                # # save logits to a csv file
-                # import pandas as pd
-                # df = pd.DataFrame({
-                #     "logits": logits.flatten().tolist(),
-                # })
-                # df.to_csv(f"vllm_logits.csv", index=False)
-                # ss
 
                 per_req_logits = {}
                 all_logits = []
@@ -2595,7 +2570,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     else:
                         labels = labels.to(self.device)
 
-                    # Handle variable length sequences like PEFT does
+                    # Handle variable length sequences
                     if len(labels) != num_tokens:
                         # Pad or truncate labels to match sequence length
                         if len(labels) < num_tokens:
@@ -2621,9 +2596,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits = torch.stack(all_logits, dim=0)
                 labels = torch.stack(all_labels, dim=0)
 
-                # Capture input tensors for debugging/comparison
-                # self.training_manager.capture_input_tensors(input_ids_tensor, labels)
-
                 # TODO(girfan): Check if this is correct.
                 # https://github.com/huggingface/transformers/issues/41842
                 num_items_in_batch = labels.ne(-100).sum()
@@ -2636,46 +2608,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_items_in_batch=num_items_in_batch
                 )
 
-                # save labels to a csv file
-                # import pandas as pd
-                # df = pd.DataFrame({
-                #     "labels": labels.flatten().tolist(),
-                # })
-                # df.to_csv(f"vllm_labels.csv", index=False)
-                # ss
-
-                # # save loss to a csv file
-                # df = pd.DataFrame({
-                #     "loss": tr_loss.flatten().tolist(),
-                # })
-                # df.to_csv(f"vllm_loss.csv", index=False)
-                # ss
-
                 if not is_eval_batch:
-                    # import csv
-                    # with open('vllm_weights.csv', 'w') as f:
-                    #     writer = csv.writer(f)
-                    #     writer.writerow(['parameter', 'weight'])
-                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
-                    #         if param.data is not None:
-                    #             writer.writerow([param.name, param.data.flatten().tolist()])
-
                     # Backward pass
                     tr_loss.backward()
                     cur_loss = tr_loss.detach()
-
-                    # import torchviz
-                    # torchviz.make_dot(tr_loss, params=dict(self.model.named_parameters())).render("vllm_loss_computation_graph", format="png")
-                    # ss
-
-                    # import csv
-                    # with open('vllm_gradients.csv', 'w') as f:
-                    #     writer = csv.writer(f)
-                    #     writer.writerow(['parameter', 'gradient'])
-                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
-                    #         if param.grad is not None:
-                    #             writer.writerow([param.name, param.grad.flatten().tolist()])
-                    # ss
 
                     # Add loss and step the training manager
                     self.training_manager.add_loss(cur_loss)
@@ -2689,16 +2625,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Run the optimizer step if it is time to do so
                 if self.training_manager.should_run_optimizer_step():
                     learning_rate = self.training_manager.optimizer_step()
-
-                    # import csv
-                    # with open('vllm_weights_after_optimizer_step.csv', 'w') as f:
-                    #     writer = csv.writer(f)
-                    #     writer.writerow(['parameter', 'weight'])
-                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
-                    #         if param.data is not None:
-                    #             writer.writerow([param.name, param.data.flatten().tolist()])
-                    # ss
-
                     self.training_manager.reset_steps()
                     self.training_manager.model_zero_grad()
 

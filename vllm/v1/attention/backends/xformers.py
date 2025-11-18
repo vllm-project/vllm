@@ -34,9 +34,6 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
-ATTN_MASK = None
-
-
 class XFormersAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
@@ -482,8 +479,6 @@ class XFormersAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        global ATTN_MASK
-
         # Extract batch structure from metadata
         query_start_loc = attn_metadata.query_start_loc
         if query_start_loc is None or len(query_start_loc) <= 1:
@@ -499,31 +494,16 @@ class XFormersAttentionImpl(AttentionImpl):
         seq_len = seqlens[0]
 
         # Reshape Q from [total_tokens, num_heads, head_dim] to [batch, num_heads, seq_len, head_dim]
-        # This matches Transformers format: [batch, num_heads, seq_len, head_dim]
+        # This matches Transformers format: [batch, num_heads, seq_len, head_dim] e.g., [4, 32, 512, 64]
         q = query.view(batch_size, seq_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
 
         # Reshape K/V from [total_tokens, num_kv_heads, head_dim] to [batch, num_kv_heads, seq_len, head_dim]
         k = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size).transpose(1, 2).contiguous()
         v = value.view(batch_size, seq_len, self.num_kv_heads, self.head_size).transpose(1, 2).contiguous()
 
-        # # save query_states, key_states, value_states to a csv file
-        # import pandas as pd
-        # df = pd.DataFrame({
-        #     "q": q.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_q_reshaped.csv", index=False)
-        # df = pd.DataFrame({
-        #     "k": k.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_k_reshaped.csv", index=False)
-        # df = pd.DataFrame({
-        #     "v": v.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_v_reshaped.csv", index=False)
-        # ss
-
-        # Apply repeat_kv expansion (same as Transformers sdpa_attention.py lines 62-63)
+        # Apply repeat_kv expansion (same as Transformers sdpa_attention.py)
         # This matches the logic in repeat_kv function
+        # After this q, k, v all have shape [batch, num_heads, seq_len, head_dim] e.g., [4, 32, 512, 64]
         if self.num_kv_heads != self.num_heads:
             # GQA: Expand K and V by repeating each kv_head num_queries_per_kv times
             # From [batch, num_kv_heads, seq_len, head_dim] to [batch, num_heads, seq_len, head_dim]
@@ -536,14 +516,14 @@ class XFormersAttentionImpl(AttentionImpl):
                 batch_size, self.num_kv_heads, self.num_queries_per_kv, seq_len, self.head_size
             ).reshape(batch_size, self.num_heads, seq_len, self.head_size).contiguous()
 
-        # Now q, k, v all have shape [batch, num_heads, seq_len, head_dim]
-        # This matches Transformers format exactly: [4, 32, 512, 64]
 
         # Handle attention mask - reshape to match PEFT format [batch, 1, seq_len, seq_len]
         dropout = 0.0
         scaling = self.scale
-        is_causal = False
         attn_mask = None
+
+        # TODO(girfan): Follow the same logic as Transformers to set is_causal?
+        is_causal = False
 
         if attn_metadata.training_attention_mask is not None:
             mask_data = attn_metadata.training_attention_mask
@@ -580,31 +560,8 @@ class XFormersAttentionImpl(AttentionImpl):
                         f"Individual mask shapes: {[m.shape for m in masks_per_req]}, seq_lens_list: {seq_lens_list}"
                     )
 
-        # # Debug: save attention mask
-        # import pandas as pd
-        # df = pd.DataFrame({
-        #     "attn_mask": attn_mask.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_attn_mask.csv", index=False)
-        # ss
-
-        # import pandas as pd
-        # # save q, k, v to separate csv files
-        # df = pd.DataFrame({
-        #     "q": q.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_q_in_attn.csv", index=False)
-        # df = pd.DataFrame({
-        #     "k": k.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_k_in_attn.csv", index=False)
-        # df = pd.DataFrame({
-        #     "v": v.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_v_in_attn.csv", index=False)
-        # ss
-
-        # Call SDPA with same parameters as Transformers (sdpa_attention.py line 118)
+        # Call SDPA with same parameters as Transformers (sdpa_attention.py)
+        # attn_output shape: [batch, num_heads, seq_len, head_dim] = e.g., [4, 32, 512, 64]
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             q,  # [batch, num_heads, seq_len, head_dim] - same as Transformers
             k,  # [batch, num_heads, seq_len, head_dim] - same as Transformers
@@ -614,32 +571,14 @@ class XFormersAttentionImpl(AttentionImpl):
             scale=scaling,
             is_causal=is_causal,
         )
-        # attn_output shape: [batch, num_heads, seq_len, head_dim] = [4, 32, 512, 64]
 
         # Reshape output to match Transformers' output format
-        # Transformers does: attn_output.transpose(1, 2).contiguous() (line 128)
-        # This gives: [batch, seq_len, num_heads, head_dim] = [4, 512, 32, 64]
+        # Transformers: attn_output.transpose(1, 2).contiguous()
+        # This gives: [batch, seq_len, num_heads, head_dim] = e.g., [4, 512, 32, 64]
         attn_output = attn_output.transpose(1, 2).contiguous()
 
-        # import pandas as pd
-        # df = pd.DataFrame({
-        #     "attn_output": attn_output.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_attn_output.csv", index=False)
-        # ss
-
         # Flatten back to vLLM format: [total_tokens, num_heads, head_dim]
-        # [4, 512, 32, 64] -> [2048, 32, 64]
+        # e.g., [4, 512, 32, 64] -> [2048, 32, 64]
         attn_output_flat = attn_output.view(-1, self.num_heads, self.head_size)
-
-        # import pandas as pd
-        # df = pd.DataFrame({
-        #     "attn_output": attn_output_flat.flatten().tolist(),
-        # })
-        # df.to_csv("vllm_attn_output_flat.csv", index=False)
-
         output[:] = attn_output_flat
-
         return attn_output_flat
-
-        # return output
