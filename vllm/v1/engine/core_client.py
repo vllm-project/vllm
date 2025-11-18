@@ -602,7 +602,8 @@ class MPClient(EngineCoreClient):
 
                 # If r is a call frame: show info
                 if inspect.isframe(r):
-                    logger.error("Frame at:", r.f_code.co_name, "locals:", r.f_locals.keys())
+                    logger.error("Frame at: %s, locals: %s", 
+                                 r.f_code.co_name, r.f_locals.keys())
 
             _self.resources.engine_dead = True
             proc_name = next(
