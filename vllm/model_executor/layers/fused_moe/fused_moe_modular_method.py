@@ -108,6 +108,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         # Is getattr needed?
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+        layer_id = getattr(layer, "layer_id", 0)
 
         if enable_eplb:
             if self.supports_eplb:
@@ -141,6 +142,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
+            layer_id=layer_id,
         )
 
         result = self.fused_experts(
