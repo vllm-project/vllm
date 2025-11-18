@@ -498,8 +498,8 @@ class GptOssModel(nn.Module):
 
     def _load_weights_other(
         self,
-        ep_rank_start: int,
         ep_rank_end: int,
+        ep_rank_start: int,
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -662,8 +662,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_end,
                 ep_rank_start,
+                ep_rank_end,
                 heads_per_rank,
                 head_start,
                 weights,
