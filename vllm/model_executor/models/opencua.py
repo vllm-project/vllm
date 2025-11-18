@@ -607,10 +607,23 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         hf_config = self.info.get_hf_config()
 
         # OpenCUA's chat_template uses <|media_placeholder|> for images
-        # This is what actually appears in the prompt, not <|image_pad|>
+        # This matches HF repo: https://huggingface.co/xlangai/OpenCUA-7B
+        # Use media_placeholder_token_id from config (default: 151664)
+        media_placeholder_token_id = getattr(
+            hf_config, "media_placeholder_token_id", 151664
+        )
         placeholder = {
-            "image": vocab.get("<|media_placeholder|>", vocab.get(hf_processor.image_token, getattr(hf_config, "image_token_id", 151664))),
-            "video": vocab.get(hf_processor.video_token, getattr(hf_config, "video_token_id", 151656)),
+            "image": vocab.get(
+                "<|media_placeholder|>",
+                vocab.get(
+                    hf_processor.image_token,
+                    getattr(hf_config, "image_token_id", media_placeholder_token_id),
+                ),
+            ),
+            "video": vocab.get(
+                hf_processor.video_token,
+                getattr(hf_config, "video_token_id", media_placeholder_token_id),
+            ),
         }
 
         merge_length = image_processor.merge_size**2
@@ -703,49 +716,82 @@ class OpenCUAForConditionalGeneration(
         video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
         hf_config = self.config
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
+        # OpenCUA uses media_placeholder_token_id (default: 151664) from HF repo
+        media_placeholder_token_id = getattr(
+            hf_config, "media_placeholder_token_id", 151664
+        )
+        # For backward compatibility, also check separate token IDs
+        image_token_id = getattr(hf_config, "image_token_id", media_placeholder_token_id)
+        video_token_id = getattr(hf_config, "video_token_id", media_placeholder_token_id)
+        vision_start_token_id = getattr(
+            hf_config, "vision_start_token_id", media_placeholder_token_id
+        )
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
+        # Count images and videos from grid_thw
+        image_nums = len(image_grid_thw)
+        video_nums = len(video_grid_thw)
+        total_mm_items = image_nums + video_nums
+
         input_tokens_tensor = torch.tensor(input_tokens)
-        vision_start_indices = torch.argwhere(
-            input_tokens_tensor == vision_start_token_id
-        ).squeeze(1)
-        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
-        image_nums = (vision_tokens == image_token_id).sum()
-        video_nums = (vision_tokens == video_token_id).sum()
+        # Find all media placeholder tokens in the input
+        # OpenCUA uses media_placeholder_token_id directly (no vision_start wrapper)
+        media_indices = torch.argwhere(
+            input_tokens_tensor == media_placeholder_token_id
+        ).squeeze(-1).tolist()
+        
+        # If no media_placeholder_token_id found, try vision_start_token_id pattern
+        if len(media_indices) == 0:
+            vision_start_indices = torch.argwhere(
+                input_tokens_tensor == vision_start_token_id
+            ).squeeze(-1).tolist()
+            if len(vision_start_indices) > 0:
+                # Next token after vision_start is the media token
+                media_indices = [idx + 1 for idx in vision_start_indices 
+                               if idx + 1 < len(input_tokens)]
+        
+        # Match media tokens with grid_thw items in order
         llm_pos_ids_list: list = []
-
         st = 0
-        remain_images, remain_videos = image_nums, video_nums
-
         image_index, video_index = 0, 0
-        for _ in range(image_nums + video_nums):
-            if remain_images > 0:
+        media_token_index = 0
+
+        for _ in range(total_mm_items):
+            # Find next media token
+            if media_token_index < len(media_indices):
+                ed = media_indices[media_token_index]
+                media_token_index += 1
+            else:
+                # Fallback: search for any media token from current position
                 try:
-                    ed_image = input_tokens.index(image_token_id, st)
+                    ed = input_tokens.index(media_placeholder_token_id, st)
                 except ValueError:
+                    # Try image_token_id or video_token_id
                     ed_image = len(input_tokens) + 1
-            else:
-                ed_image = len(input_tokens) + 1
-            if remain_videos > 0:
-                try:
-                    ed_video = input_tokens.index(video_token_id, st)
-                except ValueError:
                     ed_video = len(input_tokens) + 1
-            else:
-                ed_video = len(input_tokens) + 1
-            if ed_image < ed_video:
+                    if image_index < image_nums:
+                        try:
+                            ed_image = input_tokens.index(image_token_id, st)
+                        except ValueError:
+                            pass
+                    if video_index < video_nums:
+                        try:
+                            ed_video = input_tokens.index(video_token_id, st)
+                        except ValueError:
+                            pass
+                    ed = min(ed_image, ed_video)
+                    if ed > len(input_tokens):
+                        break
+            
+            # Determine modality: use image_grid_thw first, then video_grid_thw
+            if image_index < image_nums:
                 t, h, w = image_grid_thw[image_index]
                 image_index += 1
-                remain_images -= 1
-                ed = ed_image
-            else:
+            elif video_index < video_nums:
                 t, h, w = video_grid_thw[video_index]
                 video_index += 1
-                remain_videos -= 1
-                ed = ed_video
+            else:
+                break
 
             llm_grid_t, llm_grid_h, llm_grid_w = (
                 t,
@@ -761,14 +807,16 @@ class OpenCUAForConditionalGeneration(
 
             # For 1D-RoPE, we use sequential positions instead of 3D grid
             # but still return 3D format for LLM compatibility
-            t_index = torch.arange(llm_grid_t * llm_grid_h * llm_grid_w).long()
+            # OpenCUA uses 1D-RoPE, so we set t_index to sequential, h/w to 0
+            num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            t_index = torch.arange(num_vision_tokens).long()
             h_index = torch.zeros_like(t_index)
             w_index = torch.zeros_like(t_index)
             
             llm_pos_ids_list.append(
                 torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
-            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+            st = ed + num_vision_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
@@ -784,10 +832,17 @@ class OpenCUAForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        """Get placeholder string for OpenCUA.
+        
+        OpenCUA uses <|media_placeholder|> for images (matching HF repo).
+        This is what appears in the chat_template after processing.
+        """
         if modality.startswith("image"):
-            return "<|vision_start|><|image_pad|><|vision_end|>"
+            # OpenCUA uses <|media_placeholder|> instead of <|image_pad|>
+            return "<|media_placeholder|>"
         if modality.startswith("video"):
-            return "<|vision_start|><|video_pad|><|vision_end|>"
+            # Keep video token as is for now
+            return "<|video_pad|>"
         raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

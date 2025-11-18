@@ -14,6 +14,9 @@ class OpenCUAConfig(PretrainedConfig):
     
     OpenCUA is based on Qwen2.5-VL but uses 1D-RoPE instead of M-RoPE
     for the vision encoder.
+    
+    This matches the HF repo implementation at:
+    https://huggingface.co/xlangai/OpenCUA-7B/blob/main/configuration_opencua.py
     """
 
     model_type = "opencua"
@@ -23,9 +26,7 @@ class OpenCUAConfig(PretrainedConfig):
         vision_config: dict | Qwen2_5_VLVisionConfig | None = None,
         text_config: dict | Qwen2Config | None = None,
         ignore_index: int = -100,
-        image_token_id: int = 151664,
-        video_token_id: int = 151656,
-        vision_start_token_id: int = 151647,
+        media_placeholder_token_id: int = 151664,
         pad_token_id: int = 0,
         **kwargs,
     ):
@@ -42,9 +43,17 @@ class OpenCUAConfig(PretrainedConfig):
         self.text_config = text_config
 
         self.ignore_index = ignore_index
-        self.image_token_id = image_token_id
-        self.video_token_id = video_token_id
-        self.vision_start_token_id = vision_start_token_id
+        self.media_placeholder_token_id = media_placeholder_token_id
 
         super().__init__(pad_token_id=pad_token_id, **kwargs)
+        
+        # Backward compatibility: support old configs with separate token IDs
+        # These are used internally by vLLM but not in HF repo
+        if not hasattr(self, "image_token_id"):
+            self.image_token_id = media_placeholder_token_id
+        if not hasattr(self, "video_token_id"):
+            self.video_token_id = media_placeholder_token_id
+        if not hasattr(self, "vision_start_token_id"):
+            # OpenCUA uses media_placeholder_token_id for vision start
+            self.vision_start_token_id = media_placeholder_token_id
 
