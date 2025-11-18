@@ -1602,7 +1602,7 @@ class FusedMoE(CustomOp):
         def reduce_output(states: torch.Tensor) -> torch.Tensor:
             # Slice before all_reduce to enable possible fusion
             if self.hidden_size != og_hidden_states:
-                states = states[..., :og_hidden_states].contiguous()
+                states = states[..., :og_hidden_states]
 
             if (
                 not self.is_sequence_parallel
