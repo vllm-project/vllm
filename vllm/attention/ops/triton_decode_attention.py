@@ -298,7 +298,9 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_req_idx = cur_batch
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
+    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0).to(
+        tl.bfloat16
+    )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -308,7 +310,7 @@ def _fwd_grouped_kernel_stage1(
         )
         qpe = tl.load(
             Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
-        )
+        ).to(tl.bfloat16)
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
@@ -376,7 +378,7 @@ def _fwd_grouped_kernel_stage1(
             re_scale = tl.exp(e_max - n_e_max)
             p = tl.exp(qk - n_e_max[:, None])
             acc *= re_scale[:, None]
-            acc += tl.dot(p.to(v.dtype), v)
+            acc += tl.dot(p.to(q.dtype), v.to(q.dtype))
 
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max

@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
@@ -16,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -27,7 +29,10 @@ logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+    ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
@@ -90,14 +95,44 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLAImpl"
             )
 
+        self.use_aiter_prefill = False
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER_MLA_PREFILL:
+            logger.info_once("Using Aiter prefill for MLA")
+            self.use_aiter_prefill = True
+
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported"
+            if self.kv_cache_dtype.startswith("fp8"):
+                logger.warning_once(
+                    """TritonMLA V1 with FP8 KV only works when all
+                    layer scales are 1.0. Any other value will raise
+                    an error."""
+                )
+            else:
+                raise NotImplementedError(
+                    "TritonMLA V1 with quantized KV cache not yet supported"
+                )
+
+        self.force_num_kv_splits = envs.VLLM_FORCE_NUM_KV_SPLITS
+        if self.force_num_kv_splits:
+            logger.info_once(
+                "Forcing TritonMLA num_kv_splits to %d",
+                self.force_num_kv_splits,
             )
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
+        if self.use_aiter_prefill:
+            from aiter import flash_attn_varlen_func as aiter_fa_func
+
+            return aiter_fa_func(
+                q=q,
+                k=k,
+                v=v,
+                softmax_scale=softmax_scale,
+                return_lse=return_softmax_lse,
+                **kwargs,
+            )
         return super()._flash_attn_varlen_diff_headdims(
             q,
             k,
@@ -117,8 +152,16 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+        if self.kv_cache_dtype.startswith("fp8") and (
+            layer._q_scale != 1.0 or layer._k_scale != 1.0 or layer._v_scale != 1.0
+        ):
+            raise NotImplementedError(
+                """
+                FP8 Triton MLA with q,k,v scales
+                {layer._q_scale},{layer._k_scale},{layer._v_scale}
+                not yet supported. Only values of 1.0 supported.
+            """
+            )
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
@@ -133,6 +176,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        if self.force_num_kv_splits:
+            num_kv_splits = self.force_num_kv_splits
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
