@@ -186,6 +186,14 @@ class CudagraphDispatcher:
                         bs, False, num_active_loras > 0, num_active_loras
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
+            # ViT CUDAGraph Entry
+            for vit_patch_len in self.compilation_config.vit_cudagraph_capture_sizes:
+                self.add_cudagraph_key(
+                    cudagraph_mode.mixed_mode(),
+                    BatchDescriptor(
+                        num_tokens=vit_patch_len, uniform_decode=False, is_vit=True
+                    ),
+                )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.

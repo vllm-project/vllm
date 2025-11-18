@@ -2436,6 +2436,7 @@ class GPUModelRunner(
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
                 original_num_imgs = -1
+                padded_num_tokens = -1
                 if "pixel_values" in mm_kwargs_group:
                     pixel_values = mm_kwargs_group["pixel_values"]
                     num_tokens = pixel_values.shape[0]
@@ -2471,14 +2472,18 @@ class GPUModelRunner(
                             )
                             mm_kwargs_group["image_grid_thw"] = self.image_grid_thw_buffer[:num_images + 1]
 
-                # TODO get batch_descriptor from dispatch
+                # get batch_descriptor from dispatcher
                 batch_descriptor = BatchDescriptor(
-                    num_tokens=mm_kwargs_group["pixel_values"].shape[0],
+                    num_tokens=padded_num_tokens,
+                    is_vit=True,
+                )
+                cudagraph_runtime_mode, batch_descriptor = (
+                    self.cudagraph_dispatcher.dispatch(batch_descriptor, False)
                 )
                 with set_forward_context(
                         None,
                         vllm_config=self.vllm_config,
-                        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                        cudagraph_runtime_mode=cudagraph_runtime_mode,
                         batch_descriptor=batch_descriptor,
                     ), self.timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx, num_items
@@ -5232,6 +5237,7 @@ class GPUModelRunner(
             dummy_mm_inputs = self._get_dummy_vit_input(capture_size, img_feature_dim)
             batch_descriptor = BatchDescriptor(
                                 num_tokens=capture_size,
+                                is_vit=True,
                             )
             with (
                 set_forward_context(
