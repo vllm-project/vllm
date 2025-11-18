@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
@@ -250,7 +250,6 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
-    kv_connector_output: KVConnectorOutput | None
     ec_connector_output: ECConnectorOutput | None
 
 
@@ -573,6 +572,7 @@ class GPUModelRunner(
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
+        self.kv_connector_output: KVConnectorOutput | None = None
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -2663,6 +2663,18 @@ class GPUModelRunner(
                         return make_empty_encoder_model_runner_output(scheduler_output)
 
                 if not num_scheduled_tokens:
+                    if (
+                        self.parallel_config.distributed_executor_backend
+                        == "external_launcher"
+                        and self.parallel_config.data_parallel_size > 1
+                    ):
+                        # this is a corner case when both external launcher
+                        # and DP are enabled, num_scheduled_tokens could be
+                        # 0, and has_unfinished_requests in the outer loop
+                        # returns True. before returning early here we call
+                        # dummy run to ensure coordinate_batch_across_dp
+                        # is called into to avoid out of sync issues.
+                        self._dummy_run(1)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2803,6 +2815,7 @@ class GPUModelRunner(
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
+                    self.kv_connector_output = kv_connector_output
                     return hidden_states
 
                 if self.is_pooling_model:
@@ -2853,18 +2866,31 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
-            kv_connector_output,
             ec_connector_output,
         )
+        self.kv_connector_output = kv_connector_output
         return None
 
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
+
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
+            if not kv_connector_output:
+                return None  # noqa
+
+            # In case of PP with kv transfer, we need to pass through the
+            # kv_connector_output
+            if kv_connector_output.is_empty():
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
 
         # Unpack ephemeral state.
         (
@@ -2875,7 +2901,6 @@ class GPUModelRunner(
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
-            kv_connector_output,
             ec_connector_output,
         ) = self.execute_model_state
         # Clear ephemeral state.
