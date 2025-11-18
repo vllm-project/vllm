@@ -14,7 +14,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
@@ -102,10 +101,10 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def __init__(
         self,
-        exclude_modules: list[str] | None = None,
+        exclude_modules: list[str],
     ):
         super().__init__()
-        self.exclude_modules = exclude_modules or []
+        self.exclude_modules: list[str] = exclude_modules
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """
@@ -115,7 +114,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         The ModelOpt exclude_modules list is a list of wildcards.
         """
-        if self.exclude_modules is None:
+        if len(self.exclude_modules) == 0:
             return False
 
         # First check exact matching with fused layer support
@@ -168,9 +167,13 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return self.LinearMethodCls(self)
         elif isinstance(layer, FusedMoE):
-            return self.FusedMoEMethodCls(self, layer)
+            return self.FusedMoEMethodCls(quant_config=self, layer=layer)
 
         return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.exclude_modules is not None:
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):
@@ -178,9 +181,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     def __init__(
         self,
-        is_checkpoint_fp8_serialized: bool = False,
-        kv_cache_quant_method: str | None = None,
-        exclude_modules: list[str] | None = None,
+        is_checkpoint_fp8_serialized: bool,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
     ) -> None:
         super().__init__(exclude_modules)
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
@@ -206,10 +209,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        if self.exclude_modules is not None:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
     @classmethod
     def override_quantization_method(
@@ -256,14 +255,14 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 raise ValueError("Missing 'quant_algo' in quantization config")
             kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
             # "exclude_modules" is the key in the legacy hf_quant_config.json
-            exclude_modules = quant_config.get("exclude_modules")
+            exclude_modules = quant_config.get("exclude_modules") or []
         else:
             # Compressed-tensors style format:
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo", "")
             kv_cache_quant_method = config.get("kv_cache_quant_algo")
             # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore")
+            exclude_modules = config.get("ignore") or []
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(
@@ -380,7 +379,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: ModelOptFp8Config,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
     ) -> None:
         super().__init__(layer.moe_config)
         self.layer = layer
@@ -729,7 +728,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
-        super().__init__()
+        super().__init__(exclude_modules)
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
@@ -739,7 +738,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
-            self.exclude_modules = exclude_modules
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -756,10 +754,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        if self.exclude_modules is not None:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
     @classmethod
     def override_quantization_method(
@@ -1137,14 +1131,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
-        moe: FusedMoEConfig,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
     ) -> None:
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (
             detect_nvfp4_moe_support,  # noqa: E501
         )
 
-        super().__init__(moe)
+        super().__init__(layer.moe_config)
         self.quant_config = quant_config
         self.layer = layer
         _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
