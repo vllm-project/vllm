@@ -477,6 +477,17 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
+def uses_custom_attention_masks(config: PretrainedConfig) -> bool:
+    """Detect if model uses custom attention mask generation for multimodal.
+
+    Some multimodal models require custom attention masks that enable
+    bidirectional attention between image tokens while maintaining causal
+    attention for text tokens. Currently applies to Gemma3 multimodal models.
+    """
+    architectures = getattr(config, "architectures", [])
+    return "Gemma3ForConditionalGeneration" in architectures
+
+
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """
     Update kwargs for AutoConfig initialization based on model_type
