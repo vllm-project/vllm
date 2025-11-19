@@ -61,6 +61,7 @@ class TritonAttentionMetadata:
     slot_mapping: torch.Tensor
 
     seq_threshold_3D: int
+    split_launch: bool
 
     # For cascade attention.
     use_cascade: bool
@@ -105,6 +106,13 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 CUDAGraphMode.FULL,
             )
         )
+
+        # Check if CUDA Graphs are enabled for prefill
+        self.prefill_cudagraph_enabled = (
+            self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
+        )
+
+        self.split_launch = self.prefill_cudagraph_enabled
 
         # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
         # A lower bound for num_q_blocks is the number of sequences.
@@ -205,6 +213,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             seq_threshold_3D=self.seq_threshold_3D,
+            split_launch=self.split_launch,
         )
         return attn_metadata
 
@@ -410,6 +419,7 @@ class TritonAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         seq_threshold_3D = attn_metadata.seq_threshold_3D
+        split_launch = attn_metadata.split_launch
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
@@ -433,6 +443,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             seq_threshold_3D=seq_threshold_3D,
+            split_launch=split_launch,
             sinks=self.sinks,
             output_scale=output_scale,
         )
