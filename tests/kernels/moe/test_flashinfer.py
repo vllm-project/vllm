@@ -27,8 +27,9 @@ try:
     from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 except ImportError:
     if current_platform.is_rocm():
-        pytest.skip("flashinfer not supported for vLLM on ROCm",
-                allow_module_level=True)
+        pytest.skip(
+            "flashinfer not supported for vLLM on ROCm", allow_module_level=True
+        )
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
