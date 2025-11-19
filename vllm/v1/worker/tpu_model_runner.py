@@ -21,7 +21,7 @@ from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -962,7 +962,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             torch_xla.sync(wait=False)
-            curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+            curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             torch_xla.sync(wait=False)
 
             sanity_check_mm_encoder_outputs(
@@ -1065,7 +1065,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds = self.model.get_input_embeddings(
+            inputs_embeds = self.model.embed_input_ids(
                 input_ids,
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -1254,13 +1254,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids = selected_token_ids.tolist()
+            valid_sampled_token_ids: list[np.ndarray] = [
+                row for row in selected_token_ids.numpy()
+            ]
 
             # Mask out the sampled tokens that should not be sampled.
             # TODO: Keep in sync with gpu_model_runner.py, in particular
             #       the "else" case here
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
+                valid_sampled_token_ids[i] = np.array([])
 
             # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
@@ -1273,7 +1275,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
-                seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
+                seq.numpy() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
             self.input_batch.num_tokens[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
@@ -1484,14 +1486,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 # Run multimodal encoder.
                 torch_xla.sync(wait=False)
-                mm_embeds = self.model.get_multimodal_embeddings(
-                    **batched_dummy_mm_inputs
-                )
+                mm_embeds = self.model.embed_multimodal(**batched_dummy_mm_inputs)
                 torch_xla.sync(wait=False)
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
-                # NOTE (NickLucche) pre-compile `get_input_embeddings` when mm
+                # NOTE (NickLucche) pre-compile `embed_input_ids` when mm
                 # embeddings are present. We assume `--disable-mm-chunked`,
                 # hence only whole items can be scheduled. This implies we just
                 # need to compile when `num_items` fit the (padded) `input_ids`
@@ -1519,7 +1519,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         assert a is None
                         torch_xla.sync(wait=False)
 
-            # Pre-compile `get_input_embeddings` when mm_embeddings are not
+            # Pre-compile `embed_input_ids` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
             for num_tokens in self.num_tokens_paddings:
                 placeholders_ids = torch.zeros(
@@ -1738,7 +1738,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # impact of recompilation until it's fixed.
                     start = time.perf_counter()
                     torch_xla.sync(wait=False)
-                    dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    dummy_encoder_outputs = self.model.embed_multimodal(
                         **batched_dummy_mm_inputs
                     )
                     torch_xla.sync(wait=False)
@@ -1897,12 +1897,14 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
-        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+        if isinstance(compiled_model, TorchCompileWithNoGuardsWrapper):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
             torch._dynamo.eval_frame.remove_from_cache(
-                compiled_model.original_code_object
+                compiled_model.original_code_object()
             )
-            compiled_model.compiled_codes.clear()
+            # Reset the wrapper to re-initialize.
+            compiled_model.compiled = False
+            TorchCompileWithNoGuardsWrapper.__init__(compiled_model)
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
@@ -1974,11 +1976,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         return logits_cloned
 
-    def get_multimodal_embeddings(self, *args, **kwargs):
-        return self.model.get_multimodal_embeddings(*args, **kwargs)
+    def embed_multimodal(self, *args, **kwargs):
+        return self.model.embed_multimodal(*args, **kwargs)
 
-    def get_input_embeddings(self, *args, **kwargs):
-        return self.model.get_input_embeddings(*args, **kwargs)
+    def embed_input_ids(self, *args, **kwargs):
+        return self.model.embed_input_ids(*args, **kwargs)
 
     def prepare_structured_decoding_input(
         self, logits: torch.Tensor, grammar_output: "GrammarOutput"

@@ -291,6 +291,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
+                attn_type=attn_type,
             )
         else:
             self.attn_backend = attn_backend
@@ -309,7 +310,8 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
+        backend_name = self.attn_backend.get_name()
+        self.backend = AttentionBackendEnum.__members__.get(backend_name)
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
