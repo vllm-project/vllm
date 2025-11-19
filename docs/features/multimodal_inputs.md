@@ -627,8 +627,8 @@ You can configure video processing behavior using `--media-io-kwargs`. The follo
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `num_frames` | int | 32 | Number of frames to sample from video |
-| `fps` | int | -1 | Target FPS for frame sampling (opencv backend) |
-| `max_duration` | int | 300 | Maximum video duration in seconds (opencv_dynamic backend) |
+| `fps` | int | -1 (opencv)<br>2 (opencv_dynamic) | Target FPS for frame sampling. Used differently by each backend: `opencv` uses it to limit total frames, `opencv_dynamic` uses it as sampling rate |
+| `max_duration` | int | 300 | Maximum video duration in seconds (opencv_dynamic backend only) |
 | `direct_url_loading` | bool | false | Pass HTTP/HTTPS URLs directly to OpenCV instead of downloading first |
 
 ##### Direct URL Loading
