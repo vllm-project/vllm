@@ -892,7 +892,8 @@ class GPUModelRunner(
             # conform to the schema. This can result in
             # scheduler_output.scheduled_spec_decode_tokens being empty,
             # even when speculative decoding is enabled.
-            self.input_batch.spec_token_ids[req_index] = spec_token_ids
+            self.input_batch.spec_token_ids[req_index].clear()
+            self.input_batch.spec_token_ids[req_index].extend(spec_token_ids)
 
             # there are no draft tokens with async scheduling,
             # we clear the spec_decoding info in scheduler_output and
