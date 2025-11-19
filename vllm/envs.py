@@ -617,8 +617,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
     # Controls colored logging output. Options: "auto" (default, colors when terminal),
-    # "always" (always use colors), "never" (never use colors)
+    # "1" (always use colors), "0" (never use colors)
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
+    # Standard unix flag for disabling ANSI color codes
+    "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val
@@ -1500,8 +1502,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Standard unix flag for disabling ANSI color codes
-    "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
 }
 
 # --8<-- [end:env-vars-definition]

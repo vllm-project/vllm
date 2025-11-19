@@ -42,13 +42,10 @@ def _use_color() -> bool:
     return False
 
 
-USE_COLOR = _use_color()
-
-
 # Choose formatter based on color setting
 _FORMATTER_CLASS = (
     "vllm.logging_utils.ColoredFormatter"
-    if USE_COLOR
+    if _use_color()
     else "vllm.logging_utils.NewLineFormatter"
 )
 
