@@ -4,6 +4,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -24,6 +25,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -71,18 +73,23 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        return  # FlexAttention supports any head size
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
     def get_name() -> str:
         return "FLEX_ATTENTION"
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """FlexAttention supports both decoder and encoder-only attention."""
+        from vllm.attention import AttentionType
+
+        return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
 
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
@@ -105,6 +112,10 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")
@@ -720,7 +731,6 @@ class FlexAttentionImpl(AttentionImpl):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("FlexAttention does not support kv sharing yet.")
 
-        FlexAttentionBackend.validate_head_size(head_size)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet"

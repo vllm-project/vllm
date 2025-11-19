@@ -208,6 +208,8 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+        elif _is_hip():
+            cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
@@ -296,6 +298,20 @@ class cmake_build_ext(build_ext):
             print(f"Copying {file} to {dst_file}")
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
+
+        if _is_cuda() or _is_hip():
+            # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
+            # to current directory so that they can be included in the editable
+            # build
+            print(
+                f"Copying {self.build_lib}/vllm/third_party/triton_kernels "
+                "to vllm/third_party/triton_kernels"
+            )
+            shutil.copytree(
+                f"{self.build_lib}/vllm/third_party/triton_kernels",
+                "vllm/third_party/triton_kernels",
+                dirs_exist_ok=True,
+            )
 
 
 class precompiled_build_ext(build_ext):
@@ -543,7 +559,9 @@ def get_vllm_version() -> str:
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        return env_version
+        print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
+        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
+        return get_version(write_to="vllm/_version.py")
 
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
@@ -628,6 +646,10 @@ ext_modules = []
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
+    # Optional since this doesn't get built (produce an .so file). This is just
+    # copying the relevant .py files from the source repository.
+    ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -643,7 +665,6 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
-    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))

@@ -34,9 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
@@ -58,6 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -164,7 +165,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -211,17 +212,17 @@ class Ernie4_5_VisionAttention(nn.Module):
         )
 
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"Ernie45-VL does not support {self.attn_backend} backend now."
             )
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -291,7 +292,7 @@ class Ernie4_5_VisionAttention(nn.Module):
             context_layer = rearrange(
                 output, "(b s) h d -> s b (h d)", b=batch_size
             ).contiguous()
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
             for i in range(1, len(cu_seqlens)):
@@ -310,7 +311,7 @@ class Ernie4_5_VisionAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -370,7 +371,7 @@ class Ernie4_5_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -463,7 +464,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         patch_size = vision_config.patch_size
@@ -515,10 +516,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            self.attn_backend = _Backend.FLASH_ATTN
+            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -565,11 +567,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
     ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
         if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
@@ -1432,15 +1434,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for Ernie VL."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
+        hf_config = self.config
         image_token_id = hf_config.im_patch_id
         video_start_token_id = hf_config.video_start_token_id
         video_end_token_id = hf_config.video_end_token_id
@@ -1448,10 +1451,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         temporal_conv_size = hf_config.temporal_conv_size
         llm_pos_ids_list: list = []
 
-        if not (image_grid_thw is None and video_grid_thw is None):
-            if isinstance(image_grid_thw, torch.Tensor):
-                image_grid_thw = image_grid_thw.tolist()
-
+        if image_grid_thw or video_grid_thw:
             input_token_type: list[str] = []
             video_check_flg = False
             for token in input_tokens:
@@ -1483,11 +1483,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = image_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_conv_size,
@@ -1518,11 +1514,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     mm_data_idx += 1
 
                 elif modality_type == "video":
-                    t, h, w = (
-                        video_grid_thw[mm_data_idx][0],
-                        video_grid_thw[mm_data_idx][1],
-                        video_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = video_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t // temporal_conv_size,
                         h // spatial_conv_size,
@@ -1664,9 +1656,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return modalities
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -1689,7 +1679,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1702,9 +1692,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,

@@ -49,6 +49,7 @@ function cpu_tests() {
   # Run kernel tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
+    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/test_onednn.py"
 
   # Run basic model test
@@ -72,12 +73,11 @@ function cpu_tests() {
     pytest -x -s -v \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
-  # Note: disable it until supports V1
-  # Run AWQ test
-  # docker exec cpu-test-"$NUMA_NODE" bash -c "
-  #   set -e
-  #   VLLM_USE_V1=0 pytest -x -s -v \
-  #   tests/quantization/test_ipex_quant.py"
+  # Run AWQ/GPTQ test
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -x -s -v \
+    tests/quantization/test_cpu_wna16.py"
 
   # Run multi-lora tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
@@ -116,4 +116,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 2h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 2.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

@@ -88,6 +88,14 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    if getattr(model, "process_weights_after_loading_already_called", False):
+        # In case `process_weights_after_loading` is called multiple times
+        # we'll skip it at later times
+        logger.debug_once(
+            "process_weights_after_loading already called for model %s", model
+        )
+        return
+
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
         maybe_save_metadata_and_attributes_for_weight_reloading,

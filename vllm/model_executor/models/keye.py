@@ -16,7 +16,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
     maybe_get_vit_flash_attn_backend,
 )
@@ -24,6 +24,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -40,6 +41,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -203,7 +205,7 @@ class KeyeVisionEmbeddings(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -345,6 +347,13 @@ def apply_rotary_pos_emb_flashatt(
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
     elif current_platform.is_rocm():
         from flash_attn.ops.triton.rotary import apply_rotary as apply_rotary_emb
+    else:
+        # For other platforms, use PyTorch fallback
+        from vllm.model_executor.layers.rotary_embedding.common import (
+            apply_rotary_emb_torch,
+        )
+
+        apply_rotary_emb = partial(apply_rotary_emb_torch, is_neox_style=True)
 
     q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
     k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
@@ -360,7 +369,7 @@ class KeyeSiglipAttention(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -414,17 +423,17 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"Keye-VL does not support {self.attn_backend} backend now."
             )
 
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
     def forward(
@@ -489,7 +498,7 @@ class KeyeSiglipAttention(nn.Module):
                 softmax_scale=self.scale,
             )
             context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -536,7 +545,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -590,7 +599,7 @@ class KeyeSiglipEncoder(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -685,7 +694,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -768,7 +777,7 @@ class KeyeSiglipVisionModel(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
@@ -1476,9 +1485,7 @@ class BaseKeyeModule(nn.Module):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -1627,16 +1634,17 @@ class KeyeForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+
         if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
             video_grid_thw = video_grid_thw[0]
-        """Get mrope input positions and delta value (Keye series)."""
 
         def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
             """
@@ -1662,6 +1670,7 @@ class KeyeForConditionalGeneration(
 
         video_grid_thw = split_thw(video_grid_thw)
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
@@ -1691,20 +1700,12 @@ class KeyeForConditionalGeneration(
                 ed_video = len(input_tokens) + 1
 
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index]
                 video_index += 1
                 remain_frames -= 1
                 ed = ed_video

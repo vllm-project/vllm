@@ -33,10 +33,14 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
+    uses_custom_attention_masks,
     uses_mrope,
 )
+from vllm.transformers_utils.gguf_utils import (
+    maybe_patch_hf_config_from_gguf,
+)
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -45,7 +49,7 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -53,7 +57,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    _Backend = Any
+    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -264,7 +268,8 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """Enable sleep mode for the engine (only cuda and
+    hip platforms are supported)."""
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
@@ -302,7 +307,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
-    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
+    mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -420,7 +425,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
-        mm_encoder_attn_backend: _Backend | str | None,
+        mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -449,6 +454,12 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
+            if check_gguf_file(self.model):
+                raise ValueError(
+                    "Using a tokenizer is mandatory when loading a GGUF model. "
+                    "Please specify the tokenizer path or name using the "
+                    "--tokenizer argument."
+                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -506,6 +517,10 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
+        )
+        hf_config = maybe_patch_hf_config_from_gguf(
+            self.model,
+            hf_config,
         )
 
         self.hf_config = hf_config
@@ -731,7 +746,7 @@ class ModelConfig:
         return self
 
     def _get_transformers_backend_cls(self) -> str:
-        """Determine which Transformers backend class will be used if
+        """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
@@ -745,8 +760,8 @@ class ModelConfig:
         # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        # Only consider Transformers backend pooling classes if we're wrapping an
-        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # Only consider Transformers modeling backend pooling classes if we're wrapping
+        # an architecture that defaults to pooling. Otherwise, we return the LM class
         # and use adapters.
         if runner == "pooling" and task in {"embed", "classify"}:
             if task == "embed":
@@ -758,7 +773,7 @@ class ModelConfig:
         return cls
 
     def using_transformers_backend(self) -> bool:
-        """Check if the model is using the Transformers backend class."""
+        """Check if the model is using the Transformers modeling backend class."""
         used_cls = self._model_info.architecture
         transformers_backend_cls = self._get_transformers_backend_cls()
         return used_cls == transformers_backend_cls
@@ -1005,6 +1020,8 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
+                "cpu_gptq",
+                "cpu_awq",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1182,6 +1199,14 @@ class ModelConfig:
                 f"but got {decode_context_parallel_size}"
             )
 
+            num_q_per_kv = total_num_attention_heads // total_num_kv_heads
+            assert num_q_per_kv % decode_context_parallel_size == 0, (
+                f"Total number of q per kv attn heads ({num_q_per_kv})"
+                " must be divisible by dcp world size when enable "
+                "decode context parallel for GQA "
+                f"({parallel_config.decode_context_parallel_size})."
+            )
+
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
@@ -1341,7 +1366,8 @@ class ModelConfig:
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        return num_experts
+        # Coerce to 0 if explicitly set to None
+        return num_experts or 0
 
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
@@ -1596,6 +1622,10 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
+    def uses_custom_attention_masks(self) -> bool:
+        return uses_custom_attention_masks(self.hf_config)
+
+    @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
@@ -1619,6 +1649,13 @@ class ModelConfig:
 
     @property
     def is_hybrid(self) -> bool:
+        # Handle granite-4.0-micro case which uses hybrid config but does not
+        # actually contain any non-attention layers.
+        layer_types = getattr(self.hf_config, "layer_types", None)
+        if layer_types is not None and all(
+            layer == "attention" for layer in layer_types
+        ):
+            return False
         return self._model_info.is_hybrid
 
     @property

@@ -208,7 +208,7 @@ class PromptUpdateDetails(Generic[_S]):
     `None` (default) means to assign embeddings to all positions of `full`.
 
     The embeddings are obtained by calling
-    [`SupportsMultiModal.get_multimodal_embeddings`][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings].
+    [`SupportsMultiModal.embed_multimodal`][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
     """
 
     @staticmethod

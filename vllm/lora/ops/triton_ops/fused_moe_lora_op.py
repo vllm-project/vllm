@@ -26,7 +26,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     tensor_ptrs = []
     for lora_weight in lora_weights:
         tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)
@@ -85,6 +85,7 @@ def _fused_moe_lora_kernel(
     GROUP_SIZE_M: tl.constexpr,
     SPLIT_K: tl.constexpr,
     USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -153,7 +154,7 @@ def _fused_moe_lora_kernel(
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
         # pre-fetch lora weight
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()
