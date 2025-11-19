@@ -26,6 +26,7 @@
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 #include <cuda_runtime.h>
+#include "get_group_starts.cuh"
 
 namespace vllm::cutlass_w4a8_moe {
 
@@ -108,6 +109,7 @@ using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativ
 using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative; // Epilogue to launch
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
+
 // ----------------------------------------------------------------------------
 // Kernel template — Tile/Cluster shapes
 // ----------------------------------------------------------------------------
@@ -189,6 +191,9 @@ struct W4A8GroupedGemmKernel {
 
     // allocate ptrs 
     int num_experts = static_cast<int>(expert_offsets.size(0));
+    int n = out_tensors.size(1);
+    int k = a_tensors.size(1);
+
     auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(device);
     torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
@@ -204,9 +209,12 @@ struct W4A8GroupedGemmKernel {
     // TODO: move to gpu. just keep the calculation on cpu now to check correctness
     // if we skip it the gemm should still technically compile; let's test that first.
     // run will fail cause the ptrs will be invalid
-    // run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
-    //                         a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
-    //                         out_tensors, a_scales, b_scales, b_group_scales);
+    run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
+                            a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
+                            out_tensors, a_scales, b_scales, b_group_scales, b_group_size);
+    // for now we can have a slow version which does this on CPU
+    // iterate through problem_sizes.data_ptr()
+    // each entry is (M, N, K) so we might have to transpose it
 
     // now we can build the grouped gemm args since all pointers are populated
     // Swap the A and B tensors, as well as problem shapes here.
@@ -216,6 +224,31 @@ struct W4A8GroupedGemmKernel {
 
     // dont need concern with per-tok/per-chan scales here, but need group scales
     // SwapAB so B (weights) comes first
+    // TODO: this a workaround to just construct the layouts
+    // assume we already did encoding + reordering
+    cutlass::DeviceAllocation<LayoutB_Reordered> layout_B_reordered;
+    std::vector<LayoutB_Reordered> layout_B_reordered_host(num_experts);
+    // the stride might need reverse?
+    auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {n, k, 1});
+    for (int i = 0; i < num_experts; i++){
+      // before transpose
+      auto shape_B = cute::make_shape(n, k, Int<1>{});
+      auto layout_B = make_layout(shape_B, stride_B);
+      layout_B_reordered_host[i] = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
+
+      if (i == 0) {
+        print("Quantized tensor layout: ");
+        print(layout_B_reordered_host[0]);
+        print("\n");
+        print("original layout: ");
+        print(layout_B);
+        print("\n");
+      }
+    }
+    // copy to device
+    layout_B_reordered.reset(num_experts);
+    layout_B_reordered.copy_from_host(layout_B_reordered_host.data());
+
     MainloopArguments mainloop_arguments{
         static_cast<const QuantType**>(b_ptrs.data_ptr()),
         static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
@@ -241,6 +274,10 @@ struct W4A8GroupedGemmKernel {
     };
 
     // get the input problem shape
+    // TODO: since we are always swapping AB we need to swap it here
+    // OR swap it in the caller
+    // CAUTION: the fp8 code path assumes swapAB is enabled depending on M
+    // this should not be followed here or we will get rekt
     ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(
           problem_sizes.data_ptr());
@@ -251,7 +288,7 @@ struct W4A8GroupedGemmKernel {
     };
 
     Args arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
-                prob_shape,
+                prob_shape, // TODO: we need to either transpose this or take care of it correctly in the caller
                 mainloop_arguments,
                 epilogue_arguments,
                 hw_info};
@@ -298,10 +335,10 @@ using Kernel_128x16_1x1x1 = W4A8GroupedGemmKernel<Shape<_128, _16>, Shape<_1, _1
 void mm(
     torch::Tensor& out_tensors,
     const torch::Tensor& a_tensors,
-    const torch::Tensor& b_tensors,
+    const torch::Tensor& b_tensors, // expected to be correctly packed/reordered/encoded
     const torch::Tensor& a_scales,
     const torch::Tensor& b_scales,
-    const torch::Tensor& b_group_scales,
+    const torch::Tensor& b_group_scales, // expected to be packed fp8
     const int64_t b_group_size,
     const torch::Tensor& expert_offsets,
     const torch::Tensor& problem_sizes,
@@ -435,9 +472,9 @@ static bool unified_encode_int4b(cutlass::int4b_t const* in,
 // block_B_modified (packed ptr)
 // offset_B
 // what shape is B actually?
-// torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
-//   TORCH_CHECK(B.dtype() == torch::kInt32);
-//   TORCH_CHECK(B.dim() == 2);
+// torch::Tensor encode_and_reorder_int4b(torch::Tensor const& b_tensors) {
+//   TORCH_CHECK(b_tensors.dtype() == torch::kInt32);
+//   TORCH_CHECK(b_tensors.dim() == 3); // (experts, n, k)
 
 //   torch::Tensor B_packed = torch::empty_like(B);
 
@@ -478,6 +515,7 @@ static bool unified_encode_int4b(cutlass::int4b_t const* in,
 //         print("\n");
 //     }
 //   }
+// }
 
 //   // we might not need this because we can pass in b_strides directly
 //   // in dense gemm this is only used as mainloop args, here we can apss in strides directly
@@ -495,7 +533,7 @@ TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
 // this needs QuantType, LayoutRight, LayoutB_Reordered, LayoutAtomQuant
 // the reorder also works slightly differently for moe
 // have it separate for now but should merge it later
-//   m.impl("cutlass_encode_and_reorder_int4b_grouped", &encode_and_reorder_int4b);
+  // m.impl("cutlass_encode_and_reorder_int4b_grouped", &encode_and_reorder_int4b);
 }
 
 }  // namespace vllm::cutlass_w4a8_moe
