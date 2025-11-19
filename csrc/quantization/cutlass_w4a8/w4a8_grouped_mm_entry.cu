@@ -203,18 +203,10 @@ struct W4A8GroupedGemmKernel {
     torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor b_group_scales_ptrs = torch::empty(num_experts, options_int);
 
-    // get the correct offsets
-    // TODO: we can modify `run_get_group_gemm_starts` to do the correct thing when
-    // there are group scales also 
-    // TODO: move to gpu. just keep the calculation on cpu now to check correctness
-    // if we skip it the gemm should still technically compile; let's test that first.
-    // run will fail cause the ptrs will be invalid
+    // get the correct offsets to pass to gemm
     run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
                             a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
                             out_tensors, a_scales, b_scales, b_group_scales, b_group_size);
-    // for now we can have a slow version which does this on CPU
-    // iterate through problem_sizes.data_ptr()
-    // each entry is (M, N, K) so we might have to transpose it
 
     // now we can build the grouped gemm args since all pointers are populated
     // Swap the A and B tensors, as well as problem shapes here.
@@ -222,16 +214,13 @@ struct W4A8GroupedGemmKernel {
     using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
     using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
 
-    // dont need concern with per-tok/per-chan scales here, but need group scales
-    // SwapAB so B (weights) comes first
-    // TODO: this a workaround to just construct the layouts
+    // TODO: this a workaround to just construct the layouts. we should eventually
+    // pass the saved layout after reordering directly so we don't need to construct at runtime
     // assume we already did encoding + reordering
     cutlass::DeviceAllocation<LayoutB_Reordered> layout_B_reordered;
     std::vector<LayoutB_Reordered> layout_B_reordered_host(num_experts);
-    // the stride might need reverse?
     auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {n, k, 1});
     for (int i = 0; i < num_experts; i++){
-      // before transpose
       auto shape_B = cute::make_shape(n, k, Int<1>{});
       auto layout_B = make_layout(shape_B, stride_B);
       layout_B_reordered_host[i] = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
@@ -249,9 +238,11 @@ struct W4A8GroupedGemmKernel {
     layout_B_reordered.reset(num_experts);
     layout_B_reordered.copy_from_host(layout_B_reordered_host.data());
 
+    // SwapAB so B operands come first
     MainloopArguments mainloop_arguments{
         static_cast<const QuantType**>(b_ptrs.data_ptr()),
-        static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
+        // static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
+        layout_B_reordered.get(), // TODO: change this back when we save the reordered layout
         static_cast<const MmaType**>(a_ptrs.data_ptr()),
         static_cast<StrideA*>(a_strides.data_ptr()),
         static_cast<const cutlass::Array<ElementScale, 8> **>(b_group_scales_ptrs.data_ptr()),
@@ -273,7 +264,6 @@ struct W4A8GroupedGemmKernel {
         static_cast<StrideC*>(c_strides.data_ptr()) // this also has issue
     };
 
-    // get the input problem shape
     // TODO: since we are always swapping AB we need to swap it here
     // OR swap it in the caller
     // CAUTION: the fp8 code path assumes swapAB is enabled depending on M
@@ -293,7 +283,7 @@ struct W4A8GroupedGemmKernel {
                 epilogue_arguments,
                 hw_info};
 
-    // // Workspace
+    // Workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
     torch::Tensor workspace =
         torch::empty(workspace_size,
@@ -529,9 +519,10 @@ TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("cutlass_w4a8_moe_mm", &mm);
   // TODO: can pull these to common utils file? used in w4a8 and w4a8_moe. but they might need some layout info
   // this needs MmaType, ScalePackSize, ElementScale
+  // moe can reuse the code exactly, we just need to calculate number of elements correctly
 //   m.impl("cutlass_pack_scale_fp8", &pack_scale_fp8);
 // this needs QuantType, LayoutRight, LayoutB_Reordered, LayoutAtomQuant
-// the reorder also works slightly differently for moe
+// the reorder also works slightly differently for moe (the reodering is done per expert)
 // have it separate for now but should merge it later
   // m.impl("cutlass_encode_and_reorder_int4b_grouped", &encode_and_reorder_int4b);
 }
