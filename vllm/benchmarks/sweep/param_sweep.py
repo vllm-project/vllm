@@ -90,6 +90,10 @@ class ParameterSweepItem(dict[str, object]):
         cmd = list(cmd)
 
         for k, v in self.items():
+            # Skip the 'name' field - it's used for identification, not as a parameter
+            if k == "name":
+                continue
+            
             # Serialize dict values as JSON
             if isinstance(v, dict):
                 v = json.dumps(v)
@@ -123,4 +127,4 @@ class ParameterSweepItem(dict[str, object]):
         return cmd
 
     def as_text(self, sep: str = ", ") -> str:
-        return sep.join(f"{k}={v}" for k, v in self.items())
+        return sep.join(f"{k}={v}" for k, v in self.items() if k != "name")
