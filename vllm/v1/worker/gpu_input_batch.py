@@ -309,14 +309,12 @@ class InputBatch:
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
-            self.spec_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
-            self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
-
+        self.spec_token_ids[req_index].clear()
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             request.prompt_token_ids, request.prompt_embeds
