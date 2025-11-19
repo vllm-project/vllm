@@ -3,6 +3,7 @@
 """Utils for model executor."""
 
 import copy
+from types import MethodType
 from typing import Any
 
 import torch
@@ -48,6 +49,37 @@ def set_weight_attrs(
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
+
+
+def replace_parameter(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor):
+    """
+    Replace a parameter of a layer while maintaining the ability to reload the weight.
+    Called within implementations of the `process_weights_after_loading` method.
+
+    This function should not be called on weights which are tied/shared
+
+    Args:
+        layer: Layer containing parameter to replace
+        param_name: Name of parameter to replace
+        new_data: New data of the new parameter
+    """
+    # should not be used on a tied/shared param
+    old_param: torch.nn.Parameter = getattr(layer, param_name)
+    if isinstance(new_data, torch.nn.Parameter):
+        new_data = new_data.data
+    new_param = torch.nn.Parameter(new_data, requires_grad=old_param.requires_grad)
+
+    if hasattr(old_param, "weight_loader"):
+        weight_loader = old_param.weight_loader
+        if isinstance(weight_loader, MethodType):
+            raise NotImplementedError(
+                "Replacement with weight loader methods is not currently supported, "
+                "but could be via rebinding"
+            )
+
+        set_weight_attrs(new_param, {"weight_loader": weight_loader})
+
+    setattr(layer, param_name, new_param)
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
