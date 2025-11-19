@@ -1468,7 +1468,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if self.allow_flashinfer:
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        ):
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2
             )
@@ -1746,17 +1749,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-        ):
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                flashinfer_cutlass_moe_fp4,
+        elif self.allow_flashinfer:
+            assert self.flashinfer_moe_backend in (
+                FlashinferMoeBackend.CUTLASS,
+                FlashinferMoeBackend.CUTEDSL,
             )
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+                from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                    flashinfer_cutlass_moe_fp4,
+                )
+
+                flashinfer_fn_moe_fp4 = flashinfer_cutlass_moe_fp4
+            else:
+                from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (  # noqa: E501
+                    flashinfer_cutedsl_moe_fp4,
+                )
+
+                flashinfer_fn_moe_fp4 = flashinfer_cutedsl_moe_fp4
 
             assert self.moe_quant_config is not None
-
-            return flashinfer_cutlass_moe_fp4(
+            return flashinfer_fn_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
