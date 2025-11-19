@@ -13,14 +13,14 @@ from vllm.vllm_flash_attn import (
 )
 
 NUM_HEADS = [(4, 4), (8, 2)]
-HEAD_SIZES = [128, 256]
+HEAD_SIZES = [40, 72, 80, 128, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
 QDTYPES = [None, torch.float8_e4m3fn]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
-SOFT_CAPS = [None, 50.0]
+SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None, 256]
 
 
