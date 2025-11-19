@@ -128,6 +128,8 @@ def test_structured_output(
         ),
         seed=120,
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
     )
 
@@ -699,6 +701,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
     )
 
     sampling_params = SamplingParams(
