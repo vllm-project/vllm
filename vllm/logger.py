@@ -22,7 +22,6 @@ VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
-VLLM_LOGGING_COLOR = envs.VLLM_LOGGING_COLOR
 
 _FORMAT = (
     f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -30,10 +29,26 @@ _FORMAT = (
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
+
+def _use_color() -> bool:
+    if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
+        return False
+    if envs.VLLM_LOGGING_COLOR == "1":
+        return True
+    if VLLM_LOGGING_STREAM == "ext://sys.stdout":  # stdout
+        return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    elif VLLM_LOGGING_STREAM == "ext://sys.stderr":  # stderr
+        return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+    return False
+
+
+USE_COLOR = _use_color()
+
+
 # Choose formatter based on color setting
 _FORMATTER_CLASS = (
     "vllm.logging_utils.ColoredFormatter"
-    if VLLM_LOGGING_COLOR.lower() != "never"
+    if USE_COLOR
     else "vllm.logging_utils.NewLineFormatter"
 )
 

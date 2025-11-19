@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
+    NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -1499,6 +1500,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Standard unix flag for disabling ANSI color codes
+    "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1578,6 +1581,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_PREFIX",
         "VLLM_LOGGING_STREAM",
         "VLLM_LOGGING_CONFIG_PATH",
+        "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
@@ -1608,6 +1612,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "NO_COLOR",
     }
 
     from vllm.config.utils import normalize_value
