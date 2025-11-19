@@ -16,11 +16,10 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-
 try:
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import (
-        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask)
+        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask, LowerTriangularMask)
 
     XFORMERS_AVAILABLE = True
 except ImportError:
@@ -138,6 +137,12 @@ class XFormersAttentionMetadata:
     # Biases for different attention types.
     attn_bias: Optional["AttentionBias"] = None
 
+    # Training mode flag
+    is_training: bool = False
+
+    # Training attention mask - dict with 'masks' (list of tensors) and 'seq_lens' (list of ints)
+    training_attention_mask: Optional[dict] = None
+
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["XFormersAttentionMetadata"] = None
     _cached_decode_metadata: Optional["XFormersAttentionMetadata"] = None
@@ -225,6 +230,8 @@ class XFormersAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        is_training: bool = False,
+        training_attention_mask: Optional[dict] = None,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -241,8 +248,9 @@ class XFormersAttentionMetadataBuilder(
         slot_mapping = common_attn_metadata.slot_mapping
 
         bias = None
-        if num_decodes > 0:
+        if num_decodes > 0 and not is_training:
             # Construct the decoder bias.
+            # Skip for training since we won't use KV cache
             decode_q_seqlens = q_seqlens[:num_decodes]
             decode_kv_seqlens = kv_seqlens[:num_decodes]
             bias = (
@@ -267,6 +275,8 @@ class XFormersAttentionMetadataBuilder(
             block_table=block_table,
             slot_mapping=slot_mapping,
             attn_bias=bias,
+            is_training=is_training,
+            training_attention_mask=training_attention_mask,
         )
 
 
@@ -352,6 +362,18 @@ class XFormersAttentionImpl(AttentionImpl):
             # Profiling run.
             return output
 
+        # Dispatch to training-specific forward if in training mode
+        if attn_metadata.is_training:
+            return self.forward_training(
+                layer=layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+
         # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)
         if self.kv_sharing_target_layer_name is None:
@@ -435,3 +457,130 @@ class XFormersAttentionImpl(AttentionImpl):
 
         # Reshape the output tensor.
         return output
+
+    # TODO(girfan): This is NOT xformers. It is a copy of Transformers' SDPA.
+    # We should use the cpu_attn backend for training which does the same thing.
+    def forward_training(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: XFormersAttentionMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Training-specific forward pass using PyTorch SDPA (equivalent to Transformers).
+
+        This method matches the exact reshaping and computation done in Transformers' SDPA.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        # Extract batch structure from metadata
+        query_start_loc = attn_metadata.query_start_loc
+        if query_start_loc is None or len(query_start_loc) <= 1:
+            raise ValueError("Training requires proper batch metadata with query_start_loc")
+
+        # Get sequence lengths for each sample in the batch
+        seqlens = torch.diff(query_start_loc).tolist()
+        batch_size = len(seqlens)
+
+        # Verify all sequences have the same length (simplification for now)
+        if len(set(seqlens)) != 1:
+            raise NotImplementedError("Variable sequence lengths not yet supported")
+        seq_len = seqlens[0]
+
+        # Reshape Q from [total_tokens, num_heads, head_dim] to [batch, num_heads, seq_len, head_dim]
+        # This matches Transformers format: [batch, num_heads, seq_len, head_dim] e.g., [4, 32, 512, 64]
+        q = query.view(batch_size, seq_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+
+        # Reshape K/V from [total_tokens, num_kv_heads, head_dim] to [batch, num_kv_heads, seq_len, head_dim]
+        k = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size).transpose(1, 2).contiguous()
+        v = value.view(batch_size, seq_len, self.num_kv_heads, self.head_size).transpose(1, 2).contiguous()
+
+        # Apply repeat_kv expansion (same as Transformers sdpa_attention.py)
+        # This matches the logic in repeat_kv function
+        # After this q, k, v all have shape [batch, num_heads, seq_len, head_dim] e.g., [4, 32, 512, 64]
+        if self.num_kv_heads != self.num_heads:
+            # GQA: Expand K and V by repeating each kv_head num_queries_per_kv times
+            # From [batch, num_kv_heads, seq_len, head_dim] to [batch, num_heads, seq_len, head_dim]
+            # This is equivalent to repeat_kv in Transformers
+            k = k[:, :, None, :, :].expand(
+                batch_size, self.num_kv_heads, self.num_queries_per_kv, seq_len, self.head_size
+            ).reshape(batch_size, self.num_heads, seq_len, self.head_size).contiguous()
+
+            v = v[:, :, None, :, :].expand(
+                batch_size, self.num_kv_heads, self.num_queries_per_kv, seq_len, self.head_size
+            ).reshape(batch_size, self.num_heads, seq_len, self.head_size).contiguous()
+
+
+        # Handle attention mask - reshape to match PEFT format [batch, 1, seq_len, seq_len]
+        dropout = 0.0
+        scaling = self.scale
+        attn_mask = None
+
+        # TODO(girfan): Follow the same logic as Transformers to set is_causal?
+        is_causal = False
+
+        if attn_metadata.training_attention_mask is not None:
+            mask_data = attn_metadata.training_attention_mask
+            if isinstance(mask_data, dict) and 'masks' in mask_data:
+                # Extract individual masks and sequence lengths
+                masks_per_req = mask_data['masks']  # List of [seq_len_i, seq_len_i] tensors
+                seq_lens_list = mask_data['seq_lens']    # List of seq_len_i integers
+
+                # Verify we have the right number of masks
+                if len(masks_per_req) != batch_size:
+                    raise ValueError(f"Number of masks ({len(masks_per_req)}) doesn't match batch_size ({batch_size})")
+
+                # Stack masks to create batched format: [batch, 1, seq_len, seq_len]
+                # Each mask is [seq_len_i, seq_len_i], we add head dim and batch them
+                batched_masks = []
+                for i, mask in enumerate(masks_per_req):
+                    # Verify mask shape matches expected seq_len
+                    if mask.shape[0] != seq_len or mask.shape[1] != seq_len:
+                        raise ValueError(
+                            f"Mask {i} shape {mask.shape} doesn't match expected [{seq_len}, {seq_len}]. "
+                            f"seq_lens_list: {seq_lens_list}, batch_size: {batch_size}"
+                        )
+                    # Add head dimension: [seq_len, seq_len] -> [1, seq_len, seq_len]
+                    mask_with_head = mask.unsqueeze(0)
+                    batched_masks.append(mask_with_head)
+
+                # Stack along batch dimension: [batch, 1, seq_len, seq_len]
+                attn_mask = torch.stack(batched_masks, dim=0)
+
+                # Verify shape matches PEFT format
+                if attn_mask.shape != (batch_size, 1, seq_len, seq_len):
+                    raise ValueError(
+                        f"Attention mask shape {attn_mask.shape} doesn't match expected [{batch_size}, 1, {seq_len}, {seq_len}]. "
+                        f"Individual mask shapes: {[m.shape for m in masks_per_req]}, seq_lens_list: {seq_lens_list}"
+                    )
+
+        # Call SDPA with same parameters as Transformers (sdpa_attention.py)
+        # attn_output shape: [batch, num_heads, seq_len, head_dim] = e.g., [4, 32, 512, 64]
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q,  # [batch, num_heads, seq_len, head_dim] - same as Transformers
+            k,  # [batch, num_heads, seq_len, head_dim] - same as Transformers
+            v,  # [batch, num_heads, seq_len, head_dim] - same as Transformers
+            attn_mask=attn_mask,
+            dropout_p=dropout,
+            scale=scaling,
+            is_causal=is_causal,
+        )
+
+        # Reshape output to match Transformers' output format
+        # Transformers: attn_output.transpose(1, 2).contiguous()
+        # This gives: [batch, seq_len, num_heads, head_dim] = e.g., [4, 512, 32, 64]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+
+        # Flatten back to vLLM format: [total_tokens, num_heads, head_dim]
+        # e.g., [4, 512, 32, 64] -> [2048, 32, 64]
+        attn_output_flat = attn_output.view(-1, self.num_heads, self.head_size)
+        output[:] = attn_output_flat
+        return attn_output_flat

@@ -180,8 +180,17 @@ class LoRAModel:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
 
-        for lora in loras.values():
-            lora.optimize()
+        # Skip applying optimize to the LoRA if it will be used for training
+        # We will apply scaling in the LoRA computation itself in base_linear.py
+        from vllm.lora.training_manager import TrainingManager
+        if TrainingManager.is_enabled():
+            training_manager = TrainingManager.get_instance()
+            is_training_lora = training_manager.is_registered_by_id(lora_model_id)
+        else:
+            is_training_lora = False
+        if not is_training_lora:
+            for lora in loras.values():
+                lora.optimize()
 
         return cls(lora_model_id, peft_helper.r, loras)
 
@@ -403,6 +412,8 @@ class LoRAModelManager:
     def activate_adapter(
         self,
         lora_id: int,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
@@ -421,7 +432,10 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
-                module_lora.optimize()
+                # Skip applying optimize to the LoRA if it will be used for training
+                # We will apply scaling in the LoRA computation itself in base_linear.py
+                if not is_trainable:
+                    module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
                 bias = module_lora.bias
                 if ((torch.is_tensor(bias) or
@@ -434,9 +448,10 @@ class LoRAModelManager:
                         " without --enable-lora-bias.")
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
-                                module_lora.bias)
+                                module_lora.bias, is_trainable=is_trainable, trainable_slices=trainable_slices)
             else:
-                module.reset_lora(index)
+                if not is_trainable:
+                    module.reset_lora(index)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -446,8 +461,8 @@ class LoRAModelManager:
         except ValueError:
             pass
 
-    def _add_adapter(self, lora: LoRAModel):
-        self._create_merged_loras_inplace(lora)
+    def _add_adapter(self, lora: LoRAModel, is_trainable: bool = False):
+        self._create_merged_loras_inplace(lora, is_trainable=is_trainable)
         self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
@@ -545,6 +560,12 @@ class LoRAModelManager:
             embedding_modules: Optional[dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
+        from vllm.lora.training_manager import TrainingManager
+        if TrainingManager.is_enabled():
+            training_manager = TrainingManager.get_instance()
+            is_training_lora = training_manager.is_registered_by_id(lora_id)
+        else:
+            is_training_lora = False
         for module_name, module in self.model.named_modules():
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
@@ -585,7 +606,10 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                lora.optimize()
+                # Skip applying optimize to the LoRA if it will be used for training
+                # We will apply scaling in the LoRA computation itself in base_linear.py
+                if not is_training_lora:
+                    lora.optimize()
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -600,7 +624,10 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                    lora.optimize()
+                    # Skip applying optimize to the LoRA if it will be used for training
+                    # We will apply scaling in the LoRA computation itself in base_linear.py
+                    if not is_training_lora:
+                        lora.optimize()
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora
@@ -639,7 +666,7 @@ class LoRAModelManager:
             prefix + "." + r if prefix else r for r in replacements
         ]
 
-    def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
+    def _create_merged_loras_inplace(self, lora_model: LoRAModel, is_trainable: bool = False) -> None:
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: list[Optional[LoRALayerWeights]] = []
             replaced_module: set[str] = set()
@@ -663,7 +690,7 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
-                replacement_loras)
+                replacement_loras, is_trainable=is_trainable)
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
@@ -691,14 +718,14 @@ class LoRAModelManager:
         self._active_adapters.pop(adapter_id, None)
         return True
 
-    def add_adapter(self, adapter: LoRAModel) -> bool:
+    def add_adapter(self, adapter: LoRAModel, is_trainable: bool = False) -> bool:
         logger.debug("Adding lora. Model id: %d, "
                      "int id: %d", adapter.id, adapter.id)
         if adapter.id in self._registered_adapters:
             return False
         if len(self._registered_adapters) >= self.capacity:
             raise RuntimeError("No free adapter slots.")
-        self._add_adapter(adapter)
+        self._add_adapter(adapter, is_trainable=is_trainable)
         return True
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
@@ -744,12 +771,12 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         """List all registered LoRAModels."""
         return dict(self._registered_adapters.cache)
 
-    def add_adapter(self, lora: LoRAModel) -> bool:
+    def add_adapter(self, lora: LoRAModel, is_trainable: bool = False) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug("Adding lora. Model id: %d, "
                      "int id: %d", lora.id, lora.id)
         if lora.id not in self._registered_adapters:
-            self._add_adapter(lora)
+            self._add_adapter(lora, is_trainable=is_trainable)
             was_added = True
         else:
             # We always touch to update the LRU cache order
@@ -760,11 +787,13 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     def activate_adapter(
         self,
         lora_id: int,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ) -> bool:
         if lora_id not in self._active_adapters and len(
                 self._active_adapters) >= self.lora_slots:
             self._active_adapters.remove_oldest()
-        result = super().activate_adapter(lora_id)
+        result = super().activate_adapter(lora_id, is_trainable=is_trainable, trainable_slices=trainable_slices)
         # We always touch to update the LRU cache order
         self._active_adapters.touch(lora_id)
         return result

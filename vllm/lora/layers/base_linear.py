@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 # yapf: disable
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, ReplicatedLinear,
                                                RowParallelLinear)
@@ -16,6 +17,9 @@ from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
+
+
+logger = init_logger(__name__)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -39,7 +43,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         self.lora_config = lora_config
-        #
+
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -105,6 +109,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
@@ -113,7 +119,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
-        self.reset_lora(index)
+        if not is_trainable:
+            # Only reset LoRA if not registered in training manager (i.e., not training mode)
+            self.reset_lora(index)
+
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
@@ -133,6 +142,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             assert len(self.lora_bias_stacked)
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
                 lora_bias.T, non_blocking=True)
+        if is_trainable:
+            self.lora_a_stacked[0].requires_grad_(True)
+            self.lora_b_stacked[0].requires_grad_(True)
+            if lora_bias is not None:
+                self.lora_bias_stacked[0].requires_grad_(True)
 
     def apply(self,
               x: torch.Tensor,
@@ -146,12 +160,66 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        # TODO(girfan): Pass is_lora_training to the apply method?
+        if torch.is_grad_enabled():
+            return self._training_apply(x, output)
+        else:
+            return self._inference_apply(x, output)
+
+    def _inference_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_linear(
                 output, x, self.lora_a_stacked, self.lora_b_stacked,
                 self.lora_bias_stacked, 1.0, self.output_slices)
         if not current_platform.can_update_inplace():
             output = lora_output
+        return output
+
+    # TODO(girfan): Add tests.
+    def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        lora_indices = self.punica_wrapper.token_lora_indices
+
+        # Group tokens by LoRA index
+        unique_lora_ids = set(lora_indices.tolist())
+
+        scaling = self.lora_config.lora_alpha / self.lora_config.max_lora_rank
+
+        # TODO(girfan): We should use the ACTUAL rank of this LoRA, not max rank.
+        assert scaling == 2.0, f"Scaling factor is {scaling}, expected 2.0 (temp: matching PEFT example)"
+
+        for lora_idx in unique_lora_ids:
+            if lora_idx == -1:
+                continue
+
+            # Get all tokens using this LoRA
+            token_mask = (lora_indices == lora_idx)
+            token_indices = torch.where(token_mask)[0]
+
+            if len(token_indices) == 0:
+                continue
+
+            # Process all tokens for this LoRA as a batch
+            x_batch = x[token_indices]  # [num_tokens, hidden_dim]
+
+            output_offset = 0
+            for slice_idx in range(len(self.lora_a_stacked)):
+                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :]  # [rank, input_size]
+                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :]  # [output_size, rank]
+
+                # Batch operation: [num_tokens, hidden_dim] @ [hidden_dim, rank] @ [rank, output_size]
+                # This matches PEFT's computation: result = result + lora_B(lora_A(x)) * scaling
+                lora_hidden = x_batch @ lora_a.T  # [num_tokens, rank]
+                lora_output = lora_hidden @ lora_b.T  # [num_tokens, output_size]
+                lora_output_scaled = lora_output * scaling  # Apply scaling to match PEFT
+
+                slice_size = self.output_slices[slice_idx]
+
+                output[token_indices, output_offset:output_offset + slice_size] += lora_output_scaled
+                output_offset += slice_size
+
+                if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
+                    bias = self.lora_bias_stacked[slice_idx][lora_idx, 0, :]
+                    output[token_indices, output_offset-slice_size:output_offset] += bias
 
         return output
 

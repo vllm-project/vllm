@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from contextlib import nullcontext
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
@@ -212,7 +212,9 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        # The following is not needed for training in Transformers.
+        with torch.no_grad():
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -246,6 +248,7 @@ class LlamaDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_idx = int(prefix.split(".")[-1])
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -302,12 +305,38 @@ class LlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-    def forward(
+    def forward_training(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass for LoRA training. Follows the order of operations as in Transformers."""
+        residual = hidden_states
+        hidden_states, _ = self.input_layernorm(hidden_states, residual, is_training=True)
+
+        # Self Attention
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states, is_training=True)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states, None
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        is_lora_training: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if is_lora_training:
+            return self.forward_training(positions, hidden_states, residual)
+
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -384,6 +413,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
         if get_pp_group().is_first_rank:
@@ -402,7 +432,7 @@ class LlamaModel(nn.Module):
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(positions, hidden_states, residual, is_lora_training=is_lora_training)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -410,10 +440,15 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        ret = self.norm(hidden_states, residual, is_training=is_lora_training)
+        if isinstance(ret, tuple):
+            hidden_states, _ = ret
+        else:
+            hidden_states = ret
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -533,6 +568,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        self.girfan_temp = False
 
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
@@ -593,9 +629,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+                                  inputs_embeds, is_lora_training=is_lora_training)
         return model_output
 
     def compute_logits(

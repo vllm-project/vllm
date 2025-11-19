@@ -117,6 +117,8 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        loss: Optional[float] = None,
+        logits: Optional[torch.Tensor] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
         kv_transfer_params: Optional[dict[str, Any]] = None,
@@ -140,12 +142,18 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.loss = loss
+        self.logits = logits
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        if self.loss is not None or next_output.loss is not None:
+            raise ValueError("Loss is not supported for adding outputs")
+        if self.logits is not None or next_output.logits is not None:
+            raise ValueError("Logits are not supported for adding outputs")
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

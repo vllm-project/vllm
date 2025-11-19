@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, Union, cast
 
 import cloudpickle
+from datasets import Dataset
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
+from torch.utils.data import DataLoader
+from transformers import default_data_collator
 
 import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -55,6 +59,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.request import TrainingParams
+from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -62,6 +68,39 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+BATCH_NUM = 0
+
+
+def tokenize(tokenizer: AnyTokenizer, dataset: dict[str, Any], max_length: Optional[int]) -> dict[str, Any]:
+    tokenized = tokenizer(
+        dataset["text"],
+        truncation=True,
+        max_length=max_length,
+        padding="max_length" if max_length is not None else "do_not_pad",
+    )
+
+    tokenized["labels"] = []
+    for text, input_ids in zip(dataset["text"], tokenized["input_ids"]):
+        labels = input_ids[:]
+
+        # Mask instruction part (only compute loss on response)
+        if "### Response:" in text:
+            response_start = "### Response:"
+            response_pos = text.find(response_start)
+            if response_pos != -1:
+                instruction_text = text[:response_pos + len(response_start)]
+                instruction_tokens = tokenizer.encode(instruction_text, add_special_tokens=True)
+                labels[:len(instruction_tokens)] = [-100] * len(instruction_tokens)
+
+        # Mask padding tokens
+        for i, token_id in enumerate(input_ids):
+            if token_id == tokenizer.pad_token_id:
+                labels[i] = -100
+
+        tokenized["labels"].append(labels)
+
+    return tokenized
 
 
 class LLM:
@@ -313,6 +352,10 @@ class LLM:
         else:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
+    def set_tokenizer_pad_token(self, pad_token: str) -> None:
+        tokenizer = self.get_tokenizer()
+        tokenizer.pad_token = pad_token
+
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
             self.default_sampling_params = (
@@ -389,6 +432,304 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def train(
+        self,
+        train_dataset: Sequence[dict[str, Any]],
+        use_tqdm: bool,
+        lora_request: LoRARequest,
+        # Training configuration
+        num_epochs: int,
+        batch_size: int,
+        learning_rate: float = 1e-4,
+        gradient_accumulation_steps: int = 1,
+        warmup_steps: int = 0,
+        max_length: Optional[int] = None,
+        # Evaluation configuration
+        eval_dataset: Optional[Sequence[dict[str, Any]]] = None,
+        eval_steps: Optional[int] = None,
+        # Tokenization control
+        is_tokenized: bool = False,
+    ) -> Sequence[dict[str, Any]]:
+        if is_tokenized:
+            # Data is already tokenized, use directly
+            tokenized_train_dataset = Dataset.from_dict(train_dataset) if isinstance(train_dataset, dict) else Dataset.from_list(train_dataset)
+            if eval_dataset is not None:
+                tokenized_eval_dataset = Dataset.from_dict(eval_dataset) if isinstance(eval_dataset, dict) else Dataset.from_list(eval_dataset)
+        else:
+            # Tokenize the dataset if not already tokenized
+            tokenizer = self.get_tokenizer()
+            self.set_tokenizer_pad_token(tokenizer.eos_token)
+
+            if eval_dataset is not None:
+                data_list = train_dataset + eval_dataset
+            else:
+                data_list = train_dataset
+            dataset = Dataset.from_list(data_list)
+            tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
+
+            # Split the tokenized dataset into train and eval
+            tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
+            if eval_dataset is not None:
+                tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
+
+        # Create DataLoaders with default_data_collator to match PEFT/Transformers behavior
+        # Use RandomSampler with seed to match PEFT Trainer behavior
+        import torch
+        from torch.utils.data import RandomSampler
+
+        # Set seed for reproducible sampling (matches PEFT's data_seed=42)
+        generator = torch.Generator()
+        generator.manual_seed(42) # TODO(girfan): Take the data_seed from the TrainingArguments
+        train_sampler = RandomSampler(tokenized_train_dataset, generator=generator)
+
+        train_dataloader = DataLoader(
+            tokenized_train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,  # Use RandomSampler to match PEFT
+            collate_fn=default_data_collator,
+            drop_last=False,
+        )
+
+        if eval_dataset is not None:
+            max_eval_batch_size = 8
+            eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
+            eval_dataloader = DataLoader(
+                tokenized_eval_dataset,
+                batch_size=eval_batch_size,
+                shuffle=False,  # TODO(girfan): Does PEFT take this as an arg?
+                collate_fn=default_data_collator,
+                drop_last=False,
+            )
+        else:
+            eval_dataloader = None
+
+        # Check if this is eval-only mode (no training data)
+        is_eval_only = len(train_dataloader) == 0
+        
+        if not is_eval_only:
+            num_steps_per_epoch = len(train_dataloader)  # Number of batches per epoch
+            num_training_steps = num_steps_per_epoch * num_epochs
+        else:
+            # Eval-only mode: no training steps
+            num_steps_per_epoch = 0
+            num_training_steps = 0
+
+        def _run_batch(batch: dict[str, Any], lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
+            """Process a single batch from the DataLoader."""
+            training_params = TrainingParams(
+                is_eval=is_eval,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                num_training_steps=num_training_steps,
+                num_warmup_steps=warmup_steps
+            )
+            request_ids = self._add_training_requests_from_batch(batch, training_params, lora_request)
+            outputs = self._run_engine(use_tqdm=use_tqdm)
+            return outputs
+
+        def _run_eval():
+            if eval_dataloader is None:
+                return []
+            eval_losses = []
+            with tqdm(total=len(eval_dataloader), desc="Evaluation Progress") as eval_pbar:
+                for batch in eval_dataloader:
+                    outputs = _run_batch(batch, lora_request, is_eval=True)
+                    # Add the loss of each request to the eval losses.
+                    for output in outputs:
+                        eval_losses.append(output.loss)
+                    eval_pbar.update(1)
+                # Report the mean loss of the eval batch.
+                if len(eval_losses) > 0:
+                    mean_loss = sum(eval_losses) / len(eval_losses)
+                    logger.info(f"eval loss = {mean_loss:.6f}")
+            return eval_losses
+
+        # Run training (skip if eval-only mode)
+        if not is_eval_only:
+            total_steps = (num_epochs * num_steps_per_epoch // gradient_accumulation_steps)
+            completed_steps = 0
+
+            with tqdm(total=total_steps, desc="Training Progress") as pbar:
+                for _ in range(num_epochs):
+                    # Iterate through batches from DataLoader
+                    batch_iter = iter(train_dataloader)
+                    for step in range(0, num_steps_per_epoch, gradient_accumulation_steps):
+                        # Process gradient_accumulation_steps batches
+                        for _ in range(gradient_accumulation_steps):
+                            try:
+                                batch = next(batch_iter)
+                                _run_batch(batch, lora_request, is_eval=False)
+                            except StopIteration:
+                                # This can happen if num_steps_per_epoch is not divisible by gradient_accumulation_steps
+                                break
+
+                        pbar.update(1)
+                        completed_steps += 1
+
+                        if eval_steps is not None:
+                            if completed_steps % eval_steps == 0:
+                                _run_eval()
+
+        # Run eval at the end (always, even in eval-only mode)
+        final_eval_losses = _run_eval()
+
+        # Get captured tensors from training manager
+        training_manager = self.llm_engine.model_executor.driver_worker.model_runner.training_manager
+        captured_input_ids = training_manager.captured_input_ids
+        captured_labels = training_manager.captured_labels
+
+        # TODO(girfan): Implement proper train_losses collection
+        total_steps = 0
+        train_losses = []
+        eval_losses = [loss for loss in final_eval_losses] if final_eval_losses else []
+
+        return {
+            'train_losses': train_losses,
+            'eval_losses': eval_losses,
+            'metrics': {
+                'total_steps': total_steps,
+                'num_epochs': num_epochs,
+                'final_train_loss': train_losses[-1]['loss'] if train_losses else None,
+                'final_eval_loss': eval_losses[-1] if eval_losses else None,
+            },
+            'captured_input_ids': captured_input_ids,
+            'captured_labels': captured_labels,
+        }
+
+    def _add_training_requests_from_batch(
+        self,
+        batch: dict[str, Any],
+        training_params: TrainingParams,
+        lora_request: LoRARequest,
+    ) -> list[str]:
+        """
+        Add training requests from a collated batch.
+        
+        The batch is a dictionary with keys like 'input_ids', 'attention_mask', 'labels',
+        where each value is a tensor of shape [batch_size, seq_len].
+        
+        We need to unbatch it and add individual requests.
+        """
+        # Get batch size from the first tensor
+        batch_size = batch['input_ids'].shape[0]
+
+        request_ids = []
+        for i in range(batch_size):
+            # Extract the i-th sample from the batch
+            # TODO(girfan): Can remove the tolist() calls and handle tensors.
+            sample = {
+                'input_ids': batch['input_ids'][i].tolist(),
+                'attention_mask': batch['attention_mask'][i].tolist(),
+                'labels': batch['labels'][i].tolist(),
+            }
+
+            request_id = self._add_training_request(
+                sample=sample,
+                training_params=training_params,
+                lora_request=lora_request,
+            )
+            request_ids.append(request_id)
+
+        return request_ids
+    
+    def _add_training_requests_from_iter(
+        self,
+        dataset_iter: Iterator,
+        batch_size: int,
+        training_params: TrainingParams,
+        lora_request: LoRARequest,
+    ) -> list[str]:
+        """Legacy method for compatibility. Prefer _add_training_requests_from_batch."""
+        request_ids = []
+        for i in range(batch_size):
+            try:
+                sample = next(dataset_iter)
+            except StopIteration:
+                logger.warning(f"Dataset exhausted after {i} samples (requested {batch_size})")
+                break
+
+            request_id = self._add_training_request(
+                sample=sample,
+                training_params=training_params,
+                lora_request=lora_request,
+            )
+            request_ids.append(request_id)
+
+        return request_ids
+
+    def _add_training_request(
+        self,
+        sample: dict[str, Any],
+        training_params: TrainingParams,
+        lora_request: LoRARequest
+    ) -> str:
+        # Get EOS token ID
+        tokenizer = self.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
+
+        # Create the training request
+        prompt_token_ids = sample["input_ids"]
+        # prompt_str = sample["text"]
+        prompt_str = ""
+        labels = sample["labels"]
+        
+        # Convert 1D attention mask to 2D causal mask (matching PEFT behavior)
+        # Input: [seq_len] with 1 for real tokens, 0 for padding
+        # Output: [seq_len, seq_len] with causal + padding mask
+        attention_mask_1d = sample["attention_mask"]
+        seq_len = len(attention_mask_1d)
+        
+        # Create 2D causal mask: lower triangular (causal) AND respecting padding
+        # This matches what PEFT/Transformers creates internally
+        import torch
+        # Create causal mask (lower triangular)
+        causal_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool))
+        
+        # Apply padding mask: a token can only attend to non-padded tokens
+        # Convert 1D mask to 2D by broadcasting
+        padding_mask_2d = torch.tensor(attention_mask_1d, dtype=torch.bool).unsqueeze(0).expand(seq_len, -1)
+        
+        # Combine: causal AND padding
+        training_attention_mask = causal_mask & padding_mask_2d
+        
+        request_id = str(next(self.request_counter))
+
+        training_request = Request(
+            request_id=request_id,
+            lora_request=lora_request,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=None,
+            pooling_params=None,
+            eos_token_id=eos_token_id,
+            is_training=True,
+            training_params=training_params,
+            labels=labels,
+            training_attention_mask=training_attention_mask,
+        )
+
+        # Add to output processor first (needed for get_num_unfinished_requests)
+        # TODO(girfan): Pass the string from the request
+        self.llm_engine.output_processor.add_request(training_request, prompt_str, None, 0)
+
+        # Add to scheduler for execution
+        engine_core_client = self.llm_engine.engine_core
+
+        # Access the actual EngineCore (unwrap from InprocClient)
+        if hasattr(engine_core_client, 'engine_core'):
+            # InprocClient case
+            actual_engine_core = engine_core_client.engine_core
+            actual_engine_core.scheduler.add_request(training_request)
+        elif hasattr(engine_core_client, 'scheduler'):
+            # Direct EngineCore access
+            engine_core_client.scheduler.add_request(training_request)
+        else:
+            # For async/multiprocess case
+            raise NotImplementedError(
+                "Training with async/multiprocess engine not yet supported. "
+                "Please use the synchronous LLM class with V1 engine.")
+
+        return request_id
+
 
     def _get_modality_specific_lora_reqs(
             self, prompts: Union[PromptType, Sequence[PromptType]],

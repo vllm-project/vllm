@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import torch
 import time
 from collections.abc import Mapping
 from functools import partial
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.training_params import TrainingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -18,7 +20,6 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
-
 
 class Request:
 
@@ -39,6 +40,10 @@ class Request:
         trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
+        is_training: bool = False,
+        training_params: Optional[TrainingParams] = None,
+        labels: Optional[torch.Tensor] = None,
+        training_attention_mask: Optional[list[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -57,6 +62,11 @@ class Request:
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
+        self.is_training = is_training
+        self.training_params = training_params
+        self.labels = labels
+        self.training_attention_mask = training_attention_mask
+
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -74,6 +84,11 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
                     sampling_params.extra_args.get("kv_transfer_params")
+        elif is_training:
+            # Training requests don't need sampling or pooling params
+            # They process the entire sequence at once for training
+            # Set max_tokens=1 so scheduler knows to run forward pass
+            self.max_tokens = 1
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be unset")

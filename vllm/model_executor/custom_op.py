@@ -3,11 +3,16 @@
 
 from typing import Optional
 
+import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+
+DYNAMIC_DISPATCH_CUSTOM_OPS = ["rms_norm", "silu_and_mul"]
+
 
 logger = init_logger(__name__)
 
@@ -39,9 +44,22 @@ class CustomOp(nn.Module):
     def __init__(self):
         super().__init__()
         self._forward_method = self.dispatch_forward()
+        if self.__class__.name in DYNAMIC_DISPATCH_CUSTOM_OPS:
+            self._supports_dynamic_dispatch = True
+            self._forward_method_training = self.dispatch_forward(force_native=True)
+        else:
+            self._supports_dynamic_dispatch = False
+            self._forward_method_training = None
 
     def forward(self, *args, **kwargs):
-        return self._forward_method(*args, **kwargs)
+        is_training = kwargs.pop('is_training', False)
+        if not self._supports_dynamic_dispatch:
+            return self._forward_method(*args, **kwargs)
+        # Dynamic dispatch.
+        if torch.is_grad_enabled() or is_training:
+            return self._forward_method_training(*args, **kwargs)
+        else:
+            return self._forward_method(*args, **kwargs)
 
     def forward_native(self, *args, **kwargs):
         """PyTorch-native implementation of the forward method.
@@ -78,9 +96,13 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
-    def dispatch_forward(self):
+    def dispatch_forward(self, force_native: bool = False):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
+
+        if force_native:
+            return self.forward_native
+
         compilation_config = get_cached_compilation_config()
         enabled = self.enabled()
         if enabled:

@@ -23,7 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-
+from vllm.training_params import TrainingParams
 
 @dataclass
 class CachedRequestState:
@@ -43,6 +43,11 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+
+    is_training: bool = False
+    training_params: Optional[TrainingParams] = None
+    labels: Optional[torch.Tensor] = None
+    training_attention_mask: Optional[list[int]] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -263,6 +268,11 @@ class InputBatch:
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
+        # Training state
+        self.is_training: bool = False
+        self.training_params: dict[str, TrainingParams] = {}
+        self.labels: dict[str, torch.Tensor] = {}
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -399,6 +409,11 @@ class InputBatch:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids)
+        elif request.is_training:
+            # TODO(girfan): Does this self.is_training set it for the full batch?
+            self.is_training = True
+            self.training_params[req_index] = request.training_params
+            self.labels[req_index] = request.labels
         else:
             raise NotImplementedError("Unrecognized request type")
 
@@ -758,7 +773,8 @@ class InputBatch:
                                               non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray,
+        is_training_batch: bool = False,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
@@ -772,12 +788,16 @@ class InputBatch:
         """
 
         req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping)
         token_lora_mapping = tuple(
             req_lora_mapping.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values())
-
+        if is_training_batch:
+            # For training, we need per-token mapping since we compute logits for all tokens
+            prompt_lora_mapping = token_lora_mapping
+        else:
+            # For inference, we only need per-request mapping (for last token sampling)
+            prompt_lora_mapping = tuple(req_lora_mapping)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
     @property

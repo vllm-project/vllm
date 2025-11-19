@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union, List
 
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
+from dataclasses import field
 
 import vllm.envs as envs
 from vllm.config.utils import config
@@ -44,7 +45,7 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = 256
+    lora_extra_vocab_size: int = 0
     """(Deprecated) Maximum size of extra vocabulary that can be present in a 
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
@@ -62,6 +63,14 @@ class LoRAConfig:
     bias_enabled: bool = False
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
     removed in v0.12.0."""
+    lora_alpha: int = 16
+    """LoRA alpha."""
+    training_target_modules: List[str] | None = None
+    """Target modules for LoRA training."""
+    enable_lora_training: bool = False
+    """Enable LoRA training."""
+    scheduler_type: str = "cosine"
+    """Scheduler type for LoRA training."""
 
     def compute_hash(self) -> str:
         """
@@ -102,7 +111,7 @@ class LoRAConfig:
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (256, 512)
+        possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
@@ -119,6 +128,9 @@ class LoRAConfig:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
+
+        if self.training_target_modules is None:
+            self.training_target_modules = ["q_proj", "v_proj"]
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
         if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:

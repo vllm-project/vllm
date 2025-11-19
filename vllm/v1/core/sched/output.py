@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
-
+    from vllm.training_params import TrainingParams
 
 @bc_linter_include
 @dataclass
@@ -33,6 +34,10 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    is_training: bool = False
+    training_params: Optional[TrainingParams] = None
+    labels: Optional[torch.Tensor] = None
+    training_attention_mask: Optional[list[int]] = None
 
     @classmethod
     def from_request(
@@ -49,6 +54,10 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            is_training=request.is_training,
+            training_params=request.training_params,
+            labels=request.labels,
+            training_attention_mask=request.training_attention_mask,
         )
 
     def __repr__(self):
@@ -59,7 +68,8 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"is_training={self.is_training},"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -72,6 +82,7 @@ class NewRequestData:
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request}"
+                f"is_training={self.is_training},"
                 ")")
 
 

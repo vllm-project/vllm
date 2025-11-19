@@ -137,8 +137,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
+        is_trainable: bool = False,
+        trainable_slices: Optional[list[int]] = None,
     ):
-        self.reset_lora(index)
+        if not is_trainable:
+            # Only reset LoRA if not registered in training manager (i.e., not training mode)
+            self.reset_lora(index)
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
                                 lora_a.T, non_blocking=True)
@@ -151,6 +155,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 :embeddings_tensor.shape[0],
                 :embeddings_tensor.shape[1],
             ] = embeddings_tensor
+        if is_trainable:
+            self.lora_a_stacked[index].requires_grad_(True)
+            self.lora_b_stacked[index].requires_grad_(True)
+            if embeddings_tensor is not None:
+                self.embeddings_tensors[index].requires_grad_(True)
 
     def _get_logits(
         self,
@@ -195,9 +204,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.embeddings_tensors.dtype,
             device=self.embeddings_tensors.device,
         )
-        torch.matmul(self.embeddings_tensors,
-                     hidden_states.T,
-                     out=lora_logits[:-1])
+
+        # For training, we cannot use out= parameter as it doesn't support autograd
+        # Check if gradients are required (training mode)
+        if hidden_states.requires_grad or self.embeddings_tensors.requires_grad:
+            # Training mode: compute without out= parameter to enable gradient flow
+            lora_logits[:-1] = torch.matmul(self.embeddings_tensors,
+                                            hidden_states.T)
+        else:
+            # Inference mode: use out= parameter for efficiency
+            torch.matmul(self.embeddings_tensors,
+                         hidden_states.T,
+                         out=lora_logits[:-1])
 
         neg_inf, pos_inf = current_platform.get_infinity_values(
             lora_logits.dtype)
