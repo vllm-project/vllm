@@ -584,8 +584,15 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
+    if device.type == "xpu":
+        logger.warning(
+            "UVA offloading is not supported on Intel XPU. "
+            "Falling back to standard CPU offloading."
+        )
+        uva_offloading = False
+    else:
+        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+        uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -618,14 +625,21 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if offloaded_parameters and not uva_offloading:
         original_forward = module.forward
 
+        def get_device_state():
+            # build a unified (name, tensor) list
+            items = list(module.named_parameters()) + [
+                (name, b)
+                for name, b in module.named_buffers()
+                if module._buffers.get(name, None) is b
+            ]
+            # here we blindly call `to(device)`
+            # if the parameter is already on the device, it will be a no-op
+            return {name: param.to(device, non_blocking=True) for name, param in items}
+
         def forward(*args, **kwargs):
             module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
+
+            device_state = get_device_state()
             output = functional_call(module, device_state, args=args, kwargs=kwargs)
             module.forward = forward
             return output
