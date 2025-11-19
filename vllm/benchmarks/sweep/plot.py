@@ -198,13 +198,15 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
 def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str | None = None):
     parts = list[str]()
     
-    # Use custom figure name if provided, otherwise generate from group
+    # Start with custom figure name or default "FIGURE"
     if fig_name:
         parts.append(fig_name)
-    elif group:
-        parts.extend(("FIGURE-", *(f"{k}={v}" for k, v in group)))
     else:
-        parts.append("figure")
+        parts.append("FIGURE")
+    
+    # Always append group data if present
+    if group:
+        parts.extend(f"{k}={v}" for k, v in group)
 
     return fig_dir / sanitize_filename("-".join(parts) + ".png")
 
