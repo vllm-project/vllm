@@ -9,3 +9,4 @@ import vllm.model_executor.layers.batch_invariant as batch_invariant
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
     """Automatically enable batch invariant kernel overrides for all tests."""
     monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")

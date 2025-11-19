@@ -6,30 +6,16 @@ import random
 
 import pytest
 import torch
-from utils import _extract_step_logprobs, _random_prompt, skip_unsupported
+from utils import (
+    BACKENDS,
+    _extract_step_logprobs,
+    _random_prompt,
+    resolve_model_name,
+    skip_unsupported,
+)
 
 import vllm.model_executor.layers.batch_invariant as batch_invariant
 from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
-
-BACKENDS: list[str] = [
-    "FLASH_ATTN",
-    "FLASHINFER",
-]
-
-if current_platform.is_cuda() and current_platform.is_device_capability(90):
-    BACKENDS.append("FLASH_ATTN_MLA")
-
-DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
-MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-
-
-def resolve_model_name(backend: str) -> str:
-    """Resolve the model name for the given backend, respecting env overrides."""
-    model = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
-    if backend.endswith("MLA") and model == DEFAULT_MODEL:
-        return MLA_MODEL
-    return model
 
 
 @skip_unsupported
