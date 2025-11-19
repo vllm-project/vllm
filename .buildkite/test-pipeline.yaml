@@ -560,6 +560,7 @@ steps:
   num_gpus: 1
   source_file_dependencies:
   - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization/test_block_fp8.py
