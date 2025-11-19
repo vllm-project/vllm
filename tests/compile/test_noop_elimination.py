@@ -25,9 +25,12 @@ def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
     class Model(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
+            # Avoid using empty, since on rocm torch.empty
+            # does not initialize the memory.
             self.pos_embed = torch.randn(buffer_size, hidden_size, dtype=dtype)
 
         def forward(self, x):
+            # Avoid += to prevent inplace addition.
             x = x + self.pos_embed[: x.shape[0]]
             # Chain of reshapes
             y = x.reshape(-1, 128, 32)
