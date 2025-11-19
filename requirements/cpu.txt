@@ -22,7 +22,6 @@ datasets # for benchmark scripts
 
 # Intel Extension for PyTorch, only for x86_64 CPUs
 intel-openmp==2024.2.1; platform_machine == "x86_64"
-intel_extension_for_pytorch==2.8.0; platform_machine == "x86_64"
 triton==3.2.0; platform_machine == "x86_64" # Triton is required for torch 2.6+cpu, as it is imported in torch.compile.
 
 # Use this to gather CPU info and optimize based on ARM Neoverse cores

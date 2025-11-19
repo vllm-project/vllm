@@ -134,7 +134,7 @@ class IPEXConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        if not current_platform.is_cpu() and not current_platform.is_xpu():
+        if not current_platform.is_xpu():
             return None
 
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
