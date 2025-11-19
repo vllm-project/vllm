@@ -25,17 +25,12 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
-    maybe_create_device_identity,
-)
 from vllm.platforms import current_platform
 
-from ..utils import override_cutlass_fp8_supported
+from ..utils import TestFP8Layer, override_cutlass_fp8_supported
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -47,25 +42,30 @@ def is_nvfp4_supported():
 
 
 class TestSiluMulFp8QuantModel(torch.nn.Module):
+    quant_key = kFp8StaticTensorSym
+
     def __init__(self, hidden_size: int, cuda_force_torch: bool, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
-        self.wscale = torch.rand(1, dtype=torch.float32)
-        self.scale = torch.rand(1, dtype=torch.float32)
-
-        self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
+        self.weight_scale = torch.rand(1, dtype=torch.float32)
+        self.input_scale = torch.rand(1, dtype=torch.float32)
+        self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=True,
-                act_quant_group_shape=GroupShape.PER_TENSOR,
+            self.fp8_linear = TestFP8Layer(
+                self.quant_key,
+                self.quant_key,
+                self.weight,
+                self.weight_scale,
+                self.input_scale,
             )
+
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
-        self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
+        self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.fp8_linear.apply(y, self.w, self.wscale, input_scale=self.wscale)
+        x2 = self.fp8_linear(y)
         return x2
 
     def ops_in_model_before(self):
@@ -154,7 +154,6 @@ def test_fusion_silu_and_mul_quant(
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
-    maybe_create_device_identity()
 
     x = torch.rand(num_tokens, hidden_size * 2)
 
