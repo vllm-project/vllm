@@ -112,34 +112,35 @@ def select_nvfp4_gemm_impl(
         "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
     )
 
+
 def flashinfer_trtllm_fp4_moe(
-                              layer: torch.nn.Module,
-                              x: torch.Tensor,
-                              router_logits: torch.Tensor,
-                              top_k: int,
-                              global_num_experts: int,
-                              num_expert_group: int | None,
-                              topk_group: int | None,
-                              custom_routing_function: object | None,
-                              e_score_correction_bias: torch.Tensor | None,
-                              ) -> torch.Tensor:
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    global_num_experts: int,
+    num_expert_group: int | None,
+    topk_group: int | None,
+    custom_routing_function: object | None,
+    e_score_correction_bias: torch.Tensor | None,
+) -> torch.Tensor:
     """
-        Apply FlashInfer TensorRT-LLM FP4 MoE kernel.
+    Apply FlashInfer TensorRT-LLM FP4 MoE kernel.
 
-        Args:
-            layer: The MoE layer with weights and scales
-            x: Input tensor
-            router_logits: Router logits for expert selection
-            top_k: Number of experts to select per token
-            global_num_experts: Total number of experts across all ranks
-            num_expert_group: Number of expert groups (for grouped routing)
-            topk_group: Top-k within each group
-            custom_routing_function: Custom routing function (e.g., Llama4)
-            e_score_correction_bias: Optional routing bias correction
+    Args:
+        layer: The MoE layer with weights and scales
+        x: Input tensor
+        router_logits: Router logits for expert selection
+        top_k: Number of experts to select per token
+        global_num_experts: Total number of experts across all ranks
+        num_expert_group: Number of expert groups (for grouped routing)
+        topk_group: Top-k within each group
+        custom_routing_function: Custom routing function (e.g., Llama4)
+        e_score_correction_bias: Optional routing bias correction
 
-        Returns:
-            Output tensor from the MoE layer
-        """
+    Returns:
+        Output tensor from the MoE layer
+    """
     import flashinfer
 
     from vllm.model_executor.models.llama4 import Llama4MoE
@@ -153,9 +154,7 @@ def flashinfer_trtllm_fp4_moe(
     )
 
     # Determine routing method type
-    use_llama4_routing = (
-            custom_routing_function is Llama4MoE.custom_routing_function
-    )
+    use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
     routing_method_type = layer.routing_method_type
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
@@ -209,4 +208,3 @@ def flashinfer_trtllm_fp4_moe(
     )[0]
 
     return out
-

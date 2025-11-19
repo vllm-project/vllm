@@ -6,9 +6,9 @@ from collections.abc import Callable
 from enum import Enum
 
 import torch
-from torch.nn.parameter import Parameter
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import ActivationOrdering, QuantizationStrategy
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -41,12 +41,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-    is_flashinfer_supporting_global_sf,
-)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
@@ -57,9 +51,13 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
+    flashinfer_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
-    flashinfer_trtllm_fp4_moe,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    FlashinferMoeBackend,
+    get_flashinfer_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     expert_weight_is_col_major,
@@ -500,16 +498,20 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         )
 
         # w2
-        if self.allow_flashinfer and self.flashinfer_moe_backend==FlashinferMoeBackend.TENSORRT_LLM:
-            w2_input_global_scale=layer.w2_input_global_scale.min().to(torch.float32).expand(layer.num_experts)
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            w2_input_global_scale = (
+                layer.w2_input_global_scale.min()
+                .to(torch.float32)
+                .expand(layer.num_experts)
+            )
         else:
-            w2_input_global_scale=layer.w2_input_global_scale
-
+            w2_input_global_scale = layer.w2_input_global_scale
 
         layer.g2_alphas = torch.nn.Parameter(
-            ((1 / w2_input_global_scale) * layer.w2_weight_scale_2).to(
-                torch.float32
-            ),
+            ((1 / w2_input_global_scale) * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False,
         )
 
@@ -519,8 +521,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
         # TensorRT-LLM specific processing
         if (
-                self.allow_flashinfer
-                and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             # Prepare static weights for TRT-LLM kernel
             # alternate: prepare_static_weight_layouts_for_trtllm_moe
@@ -605,7 +607,10 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.use_marlin or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if (
+            self.use_marlin
+            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
             return None
 
         return nvfp4_moe_quant_config(
