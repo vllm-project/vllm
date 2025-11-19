@@ -151,16 +151,16 @@ class TestParameterSweep:
         sweep = ParameterSweep.read_from_dict(data)
         assert len(sweep) == 2
 
-        # Check that items have the name field
-        names = {item['name'] for item in sweep}
+        # Check that items have the _benchmark_name field
+        names = {item['_benchmark_name'] for item in sweep}
         assert names == {'experiment1', 'experiment2'}
 
         # Check that parameters are preserved
         for item in sweep:
-            if item['name'] == 'experiment1':
+            if item['_benchmark_name'] == 'experiment1':
                 assert item['max_tokens'] == 100
                 assert item['temperature'] == 0.7
-            elif item['name'] == 'experiment2':
+            elif item['_benchmark_name'] == 'experiment2':
                 assert item['max_tokens'] == 200
                 assert item['temperature'] == 0.9
 
@@ -200,11 +200,59 @@ class TestParameterSweep:
             sweep = ParameterSweep.read_json(temp_path)
             assert len(sweep) == 2
 
-            # Check that items have the name field
-            names = {item['name'] for item in sweep}
+            # Check that items have the _benchmark_name field
+            names = {item['_benchmark_name'] for item in sweep}
             assert names == {'experiment1', 'experiment2'}
         finally:
             temp_path.unlink()
+
+    def test_unique_benchmark_names_validation(self):
+        """Test that duplicate _benchmark_name values raise an error."""
+        # Test with duplicate names in list format
+        records = [
+            {'_benchmark_name': 'exp1', 'max_tokens': 100},
+            {'_benchmark_name': 'exp1', 'max_tokens': 200},
+        ]
+        
+        try:
+            ParameterSweep.from_records(records)
+            assert False, "Should have raised ValueError for duplicate names"
+        except ValueError as e:
+            assert "Duplicate _benchmark_name values" in str(e)
+            assert "exp1" in str(e)
+
+    def test_unique_benchmark_names_multiple_duplicates(self):
+        """Test validation with multiple duplicate names."""
+        records = [
+            {'_benchmark_name': 'exp1', 'max_tokens': 100},
+            {'_benchmark_name': 'exp1', 'max_tokens': 200},
+            {'_benchmark_name': 'exp2', 'max_tokens': 300},
+            {'_benchmark_name': 'exp2', 'max_tokens': 400},
+        ]
+        
+        try:
+            ParameterSweep.from_records(records)
+            assert False, "Should have raised ValueError for duplicate names"
+        except ValueError as e:
+            assert "Duplicate _benchmark_name values" in str(e)
+
+    def test_no_benchmark_names_allowed(self):
+        """Test that records without _benchmark_name are allowed."""
+        records = [
+            {'max_tokens': 100, 'temperature': 0.7},
+            {'max_tokens': 200, 'temperature': 0.9}
+        ]
+        sweep = ParameterSweep.from_records(records)
+        assert len(sweep) == 2
+
+    def test_mixed_benchmark_names_allowed(self):
+        """Test that mixing records with and without _benchmark_name is allowed."""
+        records = [
+            {'_benchmark_name': 'exp1', 'max_tokens': 100},
+            {'max_tokens': 200, 'temperature': 0.9}
+        ]
+        sweep = ParameterSweep.from_records(records)
+        assert len(sweep) == 2
 
 
 class TestParameterSweepItemKeyNormalization:

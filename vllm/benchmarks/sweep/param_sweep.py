@@ -28,7 +28,7 @@ class ParameterSweep(list["ParameterSweepItem"]):
                 "experiment2": {"max_tokens": 200, "temperature": 0.9}
             }
         """
-        records = [{"name": name, **params} for name, params in data.items()]
+        records = [{"_benchmark_name": name, **params} for name, params in data.items()]
         return cls.from_records(records)
 
     @classmethod
@@ -37,6 +37,15 @@ class ParameterSweep(list["ParameterSweepItem"]):
             raise TypeError(
                 f"The parameter sweep should be a list of dictionaries, "
                 f"but found type: {type(records)}"
+            )
+
+        # Validate that all _benchmark_name values are unique if provided
+        names = [record.get("_benchmark_name") for record in records if "_benchmark_name" in record]
+        if names and len(names) != len(set(names)):
+            duplicates = [name for name in names if names.count(name) > 1]
+            raise ValueError(
+                f"Duplicate _benchmark_name values found: {set(duplicates)}. "
+                f"All _benchmark_name values must be unique."
             )
 
         return cls(ParameterSweepItem.from_record(record) for record in records)
@@ -60,11 +69,11 @@ class ParameterSweepItem(dict[str, object]):
         """
         Get the name for this parameter sweep item.
         
-        Returns the 'name' field if present, otherwise returns a text
+        Returns the '_benchmark_name' field if present, otherwise returns a text
         representation of all parameters.
         """
-        if "name" in self:
-            return self["name"]
+        if "_benchmark_name" in self:
+            return self["_benchmark_name"]
         return self.as_text(sep="-")
 
     # In JSON, we prefer "_"
@@ -113,8 +122,8 @@ class ParameterSweepItem(dict[str, object]):
         cmd = list(cmd)
 
         for k, v in self.items():
-            # Skip the 'name' field - it's used for identification, not as a parameter
-            if k == "name":
+            # Skip the '_benchmark_name' field - it's used for identification, not as a parameter
+            if k == "_benchmark_name":
                 continue
             
             # Serialize dict values as JSON
@@ -145,4 +154,4 @@ class ParameterSweepItem(dict[str, object]):
         return cmd
 
     def as_text(self, sep: str = ", ") -> str:
-        return sep.join(f"{k}={v}" for k, v in self.items() if k != "name")
+        return sep.join(f"{k}={v}" for k, v in self.items() if k != "_benchmark_name")
