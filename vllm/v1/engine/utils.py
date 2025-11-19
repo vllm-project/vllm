@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.utils.import_utils import resolve_obj_by_qualname
 import contextlib
 import os
 import weakref
@@ -883,11 +884,22 @@ def launch_core_engines(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
         from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.streaming.engine.core import StreamingEngineCoreProc
+        from vllm.v1.streaming.streaming_scheduler import StreamingScheduler
+
+        sched_cls = vllm_config.scheduler_config.scheduler_cls
+        if isinstance(sched_cls, str):
+            sched_cls = resolve_obj_by_qualname(sched_cls)
+        engine_core_proc = (
+            StreamingEngineCoreProc
+            if issubclass(sched_cls, StreamingScheduler)
+            else EngineCoreProc
+        )
 
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
+                engine_core_proc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,

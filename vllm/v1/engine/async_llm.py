@@ -52,6 +52,10 @@ logger = init_logger(__name__)
 
 
 class AsyncLLM(EngineClient):
+    processor_cls: type[Processor] = Processor
+    output_processor_cls: type[OutputProcessor] = OutputProcessor
+    engine_core_client_cls: type[EngineCoreClient] = EngineCoreClient
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -113,7 +117,7 @@ class AsyncLLM(EngineClient):
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.processor = self.processor_cls(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -121,7 +125,7 @@ class AsyncLLM(EngineClient):
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         stream_interval = self.vllm_config.scheduler_config.stream_interval
-        self.output_processor = OutputProcessor(
+        self.output_processor = self.output_processor_cls(
             self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
@@ -130,7 +134,7 @@ class AsyncLLM(EngineClient):
             self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_async_mp_client(
+        self.engine_core = self.engine_core_client_cls.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
