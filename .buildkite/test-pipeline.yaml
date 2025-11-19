@@ -939,6 +939,7 @@ steps:
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/test_fusions_e2e.py
   commands:
     - nvidia-smi
     - pytest -v -s tests/compile/test_fusion_attn.py
