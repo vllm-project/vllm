@@ -441,6 +441,13 @@ class CompilationConfig:
     inductor `call` function in the model runner. The top-level full cudagraph
     capture ignores all partitioning.
     """
+    enable_nano_batch_split: bool = False
+    """Enable splitting the input batch into nano-batches for intra-device
+    parallelism"""
+    max_num_nano_batches: int = 2
+    """Maximum number of nano-batches to split the input batch into"""
+    min_nano_split_tokens: int = 1024
+    """Minimum number of tokens to split the input batch"""
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -527,6 +534,9 @@ class CompilationConfig:
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
         factors.append(self.compile_cache_save_format)
+        factors.append(self.enable_nano_batch_split)
+        factors.append(self.max_num_nano_batches)
+        factors.append(self.min_nano_split_tokens)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __repr__(self) -> str:
