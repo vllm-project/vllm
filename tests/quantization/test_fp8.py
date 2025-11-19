@@ -271,11 +271,10 @@ def test_scaled_fp8_quant(dtype) -> None:
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
 @pytest.mark.parametrize("weight_block_size", [None, [1, 1]])
-# Marlin performs reshaping which is incompatible with
 # any postprocessing that is applied to the weights such as padding and repacking
 # (excluding device sharding) must also be applied to the reloaded weights
 #
-# this is the case for marlin as well as per tensor Fp8MoEMethod
+# this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
 def test_fp8_reloading(
     method_cls, is_checkpoint_fp8_serialized, weight_block_size, use_marlin, dist_init
