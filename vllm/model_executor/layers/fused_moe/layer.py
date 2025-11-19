@@ -67,7 +67,6 @@ else:
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
-        indices_type: torch.dtype | None,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
