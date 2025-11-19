@@ -14,14 +14,14 @@ class ParameterSweep(list["ParameterSweepItem"]):
         # Support both list and dict formats
         if isinstance(data, dict):
             return cls.read_from_dict(data)
-        
+
         return cls.from_records(data)
 
     @classmethod
     def read_from_dict(cls, data: dict[str, dict[str, object]]):
         """
         Read parameter sweep from a dict format where keys are names.
-        
+
         Example:
             {
                 "experiment1": {"max_tokens": 100, "temperature": 0.7},
@@ -40,7 +40,7 @@ class ParameterSweep(list["ParameterSweepItem"]):
             )
 
         # Validate that all _benchmark_name values are unique if provided
-        names = [record.get("_benchmark_name") for record in records if "_benchmark_name" in record]
+        names = [r["_benchmark_name"] for r in records if "_benchmark_name" in r]
         if names and len(names) != len(set(names)):
             duplicates = [name for name in names if names.count(name) > 1]
             raise ValueError(
@@ -68,7 +68,7 @@ class ParameterSweepItem(dict[str, object]):
     def name(self) -> str:
         """
         Get the name for this parameter sweep item.
-        
+
         Returns the '_benchmark_name' field if present, otherwise returns a text
         representation of all parameters.
         """
@@ -104,7 +104,7 @@ class ParameterSweepItem(dict[str, object]):
     def _normalize_cmd_kv_pair(self, k: str, v: object) -> list[str]:
         """
         Normalize a key-value pair into command-line arguments.
-        
+
         Returns a list containing either:
         - A single element for boolean flags (e.g., ['--flag'] or ['--flag=true'])
         - Two elements for key-value pairs (e.g., ['--key', 'value'])
@@ -122,14 +122,14 @@ class ParameterSweepItem(dict[str, object]):
         cmd = list(cmd)
 
         for k, v in self.items():
-            # Skip the '_benchmark_name' field - it's used for identification, not as a parameter
+            # Skip the '_benchmark_name' field, not a parameter
             if k == "_benchmark_name":
                 continue
-            
+
             # Serialize dict values as JSON
             if isinstance(v, dict):
                 v = json.dumps(v)
-            
+
             for k_candidate in self._iter_cmd_key_candidates(k):
                 try:
                     k_idx = cmd.index(k_candidate)
