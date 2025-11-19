@@ -10,12 +10,12 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
+import numpy as np
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
-import numpy as np
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -456,10 +456,12 @@ class OpenAIServing:
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     all_beams_token_id.extend(list(logprobs.keys()))
-                    all_beams_logprob.extend([
-                        current_beam.cum_logprob + obj.logprob
-                        for obj in logprobs.values()
-                    ])
+                    all_beams_logprob.extend(
+                        [
+                            current_beam.cum_logprob + obj.logprob
+                            for obj in logprobs.values()
+                        ]
+                    )
 
             # Handle the token for the end of sentence (EOS)
             all_beams_token_id = np.array(all_beams_token_id)
@@ -467,32 +469,32 @@ class OpenAIServing:
 
             if not ignore_eos:
                 # Get the index position of eos token in all generated results
-                eos_idx = np.where(
-                    all_beams_token_id == eos_token_id)[0]
+                eos_idx = np.where(all_beams_token_id == eos_token_id)[0]
                 for idx in eos_idx:
                     current_beam = all_beams[idx // logprobs_num]
                     result = output[idx // logprobs_num]
                     assert result.outputs[0].logprobs is not None
                     logprobs_entry = result.outputs[0].logprobs[0]
                     completed.append(
-                        BeamSearchSequence(tokens=current_beam.tokens +
-                                           [eos_token_id]
-                                           if include_stop_str_in_output else
-                                           current_beam.tokens,
-                                           logprobs=current_beam.logprobs +
-                                           [logprobs_entry],
-                                           cum_logprob=float(
-                                               all_beams_logprob[idx]),
-                                           finish_reason="stop",
-                                           stop_reason=eos_token_id))
+                        BeamSearchSequence(
+                            tokens=current_beam.tokens + [eos_token_id]
+                            if include_stop_str_in_output
+                            else current_beam.tokens,
+                            logprobs=current_beam.logprobs + [logprobs_entry],
+                            cum_logprob=float(all_beams_logprob[idx]),
+                            finish_reason="stop",
+                            stop_reason=eos_token_id,
+                        )
+                    )
                 # After processing, set the log probability of the eos condition
                 # to negative infinity.
                 all_beams_logprob[eos_idx] = -np.inf
 
             # Processing non-EOS tokens
             # Get indices of the top beam_width probabilities
-            topn_idx = np.argpartition(np.negative(all_beams_logprob),
-                                       beam_width)[:beam_width]
+            topn_idx = np.argpartition(np.negative(all_beams_logprob), beam_width)[
+                :beam_width
+            ]
 
             for idx in topn_idx:
                 current_beam = all_beams[idx // logprobs_num]
@@ -503,12 +505,13 @@ class OpenAIServing:
                 new_beams.append(
                     BeamSearchSequence(
                         tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs +
-                        [logprobs_entry],
+                        logprobs=current_beam.logprobs + [logprobs_entry],
                         lora_request=current_beam.lora_request,
                         cum_logprob=float(all_beams_logprob[idx]),
                         multi_modal_data=current_beam.multi_modal_data,
-                        mm_processor_kwargs=current_beam.mm_processor_kwargs))
+                        mm_processor_kwargs=current_beam.mm_processor_kwargs,
+                    )
+                )
 
             all_beams = new_beams
 
