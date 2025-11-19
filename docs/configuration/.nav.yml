@@ -1,0 +1,9 @@
+nav:
+  - README.md
+  - conserving_memory.md
+  - engine_args.md
+  - env_vars.md
+  - model_resolution.md
+  - optimization.md
+  - serve_args.md
+  - TPU: https://docs.vllm.ai/projects/tpu/en/latest/
