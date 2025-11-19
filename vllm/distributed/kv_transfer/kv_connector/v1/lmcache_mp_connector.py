@@ -88,7 +88,7 @@ def extract_world_size_and_kv_rank(
 def create_scheduler_adapter(
     server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPSchedulerAdapter:
-    world_size, rank = extract_world_size_and_kv_rank(
+    world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
@@ -98,7 +98,7 @@ def create_scheduler_adapter(
         zmq_context,
         vllm_config.model_config.model,
         world_size,
-        rank,
+        kv_rank,
         vllm_config.cache_config.block_size,
     )
 
@@ -106,7 +106,7 @@ def create_scheduler_adapter(
 def create_worker_adapter(
     server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPWorkerAdapter:
-    world_size, rank = extract_world_size_and_kv_rank(
+    world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
@@ -116,7 +116,7 @@ def create_worker_adapter(
         zmq_context,
         vllm_config.model_config.model,
         world_size,
-        rank,
+        kv_rank,
         vllm_config.cache_config.block_size,
     )
 
