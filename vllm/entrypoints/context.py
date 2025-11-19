@@ -214,7 +214,6 @@ class HarmonyContext(ConversationContext):
 
     def append_output(self, output: RequestOutput) -> None:
         output_token_ids = output.outputs[0].token_ids
-        self.parser = get_streamable_parser_for_assistant()
         for token_id in output_token_ids:
             self.parser.process(token_id)
             # Check if the current token is part of reasoning content
@@ -519,7 +518,8 @@ class StreamingHarmonyContext(HarmonyContext):
         # (finished=True), then the next token processed will mark the
         # beginning of a new message
         self.first_tok_of_message = output.finished
-        for tok in output.outputs[0].token_ids:
+        token_ids = output.outputs[0].token_ids
+        for tok in token_ids:
             self.parser.process(tok)
         self._update_decode_token_usage(output)
 
@@ -529,7 +529,9 @@ class StreamingHarmonyContext(HarmonyContext):
             self.current_turn_metrics.reset()
         # Check if the current token is part of reasoning content
         self._update_num_reasoning_tokens()
-        self.last_tok = tok
+        # Only update last_tok if we actually processed tokens
+        if token_ids:
+            self.last_tok = tok
         if len(self._messages) - self.num_init_messages < len(self.parser.messages):
             self._messages.extend(
                 self.parser.messages[len(self._messages) - self.num_init_messages :]
@@ -547,7 +549,8 @@ class StreamingHarmonyContext(HarmonyContext):
         for tok in toks:
             self.parser.process(tok)
         self.last_tok = toks[-1]
-        # TODO: add tool_output messages to self._messages
+        # Add tool output messages to self._messages
+        self._messages.extend(output)
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START
