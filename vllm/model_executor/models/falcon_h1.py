@@ -198,10 +198,8 @@ class FalconH1SSMDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         **kwargs,
     ):
-        output = torch.empty_like(hidden_states)
-        self.mamba(
+        output = self.mamba(
             hidden_states,
-            output,
             mup_vector=self.mup_vector,
         )
         return output, residual
