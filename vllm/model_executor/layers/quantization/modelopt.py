@@ -1706,7 +1706,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
-                routed_scaling_factor=None,
+                routed_scaling_factor=1.0,
                 tile_tokens_dim=None,
                 routing_method_type=routing_method_type,
                 do_finalize=True,
