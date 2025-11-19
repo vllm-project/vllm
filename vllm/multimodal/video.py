@@ -137,9 +137,15 @@ class OpenCVVideoBackend(VideoLoader):
 
         if i != num_frames_to_sample:
             import logging
+
             logger = logging.getLogger(__name__)
-            logger.warning(f"Expected reading {num_frames_to_sample} frames, "
-                        f"but only loaded {i} frames from video. Using {i} frames.")
+            logger.warning(
+                "Expected reading %d frames, "
+                "but only loaded %d frames from video. Using %d frames.",
+                num_frames_to_sample,
+                i,
+                i,
+            )
             frames = frames[:i]
 
         # Use transformers transformers.video_utils.VideoMetadata format
@@ -226,9 +232,15 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         if i != len(frame_indices):
             import logging
+
             logger = logging.getLogger(__name__)
-            logger.warning(f"Expected reading {len(frame_indices)} frames, "
-                        f"but only loaded {i} frames from video. Using {i} frames.")
+            logger.warning(
+                "Expected reading %d frames, "
+                "but only loaded %d frames from video. Using %d frames.",
+                len(frame_indices),
+                i,
+                i,
+            )
             frames = frames[:i]
 
         # Use transformers transformers.video_utils.VideoMetadata format
