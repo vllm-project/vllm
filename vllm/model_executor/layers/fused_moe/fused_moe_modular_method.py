@@ -84,7 +84,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -123,22 +123,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
         )

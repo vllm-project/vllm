@@ -722,7 +722,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -750,19 +750,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         assert activation == "silu", "Only SiLU activation is supported."
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         return fused_marlin_moe(

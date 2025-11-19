@@ -93,7 +93,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
