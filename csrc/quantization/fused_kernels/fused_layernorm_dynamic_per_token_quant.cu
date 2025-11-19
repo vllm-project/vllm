@@ -213,8 +213,8 @@ void rms_norm_per_block_quant_dispatch(
   int32_t hidden_size = input.size(-1);
   auto num_tokens = input.numel() / hidden_size;
 
-  dim3 grid13(num_tokens);
-  dim3 block13(std::min(hidden_size, 512));
+  dim3 grid(num_tokens);
+  dim3 block(std::min(hidden_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -228,7 +228,7 @@ void rms_norm_per_block_quant_dispatch(
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
           vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, true>
-              <<<grid13, block13, 0, stream>>>(
+              <<<grid, block, 0, stream>>>(
                   rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                   scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
                   weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
@@ -240,7 +240,7 @@ void rms_norm_per_block_quant_dispatch(
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
           vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, false>
-              <<<grid13, block13, 0, stream>>>(
+              <<<grid, block, 0, stream>>>(
                   rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                   scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
                   weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),

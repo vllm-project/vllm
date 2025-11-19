@@ -473,12 +473,12 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
-            # Try it before the dynamic one, maybe refator later to run both
-            # blockwise and per-token from the same pattern?
+            # Fuse fused_add_rms_norm + fp8 group quant
             FusedAddRMSNormGroupQuantPattern(
                 epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
             ).register(self.patterns)
 
+            # Fuse rms_norm + fp8 group quant
             RMSNormGroupQuantPattern(
                 epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
             ).register(self.patterns)
