@@ -10,6 +10,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -168,18 +169,20 @@ class TestFullCUDAGraph:
             )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
-    with (
-        temporary_environ(
-            {
-                "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
-                # Flex_Attention is not supported with full cuda graph
-            }
-        ),
-        pytest.raises(RuntimeError),
+    with temporary_environ(
+        {
+            # Flex_Attention is not supported with full cuda graph
+            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+            # Make sure config changes get reflected in the main process
+            "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        }
     ):
-        LLM(
+        llm = LLM(
             model="Qwen/Qwen2-1.5B-Instruct",
             compilation_config=CompilationConfig(cudagraph_mode="FULL"),
+        )
+        assert (
+            llm.llm_engine.vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.PIECEWISE
         )
