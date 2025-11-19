@@ -568,7 +568,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
-        self.girfan_temp = False
 
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
