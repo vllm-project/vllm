@@ -67,6 +67,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 # -----------------------
 # Test vLLM image
 FROM base AS test
+ARG PYTHON_VERSION=3.12
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
@@ -86,9 +87,22 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 
 # install development dependencies (for testing)
 RUN cd /vllm-workspace \
-    && rm -rf vllm \
     && python3 -m pip install -e tests/vllm_test_utils \
     && python3 -m pip install pytest-shard
+
+# enable fast downloads from hf (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Copy in the v1 package for testing (it isn't distributed yet)
+COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
+
+# Source code is used in the `python_only_compile.sh` test
+# We hide it inside `src/` so that this source code
+# will not be imported by other tests
+RUN mkdir src
+RUN mv vllm src/vllm
 
 # -----------------------
 # Final vLLM image
