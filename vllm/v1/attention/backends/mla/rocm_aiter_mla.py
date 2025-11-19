@@ -58,7 +58,7 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
     def __init__(
@@ -183,7 +183,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 query_start_loc_device, non_blocking=True
             )
             self.qo_indptr[1 + num_reqs :] = query_start_loc_device[-1]
-            qo_indptr = self.qo_indptr
+            qo_indptr = self.qo_indptr[: 1 + num_reqs]
 
         else:
             qo_indptr = torch.arange(
