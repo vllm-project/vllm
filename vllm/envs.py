@@ -1261,7 +1261,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
     # strategies.
-    # Cutstom routing strategies can be registered by
+    # Custom routing strategies can be registered by
     # RoutingSimulator.register_strategy()
     # Note: custom strategies may not produce correct model outputs
     "VLLM_MOE_ROUTING_SIMULATION_STRATEGY": lambda: os.environ.get(
