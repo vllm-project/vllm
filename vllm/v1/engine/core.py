@@ -181,10 +181,11 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.ec_producer = (
+        self.is_ec_producer = (
             vllm_config.ec_transfer_config is not None
             and vllm_config.ec_transfer_config.is_ec_producer
         )
+        self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
@@ -390,10 +391,10 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            if not self.ec_producer:
+            if not self.is_ec_producer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if not model_executed:
+            if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
