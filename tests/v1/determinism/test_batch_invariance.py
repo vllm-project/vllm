@@ -16,6 +16,9 @@ BACKENDS: list[str] = [
     "FLASHINFER",
 ]
 
+if current_platform.is_cuda() and current_platform.is_device_capability(90):
+    BACKENDS.append("FLASH_ATTN_MLA")
+
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
@@ -26,11 +29,6 @@ def resolve_model_name(backend: str) -> str:
     if backend.endswith("MLA") and model == DEFAULT_MODEL:
         return MLA_MODEL
     return model
-
-
-capability = current_platform.get_device_capability()  # type: ignore[attr-defined]
-if capability is not None and capability.major == 9:
-    BACKENDS.append("FLASH_ATTN_MLA")
 
 
 @skip_unsupported
