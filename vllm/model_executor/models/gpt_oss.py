@@ -670,6 +670,15 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
             # MoE Bias
             ".gate_up_proj_bias": ".w13_bias",
             ".down_proj_bias": ".w2_bias",
+            # For quark format
+            ".gate_up_proj.weight": ".w13_weight",
+            ".gate_up_proj.weight_scale": ".w13_weight_scale",
+            ".gate_up_proj.bias": ".w13_bias",
+            ".gate_up_proj.input_scale": ".w13_input_scale",
+            ".down_proj.weight": ".w2_weight",
+            ".down_proj.weight_scale": ".w2_weight_scale",
+            ".down_proj.bias": ".w2_bias",
+            ".down_proj.input_scale": ".w2_input_scale"
         },
     )
 
