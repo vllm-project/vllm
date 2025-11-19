@@ -68,7 +68,6 @@ else:
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
-        indices_type: torch.dtype | None,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
@@ -1509,8 +1508,6 @@ class FusedMoE(CustomOp):
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
             )
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
         elif e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -1519,7 +1516,7 @@ class FusedMoE(CustomOp):
                 topk=top_k,
                 renormalize=renormalize,
             )
-            if routed_scaling_factor is not None:
+            if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
         elif custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(
@@ -1536,8 +1533,6 @@ class FusedMoE(CustomOp):
                 topk=top_k,
                 renormalize=renormalize,
             )
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
 
         if enable_eplb:
             assert expert_load_view is not None
@@ -1549,8 +1544,10 @@ class FusedMoE(CustomOp):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
-                indices_type=indices_type,
             )
+
+        if (indices_type is not None) and topk_ids.dtype != indices_type:
+            topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
