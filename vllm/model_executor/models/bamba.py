@@ -138,8 +138,7 @@ class BambaMixerDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        output = torch.empty_like(hidden_states)
-        self.mamba(hidden_states, output)
+        output = self.mamba(hidden_states)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
