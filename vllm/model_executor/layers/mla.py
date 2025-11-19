@@ -24,7 +24,7 @@ class MLAModules:
     q_b_proj: torch.nn.Module | None
     q_proj: torch.nn.Module | None
     indexer: torch.nn.Module | None
-    indexer_rotary_emb: torch.nn.Module
+    indexer_rotary_emb: torch.nn.Module | None
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
 
