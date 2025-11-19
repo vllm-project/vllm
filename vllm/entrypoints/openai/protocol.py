@@ -3228,6 +3228,8 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
 
 TranslationResponseVariant: TypeAlias = TranslationResponse | TranslationResponseVerbose
+
+
 ####### Tokens IN <> Tokens OUT #######
 class GenerateRequest(BaseModel):
     request_id: str = Field(
