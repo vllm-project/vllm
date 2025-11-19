@@ -930,6 +930,8 @@ steps:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/worker/
+  - vllm/v1/cudagraph_dispatcher.py
   - vllm/compilation/
   # can affect pattern matching
   - vllm/model_executor/layers/layernorm.py
