@@ -166,15 +166,16 @@ class AsyncLLM(EngineClient):
                 envs.VLLM_TORCH_PROFILER_DIR,
             )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                ],
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
-                ),
-            )
+            # self.profiler = torch.profiler.profile(
+            #     activities=[
+            #         torch.profiler.ProfilerActivity.CPU,
+            #     ],
+            #     with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+            #     on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            #         envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
+            #     ),
+            # )
+            self.profiler = None
         else:
             self.profiler = None
 
