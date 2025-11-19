@@ -458,10 +458,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # CRITICAL: Disable batch invariance for this test
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-    # refresh cached value
-    batch_invariant.VLLM_BATCH_INVARIANT = batch_invariant._read_vllm_batch_invariant()
-
+    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     model_name = resolve_model_name(backend)
