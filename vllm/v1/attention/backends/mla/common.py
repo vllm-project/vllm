@@ -536,7 +536,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         # Don't try to access the runner on AMD
@@ -1289,8 +1289,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 get_current_vllm_config()
             )
         )
-        self.dcp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(
