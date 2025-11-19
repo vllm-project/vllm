@@ -1114,27 +1114,23 @@ class FusedMoEModularKernel(torch.nn.Module):
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
         """
-        shared_output: torch.Tensor | None = None
 
-        def run_shared_experts():
-            nonlocal shared_output
+        def run_shared_experts() -> torch.Tensor | None:
             if self.shared_experts is None:
-                return
+                return None
 
             if (
                 not use_shared_experts_stream
-                or self.shared_experts_stream is None
-                or not hidden_states.is_cuda
-                or not torch.cuda.is_available()
+                or self.shared_experts_stream is not None
+                and (not hidden_states.is_cuda or not torch.cuda.is_available())
             ):
                 # fall back to running on the current stream
-                shared_output = self.shared_experts(hidden_states)
-                return
+                return self.shared_experts(hidden_states)
 
             assert hidden_states_clone is not None
             # launch shared experts on the dedicated stream.
             with torch.cuda.stream(self.shared_experts_stream):
-                shared_output = self.shared_experts(hidden_states_clone)
+                return self.shared_experts(hidden_states_clone)
 
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
@@ -1147,7 +1143,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            run_shared_experts()
+            shared_output = run_shared_experts()
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1158,7 +1154,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
 
-            run_shared_experts()
+            shared_output = run_shared_experts()
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1181,6 +1177,17 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             receiver()
 
+        self._wait_for_shared_experts_stream(hidden_states, use_shared_experts_stream)
+
+        if self.shared_experts is None:
+            return output
+        else:
+            assert shared_output is not None
+            return shared_output, output
+
+    def _wait_for_shared_experts_stream(
+        self, hidden_states: torch.Tensor, use_shared_experts_stream: bool
+    ) -> None:
         # ensure that any work enqueued on the shared_experts_stream is
         # completed before the shared_output tensor is consumed
         if (
@@ -1191,12 +1198,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             and torch.cuda.is_available()
         ):
             torch.cuda.current_stream().wait_stream(self.shared_experts_stream)
-
-        if self.shared_experts is None:
-            return output
-        else:
-            assert shared_output is not None
-            return shared_output, output
 
     def forward(
         self,
