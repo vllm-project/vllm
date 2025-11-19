@@ -62,7 +62,23 @@ class PlotEqualTo(PlotFilterBase):
         except ValueError:
             target = self.target
 
-        return df[df[self.var] == target]
+        # If the target is a float but present as a string in the dataframe
+        # For example, request_rate=inf gets parsed as a string
+        return df[(df[self.var] == target) | (df[self.var] == self.target)]
+
+
+@dataclass
+class PlotNotEqualTo(PlotFilterBase):
+    @override
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        try:
+            target = float(self.target)
+        except ValueError:
+            target = self.target
+
+        # If the target is a float but present as a string in the dataframe
+        # For example, request_rate=inf gets parsed as a string
+        return df[(df[self.var] != target) & (df[self.var] != self.target)]
 
 
 @dataclass
@@ -96,6 +112,7 @@ class PlotGreaterThanOrEqualTo(PlotFilterBase):
 # NOTE: The ordering is important! Match longer op_keys first
 PLOT_FILTERS: dict[str, type[PlotFilterBase]] = {
     "==": PlotEqualTo,
+    "!=": PlotNotEqualTo,
     "<=": PlotLessThanOrEqualTo,
     ">=": PlotGreaterThanOrEqualTo,
     "<": PlotLessThan,
