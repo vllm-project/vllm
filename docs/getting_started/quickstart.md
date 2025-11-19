@@ -286,7 +286,7 @@ If desired, you can also manually set the backend of your choice by configuring 
 - On NVIDIA CUDA: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
 - On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA` or `ROCM_AITER_UNIFIED_ATTN`.
 
-For AMD ROCm, you can futher control the specific Attention implementation using the following variables:
+For AMD ROCm, you can further control the specific Attention implementation using the following variables:
 
 - Triton Unified Attention: `VLLM_ROCM_USE_AITER=0 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`
 - AITER Unified Attention: `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`
