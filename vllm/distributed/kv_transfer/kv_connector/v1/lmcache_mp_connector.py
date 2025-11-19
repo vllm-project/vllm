@@ -61,7 +61,7 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
-def maybe_exclude_tp_rank_for_mla_models(
+def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
     vllm_config: VllmConfig,
@@ -88,7 +88,7 @@ def maybe_exclude_tp_rank_for_mla_models(
 def create_scheduler_adapter(
     server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPSchedulerAdapter:
-    world_size, rank = maybe_exclude_tp_rank_for_mla_models(
+    world_size, rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
@@ -106,7 +106,7 @@ def create_scheduler_adapter(
 def create_worker_adapter(
     server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
 ) -> LMCacheMPWorkerAdapter:
-    world_size, rank = maybe_exclude_tp_rank_for_mla_models(
+    world_size, rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config,
