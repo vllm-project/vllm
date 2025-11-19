@@ -754,7 +754,7 @@ def context_attention_fwd(
     if current_platform.is_rocm():
         extra_kargs = {"kpack": 1, "waves_per_eu": 2}
 
-    grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))  # type: ignore[assignment]
+    grid = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid](
         q,
         k,
