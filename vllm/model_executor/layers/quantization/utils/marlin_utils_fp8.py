@@ -139,7 +139,6 @@ def prepare_fp8_layer_for_marlin(
         scales = layer.weight_scale.to(layer.orig_dtype)
     elif "weight_scale_inv" in dir(layer):
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
-        del layer.weight_scale_inv
 
     group_size = -1 if weight_block_size is None else weight_block_size[1]
 
@@ -178,7 +177,10 @@ def prepare_fp8_layer_for_marlin(
     )
     if input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
-    replace_parameter(layer, "weight_scale", marlin_scales)
+    if "weight_scale" in dir(layer):
+        replace_parameter(layer, "weight_scale", marlin_scales)
+    elif "weight_scale_inv" in dir(layer):
+        replace_parameter(layer, "weight_scale_inv", marlin_scales)
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
