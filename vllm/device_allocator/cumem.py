@@ -63,7 +63,7 @@ try:
     libcudart = CudaRTLibrary()
     cumem_available = True
 except ModuleNotFoundError:
-    # rocm platform does not support cumem allocator
+    # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
