@@ -1015,6 +1015,28 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
+    ) -> None:
+        self.expert_latency_view = expert_latency_view
+        for layer_idx, layer in enumerate(self.moe_layers):
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                expert_latency_view=expert_latency_view,
+            )
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """Get the expert latency tensor for all MoE layers."""
+        return self.expert_latency_view
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 

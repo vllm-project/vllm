@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from logging import DEBUG
 
 import deep_ep
 import torch
@@ -276,6 +277,28 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return_recv_hook=True,
         )
         self.handles[a2a_idx] = handle
+        
+        # Log: All-to-all dispatch (DeepEP-LL backend)
+        if logger.isEnabledFor(DEBUG):
+            # expert_num_tokens is a tensor with per-expert token counts
+            expert_counts = expert_num_tokens.tolist() if hasattr(expert_num_tokens, 'tolist') else list(expert_num_tokens)
+            
+            # Calculate per-rank token counts
+            num_local_experts = len(expert_counts)
+            rank_token_counts = [0] * self.num_dispatchers()
+            
+            for expert_id in range(len(expert_counts)):
+                target_rank = expert_id // num_local_experts
+                if target_rank < self.num_dispatchers():
+                    rank_token_counts[target_rank] += expert_counts[expert_id]
+            
+            logger.debug(
+                "[MASKING] All-to-All dispatch (DeepEP-LL): Rank %d sending tokens to ranks: %s. "
+                "Total: %d tokens",
+                self.buffer.rank,
+                rank_token_counts,
+                sum(rank_token_counts),
+            )
 
         return (
             hook,
@@ -296,6 +319,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
+        # Log: All-to-all receive (DeepEP-LL backend)
+        if logger.isEnabledFor(DEBUG):
+            expert_counts = expert_num_tokens.tolist() if hasattr(expert_num_tokens, 'tolist') else list(expert_num_tokens)
+            total_received = sum(expert_counts)
+            num_local_experts = len(expert_counts)
+            
+            logger.debug(
+                "[MASKING] All-to-All receive (DeepEP-LL): Rank %d received %d tokens for %d local experts. "
+                "Per-expert counts: %s",
+                self.buffer.rank,
+                total_received,
+                num_local_experts,
+                expert_counts[:10] if len(expert_counts) > 10 else expert_counts,
+            )
+        
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(

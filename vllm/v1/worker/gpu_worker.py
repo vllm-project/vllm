@@ -632,14 +632,56 @@ class Worker(WorkerBase):
             logger.info(
                 "[Elastic EP] Starting expert resharding before scaling down..."
             )
-        rank_mapping = {
-            old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
-            for old_ep_rank in range(old_ep_size)
-        }
+        
         assert self.model_runner.eplb_state is not None
+        
+        # Check if there are any masked/unhealthy ranks
+        masked_ranks = self.model_runner.eplb_state.masked_ranks
+        
+        if masked_ranks:
+            # Masked ranks exist - only allow scale-down that removes them
+            expected_new_size = old_ep_size - len(masked_ranks)
+            
+            if new_ep_size != expected_new_size:
+                raise RuntimeError(
+                    f"Cannot scale down {old_ep_size}→{new_ep_size} while unhealthy ranks exist.\n"
+                    f"Masked/unhealthy ranks: {sorted(masked_ranks)}\n"
+                    f"You must first remove the unhealthy ranks by scaling down to "
+                    f"{expected_new_size} (= {old_ep_size} - {len(masked_ranks)} masked ranks).\n"
+                    f"After removing unhealthy ranks, you can then scale to any desired size."
+                )
+            
+            # This is a removal of masked ranks - proceed
+            if get_ep_group().rank == 0:
+                logger.info(
+                    f"[Elastic EP] Removing unhealthy ranks {sorted(masked_ranks)} "
+                    f"during scale-down {old_ep_size}→{new_ep_size}"
+                )
+        
+        # Build rank_mapping
+        if masked_ranks and new_ep_size == old_ep_size - len(masked_ranks):
+            # Removing masked ranks: map healthy ranks to contiguous new positions
+            # Example: old_ep=4, masked={1}, new_ep=3
+            #   rank 0 → 0, rank 1 → -1 (masked), rank 2 → 1, rank 3 → 2
+            rank_mapping = {}
+            healthy_ranks = [r for r in range(old_ep_size) if r not in masked_ranks]
+            for new_idx, old_rank in enumerate(healthy_ranks):
+                rank_mapping[old_rank] = new_idx
+            for masked_rank in masked_ranks:
+                rank_mapping[masked_rank] = -1
+            
+            # Clear masked_ranks after successful removal
+            self.model_runner.eplb_state.masked_ranks.clear()
+        else:
+            # Normal scale-down (no masked ranks)
+            rank_mapping = {
+                old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
+                for old_ep_rank in range(old_ep_size)
+            }
+        
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
-            global_expert_load=None,
+            global_expert_loads=None,
             rank_mapping=rank_mapping,
         )
         torch.cuda.synchronize()
@@ -656,8 +698,22 @@ class Worker(WorkerBase):
 
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding after scaling up...")
-        rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
+        
         assert self.model_runner.eplb_state is not None
+        
+        # Check if there are any masked/unhealthy ranks
+        masked_ranks = self.model_runner.eplb_state.masked_ranks
+        
+        if masked_ranks:
+            # Cannot scale up while unhealthy ranks exist
+            raise RuntimeError(
+                f"Cannot scale up {old_ep_size}→{new_ep_size} while unhealthy ranks exist.\n"
+                f"Masked/unhealthy ranks: {sorted(masked_ranks)}\n"
+                f"You must first remove the unhealthy ranks by scaling down to "
+                f"{old_ep_size - len(masked_ranks)}, then scale up to the desired size."
+            )
+        
+        rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
             global_expert_loads=global_expert_loads,

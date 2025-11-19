@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable
+from logging import DEBUG
 from typing import Any
 
 import torch
@@ -15,6 +16,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -1240,6 +1242,116 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+def select_valid_physical_experts(
+    topk_ids_long: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    pos_indices: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Select valid (non-masked) physical experts for each logical expert assignment.
+    
+    For health-based masking, some expert replicas may be marked as -1 (masked).
+    This function ensures we select valid replicas by avoiding -1 indices.
+    
+    Args:
+        topk_ids_long: Logical expert IDs for each token.
+            Shape: (num_tokens, topk)
+        logical_to_physical_map: Maps logical experts to physical expert replicas.
+            Shape: (num_logical_experts, max_replicas_per_expert)
+            Values can be -1 for masked or padding replicas.
+        logical_replica_count: Number of replicas for each logical expert.
+            Shape: (num_logical_experts,)
+        pos_indices: Flattened position indices for pseudo-random selection.
+            Shape: (num_tokens, topk)
+    
+    Returns:
+        physical_ids: Selected physical expert IDs (guaranteed non--1 if possible).
+            Shape: (num_tokens, topk)
+    """
+    # Get all physical replicas for each logical expert
+    # Shape: (num_tokens, topk, max_replicas)
+    physical_replicas = logical_to_physical_map[topk_ids_long]
+    
+    replica_count = logical_replica_count[topk_ids_long]
+    # Use max(1, count) to avoid division by zero when all replicas are masked
+    safe_replica_count = torch.clamp(replica_count, min=1)
+    # Use (token position) modulo (replica count) to get pseudo-random starting point
+    starting_replica_idx = (pos_indices % safe_replica_count)
+    
+    # Simple approach: Try the initial selection, if it's -1, find next valid replica
+    # with wrap-around to maintain pseudo-random distribution
+    
+    # Initial selection using simple modulo (same as original code)
+    replica_indices = starting_replica_idx.unsqueeze(-1)
+    physical_ids = torch.gather(physical_replicas, dim=-1, index=replica_indices).squeeze(-1)
+    
+    # Check if any selections resulted in -1 (masked)
+    masked_selections = physical_ids == -1
+    
+    # Log Point: Token routing encountered masked experts
+    if masked_selections.any():
+        num_masked = masked_selections.sum().item()
+        total = masked_selections.numel()
+        
+        # Only log if DEBUG enabled
+        if logger.isEnabledFor(DEBUG):
+            # Get current EP rank
+            ep_rank = get_ep_group().rank
+            
+            # Calculate which logical experts had masked replicas selected
+            masked_positions = masked_selections.nonzero(as_tuple=False)
+            if len(masked_positions) > 0:
+                affected_logical_experts = topk_ids_long[masked_positions[:, 0], masked_positions[:, 1]].unique()
+                
+                logger.debug(
+                    "[MASKING] Rank=%d: Token routing encountered %d masked expert selections "
+                    "out of %d total (%.2f%%). Affected logical experts: %s. Rerouting...",
+                    ep_rank,
+                    num_masked,
+                    total,
+                    100.0 * num_masked / total,
+                    affected_logical_experts.tolist()[:20],  # Limit to first 20
+                )
+    
+    # For masked selections, find the next valid replica with wrap-around
+    if masked_selections.any():
+        # For positions that got -1, search for first valid replica starting from
+        # starting_replica_idx and wrapping around
+        # Shape: (num_tokens, topk, max_replicas)
+        is_valid = physical_replicas >= 0
+        max_replicas = physical_replicas.shape[-1]
+        
+        # Create circular replica indices starting from starting_replica_idx
+        # Shape: (num_tokens, topk, max_replicas)
+        # For each position, this creates: [start, start+1, ..., max-1, 0, 1, ..., start-1]
+        offsets = torch.arange(max_replicas, device=physical_replicas.device, dtype=torch.long)
+        circular_indices = (starting_replica_idx.unsqueeze(-1) + offsets) % max_replicas
+        
+        # Gather validity mask in circular order
+        # Shape: (num_tokens, topk, max_replicas)
+        circular_valid = torch.gather(is_valid, dim=-1, index=circular_indices)
+        
+        # Find first valid position in circular order
+        # Shape: (num_tokens, topk)
+        first_valid_offset = torch.argmax(circular_valid.to(torch.int32), dim=-1)
+        
+        # Map back to actual replica index
+        first_valid_circular_idx = (starting_replica_idx + first_valid_offset) % max_replicas
+        
+        # Get the first valid physical ID in circular order
+        first_valid_physical_id = torch.gather(
+            physical_replicas,
+            dim=-1,
+            index=first_valid_circular_idx.unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Replace -1 values with first valid replica (in circular order)
+        physical_ids = torch.where(masked_selections, first_valid_physical_id, physical_ids)
+    
+    return physical_ids
+
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def eplb_map_to_physical_and_record(
     topk_ids: torch.Tensor,
@@ -1267,25 +1379,66 @@ def eplb_map_to_physical_and_record(
     """
 
     # 1. Convert the logical expert ids to physical expert ids
-    # Directly select a random replica for each logical expert
-
+    # Select a valid (non-masked) replica for each logical expert
+    
     # In case `indices_type` is not `torch.long` or `torch.int`,
     # e.g. `torch.uint32` as required by dispatch/combine kernels
     topk_ids_long = topk_ids.long()
-    # Use (token position) modulo (replica count)
-    # to deterministically choose a replica
-    replica_count = logical_replica_count[topk_ids_long]
-    # Flatten-position based index, reshaped back to `topk_ids` shape
+    
+    # Flatten-position based index for pseudo-random replica selection
     pos_indices = torch.arange(
         topk_ids.numel(), device=topk_ids.device, dtype=torch.long
     ).reshape_as(topk_ids)
-    # Compute pseudo-random indices by modulo
-    replica_indices = (pos_indices % replica_count).unsqueeze(-1)
-    physical_ids = (
-        logical_to_physical_map[topk_ids_long].gather(-1, replica_indices).squeeze(-1)
+    
+    # Select valid physical experts, skipping any masked (-1) replicas
+    physical_ids = select_valid_physical_experts(
+        topk_ids_long=topk_ids_long,
+        logical_to_physical_map=logical_to_physical_map,
+        logical_replica_count=logical_replica_count,
+        pos_indices=pos_indices,
     )
-
+    
     topk_ids = physical_ids
+    
+    # Log: Per-rank token distribution after physical selection
+    if logger.isEnabledFor(DEBUG):
+        # Get EP rank and size
+        ep_group = get_ep_group()
+        ep_rank = ep_group.rank
+        ep_size = ep_group.world_size
+        
+        # Calculate which experts belong to which ranks
+        # Assuming linear placement: rank = expert_id // num_local_experts
+        num_physical_experts = logical_to_physical_map.shape[0] * logical_to_physical_map.shape[1]
+        num_local_experts = num_physical_experts // ep_size
+        
+        # Count tokens routed to each rank
+        token_counts_per_rank = torch.zeros(ep_size, dtype=torch.int64, device=topk_ids.device)
+        for rank in range(ep_size):
+            rank_expert_start = rank * num_local_experts
+            rank_expert_end = (rank + 1) * num_local_experts
+            # Count how many tokens are routed to this rank's experts
+            tokens_to_rank = (
+                (topk_ids >= rank_expert_start) & (topk_ids < rank_expert_end)
+            ).sum()
+            token_counts_per_rank[rank] = tokens_to_rank
+        
+        logger.debug(
+            "[MASKING] EP rank %d: Token distribution across ranks: %s. "
+            "Total tokens: %d",
+            ep_rank,
+            token_counts_per_rank.tolist(),
+            topk_ids.numel(),
+        )
+    
+    # Sanity check: Verify no -1 indices remain after selection
+    # If this fails, it means either:
+    # (1) All replicas of an expert are masked (invalid system state), or
+    # (2) Bug in select_valid_physical_experts logic
+    assert (topk_ids >= 0).all(), (
+        f"Found {(topk_ids == -1).sum().item()} invalid expert indices (-1) after "
+        f"replica selection. All experts must have at least one valid (non-masked) replica."
+    )
 
     # 2. Record expert load metrics.
 
@@ -1305,11 +1458,39 @@ def eplb_map_to_physical_and_record(
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
+    
+    # Log: Expert load before recording
+    if logger.isEnabledFor(DEBUG):
+        old_loads = expert_load_view.clone()
+    
     expert_load_view.scatter_add_(
         dim=0,
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
+    
+    # Log (continued): Expert load after recording
+    if logger.isEnabledFor(DEBUG):
+        load_delta = expert_load_view - old_loads
+        
+        # Get current EP rank
+        ep_rank = get_ep_group().rank
+        
+        # Identify experts with load increase
+        experts_with_tokens = (load_delta > 0).sum().item()
+        experts_idle = (load_delta == 0).sum().item()
+        
+        logger.debug(
+            "[MASKING] Rank=%d: Expert load delta: min=%.1f, max=%.1f, mean=%.1f. "
+            "Experts with tokens: %d/%d (%.1f%% idle)",
+            ep_rank,
+            load_delta.min().item(),
+            load_delta.max().item(),
+            load_delta.mean().item(),
+            experts_with_tokens,
+            expert_load_view.shape[0],
+            100.0 * experts_idle / expert_load_view.shape[0],
+        )
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)

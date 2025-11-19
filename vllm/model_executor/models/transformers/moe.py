@@ -124,13 +124,16 @@ class MoEMixin(MixtureOfExperts):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
     ):
-        for moe_layer_idx, mlp_layer in enumerate(self.mlp_moe_layers):
+        self.expert_latency_view = expert_latency_view
+        for moe_layer_idx, mlp_layer in enumerate(self.mlp_layers):
             mlp_layer.experts.set_eplb_state(
                 moe_layer_idx=moe_layer_idx,
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
+                expert_latency_view=expert_latency_view,
             )
 
     def update_physical_experts_metadata(
@@ -142,11 +145,22 @@ class MoEMixin(MixtureOfExperts):
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for mlp in self.mlp_moe_layers:
+        for mlp in self.mlp_layers:
             mlp.n_local_physical_experts = num_local_physical_experts
             mlp.n_physical_experts = num_physical_experts
             mlp.n_redundant_experts = self.num_redundant_experts
             mlp.experts.update_expert_map()
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        return self.expert_latency_view
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """
@@ -173,6 +187,17 @@ class MoEMixin(MixtureOfExperts):
                 )
             )
         return expert_mapping
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        return self.expert_latency_view
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
@@ -240,8 +265,7 @@ class MoEMixin(MixtureOfExperts):
         # MixtureOfExperts mixin settings
         ep_size = get_ep_group().world_size
 
-        self.mlp_moe_layers = []  # Used for MixtureOfExperts methods
-        self.moe_layers = []
+        self.mlp_layers = []  # Used for MixtureOfExperts methods
         self.expert_weights = []
         self.num_moe_layers = 0
         self.num_expert_groups = 1 if num_expert_group is None else num_expert_group
@@ -306,8 +330,7 @@ class MoEMixin(MixtureOfExperts):
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # Update MixtureOfExperts mixin state
-                    self.mlp_moe_layers.append(mlp)
-                    self.moe_layers.append(fused_experts)
+                    self.mlp_layers.append(mlp)
                     self.expert_weights.append(fused_experts.get_expert_weights())
                     self.num_moe_layers += 1
                     # If results are not all-reduced in FusedMoE, ensure they

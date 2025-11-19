@@ -1,0 +1,188 @@
+# Dockerfile.wheel - Build vLLM image from pre-built wheel with local changes
+# This Dockerfile uses a pre-built vLLM wheel and overlays local Python changes
+# for much faster builds compared to building from scratch.
+#
+# Usage:
+#   docker build -f docker/Dockerfile.wheel -t vllm-custom:latest .
+#
+# With custom wheel version:
+#   docker build --build-arg VLLM_WHEEL_VERSION=0.11.0 -f docker/Dockerfile.wheel -t vllm-custom:latest .
+#
+# With custom CUDA/torch backend (default cu128 for CUDA 12.8):
+#   docker build --build-arg CUDA_VERSION=12.4.1 --build-arg TORCH_BACKEND=cu124 -f docker/Dockerfile.wheel -t vllm-custom:latest .
+#
+# With wheel from URL:
+#   docker build --build-arg VLLM_WHEEL_URL=https://vllm-wheels.s3.us-west-2.amazonaws.com/v0.11.0/vllm-0.11.0-cp38-abi3-manylinux1_x86_64.whl \
+#                -f docker/Dockerfile.wheel -t vllm-custom:latest .
+
+ARG CUDA_VERSION=12.9.1
+ARG PYTHON_VERSION=3.12
+ARG TORCH_BACKEND=cu129
+
+# By parameterizing the base images, we allow third-party to use their own base images
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+
+#################### vLLM installation from wheel ####################
+FROM ${FINAL_BASE_IMAGE} AS vllm-base
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+ARG TORCH_BACKEND
+WORKDIR /vllm-workspace
+ENV DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-c"]
+
+ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+ARG DEADSNAKES_MIRROR_URL
+ARG DEADSNAKES_GPGKEY_URL
+
+# Install Python and system dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libibverbs-dev libnuma-dev \
+    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+        if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
+            mkdir -p -m 0755 /etc/apt/keyrings ; \
+            curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
+            sudo chmod 644 /etc/apt/keyrings/deadsnakes.gpg ; \
+            echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] ${DEADSNAKES_MIRROR_URL} $(lsb_release -cs) main" > /etc/apt/sources.list.d/deadsnakes.list ; \
+        fi ; \
+    else \
+        for i in 1 2 3; do \
+            add-apt-repository -y ppa:deadsnakes/ppa && break || \
+            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+        done ; \
+    fi \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
+
+ARG PIP_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+
+# Install uv for faster pip installs
+RUN python3 -m pip install uv
+
+# Configure uv
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
+
+# Workaround for https://github.com/openai/triton/issues/2507
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
+
+# Build vLLM from source (instead of using pre-built wheel)
+# This ensures C++ extensions are compiled against the runtime PyTorch version
+ARG VLLM_VERSION=v0.11.0
+
+# Copy vLLM source code
+COPY . /vllm-workspace/
+WORKDIR /vllm-workspace
+
+# Install build dependencies FIRST (includes setuptools with distutils for Python 3.12)
+COPY requirements/build.txt requirements/build.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    echo "Installing build dependencies with TORCH_BACKEND=${TORCH_BACKEND}" \
+    && uv pip install --system -r requirements/build.txt --torch-backend=${TORCH_BACKEND}
+
+# Install vLLM from source with torch backend
+# This will compile C++ extensions against the installed PyTorch
+RUN --mount=type=cache,target=/root/.cache/uv \
+    echo "Building vLLM from source (TORCH_BACKEND=${TORCH_BACKEND})"; \
+    # TODO: remove apache-tvm-ffi once FlashInfer is fixed
+    uv pip install --system --pre apache-tvm-ffi==0.1.0b15 \
+    && MAX_JOBS=16 uv pip install --system -e . \
+        --verbose --torch-backend=${TORCH_BACKEND}
+
+# Install FlashInfer pre-compiled kernel cache and binaries
+# https://docs.flashinfer.ai/installation.html
+RUN --mount=type=cache,target=/root/.cache/uv \
+    echo "Installing FlashInfer components for TORCH_BACKEND=${TORCH_BACKEND}" \
+    && uv pip install --system flashinfer-cubin==0.5.2 \
+    && uv pip install --system flashinfer-jit-cache==0.5.2 \
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && flashinfer show-config
+
+# Note: No need to copy Python files since we're using editable install (-e)
+# The source is already in /vllm-workspace and linked
+
+# Copy examples and benchmarks for convenience
+COPY examples /vllm-workspace/examples
+COPY benchmarks /vllm-workspace/benchmarks
+
+# Note: Build dependencies already installed above before building vLLM
+
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REF
+COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
+
+# Install gdrcopy
+ARG TARGETPLATFORM
+ARG GDRCOPY_CUDA_VERSION=12.8
+ARG GDRCOPY_OS_VERSION=Ubuntu22_04
+COPY tools/install_gdrcopy.sh install_gdrcopy.sh
+RUN set -eux; \
+    case "${TARGETPLATFORM}" in \
+      linux/arm64) UUARCH="aarch64" ;; \
+      linux/amd64) UUARCH="x64" ;; \
+      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
+    rm ./install_gdrcopy.sh
+
+# Install EP kernels (pplx-kernels and DeepEP)
+COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
+ENV CUDA_HOME=/usr/local/cuda
+RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
+    && bash install_python_libraries.sh
+
+# CUDA library path workaround
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+# Verify installation and show package versions
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip list
+
+#################### vLLM installation from wheel ####################
+
+
+#################### OPENAI API SERVER ####################
+FROM vllm-base AS vllm-openai-base
+ARG TARGETPLATFORM
+
+ARG PIP_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL
+
+ENV UV_HTTP_TIMEOUT=500
+
+# Install additional dependencies for OpenAI API server
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        BITSANDBYTES_VERSION="0.42.0"; \
+    else \
+        BITSANDBYTES_VERSION="0.46.1"; \
+    fi; \
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.0'
+
+ENV VLLM_USAGE_SOURCE production-docker-image
+
+# SageMaker variant
+FROM vllm-openai-base AS vllm-sagemaker
+COPY examples/online_serving/sagemaker-entrypoint.sh .
+RUN chmod +x sagemaker-entrypoint.sh
+ENTRYPOINT ["./sagemaker-entrypoint.sh"]
+
+# OpenAI API server variant (default)
+FROM vllm-openai-base AS vllm-openai
+ENTRYPOINT ["vllm", "serve"]
+#################### OPENAI API SERVER ####################
+

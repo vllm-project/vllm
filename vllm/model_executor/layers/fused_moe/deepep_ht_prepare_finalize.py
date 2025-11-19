@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from logging import DEBUG
 
 import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -23,6 +25,8 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+logger = init_logger(__name__)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -157,6 +161,28 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
+        
+        # Log: All-to-all token dispatch (send counts)
+        if logger.isEnabledFor(DEBUG):
+            # Calculate per-rank token counts being sent
+            # dispatch_expert_num_tokens contains per-expert token counts
+            num_local_experts = num_experts // self.num_dispatchers
+            rank_token_counts = [0] * self.num_dispatchers
+            
+            for expert_id, token_count in enumerate(dispatch_expert_num_tokens):
+                target_rank = expert_id // num_local_experts
+                if target_rank < self.num_dispatchers:
+                    rank_token_counts[target_rank] += token_count
+            
+            total_tokens = sum(rank_token_counts)
+            
+            logger.debug(
+                "[MASKING] All-to-All dispatch: Rank %d sending tokens to ranks: %s. "
+                "Total: %d tokens",
+                self.buffer.rank,
+                rank_token_counts,
+                total_tokens,
+            )
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
@@ -188,6 +214,19 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
+        # Log Point(continued): All-to-all receive counts
+        if logger.isEnabledFor(DEBUG):
+            total_received = sum(expert_num_tokens_per_expert_list)
+            num_local_experts = len(expert_num_tokens_per_expert_list)
+            
+            logger.debug(
+                "[MASKING] All-to-All receive: Rank %d received %d tokens for %d local experts. "
+                "Per-expert counts: %s",
+                self.buffer.rank,
+                total_received,
+                num_local_experts,
+                expert_num_tokens_per_expert_list[:10] if len(expert_num_tokens_per_expert_list) > 10 else expert_num_tokens_per_expert_list,
+            )
         if event.event is not None:
             event.current_stream_wait()
 
