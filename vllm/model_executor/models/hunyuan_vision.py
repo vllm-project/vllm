@@ -34,9 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
-from transformers.models.hunyuan_v1_vl import HunYuanVLV1Processor
-from transformers.models.hunyuan_v1_vl.configuration_hunyuan_v1_vl import HunYuanVLV1Config, HunYuanVLV1VisionConfig
-from transformers.models.hunyuan_v1_vl.image_processing_hunyuan_v1_vl import smart_resize
+from transformers.models.hunyuan_vl.processing_hunyuan_vl import HunYuanVLProcessor
+from transformers.models.hunyuan_vl.configuration_hunyuan_vl import HunYuanVLConfig, HunYuanVLVisionConfig
+from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import smart_resize
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
@@ -47,6 +47,7 @@ from vllm.attention.ops.vit_attn_wrappers import (
 )
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
@@ -64,12 +65,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_mrope_for_media,
-    compute_retained_tokens_count,
-    compute_retention_mask,
-    recompute_mrope_positions,
-)
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
@@ -117,7 +112,6 @@ from .utils import (
 )
 from .vision import (
     get_vit_attn_backend,
-    run_dp_sharded_mrope_vision_model,
 )
 
 logger = init_logger(__name__)
@@ -397,7 +391,7 @@ class HunYuanVisionBlock(nn.Module):
 
 
 class HunYuanVisionPatchEmbed(nn.Module):
-    def __init__(self, config: HunYuanVLV1VisionConfig):
+    def __init__(self, config: HunYuanVLVisionConfig):
         super().__init__()
 
         self.config = config
@@ -762,7 +756,7 @@ class HunYuanVisionPatchMerger(nn.Module):
 class HunYuanVisionTransformer(nn.Module):
     def __init__(
         self,
-        vision_config: HunYuanVLV1VisionConfig,
+        vision_config: HunYuanVLVisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -774,7 +768,7 @@ class HunYuanVisionTransformer(nn.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_attention_heads
         head_dim = self.hidden_size // self.num_heads
-        self.adaptor_patch_size = vision_config.adaptor_patch_size
+        self.spatial_merge_size = vision_config.adaptor_patch_size
 
         from vllm.compilation.backends import set_model_tag
 
@@ -961,7 +955,7 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
                 data,
                 modality="image",
                 required_fields={"image_embeds", "image_grid_thw"},
-                fields_factory=_hunyuan_vl_v1_field_config,
+                fields_factory=_hunyuan_vl_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -970,30 +964,23 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
 class HunYuanVLProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(HunYuanVLV1Config)
+        return self.ctx.get_hf_config(HunYuanVLConfig)
 
     def get_hf_processor(
         self,
         **kwargs: object,
-    ) -> HunYuanVLV1Processor:
+    ) -> HunYuanVLProcessor:
         return self.ctx.get_hf_processor(
-            HunYuanVLV1Processor,
-            image_processor=self.get_image_processor(
-                use_fast=kwargs.get(
-                    "use_fast", False)),
+            HunYuanVLProcessor,
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
     def get_image_processor(
         self,
         **kwargs: object,
-    ) -> HunYuanVLV1Processor:
-        kwargs["use_fast"] = kwargs.get("use_fast", True)
-        return get_image_processor(
-            self.ctx.model_config.model,
-            trust_remote_code=True,
-            **kwargs
-        )
+    ) -> HunYuanVLProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
@@ -1004,7 +991,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
-        # ToDo: support video
+        # TODO: support video
         max_video_tokens = 0
         return {"image": max_image_tokens, "video": max_video_tokens}
 
@@ -1015,7 +1002,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: HunYuanVLV1Processor | None,
+        image_processor: HunYuanVLProcessor | None,
     ) -> tuple[ImageSize, int]:
         if image_processor is None:
             image_processor = self.get_image_processor()
@@ -1058,7 +1045,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: HunYuanVLV1Processor | None,
+        image_processor: HunYuanVLProcessor | None,
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
@@ -1100,6 +1087,7 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 1)
         num_videos = mm_counts.get("video", 0)
@@ -1128,7 +1116,6 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
@@ -1148,13 +1135,13 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
 
         placeholder = {
             "image": hf_processor.image_token_id,
-            #"video": vocab[hf_processor.video_token],
         }
 
         merge_size = image_processor.merge_size
 
-        def get_replacement_hunyuan_vlv1(item_idx: int, modality: str):
-            grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
+        def get_replacement_hunyuan_vl(item_idx: int, modality: str):
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             _, grid_h, grid_w = grid_thw
@@ -1165,7 +1152,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
-                replacement=partial(get_replacement_hunyuan_vlv1,
+                replacement=partial(get_replacement_hunyuan_vl,
                                     modality=modality),
             ) for modality in ("image",)
         ]
@@ -1175,7 +1162,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _hunyuan_vl_v1_field_config(hf_inputs)
+        return _hunyuan_vl_field_config(hf_inputs)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1192,6 +1179,8 @@ class HunYuanVLForConditionalGeneration(
     SupportsXDRoPE,
     ):
 
+    multimodal_cpu_fields = {"image_grid_thw"}
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1201,63 +1190,141 @@ class HunYuanVLForConditionalGeneration(
             "model.": "language_model.model.",
         })
 
+    supports_encoder_tp_data = True
+
+    def get_xdrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> torch.Tensor:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+
+        hf_config = self.config
+        image_token_id = hf_config.image_token_id
+        image_start_token_id = hf_config.image_start_token_id
+        spatial_merge_size = hf_config.vision_config.adaptor_patch_size
+        xd_num = len(hf_config.rope_scaling["xdrope_section"])
+
+        input_tokens_tensor = torch.tensor(input_tokens)
+        image_start_indices = torch.argwhere(
+            input_tokens_tensor == image_start_token_id
+        ).squeeze(1)
+        image_tokens = input_tokens_tensor[image_start_indices + 1]
+        image_nums = (image_tokens == image_token_id).sum()
+        llm_pos_ids_list: list = []
+
+        st = 0
+        offset = 0
+        for image_index  in range(image_nums):
+            pos = image_start_indices[image_index] + 1
+            t, h, w = image_grid_thw[image_index]
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+
+            token_num = (llm_grid_w + 1) * llm_grid_h + 2
+            p_index = torch.arange(st, pos + token_num) + offset
+
+            w_index_list = [torch.arange(st, pos + 1) + offset]
+            w_index_list.append(
+                (
+                    torch.arange(0, llm_grid_w + 1)
+                    .reshape(1, -1)
+                    .expand(llm_grid_h, -1)
+                    .reshape(-1)
+                )
+            )
+            w_index_list.append(torch.tensor([pos + token_num - 1]).long())
+            w_index = torch.cat(w_index_list)
+
+            h_index_list = [torch.arange(st, pos + 1) + offset]
+            h_index_list.append(
+                (
+                    torch.arange(0, llm_grid_h)
+                    .reshape(-1, 1)
+                    .expand(-1, llm_grid_w + 1)
+                    .reshape(-1)
+                )
+            )
+            h_index_list.append(torch.tensor([pos + token_num - 1]).long())
+            h_index = torch.cat(h_index_list)
+
+            t_index_list = [torch.arange(st, pos + 1) + offset]
+            t_index_list.append(torch.tensor([0] * (token_num - 2)))
+            t_index_list.append(torch.tensor([pos + token_num - 1]).long())
+            t_index = torch.cat(t_index_list)
+
+            st = pos + 1
+            offset += token_num - 1
+            if xd_num == 4:
+                llm_pos_ids_list.append(
+                    torch.stack([p_index, w_index, h_index, t_index])
+                )
+            elif xd_num == 3:
+                llm_pos_ids_list.append(
+                    torch.stack([w_index, h_index, t_index])
+                )
+
+        if st < len(input_tokens):
+            llm_pos_ids_list.append(
+                (
+                    torch.arange(st, len(input_tokens)).view(1, -1)
+                    .expand(xd_num, -1)
+                ) + offset
+            )
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(xd_num, -1)
+
+        return llm_positions
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
-            return "<|vision_start|><|image_pad|><|vision_end|>"
+            return "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"
 
         raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: HunYuanVLV1Config = vllm_config.model_config.hf_config
+        config: HunYuanVLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = HunYuanV1_VisionTransformer(
-            config.vision_config,
-            quant_config=self._maybe_ignore_quant_config(self.quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if multimodal_config.get_limit_per_prompt("image"):
+            attn_backend_override = (
+                multimodal_config.mm_encoder_attn_backend
+                if multimodal_config is not None
+                else None
+            )
+            self.visual = HunYuanVisionTransformer(
+                config.vision_config,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = None
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model.model"),
             architectures=["HunYuanDenseV1ForCausalLM",
-                           "HunYuanDenseV1ForCausalLM",
-                           "HunYuanMoEV2ForCausalLM"],
+                           "HunYuanMoEV1ForCausalLM",],
         )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _maybe_ignore_quant_config(self, config: QuantizationConfig | None):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        if isinstance(config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return config
-
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> HunYuanVLImageInputs | None:
+        self, **kwargs: object
+    ) -> HunYuanVLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -1265,38 +1332,29 @@ class HunYuanVLForConditionalGeneration(
         if pixel_values is None and image_embeds is None:
             return None
 
+        # TODO: refine
+        if len(pixel_values.shape) == 3:
+            last_dim = pixel_values.shape[-1]
+            pixel_values = pixel_values.reshape(-1, last_dim)
+            image_grid_thw = image_grid_thw.reshape(-1, 3)
+
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return HunYuanVLImagePixelInputs(type="pixel_values",
-                                              pixel_values=pixel_values,
-                                              image_grid_thw=image_grid_thw)
+            return HunYuanVLImagePixelInputs(
+                type="pixel_values",
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
             return HunYuanVLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw)
+                image_grid_thw=image_grid_thw,
+            )
 
     def _process_image_input(
-            self,
-            image_input: HunYuanVLImageInputs) -> tuple[torch.Tensor, ...]:
-
+        self, image_input: HunYuanVLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
@@ -1305,6 +1363,8 @@ class HunYuanVLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+
+            # TODO: use_data_parallel (split image_embeds in visual)
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         return image_embeds
@@ -1315,20 +1375,20 @@ class HunYuanVLForConditionalGeneration(
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key in ("pixel_values", "image_embeds"
-                             ) and "image" not in mm_input_by_modality:
-                mm_input_by_modality[
-                    "image"] = self._parse_and_validate_image_input(**kwargs)
+            if (
+                input_key in ("pixel_values", "image_embeds")
+                and "image" not in mm_input_by_modality
+            ):
+                mm_input_by_modality["image"] = self._parse_and_validate_image_input(
+                    **kwargs
+                )
         return mm_input_by_modality
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
-
-        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
-            **kwargs)
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
 
@@ -1341,43 +1401,9 @@ class HunYuanVLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += tuple(vision_embeddings)
-            #if modality == "video":
-            #    video_embeddings = self._process_video_input(multimodal_input)
-            #    multimodal_embeddings += video_embeddings
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings += tuple(image_embeddings)
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_id)
-                #[self.config.image_token_id, self.config.video_token_id])
-        return inputs_embeds
-
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: HunYuanVLImageInputs | None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=self.config.image_token_id,
-            )
-
-        return inputs_embeds
 
     def forward(
         self,
@@ -1394,44 +1420,15 @@ class HunYuanVLForConditionalGeneration(
                 batch.
             positions: Flattened (concatenated) position ids corresponding to a
                 batch.
-                **NOTE**: If mrope is enabled (default setting for HunYuanVLV1
-                opensource models), the shape will be `(3, seq_len)`,
-                otherwise it will be `(seq_len,).
+                **NOTE**: If mrope/xdrope is enabled (default setting for 
+                Qwen2.5-VL / HunYuanVL opensource models), the shape will be 
+                `(3/xd, seq_len)`, otherwise it will be `(seq_len,).
             pixel_values: Pixel values to be fed to a model.
                 `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
-            second_per_grid_ts: Tensor `(num_videos)` of video time interval (
-                in seconds) for each grid along the temporal dimension in the
-                3D position IDs. `None` if no videos are passed.
         """
 
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            video_input = self._parse_and_validate_video_input(**kwargs)
-
-            if image_input is None and video_input is None:
-                inputs_embeds = None
-            else:
-                if uses_xdrope(self.config):
-                    assert positions.ndim == 2 and positions.size(0) == 4, (
-                        "multimodal section rotary embedding requires "
-                        f"(4, seq_len) positions, but got {positions.size()}")
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    video_input=video_input)
-                input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,

@@ -50,7 +50,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    MRotaryEmbedding,
+    XDRotaryEmbedding,
+)
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
@@ -2039,19 +2042,6 @@ class GPUModelRunner(
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
 
-            if self.is_multimodal_pruning_enabled and self.uses_xdrope_dim > 0:
-                assert req_state.xdrope_positions is not None
-                should_sync_xdrope_positions = True
-                mm_embeds_req, new_xdrope_positions = (
-                    self.model.recompute_xdrope_positions(
-                        input_ids=req_state.prompt_token_ids,
-                        multimodal_embeddings=mm_embeds_req,
-                        xdrope_positions=req_state.xdrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
-                    )
-                )
-                req_state.xdrope_positions.copy_(new_xdrope_positions)
-
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
@@ -2371,6 +2361,7 @@ class GPUModelRunner(
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs(num_input_tokens)
+
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         elif self.uses_xdrope_dim > 0:
