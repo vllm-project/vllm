@@ -625,7 +625,6 @@ class InputBatch:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
-            self.spec_token_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -732,10 +731,12 @@ class InputBatch:
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
+        for i in range(num_reqs, len(self.spec_token_ids)):
+            self.spec_token_ids[i].clear()
+
         # Trim lists to the batch size.
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
-        del self.spec_token_ids[num_reqs:]
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
@@ -832,7 +833,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
-            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            spec_token_ids=self.spec_token_ids[:num_reqs],
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
