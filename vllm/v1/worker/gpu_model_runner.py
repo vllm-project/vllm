@@ -185,7 +185,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.cuda.Event()
+        self.async_copy_ready_event = torch.Event()
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -324,6 +324,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -434,10 +435,10 @@ class GPUModelRunner(
         self.async_output_copy_stream: torch.cuda.Stream | None = None
         # cuda event to synchronize use of reused CPU tensors between steps
         # when async scheduling is enabled.
-        self.prepare_inputs_event: torch.cuda.Event | None = None
+        self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.prepare_inputs_event = torch.cuda.Event()
+            self.prepare_inputs_event = torch.Event()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -548,7 +549,7 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
-        self.transfer_event = torch.cuda.Event()
+        self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
             dtype=torch.int64,
@@ -558,10 +559,10 @@ class GPUModelRunner(
 
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
         # with dedicated stream for overlapping and event for coordination.
-        self.valid_sampled_token_count_event: torch.cuda.Event | None = None
+        self.valid_sampled_token_count_event: torch.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
         if self.use_async_scheduling and self.num_spec_tokens:
-            self.valid_sampled_token_count_event = torch.cuda.Event()
+            self.valid_sampled_token_count_event = torch.Event()
             self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.valid_sampled_token_count_cpu = torch.empty(
             self.max_num_reqs,
@@ -1451,9 +1452,12 @@ class GPUModelRunner(
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs
         ]
-        dcp_local_seq_lens = (
-            self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
-        )
+
+        dcp_local_seq_lens, dcp_local_seq_lens_cpu = None, None
+        if self.dcp_world_size > 1:
+            dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs]
+            dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs]
+
         spec_decode_common_attn_metadata = None
 
         if for_cudagraph_capture:
@@ -1521,6 +1525,7 @@ class GPUModelRunner(
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
                 dcp_local_seq_lens=dcp_local_seq_lens,
+                dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2347,6 +2352,24 @@ class GPUModelRunner(
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+
+            # Generate custom attention masks for models that require them.
+            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
+            # Check mm_features (mm_embeds is empty during decode).
+            has_mm_features = any(
+                req_state.mm_features for req_state in self.requests.values()
+            )
+            if (
+                self.uses_custom_attention_masks
+                and has_mm_features
+                and hasattr(self.model, "generate_attention_masks")
+            ):
+                mask_kwargs = self.model.generate_attention_masks(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    self.positions.gpu[:num_scheduled_tokens],
+                    mask_dtype=self.model.dtype,
+                )
+                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.

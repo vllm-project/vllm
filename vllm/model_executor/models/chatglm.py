@@ -99,6 +99,7 @@ class GLMAttention(nn.Module):
         # https://huggingface.co/zai-org/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        rope_parameters = {"rope_type": "default", "rope_theta": 10000 * rope_ratio}
         # NOTE: zai-org/cogagent-9b-20241220 uses original_rope=False,
         # which is equivalent to is_neox_style=True
         is_neox_style = not config.original_rope
@@ -106,7 +107,7 @@ class GLMAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
-            base=10000 * rope_ratio,
+            rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
         )
         self.attn = Attention(
