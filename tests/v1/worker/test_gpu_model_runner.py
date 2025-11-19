@@ -985,8 +985,10 @@ def test_hybrid_block_table_initialization():
     req_index = 0
     block_table.append_row(kvcache_manager_blocks, req_index)
     # Get expected kernel blocks from the implementation for verification.
-    expected_kernel_blocks = block_table._map_to_kernel_blocks(
-        np.array(kvcache_manager_blocks)
+    expected_kernel_blocks = block_table.map_to_kernel_blocks(
+        np.array(kvcache_manager_blocks),
+        block_table.blocks_per_kv_block,
+        block_table._kernel_block_arange,
     )
     # Verify block table state
     assert block_table.num_blocks_per_row[req_index] == len(expected_kernel_blocks)
