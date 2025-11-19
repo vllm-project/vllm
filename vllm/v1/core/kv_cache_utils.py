@@ -1227,8 +1227,8 @@ def _report_kv_cache_config(
             "Multiplying the GPU KV cache size by the cp_world_size %d "
             "(pcp_world_size %d * dcp_world_size %d).",
             pcp_size * dcp_size,
-            vllm_config.parallel_config.prefill_context_parallel_size,
-            vllm_config.parallel_config.decode_context_parallel_size,
+            pcp_size,
+            dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
     logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")

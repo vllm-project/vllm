@@ -127,9 +127,6 @@ class KVCacheManager:
 
             if dcp_world_size * pcp_world_size > 1:
                 assert len(kv_cache_config.kv_cache_groups) == 1
-                # Note(hc): need revisit. When both DCP and any future
-                # PCP are enabled, the block_size may need to be scaled
-                # by a factor of dcp_size × pcp_size?
                 self.block_size *= dcp_world_size * pcp_world_size
 
         self.coordinator = get_kv_cache_coordinator(

@@ -719,17 +719,6 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
-    def flatten_tp_across_dp(
-        tp_size: int, dp_size: int, dp_rank: int
-    ) -> tuple[int, int]:
-        tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
-        # There are actually dp_size * tp_size devices. Update tp_size
-        # and tp_rank so we shard across all devices.
-        flatten_tp_size = dp_size * tp_size
-        flatten_tp_rank = dp_rank * tp_size + tp_rank
-        return flatten_tp_size, flatten_tp_rank
-
-    @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
     ) -> tuple[int, int]:
