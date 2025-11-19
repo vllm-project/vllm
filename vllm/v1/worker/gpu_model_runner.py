@@ -3036,7 +3036,6 @@ class GPUModelRunner(
                 if req_id in self.input_batch.spec_decode_unsupported_reqs:
                     draft_token_ids[i] = []
             
-            draft_token_ids = torch.tensor(draft_token_ids)
 
         return draft_token_ids
 

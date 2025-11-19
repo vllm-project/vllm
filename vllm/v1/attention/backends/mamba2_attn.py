@@ -120,7 +120,6 @@ class Mamba2AttentionMetadata:
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None
 
-    state_indices_tensor: torch.Tensor  # shape: [batch,]
     block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor  # shape: [batch,]
     block_idx_last_computed_token: torch.Tensor  # shape: [batch,]
@@ -134,6 +133,9 @@ class Mamba2AttentionMetadata:
     # Speculative decoding support
     num_spec_decodes: int = 0
     num_spec_decode_tokens: int = 0
+    
+    spec_token_indx: torch.Tensor | None = None
+    non_spec_token_indx: torch.Tensor | None = None
     
     # Token-level state indices for speculative decode
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec+1]
@@ -225,7 +227,22 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
+            self.spec_token_indx = torch.empty(
+                (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.non_spec_token_indx = torch.empty(
+                (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
+                dtype=torch.int32,
+                device=device,
+            )
 
+    def stable_boolean_sort(self, mask: torch.Tensor):
+        idx = torch.arange(mask.numel(), device=mask.device)
+        key = mask.to(torch.int32) * (mask.numel() + 1) + idx
+        return torch.argsort(key, stable=True)
+    
     def build(
         self,
         common_prefix_len: int,
@@ -255,7 +272,6 @@ class Mamba2AttentionMetadataBuilder(
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
-            state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
             num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
@@ -269,7 +285,6 @@ class Mamba2AttentionMetadataBuilder(
                 common_attn_metadata, mamba_block_size
             )
         else:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
             # Additional cache-related variables:
             block_idx_last_scheduled_token = None
             block_idx_last_computed_token = None
@@ -316,13 +331,10 @@ class Mamba2AttentionMetadataBuilder(
                 )
             )
             num_spec_decode_tokens = 0
-            non_spec_state_indices_tensor = (
-                state_indices_tensor[:, 0] if state_indices_tensor.ndim == 2
-                else state_indices_tensor
-            )
+            non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
             non_spec_query_start_loc = common_attn_metadata.query_start_loc
-            # spec_token_indx = None
-            # non_spec_token_indx = None
+            spec_token_indx = None
+            non_spec_token_indx = None
         else:
             # Have spec decode - compute counts EXCLUDING spec sequences
             query_lens = (
@@ -339,25 +351,59 @@ class Mamba2AttentionMetadataBuilder(
                 query_lens.sum().item() - num_prefill_tokens - num_decode_tokens
             )
             
-            spec_state_indices_tensor = common_attn_metadata.block_table_tensor[:, : self.num_spec + 1]
-            non_spec_state_indices_tensor = None
+            if num_prefills == 0 and num_decodes == 0:
+                spec_token_size = min(
+                    num_spec_decodes * (self.num_spec + 1),
+                    common_attn_metadata.query_start_loc[-1].item(),
+                )
+                spec_token_indx = torch.arange(
+                    spec_token_size,
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                non_spec_token_indx = torch.empty(
+                    0, dtype=torch.int32, device=common_attn_metadata.query_start_loc.device
+                )
+                
+                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[:, : self.num_spec + 1]
+                non_spec_state_indices_tensor = None
+                spec_query_start_loc = common_attn_metadata.query_start_loc
+                non_spec_query_start_loc = None
+            else:
+                spec_token_masks = torch.repeat_interleave(
+                    spec_sequence_masks, query_lens
+                )
+                # index = torch.argsort(spec_token_masks)
+                index = self.stable_boolean_sort(spec_token_masks)
+                num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+                non_spec_token_indx = index[:num_non_spec_tokens]
+                spec_token_indx = index[num_non_spec_tokens:]
 
-            
-            # Build query_start_loc for spec and non-spec separately
-            spec_query_lens = query_lens[spec_sequence_masks]
-            spec_query_start_loc = torch.zeros(
-                num_spec_decodes + 1,
-                dtype=torch.int32,
-                device=common_attn_metadata.query_start_loc.device,
-            )
-            torch.cumsum(spec_query_lens, dim=0, out=spec_query_start_loc[1:])
-            
-            non_spec_query_start_loc = torch.zeros(
-                num_reqs - num_spec_decodes + 1,
-                dtype=torch.int32,
-                device=common_attn_metadata.query_start_loc.device,
-            )
-            torch.cumsum(non_spec_query_lens, dim=0, out=non_spec_query_start_loc[1:])
+                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                    spec_sequence_masks, : self.num_spec + 1
+                ]
+                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                    ~spec_sequence_masks, 0
+                ]
+                
+                spec_query_start_loc = torch.zeros(
+                    num_spec_decodes + 1,
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                torch.cumsum(
+                    query_lens[spec_sequence_masks], dim=0, out=spec_query_start_loc[1:]
+                )
+                non_spec_query_start_loc = torch.zeros(
+                    query_lens.size(0) - num_spec_decodes + 1,
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                torch.cumsum(
+                    query_lens[~spec_sequence_masks],
+                    dim=0,
+                    out=non_spec_query_start_loc[1:],
+                )
             
             # Filter num_accepted_tokens to only spec sequences
             if num_accepted_tokens is not None:
@@ -376,10 +422,13 @@ class Mamba2AttentionMetadataBuilder(
             has_initial_states_p = has_initial_states_cpu.to(
                 common_attn_metadata.query_start_loc.device
             )
-
+            
+            # Subtract ALL decode tokens (spec + non-spec) to get prefill-only coordinates
+            total_decode_tokens = num_decode_tokens + num_spec_decode_tokens
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
-                - num_decode_tokens
+                - total_decode_tokens
+                # - num_decode_tokens
             )
 
             if self.vllm_config.cache_config.enable_prefix_caching:
@@ -396,7 +445,8 @@ class Mamba2AttentionMetadataBuilder(
             ]
             query_start_loc_p_cpu = (
                 common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                - num_decode_tokens
+                - total_decode_tokens
+                # - num_decode_tokens
             )
 
             # The code below carefully constructs the chunks such that:
@@ -549,7 +599,6 @@ class Mamba2AttentionMetadataBuilder(
             chunk_size=self.chunk_size,
             has_initial_states_p=has_initial_states_p,
             seq_idx_p=seq_idx_p,
-            state_indices_tensor=state_indices_tensor,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
             nums_dict=nums_dict,
@@ -567,6 +616,8 @@ class Mamba2AttentionMetadataBuilder(
             spec_sequence_masks=spec_sequence_masks,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
+            spec_token_indx=spec_token_indx,
+            non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens_filtered,
         )
         
