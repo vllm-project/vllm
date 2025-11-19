@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
-    VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -92,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
+    VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
@@ -224,7 +224,6 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_FLAT_LOGPROBS: bool = False
 
 
 def get_default_cache_root():
@@ -422,7 +421,7 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
-# The begin-* and end* here are used by the documentation generator
+# The start-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # --8<-- [start:env-vars-definition]
@@ -556,6 +555,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # compilation is done in warmup phase and the compilation will be
     # reused in subsequent calls.
     "VLLM_USE_AOT_COMPILE": use_aot_compile,
+    # Feature flag to enable/disable bytecode in
+    # TorchCompileWithNoGuardsWrapper.
+    "VLLM_USE_BYTECODE_HOOK": lambda: bool(
+        int(os.environ.get("VLLM_USE_BYTECODE_HOOK", "1"))
+    ),
     # Force vllm to always load AOT compiled models from disk. Failure
     # to load will result in a hard error when this is enabled.
     # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
@@ -660,10 +664,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
     else None,
-    # (CPU backend only) whether to use prepack for MoE layer. This will be
-    # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
-    # need to set this to "0" (False).
-    "VLLM_CPU_MOE_PREPACK": lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
     # If the env var is set, Ray Compiled Graph uses the specified
@@ -1493,11 +1493,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable FlatLogprobs whose GC overhead is significantly smaller than
-    # the original list[dict[int, Logprob]] approach.
-    # After enabled, PromptLogprobs and SampleLogprobs would populated as
-    # FlatLogprobs.
-    "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
