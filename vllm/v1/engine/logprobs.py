@@ -43,15 +43,22 @@ class LogprobsProcessor:
         tokenizer: AnyTokenizer | None,
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
-        assert request.sampling_params is not None
-        num_logprobs = request.sampling_params.logprobs
-        num_prompt_logprobs = request.sampling_params.prompt_logprobs
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        num_logprobs = sampling_params.logprobs
+        num_prompt_logprobs = sampling_params.prompt_logprobs
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
-            logprobs=(None if num_logprobs is None else create_sample_logprobs()),
+            logprobs=(
+                None
+                if num_logprobs is None
+                else create_sample_logprobs(sampling_params.flat_logprobs)
+            ),
             prompt_logprobs=(
-                None if num_prompt_logprobs is None else create_prompt_logprobs()
+                None
+                if num_prompt_logprobs is None
+                else create_prompt_logprobs(sampling_params.flat_logprobs)
             ),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
