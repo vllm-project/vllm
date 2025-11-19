@@ -21,6 +21,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.model_loader.online_quantization import (
+    support_quantized_model_reload_from_hp_weights,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -316,6 +319,7 @@ class AutoWeightsLoader:
                 )
                 raise ValueError(msg)
 
+    @support_quantized_model_reload_from_hp_weights
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
