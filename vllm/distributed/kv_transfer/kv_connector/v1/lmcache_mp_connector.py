@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import torch
 import zmq
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
