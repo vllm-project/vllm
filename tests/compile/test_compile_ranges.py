@@ -98,7 +98,7 @@ def test_compile_ranges():
         model = TestModel(vllm_config=vllm_config, prefix="").eval()
         # Number of compilations: 3 for each compile range + 2 compile sizes
         batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
-        # A has support_torch_compile
+
         with compilation_counter.expect(
             num_graphs_seen=1,
             num_piecewise_graphs_seen=1,
@@ -123,3 +123,51 @@ def test_compile_config_get_compile_ranges():
         Range(start=9, end=32),
         Range(start=33, end=8192),
     ]
+
+
+def test_inductor_cache_compile_ranges(monkeypatch):
+    # To force multiple compilations, we disable the compile cache
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    post_grad_pass_manager = PostGradPassManagerCheckRanges(
+        ranges=[
+            Range(start=1, end=8),
+            Range(start=9, end=8192),
+        ]
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=8192,
+    )
+    torch.set_default_device("cuda")
+
+    def create_vllm_config():
+        return VllmConfig(
+            scheduler_config=scheduler_config,
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                compile_ranges_split_points=[8],
+                inductor_compile_config={
+                    "post_grad_custom_post_pass": post_grad_pass_manager,
+                    # Leave inductor cache enabled to verify that the cache is used
+                    "force_disable_caches": False,
+                },
+            ),
+        )
+
+    vllm_config_1 = create_vllm_config()
+    with set_current_vllm_config(vllm_config_1):
+        model1 = TestModel(vllm_config=vllm_config_1, prefix="").eval()
+        batch_sizes = [1, 16]
+        run_model(vllm_config_1, model1, batch_sizes)
+        # Could be 0 or 2, depending on the cache
+        num_call_initially = post_grad_pass_manager.num_calls
+        assert num_call_initially in [0, 2]
+
+    # Create a new vllm config with the new pass context
+    vllm_config_2 = create_vllm_config()
+    with set_current_vllm_config(vllm_config_2):
+        model2 = TestModel(vllm_config=vllm_config_2, prefix="").eval()
+        batch_sizes = [1, 16]
+        run_model(vllm_config_2, model2, batch_sizes)
+        # Check that cache is used
+        assert post_grad_pass_manager.num_calls == num_call_initially
