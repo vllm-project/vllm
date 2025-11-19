@@ -18,12 +18,11 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.backends.registry import _Backend, backend_to_class_str
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
@@ -31,25 +30,25 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.CUTLASS_MLA,
-    _Backend.FLASHMLA,
-    _Backend.FLASH_ATTN_MLA,
-    _Backend.FLASHINFER_MLA,
-    _Backend.TRITON_MLA,
+    AttentionBackendEnum.CUTLASS_MLA,
+    AttentionBackendEnum.FLASHMLA,
+    AttentionBackendEnum.FLASH_ATTN_MLA,
+    AttentionBackendEnum.FLASHINFER_MLA,
+    AttentionBackendEnum.TRITON_MLA,
 ]
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
-    BACKENDS_TO_TEST.remove(_Backend.CUTLASS_MLA)
-    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
 
 # Remove FLASH_ATTN_MLA from the list if not supported
 if not flash_attn_supports_mla():
-    BACKENDS_TO_TEST.remove(_Backend.FLASH_ATTN_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASH_ATTN_MLA)
 
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHMLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
 
 SPEC_DECODE_BACKENDS = []
 for backend in BACKENDS_TO_TEST:
@@ -62,9 +61,7 @@ for backend in BACKENDS_TO_TEST:
 
 BACKEND_BLOCK_SIZES = {}
 for backend in BACKENDS_TO_TEST:
-    backend_class_str = backend_to_class_str(backend)
-    backend_class = resolve_obj_by_qualname(backend_class_str)
-    supported_sizes = backend_class.get_supported_kernel_block_size()
+    supported_sizes = backend.get_class().supported_kernel_block_sizes
     if supported_sizes:
         default_size = supported_sizes[0]
         block_size = (
@@ -291,7 +288,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
 
 
 def run_attention_backend(
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -394,8 +391,11 @@ def run_attention_backend(
         "spec_decode_medium",
     ],
 )
-@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
-def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
+def test_backend_correctness(
+    dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
+):
     """
     Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -410,6 +410,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     4. Running each vLLM attention backend with the new queries and the
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
+
+    Note: When tensor_parallel_size > 1, we simulate the head partitioning
+    by overriding the model config to use fewer heads, without requiring
+    multiple GPUs. This tests that backends work correctly with different
+    head counts.
     """
 
     batch_spec = BATCH_SPECS[batch_spec_name]
@@ -423,11 +428,30 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     # Add 1 for null block at index 0, and some buffer
     num_gpu_blocks = required_blocks + 1 + 100
 
+    hf_config_override = None
+    if tensor_parallel_size > 1:
+        from vllm.config import ModelConfig
+
+        temp_config = ModelConfig(model=model, max_model_len=1)
+        original_num_heads = temp_config.hf_text_config.num_attention_heads
+        original_num_kv_heads = getattr(
+            temp_config.hf_text_config, "num_key_value_heads", None
+        )
+        hf_config_override = {
+            "num_attention_heads": original_num_heads // tensor_parallel_size,
+        }
+        if original_num_kv_heads is not None:
+            hf_config_override["num_key_value_heads"] = max(
+                1, original_num_kv_heads // tensor_parallel_size
+            )
+
     vllm_config = create_vllm_config(
         model_name=model,
+        tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
         max_model_len=max(batch_spec.seq_lens),
         num_gpu_blocks=num_gpu_blocks,
         block_size=default_block_size,
+        hf_config_override=hf_config_override,
     )
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
@@ -786,7 +810,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # Create a summary for the single-line failure message
         backend_names = []
         for f in failures:
-            if "[_Backend." in f:
+            if "[AttentionBackendEnum." in f:
                 backend_name = f.split("[")[1].split("]")[0]
                 backend_names.append(backend_name)
 

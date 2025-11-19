@@ -66,6 +66,41 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
+async def test_basic_audio_with_lora(mary_had_lamb):
+    """Ensure STT (transcribe) requests can pass LoRA through to generate."""
+    model_name = "ibm-granite/granite-speech-3.3-2b"
+    lora_model_name = "speech"
+    server_args = [
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "64",
+        "--lora-modules",
+        f"{lora_model_name}={model_name}",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "1",
+    ]
+
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=lora_model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="text",
+            temperature=0.0,
+        )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_usage = out["usage"]
+    assert "mary had a little lamb" in out_text
+    assert out_usage["seconds"] == 16, out_usage["seconds"]
+
+
+@pytest.mark.asyncio
 async def test_basic_audio_gemma(foscolo):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.

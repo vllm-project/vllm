@@ -55,7 +55,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -191,13 +190,22 @@ class MiniCPMMLP(nn.Module):
         hidden_act: str,
         hidden_act_param: float,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size, hidden_size, bias=False, quant_config=quant_config
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
@@ -259,12 +267,14 @@ class MiniCPMAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -394,22 +404,16 @@ class MiniCPMModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
@@ -436,7 +440,7 @@ class MiniCPMModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         return embedding * self.config.scale_emb
 
@@ -451,7 +455,7 @@ class MiniCPMModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             hidden_states = intermediate_tensors["hidden_states"]
@@ -577,12 +581,13 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
+        parallel_config = vllm_config.parallel_config
 
         self.prefix = prefix
         self.vllm_config = vllm_config
         self.config = config
-        self.lora_config = lora_config
+
         self.cache_config = cache_config
         self.quant_config = quant_config
 
@@ -590,18 +595,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = ParallelLMHead(
-            unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -609,16 +605,18 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        if parallel_config.enable_eplb and getattr(config, "num_experts", 0) > 0:
+            raise NotImplementedError("EPLB is not supported for MiniCPM yet.")
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers

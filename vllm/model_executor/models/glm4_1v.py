@@ -37,7 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
@@ -46,7 +46,7 @@ from transformers.models.glm4v.image_processing_glm4v import (
 from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
 from transformers.video_utils import VideoMetadata
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
@@ -56,20 +56,22 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -102,7 +104,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    conv3d_to_linear_weight,
     get_vit_attn_backend,
     run_dp_sharded_mrope_vision_model,
 )
@@ -252,7 +253,7 @@ class Glm4vVisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -306,18 +307,18 @@ class Glm4vVisionAttention(nn.Module):
         )
 
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"GLM-4V does not support {self.attn_backend} backend now."
             )
 
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -341,7 +342,8 @@ class Glm4vVisionAttention(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
         seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
@@ -353,10 +355,12 @@ class Glm4vVisionAttention(nn.Module):
         batch_size = q.shape[1]
 
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
-        if rotary_pos_emb is not None:
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            qk_rotated = apply_rotary_pos_emb_vision(
+                qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
+            )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
@@ -370,14 +374,14 @@ class Glm4vVisionAttention(nn.Module):
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
-                dropout_p=0,
+                dropout_p=0.0,
                 causal=False,
             )
 
             context_layer = rearrange(
                 output, "(b s) h d -> s b (h d)", b=batch_size
             ).contiguous()
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
             for i in range(1, len(cu_seqlens)):
@@ -396,7 +400,7 @@ class Glm4vVisionAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -425,7 +429,7 @@ class Glm4vVisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -454,14 +458,16 @@ class Glm4vVisionBlock(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
         seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
@@ -485,15 +491,18 @@ class Glm4vVisionPatchEmbed(nn.Module):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = ReplicatedLinear(
-            in_channels * math.prod(kernel_size),
+        self.proj = Conv3dLayer(
+            in_channels,
             hidden_size,
+            kernel_size=kernel_size,
+            stride=kernel_size,
             bias=True,
-            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
+        L, C = x.shape
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
+        x = self.proj(x).view(L, self.hidden_size)
         return x
 
 
@@ -657,44 +666,6 @@ class Glm4vVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class Glm4vVisionRotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, theta: float = 10000.0) -> None:
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._seq_len_cached = 0
-        self._freqs_cached = None
-
-    def update_freqs_cache(self, seqlen: int) -> None:
-        if seqlen > self._seq_len_cached:
-            seqlen *= 2
-            self._seq_len_cached = seqlen
-            self.inv_freq = 1.0 / (
-                self.theta
-                ** (
-                    torch.arange(
-                        0,
-                        self.dim,
-                        2,
-                        dtype=torch.float,
-                        device=self.inv_freq.device,
-                    )
-                    / self.dim
-                )
-            )
-            seq = torch.arange(
-                seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-            )
-            freqs = torch.outer(seq, self.inv_freq)
-            self._freqs_cached = freqs
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        self.update_freqs_cache(seqlen)
-        return self._freqs_cached[:seqlen]
-
-
 class Glm4vVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -703,7 +674,7 @@ class Glm4vVisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -728,7 +699,13 @@ class Glm4vVisionTransformer(nn.Module):
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
-        self.rotary_pos_emb = Glm4vVisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb = get_rope(
+            head_size=head_dim,
+            rotary_dim=head_dim // 2,
+            max_position=8192,
+            base=10000.0,
+            is_neox_style=True,
+        )
         self.blocks = nn.ModuleList(
             [
                 Glm4vVisionBlock(
@@ -757,7 +734,7 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_conv_layernorm = RMSNorm(
             vision_config.hidden_size, eps=vision_config.rms_norm_eps
         )
-        self.downsample = nn.Conv2d(
+        self.downsample = Conv2dLayer(
             in_channels=vision_config.hidden_size,
             out_channels=vision_config.out_hidden_size,
             kernel_size=vision_config.spatial_merge_size,
@@ -772,10 +749,11 @@ class Glm4vVisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            self.attn_backend = _Backend.FLASH_ATTN
+            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -785,7 +763,9 @@ class Glm4vVisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
 
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    def rot_pos_emb(
+        self, grid_thw: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -813,9 +793,13 @@ class Glm4vVisionTransformer(nn.Module):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb, pos_ids
+
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
+        cos_combined = cos[pos_ids].flatten(1)
+        sin_combined = sin[pos_ids].flatten(1)
+        return cos_combined, sin_combined, pos_ids
 
     def compute_attn_mask_seqlen(
         self,
@@ -824,8 +808,8 @@ class Glm4vVisionTransformer(nn.Module):
         max_seqlen, seqlens = None, None
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         return max_seqlen, seqlens
@@ -844,7 +828,9 @@ class Glm4vVisionTransformer(nn.Module):
         x = self.post_conv_layernorm(x)
 
         # compute position embedding
-        rotary_pos_emb, image_type_ids = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb_cos, rotary_pos_emb_sin, image_type_ids = self.rot_pos_emb(
+            grid_thw
+        )
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
@@ -863,7 +849,8 @@ class Glm4vVisionTransformer(nn.Module):
             x = blk(
                 x,
                 cu_seqlens=cu_seqlens,
-                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
                 seqlens=seqlens,
             )
@@ -891,9 +878,6 @@ class Glm4vVisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            if name.endswith("patch_embed.proj.weight"):
-                loaded_weight = conv3d_to_linear_weight(loaded_weight)
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1592,9 +1576,7 @@ class Glm4vForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -1618,27 +1600,23 @@ class Glm4vForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: "PretrainedConfig",
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for GLM4V."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_start_token_id = hf_config.video_start_token_id
         video_end_token_id = hf_config.video_end_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         llm_pos_ids_list: list = []
 
-        if not (image_grid_thw is None and video_grid_thw is None):
-            if isinstance(image_grid_thw, torch.Tensor):
-                image_grid_thw = image_grid_thw.tolist()
-
+        if image_grid_thw or video_grid_thw:
             input_token_type: list[str] = []
             video_check_flg = False
             for token in input_tokens:
@@ -1670,11 +1648,7 @@ class Glm4vForConditionalGeneration(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = image_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_merge_size,
@@ -1707,8 +1681,7 @@ class Glm4vForConditionalGeneration(
                 elif modality_type == "video":
                     t, h, w = (
                         video_frame_num,
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
+                        *image_grid_thw[mm_data_idx][1:],
                     )
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
@@ -1754,7 +1727,6 @@ class Glm4vForConditionalGeneration(
             llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        llm_positions = llm_positions[:, context_len:seq_len]
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 
