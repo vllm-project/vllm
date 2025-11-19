@@ -26,29 +26,27 @@ def update_wheel_metadata(wheel_path: str, new_version: str) -> None:
 
                     if item.filename.endswith("/METADATA") and ".dist-info" in item.filename:
                         metadata_content = data.decode("utf-8")
-                        lines = metadata_content.split("\n")
+                        lines = metadata_content.splitlines()
                         updated_lines = []
                         version_found = False
                         for line in lines:
                             if line.startswith("Version: "):
                                 updated_lines.append(f"Version: {new_version}")
                                 version_found = True
-                                metadata_updated = True
                             else:
                                 updated_lines.append(line)
-                        
-                        line_ending = "\r\n" if metadata_content.endswith("\r\n") else "\n"
-                        data = line_ending.join(updated_lines).encode("utf-8")
                         if not version_found:
-                            data = f"Version: {new_version}{line_ending}".encode("utf-8") + data
-                            metadata_updated = True
+                            updated_lines.insert(0, f"Version: {new_version}")
+                        metadata_updated = True
+                        # Rebuild the metadata with LF line endings and a trailing newline.
+                        data = ("\n".join(updated_lines) + "\n").encode("utf-8")
 
                     dest_zip.writestr(item, data)
 
         if not metadata_updated:
             raise ValueError("METADATA file not found in wheel")
 
-        wheel_path.unlink()
+        # Atomic replacement: rename directly over original file
         Path(tmp_wheel_path).rename(wheel_path)
         print(f"Updated METADATA in {wheel_path} to version {new_version}")
 
