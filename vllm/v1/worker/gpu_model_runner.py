@@ -426,7 +426,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -892,7 +892,8 @@ class GPUModelRunner(
             # conform to the schema. This can result in
             # scheduler_output.scheduled_spec_decode_tokens being empty,
             # even when speculative decoding is enabled.
-            self.input_batch.spec_token_ids[req_index] = spec_token_ids
+            self.input_batch.spec_token_ids[req_index].clear()
+            self.input_batch.spec_token_ids[req_index].extend(spec_token_ids)
 
             # there are no draft tokens with async scheduling,
             # we clear the spec_decoding info in scheduler_output and
@@ -1435,7 +1436,7 @@ class GPUModelRunner(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.dcp_kv_cache_interleave_size,
+                self.parallel_config.cp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
@@ -1451,9 +1452,12 @@ class GPUModelRunner(
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs
         ]
-        dcp_local_seq_lens = (
-            self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
-        )
+
+        dcp_local_seq_lens, dcp_local_seq_lens_cpu = None, None
+        if self.dcp_world_size > 1:
+            dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs]
+            dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs]
+
         spec_decode_common_attn_metadata = None
 
         if for_cudagraph_capture:
@@ -1521,6 +1525,7 @@ class GPUModelRunner(
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
                 dcp_local_seq_lens=dcp_local_seq_lens,
+                dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
