@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-import hashlib
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -425,6 +425,8 @@ def get_vllm_port() -> int | None:
 # to extract the used env vars.
 
 # --8<-- [start:env-vars-definition]
+
+logger = logging.getLogger(__name__)
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
@@ -1540,85 +1542,88 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def compute_hash() -> str:
-    """
-    WARNING: Whenever a new key is added to this environment
-    variables, ensure that it is included in the factors list if
-    it affects the computation graph. For example, different values
-    of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that
-    affect the choice of different kernels or attention backends should
-    also be included in the factors list.
-    """
+def compile_factors() -> dict[str, object]:
+    """Return env vars used for torch.compile cache keys.
 
-    # The values of envs may affects the computation graph.
-    # TODO(DefTruth): hash all environment variables?
-    # for key in environment_variables:
-    #     factorize(key)
-    environment_variables_to_hash = [
-        "VLLM_PP_LAYER_PARTITION",
-        "VLLM_MLA_DISABLE",
-        "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
-        "VLLM_USE_TRITON_AWQ",
-        "VLLM_DP_RANK",
-        "VLLM_DP_SIZE",
-        "VLLM_USE_STANDALONE_COMPILE",
-        "VLLM_FUSED_MOE_CHUNK_SIZE",
-        "VLLM_FLASHINFER_MOE_BACKEND",
-        "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
-        "VLLM_ATTENTION_BACKEND",
-        "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_DISABLED_KERNELS",
-        "VLLM_USE_DEEP_GEMM",
-        "VLLM_MOE_USE_DEEP_GEMM",
-        "VLLM_USE_DEEP_GEMM_E8M0",
-        "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
-        "VLLM_USE_FLASHINFER_MOE_FP16",
-        "VLLM_USE_FLASHINFER_MOE_FP8",
-        "VLLM_USE_FLASHINFER_MOE_FP4",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
-        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
-        "VLLM_USE_CUDNN_PREFILL",
-        "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
-        "VLLM_USE_TRTLLM_ATTENTION",
-        "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
-        "VLLM_ROCM_USE_AITER",
-        "VLLM_ROCM_USE_AITER_PAGED_ATTN",
-        "VLLM_ROCM_USE_AITER_LINEAR",
-        "VLLM_ROCM_USE_AITER_MOE",
-        "VLLM_ROCM_USE_AITER_RMSNORM",
-        "VLLM_ROCM_USE_AITER_MLA",
-        "VLLM_ROCM_USE_AITER_MHA",
-        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
-        "VLLM_ROCM_USE_AITER_FP8BMM",
-        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
-        "VLLM_ROCM_USE_AITER_TRITON_GEMM",
-        "VLLM_ROCM_USE_SKINNY_GEMM",
-        "VLLM_ROCM_FP8_PADDING",
-        "VLLM_ROCM_MOE_PADDING",
-        "VLLM_ROCM_CUSTOM_PAGED_ATTN",
-        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-        "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
-        "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
-        "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
-        "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
-        "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
-        "VLLM_NVFP4_GEMM_BACKEND",
-        "VLLM_USE_FBGEMM",
-        "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
-        "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
-    ]
-    for key in environment_variables_to_hash:
-        # if this goes out of sync with environment_variables,
-        # it's not a user error, it's a bug
-        assert key in environment_variables, (
-            "Please update environment_variables_to_hash in envs.py"
-        )
+    Start with every known vLLM env var; drop entries in `ignored_factors`;
+    hash everything else. This keeps the cache key aligned across workers."""
 
-    factors = [environment_variables[key]() for key in environment_variables_to_hash]
+    ignored_factors: set[str] = {
+        "MAX_JOBS",
+        "VLLM_RPC_BASE_PATH",
+        "VLLM_USE_MODELSCOPE",
+        "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "VLLM_DEBUG_DUMP_PATH",
+        "VLLM_PORT",
+        "VLLM_CACHE_ROOT",
+        "LD_LIBRARY_PATH",
+        "VLLM_SERVER_DEV_MODE",
+        "VLLM_DP_MASTER_IP",
+        "VLLM_DP_MASTER_PORT",
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_CI_USE_S3",
+        "VLLM_MODEL_REDIRECT_PATH",
+        "VLLM_HOST_IP",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+        "S3_ENDPOINT_URL",
+        "VLLM_USAGE_STATS_SERVER",
+        "VLLM_NO_USAGE_STATS",
+        "VLLM_DO_NOT_TRACK",
+        "VLLM_LOGGING_LEVEL",
+        "VLLM_LOGGING_PREFIX",
+        "VLLM_LOGGING_STREAM",
+        "VLLM_LOGGING_CONFIG_PATH",
+        "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
+        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        "VLLM_SLEEP_WHEN_IDLE",
+        "VLLM_IMAGE_FETCH_TIMEOUT",
+        "VLLM_VIDEO_FETCH_TIMEOUT",
+        "VLLM_AUDIO_FETCH_TIMEOUT",
+        "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
+        "VLLM_MEDIA_LOADING_THREAD_COUNT",
+        "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_VIDEO_LOADER_BACKEND",
+        "VLLM_MEDIA_CONNECTOR",
+        "VLLM_ASSETS_CACHE",
+        "VLLM_ASSETS_CACHE_MODEL_CLEAN",
+        "VLLM_MM_INPUT_CACHE_GIB",
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_ENABLE_V1_MULTIPROCESSING",
+        "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
+        "VLLM_CPU_KVCACHE_SPACE",
+        "VLLM_CPU_OMP_THREADS_BIND",
+        "VLLM_CPU_NUM_OF_RESERVED_CPU",
+        "VLLM_CPU_MOE_PREPACK",
+        "VLLM_CPU_SGL_KERNEL",
+        "VLLM_TEST_FORCE_LOAD_FORMAT",
+        "LOCAL_RANK",
+        "CUDA_VISIBLE_DEVICES",
+    }
+
+    from vllm.config.utils import normalize_value
+
+    factors: dict[str, object] = {}
+    for factor, getter in environment_variables.items():
+        if factor in ignored_factors:
+            continue
+
+        try:
+            raw = getter()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Skipping environment variable %s while hashing compile factors: %s",
+                factor,
+                exc,
+            )
+            continue
+
+        factors[factor] = normalize_value(raw)
 
     ray_noset_env_vars = [
         # Refer to
@@ -1641,8 +1646,8 @@ def compute_hash() -> str:
         "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
         "RAY_EXPERIMENTAL_NOSET_RBLN_RT_VISIBLE_DEVICES",
     ]
-    factors.extend([os.getenv(var) for var in ray_noset_env_vars])
 
-    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+    for var in ray_noset_env_vars:
+        factors[var] = normalize_value(os.getenv(var))
 
-    return hash_str
+    return factors
