@@ -55,7 +55,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=self.base_layer.weight.dtype,
             device=self.base_layer.weight.device,
-            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_a_stacked = torch.zeros(
             (
@@ -66,7 +65,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
-            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_b_stacked = torch.zeros(
             (
@@ -77,7 +75,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             ),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
-            # requires_grad=lora_config.enable_lora_training,
         )
         self.lora_a_stacked_2d = self.lora_a_stacked.view(
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],

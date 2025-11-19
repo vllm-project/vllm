@@ -21,8 +21,6 @@ from .utils import _get_lora_device
 
 logger = init_logger(__name__)
 
-IS_LOGGED = False
-
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
@@ -72,7 +70,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                # requires_grad=True,
             ) for _ in range(self.n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
@@ -82,7 +79,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                # requires_grad=True,
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
             lora_bias_out_size = lora_b_out_size
@@ -93,7 +89,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                     lora_bias_out_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
-                    # requires_grad=True,
                 ) for _ in range(self.n_slices))
         self.output_slices = (self.lora_b_stacked[0].shape[2], )
 
@@ -141,6 +136,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                    lora_b.T, non_blocking=True)
         if lora_bias is not None:
+
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
@@ -164,6 +160,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        # TODO(girfan): Pass is_lora_training to the apply method?
         if torch.is_grad_enabled():
             return self._training_apply(x, output)
         else:
@@ -178,36 +175,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = lora_output
         return output
 
-    # TODO(girfan): Add tests to verify if this is functionally correct and matches punica.
+    # TODO(girfan): Add tests.
     def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        # save q_old, k_old, v_old to separate csv files
-        global IS_LOGGED
-
-        # if not IS_LOGGED:
-        #     import pandas as pd
-
-        #     q_old, k_old, v_old = output.split([2048, 512, 512], dim=-1)
-        #     df = pd.DataFrame({
-        #         "q": q_old.flatten().tolist(),
-        #     })
-        #     df.to_csv(f"vllm_q_old.csv", index=False)
-            
-        #     df = pd.DataFrame({
-        #         "k": k_old.flatten().tolist(),
-        #     })
-        #     df.to_csv(f"vllm_k_old.csv", index=False)
-
-        #     df = pd.DataFrame({
-        #         "v": v_old.flatten().tolist(),
-        #     })
-        #     df.to_csv(f"vllm_v_old.csv", index=False)
-
         lora_indices = self.punica_wrapper.token_lora_indices
 
         # Group tokens by LoRA index
         unique_lora_ids = set(lora_indices.tolist())
 
         scaling = self.lora_config.lora_alpha / self.lora_config.max_lora_rank
+
         # TODO(girfan): We should use the ACTUAL rank of this LoRA, not max rank.
         assert scaling == 2.0, f"Scaling factor is {scaling}, expected 2.0 (temp: matching PEFT example)"
 
@@ -238,48 +214,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
                 slice_size = self.output_slices[slice_idx]
 
-                # print(f"Updating output indices: {token_indices}")
-                # print(f"Updating output offset: {output_offset} to {output_offset + slice_size}")
-                # print(f"Updating slice size: {slice_size}")
-
                 output[token_indices, output_offset:output_offset + slice_size] += lora_output_scaled
                 output_offset += slice_size
 
                 if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
                     bias = self.lora_bias_stacked[slice_idx][lora_idx, 0, :]
                     output[token_indices, output_offset-slice_size:output_offset] += bias
-
-                # if not IS_LOGGED:
-                #     import pandas as pd
-
-                #     q_old, k_old, v_old = output.split([2048, 512, 512], dim=-1)
-                #     df = pd.DataFrame({
-                #         "q": q_old.flatten().tolist(),
-                #     })
-                #     df.to_csv(f"vllm_q_one_accumulation.csv", index=False)
-
-                #     df = pd.DataFrame({
-                #         "lora_a": lora_a.flatten().tolist(),
-                #     })
-                #     df.to_csv(f"vllm_lora_a_{slice_idx}_{lora_idx}.csv", index=False)
-
-                #     df = pd.DataFrame({
-                #         "lora_b": lora_b.flatten().tolist(),
-                #     })
-                #     df.to_csv(f"vllm_lora_b_{slice_idx}_{lora_idx}.csv", index=False)
-
-                #     df = pd.DataFrame({
-                #         "x": x_batch.flatten().tolist(),
-                #     })
-                #     df.to_csv(f"vllm_x_batch_{slice_idx}_{lora_idx}.csv", index=False)
-
-                #     df = pd.DataFrame({
-                #         "q": lora_output_scaled.flatten().tolist(),
-                #     })
-                #     df.to_csv(f"vllm_lora_result_{slice_idx}_{lora_idx}.csv", index=False)
-                #     ss
-
-                #     IS_LOGGED = True
 
         return output
 

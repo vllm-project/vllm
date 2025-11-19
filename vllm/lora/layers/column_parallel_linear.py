@@ -219,7 +219,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                # requires_grad=lora_config.enable_lora_training,
             ) for _ in range(self.n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
@@ -229,7 +228,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-                # requires_grad=lora_config.enable_lora_training,
             ) for output_size in self.output_slices)
         if lora_config.bias_enabled:
             self.lora_bias_stacked = tuple(
@@ -239,7 +237,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     output_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
-                    # requires_grad=lora_config.enable_lora_training,
                 ) for output_size in self.output_slices)
 
     def slice_lora_a(
