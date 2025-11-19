@@ -148,7 +148,12 @@ class XPUWorker(Worker):
         return int(available_kv_cache_memory)
 
     def init_device(self):
-        if self.device_config.device.type == "xpu" and current_platform.is_xpu():
+        device = self.device_config.device
+        if (
+            isinstance(device, torch.device)
+            and device.type == "xpu"
+            and current_platform.is_xpu()
+        ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -181,6 +186,7 @@ class XPUWorker(Worker):
         )
 
         # Set random seed.
+        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner

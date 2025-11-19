@@ -140,9 +140,9 @@ class TPUWorker:
         self.device_config.device = self.device
 
         # Set random seed.
+        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
-        if self.model_config.seed is not None:
-            xm.set_rng_state(self.model_config.seed, self.device)
+        xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -291,6 +291,7 @@ class TPUWorker:
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
+        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
     def reset_mm_cache(self) -> None:
@@ -328,11 +329,14 @@ class TPUWorker:
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
         parallel_config = vllm_config.parallel_config
+        init_method = (
+            distributed_init_method if distributed_init_method is not None else "env://"
+        )
         init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
-            distributed_init_method=distributed_init_method,
+            distributed_init_method=init_method,
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(

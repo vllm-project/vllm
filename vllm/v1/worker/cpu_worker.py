@@ -80,13 +80,13 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = "nobind"
         else:
             local_dp_rank = self.parallel_config.data_parallel_rank_local
-            omp_cpuids = omp_cpuids.split("|")
+            omp_cpuids_list = omp_cpuids.split("|")
             if local_dp_rank is not None:
                 world_size = self.parallel_config.world_size
-                omp_cpuids = omp_cpuids[
+                omp_cpuids_list = omp_cpuids_list[
                     local_dp_rank * world_size : (local_dp_rank + 1) * world_size
                 ]
-            self.local_omp_cpuid = omp_cpuids[self.rank]
+            self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
@@ -104,6 +104,7 @@ class CPUWorker(Worker):
             current_platform.dist_backend,
         )
         # Set random seed.
+        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
@@ -120,11 +121,12 @@ class CPUWorker(Worker):
         pass
 
     def determine_available_memory(self) -> int:
-        return self.cache_config.cpu_kvcache_space_bytes  # type: ignore
+        return self.cache_config.cpu_kvcache_space_bytes or 0
 
     def compile_or_warm_up_model(self) -> None:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
+        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
 
