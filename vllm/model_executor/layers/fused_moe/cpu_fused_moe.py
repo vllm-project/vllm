@@ -6,7 +6,6 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
-from vllm import envs
 
 
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
@@ -127,54 +126,6 @@ def select_experts(
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
-        )
-
-
-class IPEXFusedMOE:
-    def __init__(self, layer: torch.nn.Module) -> None:
-        import intel_extension_for_pytorch as ipex
-
-        layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-            layer.w13_weight,
-            layer.w2_weight,
-            use_prepack=envs.VLLM_CPU_MOE_PREPACK,
-        )
-
-    def __call__(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-    ) -> torch.Tensor:
-        assert activation == "silu", f"{activation} is not supported."
-        assert not apply_router_weight_on_input
-        assert routed_scaling_factor == 1.0, (
-            f"routed_scaling_factor {routed_scaling_factor} is not supported."
-        )
-        return layer.ipex_fusion(
-            x,
-            use_grouped_topk,
-            top_k,
-            router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-            custom_routing_function,
-            scoring_func,
-            e_score_correction_bias,
         )
 
 
