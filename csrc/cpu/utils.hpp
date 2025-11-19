@@ -50,20 +50,20 @@ struct Counter {
 
 inline int64_t get_l2_size() {
   static int64_t size = []() {
-    #if defined(__APPLE__)
-      // macOS doesn't have _SC_LEVEL2_CACHE_SIZE. Use sysctlbyname.
-      int64_t l2_cache_size = 0;
-      size_t len = sizeof(l2_cache_size);
-      if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &len, NULL, 0) == 0 &&
-          l2_cache_size > 0) {
-        return l2_cache_size >> 1;  // use 50% of L2 cache
-      }
-      // Fallback if sysctlbyname fails
-      return 128LL * 1024 >> 1;  // use 50% of 128KB
-#else
-      long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
-      assert(l2_cache_size != -1);
+#if defined(__APPLE__)
+    // macOS doesn't have _SC_LEVEL2_CACHE_SIZE. Use sysctlbyname.
+    int64_t l2_cache_size = 0;
+    size_t len = sizeof(l2_cache_size);
+    if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &len, NULL, 0) == 0 &&
+        l2_cache_size > 0) {
       return l2_cache_size >> 1;  // use 50% of L2 cache
+    }
+    // Fallback if sysctlbyname fails
+    return 128LL * 1024 >> 1;  // use 50% of 128KB
+#else
+    long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    assert(l2_cache_size != -1);
+    return l2_cache_size >> 1;  // use 50% of L2 cache
 #endif
   }();
   return size;
