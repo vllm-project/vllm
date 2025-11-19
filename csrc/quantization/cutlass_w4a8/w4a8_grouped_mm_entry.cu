@@ -26,7 +26,6 @@
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 #include <cuda_runtime.h>
-#include "cutlass/gemm/group_array_problem_shape.hpp"
 
 namespace vllm::cutlass_w4a8_moe {
 
@@ -53,8 +52,9 @@ constexpr int AlignmentA =
               ElementA>::value;  // Memory access granularity/alignment of A
                                  // matrix in units of elements (up to 16 bytes)
 // Need to pass a pointer type to make the 3rd dimension of Stride be _0
-using StrideA = cute::remove_pointer_t<cutlass::detail::TagToStrideA_t<LayoutA*>>;
-
+// using StrideA = cute::remove_pointer_t<cutlass::detail::TagToStrideA_t<LayoutA*>>;
+// try this instead
+  using StrideA = Stride<int64_t, Int<1>, Int<0>>;
 // B matrix configuration
 using ElementB = QuantType;  // Element type for B matrix operand
 using LayoutB =
@@ -133,9 +133,8 @@ struct W4A8GroupedGemmKernel {
           // the void type for C tells the builder to allocate 0 smem for the C
           // matrix. We can enable this if beta == 0 by changing ElementC to
           // void below.
-          ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type,
-          AlignmentC, ElementD,
-          typename cutlass::layout::LayoutTranspose<LayoutD>::type, AlignmentD,
+          ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type *, AlignmentC,
+          ElementD, typename cutlass::layout::LayoutTranspose<LayoutD>::type *, AlignmentD,
           EpilogueSchedule,  // This is the only epi supporting the required
                              // swap + transpose.
           EVTCompute>::CollectiveOp;
@@ -146,8 +145,8 @@ struct W4A8GroupedGemmKernel {
   using CollectiveMainloopShuffled =
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag, OperatorClass,
-          cute::tuple<ElementB, cutlass::Array<ElementScale, ScalePackSize>>,
-          LayoutB_Reordered, AlignmentB, ElementA, LayoutA_Transpose,
+          cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
+          LayoutB_Reordered *, AlignmentB, ElementA, LayoutA_Transpose *,
           AlignmentA, ElementAccumulator, TileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
@@ -183,13 +182,15 @@ struct W4A8GroupedGemmKernel {
     const torch::Tensor& group_scale_strides
   ) {
     // assume we already did param validation elsewhere
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(a_tensors));
-    auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
+    auto device = a_tensors.device();
+    auto device_id = device.index();
+    const at::cuda::OptionalCUDAGuard device_guard(device);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
 
     // allocate ptrs 
     int num_experts = static_cast<int>(expert_offsets.size(0));
     auto options_int =
-      torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
+      torch::TensorOptions().dtype(torch::kInt64).device(device);
     torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
@@ -201,10 +202,11 @@ struct W4A8GroupedGemmKernel {
     // TODO: we can modify `run_get_group_gemm_starts` to do the correct thing when
     // there are group scales also 
     // TODO: move to gpu. just keep the calculation on cpu now to check correctness
-    // if we skip it the gemm should still technically run; let's test that first.
-    run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
-                            a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
-                            out_tensors, a_scales, b_scales, b_group_scales);
+    // if we skip it the gemm should still technically compile; let's test that first.
+    // run will fail cause the ptrs will be invalid
+    // run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
+    //                         a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
+    //                         out_tensors, a_scales, b_scales, b_group_scales);
 
     // now we can build the grouped gemm args since all pointers are populated
     // Swap the A and B tensors, as well as problem shapes here.
@@ -216,17 +218,14 @@ struct W4A8GroupedGemmKernel {
     // SwapAB so B (weights) comes first
     MainloopArguments mainloop_arguments{
         static_cast<const QuantType**>(b_ptrs.data_ptr()),
-        static_cast<StrideB*>(b_strides.data_ptr()),
+        static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
         static_cast<const MmaType**>(a_ptrs.data_ptr()),
         static_cast<StrideA*>(a_strides.data_ptr()),
-        // this is originally cutlass::DeviceAllocation<const cutlass::Array<ElementScale, 8> *>
-        // ptr_scale_packed.get()
-        static_cast<const cutlass::Array<ElementScale, 8> *>(b_group_scales_ptrs.data_ptr()),
+        static_cast<const cutlass::Array<ElementScale, 8> **>(b_group_scales_ptrs.data_ptr()),
         static_cast<StrideS*>(group_scale_strides.data_ptr()),
-        b_group_size // TODO: might need to cast this?
+        b_group_size
     };
 
-    // specify per-tok/per-chan scales
     EpilogueArguments epilogue_arguments{
         // since we are doing SwapAB the channel scales comes first, then token scales
         ChTokScalesEpilogue::prepare_args( // see ScaledEpilogueArray
@@ -236,9 +235,9 @@ struct W4A8GroupedGemmKernel {
             true
         ),
         nullptr,
-        static_cast<StrideC*>(c_strides.data_ptr()),  // this might not be needed?
+        static_cast<StrideC*>(c_strides.data_ptr()),  // this might not be needed? this has some issue
         static_cast<ElementD**>(out_ptrs.data_ptr()),
-        static_cast<StrideC*>(c_strides.data_ptr())
+        static_cast<StrideC*>(c_strides.data_ptr()) // this also has issue
     };
 
     // get the input problem shape
@@ -250,142 +249,25 @@ struct W4A8GroupedGemmKernel {
         device_id,
         cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id)
     };
+
     Args arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
                 prob_shape,
                 mainloop_arguments,
                 epilogue_arguments,
                 hw_info};
 
-    // Workspace
+    // // Workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
     torch::Tensor workspace =
         torch::empty(workspace_size,
                      torch::TensorOptions().dtype(torch::kU8).device(device));
 
-    // Run grouped GEMM
+    // // Run grouped GEMM
     GemmShuffled gemm;
     CUTLASS_CHECK(gemm.can_implement(arguments));
     CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
     CUTLASS_CHECK(gemm.run(stream));
   }
-//   static void mm(torch::Tensor const& A,
-//                 torch::Tensor const& B,             // already packed
-//                 torch::Tensor const& group_scales,  // already packed
-//                 int64_t group_size,
-//                 torch::Tensor const& channel_scales,
-//                 torch::Tensor const& token_scales,
-//                 std::optional<at::ScalarType> const& maybe_out_type // NOTE: only support bf16 for now
-//             ) {
-//     // TODO: param validation
-//     int m = A.size(0);
-//     int k = A.size(1);
-//     int n = B.size(1);
-
-//     // safely cast group_size to int
-//     TORCH_CHECK(group_size > 0 && group_size <= std::numeric_limits<int>::max(),
-//                 "group_size out of supported range for int: ", group_size);
-//     int const group_size_int = static_cast<int>(group_size);
-
-//     // stream stuff
-//     const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
-//     auto device = A.device();
-//     auto device_id = device.index();
-//     auto stream = at::cuda::getCurrentCUDAStream(device_id);
-
-//     // TODO: we dont need to allocate output
-//     torch::Tensor D =
-//         torch::empty({m, n}, torch::TensorOptions()
-//                                  .dtype(equivalent_scalar_type_v<ElementD>)
-//                                  .device(device));
-//     // prepare arg pointers
-//     auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
-//     auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-//     auto D_ptr = static_cast<ElementD*>(D.data_ptr());
-//     // can we avoid hardcode the 8 here
-//     auto S_ptr =
-//         static_cast<cutlass::Array<ElementScale, ScalePackSize> const*>(
-//             group_scales.const_data_ptr());
-
-//     // runtime layout for B
-//     auto shape_B = cute::make_shape(n, k, 1);
-//     LayoutB_Reordered layout_B_reordered =
-//         cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
-
-//     // strides
-//     int const scale_k = cutlass::ceil_div(k, group_size_int);
-//     StrideA stride_A =
-//         cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(m, k, 1));
-//     // Reverse stride here due to swap and transpose
-//     StrideD stride_D =
-//         cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(n, m, 1));
-//     StrideS stride_S = cutlass::make_cute_packed_stride(
-//         StrideS{}, cute::make_shape(n, scale_k, 1));
-
-//     // Create a structure of gemm kernel arguments suitable for invoking an
-//     // instance of Gemm auto arguments =
-//     // args_from_options<GemmShuffled>(options);
-//     /// Populates a Gemm::Arguments structure from the given arguments
-//     /// Swap the A and B tensors, as well as problem shapes here.
-//     using Args = typename GemmShuffled::Arguments;
-//     using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
-//     using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
-    
-//     // TODO: fix, need pointers available
-//     // dont need concern with per-tok/per-chan scales here, but need group scales
-//     // SwapAB so B (weights) comes first
-//     MainloopArguments mainloop_arguments{
-//         static_cast<const QuantType**>(b_ptrs.data_ptr()),
-//         static_cast<StrideB*>(b_strides.data_ptr()),
-//         static_cast<const MmaType**>(a_ptrs.data_ptr()),
-//         static_cast<StrideA*>(a_strides.data_ptr()),
-//         ptr_scale_packed.get(),
-//         stride_S.get(),
-//         group_size_int
-//     };
-//     // TODO: gotta fix, make sure we have the pointers available
-//     // dont need group scales but need per-tok/per-chan scales here
-//     EpilogueArguments epilogue_arguments{
-//         // since we are doing SwapAB the channel scales comes first, then token scales
-//         ChTokScalesEpilogue::prepare_args( // ScaledEpilogueArray
-//             static_cast<const ElementAccumulator**>(b_scales_ptrs.data_ptr()), // per-channel
-//             static_cast<const ElementAccumulator**>(a_scales_ptrs.data_ptr()), // per-token
-//             true,
-//             true
-//         ),
-//         nullptr,
-//         static_cast<StrideC*>(c_strides.data_ptr()),  // no C? what is c_strides in the other kernel for? actually this might not be needed since pointer is null?
-//         static_cast<ElementD**>(out_ptrs.data_ptr()), // should be pointer
-//         static_cast<StrideC*>(c_strides.data_ptr())}; // D same as C
-    
-//     static const cutlass::KernelHardwareInfo hw_info{
-//         device_id,
-//         cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id)
-//     };
-
-//     // TODO: we need `problem_sizes` and `expert_offsets` as inputs
-//     int num_experts = static_cast<int>(expert_offsets.size(0));
-//     ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
-//       static_cast<ProblemShape::UnderlyingProblemShape*>(
-//           problem_sizes.data_ptr());
-//     ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
-//     Args arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
-//                    prob_shape,
-//                    mainloop_arguments,
-//                    epilogue_arguments,
-//                    hw_info};
-
-//     // Workspace
-//     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-//     torch::Tensor workspace =
-//         torch::empty(workspace_size,
-//                      torch::TensorOptions().dtype(torch::kU8).device(device));
-
-//     // Run GEMM
-//     GemmShuffled gemm;
-//     CUTLASS_CHECK(gemm.can_implement(arguments));
-//     CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
-//     CUTLASS_CHECK(gemm.run(stream));
-//   }
 };
 
 // ----------------------------------------------------------------------------
