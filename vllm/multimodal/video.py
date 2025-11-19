@@ -125,18 +125,44 @@ class OpenCVVideoBackend(VideoLoader):
         frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
 
         i = 0
+        valid_num_frames = num_frames_to_sample
         for idx in range(max(frame_idx) + 1):
             ok = cap.grab()
             if not ok:
-                break
+                # Frame is broken/unreadable, adjust the valid frame count
+                if idx in frame_idx:
+                    valid_num_frames -= 1
+                    logger.warning(
+                        "Failed to grab frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+                continue
             if idx in frame_idx:
                 ret, frame = cap.retrieve()
                 if ret:
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
+                else:
+                    # retrieve() failed even though grab() succeeded
+                    valid_num_frames -= 1
+                    logger.warning(
+                        "Failed to retrieve frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
 
-        assert i == num_frames_to_sample, (
-            f"Expected reading {num_frames_to_sample} frames, "
+        if valid_num_frames < num_frames_to_sample:
+            logger.warning(
+                "Video loading completed with %d broken/unreadable frames. "
+                "Expected %d frames but only loaded %d frames.",
+                num_frames_to_sample - valid_num_frames,
+                num_frames_to_sample,
+                valid_num_frames,
+            )
+
+        assert i == valid_num_frames, (
+            f"Expected reading {valid_num_frames} frames, "
             f"but only loaded {i} frames from video."
         )
 
@@ -154,7 +180,7 @@ class OpenCVVideoBackend(VideoLoader):
             "do_sample_frames": num_frames_to_sample == total_frames_num,
         }
 
-        return frames, metadata
+        return frames[:valid_num_frames], metadata
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
@@ -212,18 +238,44 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
 
         i = 0
+        valid_num_frames = len(frame_indices)
         for idx in range(total_frames_num):
             ok = cap.grab()
             if not ok:
-                break
+                # Frame is broken/unreadable, adjust the valid frame count
+                if idx in frame_indices:
+                    valid_num_frames -= 1
+                    logger.warning(
+                        "Failed to grab frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+                continue
             if idx in frame_indices:
                 ret, frame = cap.retrieve()
                 if ret:
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
+                else:
+                    # retrieve() failed even though grab() succeeded
+                    valid_num_frames -= 1
+                    logger.warning(
+                        "Failed to retrieve frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
 
-        assert i == len(frame_indices), (
-            f"Expected reading {len(frame_indices)} frames, "
+        if valid_num_frames < len(frame_indices):
+            logger.warning(
+                "Video loading completed with %d broken/unreadable frames. "
+                "Expected %d frames but only loaded %d frames.",
+                len(frame_indices) - valid_num_frames,
+                len(frame_indices),
+                valid_num_frames,
+            )
+
+        assert i == valid_num_frames, (
+            f"Expected reading {valid_num_frames} frames, "
             f"but only loaded {i} frames from video."
         )
 
@@ -237,7 +289,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             "do_sample_frames": False,
         }
 
-        return frames, metadata
+        return frames[:valid_num_frames], metadata
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
