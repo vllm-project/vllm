@@ -574,6 +574,9 @@ class FusedMoE(CustomOp):
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
+        self.moe_config_use_flashinfer_cutlass_kernels = (
+            self.moe_config.use_flashinfer_cutlass_kernels
+        )
 
         self.quant_config = quant_config
 
@@ -728,7 +731,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_quant_config is not None
             and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config.use_flashinfer_cutlass_kernels
+            and self.moe_config_use_flashinfer_cutlass_kernels
         )
 
     @property
