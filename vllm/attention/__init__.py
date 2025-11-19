@@ -7,7 +7,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
 )
 from vllm.attention.layer import Attention
-from vllm.attention.selector import get_attn_backend
+from vllm.attention.selector import get_attn_backend, get_mamba_attn_backend
 
 __all__ = [
     "Attention",
@@ -15,4 +15,5 @@ __all__ = [
     "AttentionMetadata",
     "AttentionType",
     "get_attn_backend",
+    "get_mamba_attn_backend",
 ]

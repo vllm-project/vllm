@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention backend registry"""
 
-import enum
 from collections.abc import Callable
+from enum import Enum, EnumMeta
 from typing import TYPE_CHECKING, cast
 
 from vllm.logger import init_logger
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class _AttentionBackendEnumMeta(enum.EnumMeta):
+class _AttentionBackendEnumMeta(EnumMeta):
     """Metaclass for AttentionBackendEnum to provide better error messages."""
 
     def __getitem__(cls, name: str):
@@ -23,15 +23,15 @@ class _AttentionBackendEnumMeta(enum.EnumMeta):
         try:
             return super().__getitem__(name)
         except KeyError:
-            members = cast("dict[str, AttentionBackendEnum]", cls.__members__).values()
-            valid_backends = ", ".join(m.name for m in members)
+            members = cast("dict[str, Enum]", cls.__members__).keys()
+            valid_backends = ", ".join(members)
             raise ValueError(
                 f"Unknown attention backend: '{name}'. "
                 f"Valid options are: {valid_backends}"
             ) from None
 
 
-class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
+class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     """Enumeration of all supported attention backends.
 
     The enum value is the default class path, but this can be overridden
@@ -83,7 +83,7 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
         """
-        path = _OVERRIDES.get(self, self.value)
+        path = _ATTN_OVERRIDES.get(self, self.value)
         if not path:
             raise ValueError(
                 f"Backend {self.name} must be registered before use. "
@@ -111,18 +111,93 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
         Returns:
             True if the backend has a registered override
         """
-        return self in _OVERRIDES
+        return self in _ATTN_OVERRIDES
 
     def clear_override(self) -> None:
         """Clear any override for this backend, reverting to the default."""
-        _OVERRIDES.pop(self, None)
+        _ATTN_OVERRIDES.pop(self, None)
 
 
-_OVERRIDES: dict[AttentionBackendEnum, str] = {}
+class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
+    """Enumeration of all supported mamba attention backends.
+
+    The enum value is the default class path, but this can be overridden
+    at runtime using register_backend().
+
+    To get the actual backend class (respecting overrides), use:
+        backend.get_class()
+    """
+
+    MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
+    MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
+    SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
+    LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
+    GDN_ATTN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
+    # Placeholder for third-party/custom backends - must be registered before use
+    CUSTOM = ""
+
+    def get_path(self, include_classname: bool = True) -> str:
+        """Get the class path for this backend (respects overrides).
+
+        Returns:
+            The fully qualified class path string
+
+        Raises:
+            ValueError: If Backend.CUSTOM is used without being registered
+        """
+        path = _MAMBA_ATTN_OVERRIDES.get(self, self.value)
+        if not path:
+            raise ValueError(
+                f"Backend {self.name} must be registered before use. "
+                f"Use register_backend(Backend.{self.name}, 'your.module.YourClass')"
+            )
+        if not include_classname:
+            path = path.rsplit(".", 1)[0]
+        return path
+
+    def get_class(self) -> "type[AttentionBackend]":
+        """Get the backend class (respects overrides).
+
+        Returns:
+            The backend class
+
+        Raises:
+            ImportError: If the backend class cannot be imported
+            ValueError: If Backend.CUSTOM is used without being registered
+        """
+        return resolve_obj_by_qualname(self.get_path())
+
+    def is_overridden(self) -> bool:
+        """Check if this backend has been overridden.
+
+        Returns:
+            True if the backend has a registered override
+        """
+        return self in _MAMBA_ATTN_OVERRIDES
+
+    def clear_override(self) -> None:
+        """Clear any override for this backend, reverting to the default."""
+        _MAMBA_ATTN_OVERRIDES.pop(self, None)
+
+
+MAMBA_TYPE_TO_BACKEND_MAP = {
+    "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
+    "mamba2": MambaAttentionBackendEnum.MAMBA2.name,
+    "short_conv": MambaAttentionBackendEnum.SHORT_CONV.name,
+    "linear_attention": MambaAttentionBackendEnum.LINEAR.name,
+    "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
+    "custom": MambaAttentionBackendEnum.CUSTOM.name,
+}
+
+
+_ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
+_MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 
 def register_backend(
-    backend: AttentionBackendEnum, class_path: str | None = None
+    backend: AttentionBackendEnum | MambaAttentionBackendEnum,
+    is_mamba: bool = False,
+    class_path: str | None = None,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
@@ -135,12 +210,17 @@ def register_backend(
         Decorator function if class_path is None, otherwise a no-op
 
     Examples:
-        # Override an existing backend
+        # Override an existing attention backend
         @register_backend(AttentionBackendEnum.FLASH_ATTN)
         class MyCustomFlashAttn:
             ...
 
-        # Register a custom third-party backend
+        # Override an existing mamba attention backend
+        @register_backend(MambaAttentionBackendEnum.LINEAR, is_mamba=True)
+        class MyCustomMambaAttn:
+            ...
+
+        # Register a custom third-party attention backend
         @register_backend(AttentionBackendEnum.CUSTOM)
         class MyCustomBackend:
             ...
@@ -153,11 +233,17 @@ def register_backend(
     """
 
     def decorator(cls: type) -> type:
-        _OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"
+        if is_mamba:
+            _MAMBA_ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
+        else:
+            _ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
         return cls
 
     if class_path is not None:
-        _OVERRIDES[backend] = class_path
+        if is_mamba:
+            _MAMBA_ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
+        else:
+            _ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
         return lambda x: x
 
     return decorator
