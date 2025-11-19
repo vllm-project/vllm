@@ -237,6 +237,9 @@ class RocmPlatform(Platform):
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
                 logger.info("Using AITER MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
+                logger.info("Using AITER TRITON MLA backend.")
+                return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
 
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"

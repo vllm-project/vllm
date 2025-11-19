@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
+from vllm.v1.attention.backends.mla.common import MLACommonBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+    AiterMLAImpl,
+    AiterMLAMetadataBuilder,
+)
+
+
+class AiterTritonMLABackend(MLACommonBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "AITER_TRITON_MLA"
+
+    @staticmethod
+    def get_impl_cls() -> type["AiterTritonMLAImpl"]:
+        return AiterTritonMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
+        return AiterMLAMetadataBuilder
 
 
 class AiterTritonMLAImpl(AiterMLAImpl):
