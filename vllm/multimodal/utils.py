@@ -3,6 +3,7 @@
 
 import asyncio
 import atexit
+import concurrent.futures
 from collections.abc import Iterable, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -303,6 +304,27 @@ class MediaConnector:
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
+        # Check if direct URL loading is enabled
+        direct_url_loading = self.media_io_kwargs.get("video", {}).get(
+            "direct_url_loading", False
+        )
+        url_spec = urlparse(video_url)
+
+        if direct_url_loading and url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
+            # Use ThreadPoolExecutor to enforce timeout
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(video_io.load_url, video_url)
+                try:
+                    return future.result(timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT)
+                except concurrent.futures.TimeoutError as e:
+                    raise TimeoutError(
+                        f"Video loading from {video_url} timed out after "
+                        f"{envs.VLLM_VIDEO_FETCH_TIMEOUT} seconds"
+                    ) from e
+
+        # Default: download to bytes
         return self.load_from_url(
             video_url,
             video_io,
@@ -325,6 +347,31 @@ class MediaConnector:
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
+        # Check if direct URL loading is enabled
+        direct_url_loading = self.media_io_kwargs.get("video", {}).get(
+            "direct_url_loading", False
+        )
+        url_spec = urlparse(video_url)
+        loop = asyncio.get_running_loop()
+
+        if direct_url_loading and url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
+            # Use asyncio.wait_for to enforce timeout
+            future = loop.run_in_executor(
+                global_thread_pool, video_io.load_url, video_url
+            )
+            try:
+                return await asyncio.wait_for(
+                    future, timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT
+                )
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    f"Video loading from {video_url} timed out after "
+                    f"{envs.VLLM_VIDEO_FETCH_TIMEOUT} seconds"
+                ) from e
+
+        # Default: download to bytes
         return await self.load_from_url_async(
             video_url,
             video_io,

@@ -620,6 +620,46 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Video Configuration Options
+
+You can configure video processing behavior using `--media-io-kwargs`. The following parameters are available:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `num_frames` | int | 32 | Number of frames to sample from video |
+| `fps` | int | -1 | Target FPS for frame sampling (opencv backend) |
+| `max_duration` | int | 300 | Maximum video duration in seconds (opencv_dynamic backend) |
+| `direct_url_loading` | bool | false | Pass HTTP/HTTPS URLs directly to OpenCV instead of downloading first |
+
+##### Direct URL Loading
+
+By default, vLLM downloads video content to memory before processing. For some videos, OpenCV's direct URL streaming can be more reliable. Enable this opt-in feature via `direct_url_loading`:
+
+```bash
+# Basic usage
+vllm serve MODEL --media-io-kwargs '{"video": {"direct_url_loading": true}}'
+
+# Combined with frame sampling
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+    --trust-remote-code \
+    --media-io-kwargs '{"video": {"num_frames": 64, "direct_url_loading": true}}'
+
+# With dynamic backend (requires VLLM_VIDEO_LOADER_BACKEND=opencv_dynamic)
+VLLM_VIDEO_LOADER_BACKEND=opencv_dynamic vllm serve MODEL \
+    --media-io-kwargs '{"video": {"fps": 2, "max_duration": 60, "direct_url_loading": true}}'
+```
+
+**Benefits:**
+
+- More reliable frame loading for certain video formats (OpenCV native HTTP streaming)
+- Graceful handling of partial frame reads (warnings instead of errors)
+- Maintains timeout controls (respects `VLLM_VIDEO_FETCH_TIMEOUT`)
+- Helps resolve "Expected X frames, but loaded Y" errors
+
+**When to use:** Enable if experiencing frame loading errors with video URLs.
+
+**Note:** Only affects HTTP/HTTPS URLs. File paths, data URLs, and base64-encoded videos use standard loading.
+
 #### Custom RGBA Background Color
 
 To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:

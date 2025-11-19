@@ -63,6 +63,13 @@ class VideoLoader:
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
+    @classmethod
+    @abstractmethod
+    def load_url(
+        cls, url: str, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        raise NotImplementedError
+
 
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
@@ -85,17 +92,15 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(
+    def _load_video_from_capture(
         cls,
-        data: bytes,
+        cap,
         num_frames: int = -1,
         fps: int = -1,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
@@ -135,10 +140,17 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == num_frames_to_sample, (
-            f"Expected reading {num_frames_to_sample} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        # Replace assertion with warning for partial frame loading
+        if i < num_frames_to_sample:
+            logger.warning(
+                "Expected reading %d frames, but only loaded %d frames from video. "
+                "Continuing with partial data.",
+                num_frames_to_sample,
+                i,
+            )
+            frames = frames[:i]
+            frame_idx = frame_idx[:i]
+            num_frames_to_sample = i
 
         # Use transformers transformers.video_utils.VideoMetadata format
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
@@ -156,13 +168,41 @@ class OpenCVVideoBackend(VideoLoader):
 
         return frames, metadata
 
-
-@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
-class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
     @classmethod
     def load_bytes(
         cls,
         data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        return cls._load_video_from_capture(cap, num_frames, fps, **kwargs)
+
+    @classmethod
+    def load_url(
+        cls,
+        url: str,
+        num_frames: int = -1,
+        fps: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(url, backend, [])
+        return cls._load_video_from_capture(cap, num_frames, fps, **kwargs)
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def _load_dynamic_video_from_capture(
+        cls,
+        cap,
         num_frames: int = -1,
         fps: int = 2,
         max_duration: int = 300,
@@ -170,8 +210,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
@@ -222,10 +260,16 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == len(frame_indices), (
-            f"Expected reading {len(frame_indices)} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        # Replace assertion with warning for partial frame loading
+        if i < len(frame_indices):
+            logger.warning(
+                "Expected reading %d frames, but only loaded %d frames from video. "
+                "Continuing with partial data.",
+                len(frame_indices),
+                i,
+            )
+            frames = frames[:i]
+            frame_indices = list(frame_indices)[:i]
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
@@ -238,6 +282,40 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         }
 
         return frames, metadata
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        return cls._load_dynamic_video_from_capture(
+            cap, num_frames, fps, max_duration, **kwargs
+        )
+
+    @classmethod
+    def load_url(
+        cls,
+        url: str,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(url, backend, [])
+        return cls._load_dynamic_video_from_capture(
+            cap, num_frames, fps, max_duration, **kwargs
+        )
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
@@ -263,6 +341,11 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
         return self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
+        )
+
+    def load_url(self, url: str) -> tuple[npt.NDArray, dict[str, Any]]:
+        return self.video_loader.load_url(
+            url, num_frames=self.num_frames, **self.kwargs
         )
 
     def load_base64(
