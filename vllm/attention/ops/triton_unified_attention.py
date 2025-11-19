@@ -403,10 +403,10 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-    seq_idx_offset,  # int
+    q_block_offset,  # int
     decode_only: tl.constexpr,
 ):
-    q_block_global_idx = tl.program_id(0)
+    q_block_global_idx = tl.program_id(0) + q_block_offset
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
 
@@ -418,7 +418,6 @@ def kernel_unified_attention_3d(
     else:
         seq_idx = q_block_global_idx
         q_block_start_idx = seq_idx
-    seq_idx = seq_idx + seq_idx_offset
 
     q_block_local_idx = q_block_global_idx - q_block_start_idx
 
@@ -673,13 +672,13 @@ def reduce_segments(
     query_start_len_ptr,  # [num_seqs+1]
     BLOCK_Q: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-    seq_idx_offset,  # int
+    query_token_idx_offset,  # int
     decode_only: tl.constexpr,
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    query_token_idx = tl.program_id(0)
+    query_token_idx = tl.program_id(0) + query_token_idx_offset
     query_head_idx = tl.program_id(1)
 
     if not decode_only:
@@ -688,7 +687,6 @@ def reduce_segments(
         )
     else:
         seq_idx = query_token_idx
-    seq_idx = seq_idx + seq_idx_offset
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -1061,7 +1059,7 @@ def unified_attention(
                 num_seqs=num_decodes,
                 BLOCK_M=BLOCK_M,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-                seq_idx_offset=0,
+                q_block_offset=0,
                 decode_only=True,
             )
 
@@ -1083,7 +1081,7 @@ def unified_attention(
                 query_start_len_ptr=cu_seqlens_q,
                 BLOCK_Q=BLOCK_Q,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-                seq_idx_offset=0,
+                query_token_idx_offset=0,
                 decode_only=True,
                 USE_FP8=output_scale is not None,
             )
