@@ -546,12 +546,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            # PCP might not be initialized in testing
             self.pcp_world_size = 1
             self.pcp_rank = 0
         self.cp_world_size = self.dcp_world_size * self.pcp_world_size
@@ -958,8 +961,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
                 output_restore_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
                 prefill_kv_start_loc_cpu = (
-                    prefill_query_start_loc_cpu *
-                    self.pcp_world_size
+                    prefill_query_start_loc_cpu * self.pcp_world_size
                 )
                 kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
                     prefill_kv_start_loc_cpu,
@@ -1410,13 +1412,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 k=torch.index_select(k, 0, prefill.kv_tail_indices),
                 v=torch.index_select(v, 0, prefill.kv_tail_indices),
                 cu_seqlens_q=prefill.query_start_loc // 2,
-                cu_seqlens_k=prefill.query_start_loc // 2 * (
-                    self.pcp_world_size * 2 - self.pcp_rank
-                ),
+                cu_seqlens_k=prefill.query_start_loc
+                // 2
+                * (self.pcp_world_size * 2 - self.pcp_rank),
                 max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len // 2 * (
-                    self.pcp_world_size * 2 - self.pcp_rank
-                ),
+                max_seqlen_k=prefill.max_query_len
+                // 2
+                * (self.pcp_world_size * 2 - self.pcp_rank),
                 softmax_scale=self.scale,
                 causal=True,
                 return_softmax_lse=return_softmax_lse,
@@ -1428,7 +1430,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             output_restore_idx = prefill.output_restore_idx
             return (
                 torch.index_select(output, 0, output_restore_idx),
-                torch.index_select(lse, -1, output_restore_idx)
+                torch.index_select(lse, -1, output_restore_idx),
             )
         else:
             return self._flash_attn_varlen_diff_headdims(
@@ -2020,9 +2022,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if self.pcp_world_size > 1:
             assert attn_metadata.pcp_allgather_restore_idx is not None
             k_c_normed, k_pe = pcp_kv_allgather_and_restore(
-                k_c_normed, k_pe, num_actual_toks,
+                k_c_normed,
+                k_pe,
+                num_actual_toks,
                 attn_metadata.pcp_allgather_restore_idx,
-                get_pcp_group()
+                get_pcp_group(),
             )
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -2043,8 +2047,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         decode_q = q[:num_decode_tokens]
 
         prefill_q = q[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens * self.pcp_world_size:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens * self.pcp_world_size:]
+        prefill_k_pe = k_pe[num_decode_tokens * self.pcp_world_size :]
+        prefill_k_c_normed = k_c_normed[num_decode_tokens * self.pcp_world_size :]
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:

@@ -324,7 +324,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
             cp_world_size=self.cp_world_size,
-            cp_rank=self.pcp_rank*self.pcp_world_size+self.dcp_rank,
+            cp_rank=self.pcp_rank * self.pcp_world_size + self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.cp_tot_seq_lens,
         )
 

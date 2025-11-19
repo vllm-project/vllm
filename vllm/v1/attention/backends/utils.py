@@ -1114,39 +1114,36 @@ def get_cp_local_seq_lens(
     cp_local_seq_lens = base + remainder
     return cp_local_seq_lens.squeeze(1)
 
-def pcp_kv_allgather_and_restore(
-        key: torch.Tensor,
-        value: torch.Tensor,
-        num_actual_tokens: int,
-        pcp_allgather_restore_idx: torch.Tensor,
-        pcp_group: GroupCoordinator,
 
-    ):
+def pcp_kv_allgather_and_restore(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_actual_tokens: int,
+    pcp_allgather_restore_idx: torch.Tensor,
+    pcp_group: GroupCoordinator,
+):
     # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
     # ignores the padding from CUDA Graph.
     # TODO(yyj) Batch all-gather operations to reduce launch overhead.
     # Be careful about the dimensions of key and value.
-    key_across_cp = pcp_group.all_gather(
-        key[:num_actual_tokens].contiguous(), dim=0
-    )
+    key_across_cp = pcp_group.all_gather(key[:num_actual_tokens].contiguous(), dim=0)
     value_across_cp = pcp_group.all_gather(
         value[:num_actual_tokens].contiguous(), dim=0
     )
     # Reorder kv after pcp allgather.
     # Note that there are duplicate decoding tokens after allgather.
-    key = torch.index_select(
-        key_across_cp, 0, pcp_allgather_restore_idx
-    )
-    value = torch.index_select(
-        value_across_cp, 0, pcp_allgather_restore_idx
-    )
+    key = torch.index_select(key_across_cp, 0, pcp_allgather_restore_idx)
+    value = torch.index_select(value_across_cp, 0, pcp_allgather_restore_idx)
     return key, value
 
+
 def get_pcp_part_indices(
-        cu_num_tokens: torch.Tensor, M, N,
-        return_head=False,
-        return_tail=False,
-    ):
+    cu_num_tokens: torch.Tensor,
+    M: int,
+    N: int,
+    return_head=False,
+    return_tail=False,
+):
     """
     When using PCP, we need to split the KV and Query and select a local shard.
     This function helps get the indices of the selected shards.
@@ -1157,16 +1154,16 @@ def get_pcp_part_indices(
         return_head: whether to return the indices start from head.
         return_tail: whether to return the indices start from tail.
     """
-    cu_num_tokens_np = np.asarray(cu_num_tokens) # e.g. [0,2,4,8]
+    cu_num_tokens_np = np.asarray(cu_num_tokens)  # e.g. [0,2,4,8]
     starts = cu_num_tokens_np[:-1]  # [0, 2, 4]
-    ends = cu_num_tokens_np[1:]     # [2, 4, 8]
+    ends = cu_num_tokens_np[1:]  # [2, 4, 8]
     select_len = (ends - starts) * M // N  # [1, 1, 2], M=1, N=2
     select_num_tokens = cu_num_tokens_np[-1] * M // N
 
     seq_ids = np.repeat(np.arange(len(select_len)), select_len)  # [0,1,2,2]
 
     start_loc = np.concatenate([[0], np.cumsum(select_len)[:-1]])  # [0,1,2]
-    local_offsets = np.arange(select_num_tokens) - start_loc[seq_ids] # [0,0,0,1]
+    local_offsets = np.arange(select_num_tokens) - start_loc[seq_ids]  # [0,0,0,1]
     head_indices = None
     tail_indices = None
     if return_head:
@@ -1177,29 +1174,33 @@ def get_pcp_part_indices(
 
     return head_indices, tail_indices
 
+
 def get_pcp_query_indices(cu_num_tokens: torch.Tensor):
     head_indices, tail_indices = get_pcp_part_indices(
-        cu_num_tokens, 1, 2,
+        cu_num_tokens,
+        1,
+        2,
         return_head=True,
         return_tail=True,
     )
     return torch.from_numpy(head_indices), torch.from_numpy(tail_indices)
 
+
 def get_pcp_kv_indices(
-        cu_num_tokens: torch.Tensor,
-        pcp_rank,
-        pcp_size,
-    ):
+    cu_num_tokens: torch.Tensor,
+    pcp_rank: int,
+    pcp_size: int,
+):
     kv_head_indices, _ = get_pcp_part_indices(
         cu_num_tokens,
         pcp_rank + 1,
-        2*pcp_size,
+        2 * pcp_size,
         return_head=True,
     )
     kv_tail_indices, _ = get_pcp_part_indices(
         cu_num_tokens,
-        2*pcp_size - pcp_rank,
-        2*pcp_size,
+        2 * pcp_size - pcp_rank,
+        2 * pcp_size,
         return_head=True,
     )
     return torch.from_numpy(kv_head_indices), torch.from_numpy(kv_tail_indices)
