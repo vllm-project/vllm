@@ -279,15 +279,25 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
 
     cleaned_msgs: list[Message] = []
     for i, msg in enumerate(msgs):
-        if (
-            i < last_assistant_final_index
-            and msg.author.role == "assistant"
-            and msg.channel == "analysis"
-        ):
+        if i < last_assistant_final_index and msg.channel == "analysis":
             continue
         cleaned_msgs.append(msg)
 
     return cleaned_msgs
+
+
+def flatten_chat_text_content(content: str | list | None) -> str | None:
+    """
+    Extract the text parts from a chat message content field and flatten them
+    into a single string.
+    """
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return content
 
 
 def parse_chat_input_to_harmony_message(
@@ -310,13 +320,7 @@ def parse_chat_input_to_harmony_message(
     tool_calls = chat_msg.get("tool_calls", [])
 
     if role == "assistant" and tool_calls:
-        content = chat_msg.get("content")
-        if isinstance(content, list):
-            content = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
+        content = flatten_chat_text_content(chat_msg.get("content"))
         if content:
             commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
             commentary_msg = commentary_msg.with_channel("commentary")
@@ -339,6 +343,9 @@ def parse_chat_input_to_harmony_message(
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
             msg = msg.with_recipient(f"functions.{name}")
+            # Officially, this should be `<|constrain|>json` but there is not clear
+            # evidence that improves accuracy over `json` and some anecdotes to the
+            # contrary. Further testing of the different content_types is needed.
             msg = msg.with_content_type("json")
             msgs.append(msg)
         return msgs
@@ -348,14 +355,7 @@ def parse_chat_input_to_harmony_message(
         tool_call_id = chat_msg.get("tool_call_id", "")
         name = tool_id_names.get(tool_call_id, "")
         content = chat_msg.get("content", "") or ""
-        if isinstance(content, list):
-            # Handle array format for tool message content
-            # by concatenating all text parts.
-            content = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
+        content = flatten_chat_text_content(content)
 
         msg = (
             Message.from_author_and_content(
@@ -374,7 +374,9 @@ def parse_chat_input_to_harmony_message(
         msgs.append(analysis_msg)
 
     # Default: user/assistant/system messages with content
-    content = chat_msg.get("content", "")
+    content = chat_msg.get("content") or ""
+    if content is None:
+        content = ""
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
@@ -385,10 +387,8 @@ def parse_chat_input_to_harmony_message(
     # assistant messages were already added above.
     if role == "assistant" and contents and contents[0].text:
         msg = Message.from_role_and_contents(role, contents)
-        # Send non-tool assistant messages to the final channel if they don't have a
-        # channel already.
-        if not msg.channel:
-            msg = msg.with_channel("final")
+        # Send non-tool assistant messages to the final channel
+        msg = msg.with_channel("final")
         msgs.append(msg)
     # For user/system/developer messages, add them directly even if no content.
     elif role != "assistant":
@@ -400,7 +400,7 @@ def parse_chat_input_to_harmony_message(
 
 def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     """
-    Parse a message from request.preview_input_messages in the Responsees API to
+    Parse a message from request.previous_input_messages in the Responsees API to
     Harmony messages.
     """
     if not isinstance(chat_msg, dict):
@@ -428,14 +428,7 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if role == "tool":
         name = chat_msg.get("name", "")
         content = chat_msg.get("content", "") or ""
-        if isinstance(content, list):
-            # Handle array format for tool message content
-            # by concatenating all text parts.
-            content = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
+        content = flatten_chat_text_content(content)
 
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"), content
@@ -793,20 +786,40 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
 def parse_chat_output(
     token_ids: Sequence[int],
 ) -> tuple[str | None, str | None, bool]:
+    """
+    Parse the output of a Harmony chat completion into reasoning and final content.
+    Note that when the `openai` tool parser is used, serving_chat only uses this
+    for the reasoning content and gets the final content from the tool call parser.
+
+    When the `openai` tool parser is not enabled, or when `GptOssReasoningParser` is
+    in use,this needs to return the final content without any tool calls parsed.
+
+    Empty reasoning or final content is returned as None instead of an empty string.
+    """
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
     is_tool_call = False  # TODO: update this when tool call is supported
-    if len(output_msgs) == 0:
-        # The generation has stopped during reasoning.
-        reasoning = parser.current_content
-        final_content = None
-    elif len(output_msgs) == 1:
-        # The generation has stopped during final message.
-        reasoning = output_msgs[0].content[0].text
-        final_content = parser.current_content
-    else:
-        reasoning_msg = output_msgs[:-1]
-        final_msg = output_msgs[-1]
-        reasoning = "\n".join([msg.content[0].text for msg in reasoning_msg])
-        final_content = final_msg.content[0].text
+
+    # Get completed messages from the parser
+    reasoning_texts = [
+        msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
+    ]
+    final_texts = [
+        msg.content[0].text for msg in output_msgs if msg.channel != "analysis"
+    ]
+
+    # Extract partial messages from the parser
+    if parser.current_channel == "analysis" and parser.current_content:
+        reasoning_texts.append(parser.current_content)
+    elif parser.current_channel != "analysis" and parser.current_content:
+        final_texts.append(parser.current_content)
+
+    # Flatten multiple messages into a single string
+    reasoning: str | None = "\n".join(reasoning_texts)
+    final_content: str | None = "\n".join(final_texts)
+
+    # Return None instead of empty string since existing callers check for None
+    reasoning = reasoning or None
+    final_content = final_content or None
+
     return reasoning, final_content, is_tool_call

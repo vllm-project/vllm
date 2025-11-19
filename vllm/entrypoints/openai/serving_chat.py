@@ -816,6 +816,9 @@ class OpenAIServingChat(OpenAIServing):
 
                             if delta_message is not None:
                                 harmony_tools_streamed[i] = True
+                        elif cur_channel == "commentary":
+                            # Tool call preambles meant to be shown to the user
+                            delta_message = DeltaMessage(content=delta_text)
                         else:
                             delta_message = None
                     # handle streaming deltas for tools with named tool_choice
