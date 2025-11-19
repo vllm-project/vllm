@@ -5,8 +5,9 @@ import asyncio
 import logging
 import signal
 import socket
+from collections.abc import Iterable
 from http import HTTPStatus
-from typing import Any, Iterable
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -29,22 +30,22 @@ def build_access_log_path_filter(
     excluded_paths: Iterable[str] | None = None,
 ) -> logging.Filter | None:
     """Create a lightweight logging.Filter that suppresses selected paths."""
-    normalized_paths = tuple(p for p in (excluded_paths or ()) if p)
+    normalized_paths = {p for p in (excluded_paths or ()) if p}
     if not normalized_paths:
         return None
 
     def filter(record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        # Uvicorn access log messages typically look like:
-        # '127.0.0.1:54321 - "GET /metrics HTTP/1.1" 200'
-        for path in normalized_paths:
-            if (
-                f" {path} " in message
-                or f" {path}?" in message
-                or f" {path}\"" in message
-            ):
-                return False
-        return True
+        args = record.args
+        if not isinstance(args, dict):
+            return True
+        request_line = args.get("request_line")
+        if not isinstance(request_line, str):
+            return True
+        parts = request_line.split()
+        if len(parts) < 2:
+            return True
+        request_path = parts[1].split("?", 1)[0]
+        return request_path not in normalized_paths
 
     filter_obj = logging.Filter()
     filter_obj.filter = filter  # type: ignore[assignment]
