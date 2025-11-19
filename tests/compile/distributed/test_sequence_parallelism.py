@@ -32,8 +32,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
-from ..utils import multi_gpu_test
-from .backend import TestBackend
+from ...utils import multi_gpu_test
+from ..backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
