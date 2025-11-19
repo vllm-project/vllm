@@ -186,6 +186,20 @@ class RemoteOpenAIServer:
         except subprocess.TimeoutExpired:
             # force kill if needed
             self.proc.kill()
+        self.__cleanup_gpu_memory()
+
+    @staticmethod
+    def __cleanup_gpu_memory():
+        try:
+            if current_platform.is_cuda_alike():
+                num_devices = cuda_device_count_stateless()
+                if num_devices > 0:
+                    wait_for_gpu_memory_to_clear(devices=list(
+                        range(num_devices)),
+                                                 threshold_ratio=0.05,
+                                                 timeout_s=60)
+        except Exception as e:
+            print(f"GPU cleanup warning: {e}")
 
     def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
@@ -308,6 +322,8 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         if self.proc.is_alive():
             # force kill if needed
             self.proc.kill()
+
+        self.__cleanup_gpu_memory()
 
 
 def _test_completion(
