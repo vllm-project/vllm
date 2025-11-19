@@ -3,6 +3,8 @@
 
 import time
 from collections.abc import Mapping
+from copy import deepcopy
+from queue import Empty, Queue
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
@@ -619,3 +621,25 @@ class Processor:
 
     def clear_mm_cache(self) -> None:
         self.input_preprocessor.clear_mm_cache()
+
+
+class ProcessorPool:
+    def __init__(self, processor: Processor):
+        self.processor = processor
+        self.pool = Queue()
+
+    def get(self):
+        try:
+            processor = self.pool.get_nowait()
+            return processor
+        except Empty:
+            return deepcopy(self.processor)
+
+    def put(self, processor):
+        self.pool.put(processor)
+
+    def process_inputs(self, *args, **kwargs):
+        processor = self.get()
+        o = processor.process_inputs(*args, **kwargs)
+        self.put(processor)
+        return o
