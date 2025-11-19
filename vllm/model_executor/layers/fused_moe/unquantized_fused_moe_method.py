@@ -108,11 +108,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return True
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
             return None
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -260,7 +263,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     layer.w2_weight.copy_(packed_w2_weight)
                     layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
+                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
