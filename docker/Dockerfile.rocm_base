@@ -47,7 +47,7 @@ RUN apt-get update -y \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
-RUN apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox
+RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 FROM base AS build_triton
 ARG TRITON_BRANCH
@@ -74,18 +74,18 @@ ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 
-RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH} && \
-    pip install -r requirements.txt && git submodule update --init --recursive \
+RUN git clone ${PYTORCH_REPO} pytorch && cd pytorch \
+    && git checkout ${PYTORCH_BRANCH} \
+    && pip install -r requirements.txt && git submodule update --init --recursive \
     && python3 tools/amd_build/build_amd.py \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
-RUN git clone ${PYTORCH_VISION_REPO} vision
-RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
+RUN git clone ${PYTORCH_VISION_REPO} vision && cd vision \
+    && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
-RUN git clone ${PYTORCH_AUDIO_REPO} audio
-RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+RUN git clone ${PYTORCH_AUDIO_REPO} audio && cd audio \
+    && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
     && python3 setup.py bdist_wheel --dist-dir=dist \

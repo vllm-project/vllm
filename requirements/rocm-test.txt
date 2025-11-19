@@ -5,7 +5,6 @@ bm25s==0.2.13
 pystemmer==3.0.0
 
 # Entrypoints test
-# librosa==0.10.2.post1 # required by audio tests in entrypoints/openai
 audioread==3.0.1
 cffi==1.17.1
 decorator==5.2.1
@@ -27,6 +26,9 @@ sentence-transformers==3.4.1
 
 # Basic Models Test
 matplotlib==3.10.3
+
+# Datasets and Evaluate Test
+multiprocess==0.70.16
 
 # Multi-Modal Models Test (Extended) 3
 blobfile==3.0.0
