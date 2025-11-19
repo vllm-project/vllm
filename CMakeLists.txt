@@ -1057,4 +1057,11 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
+    if(NOT TARGET _vllm_fa3_C)
+      message(STATUS
+        "vllm-flash-attn did not define target _vllm_fa3_C "
+        "(Hopper-or-newer arch not present in TORCH_CUDA_ARCH_LIST); "
+        "adding placeholder so setup.py builds continue to work.")
+      add_custom_target(_vllm_fa3_C)
+    endif()
 endif ()
