@@ -1199,7 +1199,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if self.is_aiter_triton_fp8_bmm_enabled:
+        if self.impl.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(

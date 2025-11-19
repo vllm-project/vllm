@@ -1376,8 +1376,6 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
-    # process_weights_after_loading is handled in the layer for MLA.
-
     def _forward_prefill(
         self,
         q: torch.Tensor,
