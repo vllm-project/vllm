@@ -201,7 +201,12 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("scheduler_cls", "async_scheduling", "prefill_max_num_batched_tokens", mode="wrap")
+    @field_validator(
+        "scheduler_cls",
+        "async_scheduling",
+        "prefill_max_num_batched_tokens",
+        mode="wrap",
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
