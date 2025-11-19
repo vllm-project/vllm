@@ -27,6 +27,7 @@ def is_cloud_storage(model_or_path: str) -> bool:
     return is_s3(model_or_path) or is_gcs(model_or_path)
 
 
+@cache
 def check_gguf_file(model: str | PathLike) -> bool:
     """Check if the file is a GGUF model."""
     model = Path(model)
