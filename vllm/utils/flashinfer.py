@@ -259,6 +259,7 @@ def use_trtllm_attention(
     num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
+    dcp_world_size: int,
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
@@ -270,6 +271,14 @@ def use_trtllm_attention(
 
     # Environment variable is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
+        return False
+
+    # Decode context parallel is not supported
+    if dcp_world_size > 1:
+        logger.warning_once(
+            "Trtllm does not support returning LSE and as a result "
+            "does not support DCP, reverting to FlashInfer"
+        )
         return False
 
     # The platform is not supported
@@ -310,14 +319,12 @@ def use_trtllm_attention(
         # Environment variable not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            use_trtllm = kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = (
-                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-            )
+            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
