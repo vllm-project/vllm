@@ -4,10 +4,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 import torch
 from torch import nn
@@ -466,11 +462,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "mamba2"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
-
-        return Mamba2AttentionBackend
 
 
 def plamo2_mamba_mixer(
