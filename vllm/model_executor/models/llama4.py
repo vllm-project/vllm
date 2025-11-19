@@ -19,7 +19,6 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -171,8 +170,6 @@ class Llama4Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -208,7 +205,6 @@ class Llama4Attention(nn.Module):
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
@@ -248,8 +244,7 @@ class Llama4Attention(nn.Module):
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=int(rope_theta),
-                rope_scaling=rope_scaling if rope_scaling != "default" else None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=is_neox_style,
             )
             if not self.nope
@@ -331,8 +326,6 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
-        rope_theta = config.rope_theta
-        rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
 
         self.self_attn = Llama4Attention(
@@ -340,8 +333,6 @@ class Llama4DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,

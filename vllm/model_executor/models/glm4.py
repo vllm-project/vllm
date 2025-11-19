@@ -57,10 +57,8 @@ class Glm4Attention(nn.Module):
         max_position: int = 4096 * 32,
         head_dim: int | None = None,
         qkv_bias: bool = False,
-        rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -86,7 +84,6 @@ class Glm4Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -107,8 +104,7 @@ class Glm4Attention(nn.Module):
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             partial_rotary_factor=partial_rotary_factor,
             is_neox_style=False,
         )
@@ -150,8 +146,6 @@ class Glm4DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
 
         self.self_attn = Glm4Attention(
             config=config,
@@ -159,12 +153,10 @@ class Glm4DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn",
             attn_type=AttentionType.DECODER,
         )
