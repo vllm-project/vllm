@@ -4,7 +4,7 @@ The purpose of this document is to provide an overview of the various MoE kernel
 
 ## Fused MoE Modular All2All backends
 
-There are a number of all2all communication backends that are used to implement expert parallelism (EP) for the `FusedMoE` layer. The different `FusedMoEPrepareAndFinalize` sub-classes provide an interface for each all2all backend.
+There are a number of all2all communication backends that are used to implement expert parallelism (EP) for the `FusedMoE` layer. The different `FusedMoEPrepareAndFinalize` subclasses provide an interface for each all2all backend.
 
 The following table describes the relevant features of each backend, i.e. activation format, supported quantization schemes and async support.
 
@@ -68,7 +68,7 @@ Modular kernels are supported by the following `FusedMoEMethodBase` classes.
 
 ## Fused MoE Experts Kernels
 
-The are a number of MoE experts kernel implementations for different quantization types and architectures. Most follow the general API of the base Triton [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts] function. Many have modular kernel adapters so they can be used with compatible all2all backends. This table lists each experts kernel and its particular properties.
+There are a number of MoE experts kernel implementations for different quantization types and architectures. Most follow the general API of the base Triton [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts] function. Many have modular kernel adapters so they can be used with compatible all2all backends. This table lists each experts kernel and its particular properties.
 
 Each kernel must be provided with one of the supported input activation formats.  Some flavors of kernels support both standard and batched formats through different entry points, e.g. `TritonExperts` and `BatchedTritonExperts`. Batched format kernels are currently only needed for matching with certain all2all backends, e.g. `pplx`, `DeepEPLLPrepareAndFinalize`.
 
