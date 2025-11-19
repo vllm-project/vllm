@@ -410,7 +410,6 @@ class MolmoAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
 
         # Attention input projection. Projects x -> (q, k, v)
         self.qkv_proj = QKVParallelLinear(
@@ -437,7 +436,7 @@ class MolmoAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=config.rope_parameters,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
