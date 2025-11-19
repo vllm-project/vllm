@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.func_utils import run_once
@@ -52,6 +53,9 @@ def _valid_deep_gemm(
     if not has_deep_gemm():
         logger.debug_once("DeepGemm disabled: deep_gemm not available.")
         return False
+
+    if is_deep_gemm_e8m0_used():
+        return True
 
     M = hidden_states.size(0)
     _, K, N = w2.size()
