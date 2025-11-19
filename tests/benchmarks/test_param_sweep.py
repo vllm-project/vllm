@@ -63,16 +63,28 @@ class TestParameterSweepItem:
         cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
         assert expected in cmd
 
-    def test_nested_dict_value(self):
+    @pytest.mark.parametrize("compilation_config", [
+        {
+            'cudagraph_mode': 'full',
+            'mode': 2,
+            'use_inductor_graph_partition': True
+        },
+        {
+            'cudagraph_mode': 'piecewise',
+            'mode': 3,
+            'use_inductor_graph_partition': False
+        },
+    ])
+    def test_nested_dict_value(self, compilation_config):
         """Test that nested dict values are serialized as JSON."""
         item = ParameterSweepItem.from_record({
-            'env': {'CUDA_VISIBLE_DEVICES': '0,1'}
+            'compilation_config': compilation_config
         })
         cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
-        assert '--env' in cmd
+        assert '--compilation-config' in cmd
         # The dict should be JSON serialized
-        idx = cmd.index('--env')
-        assert json.loads(cmd[idx + 1]) == {'CUDA_VISIBLE_DEVICES': '0,1'}
+        idx = cmd.index('--compilation-config')
+        assert json.loads(cmd[idx + 1]) == compilation_config
 
     @pytest.mark.parametrize("input_dict,expected_key,expected_value", [
         (
