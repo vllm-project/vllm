@@ -195,14 +195,11 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
     return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
 
 
-def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str | None = None):
+def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str = "FIGURE"):
     parts = list[str]()
     
-    # Start with custom figure name or default "FIGURE"
-    if fig_name:
-        parts.append(fig_name)
-    else:
-        parts.append("FIGURE")
+    # Start with figure name (always provided, defaults to "FIGURE")
+    parts.append(fig_name)
     
     # Always append group data if present
     if group:
@@ -240,7 +237,7 @@ def _plot_fig(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
-    fig_name: str | None,
+    fig_name: str = "FIGURE",
 ):
     fig_group, fig_data = fig_group_data
 
@@ -388,7 +385,7 @@ def plot(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
-    fig_name: str | None,
+    fig_name: str = "FIGURE",
 ):
     all_data = [
         run_data
@@ -445,7 +442,7 @@ class SweepPlotArgs:
     scale_x: str | None
     scale_y: str | None
     dry_run: bool
-    fig_name: str | None
+    fig_name: str = "FIGURE"
 
     parser_name: ClassVar[str] = "plot"
     parser_help: ClassVar[str] = "Plot performance curves from parameter sweep results."
@@ -572,10 +569,10 @@ class SweepPlotArgs:
         parser.add_argument(
             "--fig-name",
             type=str,
-            default=None,
-            help="Custom name for the output figure file. "
-            "If not provided, the figure name is automatically generated from the grouping variables. "
-            "Example: --fig-name my_performance_plot",
+            default="FIGURE",
+            help="Name prefix for the output figure file. "
+            "Group data is always appended when present. "
+            "Default: 'FIGURE'. Example: --fig-name my_performance_plot",
         )
         parser.add_argument(
             "--dry-run",
