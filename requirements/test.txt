@@ -201,8 +201,6 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
-eval-type-backport==0.2.2
-    # via mteb
 evaluate==0.4.3
     # via lm-eval
 fastapi==0.116.1
@@ -490,7 +488,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==1.38.11
+mteb==2.1.2
     # via -r requirements/test.in
 multidict==6.1.0
     # via

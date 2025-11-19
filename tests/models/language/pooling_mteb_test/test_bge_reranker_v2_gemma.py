@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import mteb
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from tests.conftest import HfRunner
 from tests.models.language.pooling_mteb_test.mteb_utils import (
-    VllmMtebEncoder,
+    VllmMtebCrossEncoder,
     mteb_test_rerank_models,
 )
 from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
@@ -103,7 +105,7 @@ class GemmaRerankerHfRunner(HfRunner):
         return torch.Tensor(scores)
 
 
-class GemmaMtebEncoder(VllmMtebEncoder):
+class GemmaMtebEncoder(VllmMtebCrossEncoder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.query_template = "A: {query}\n"
@@ -111,17 +113,26 @@ class GemmaMtebEncoder(VllmMtebEncoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str, str | None]],  # query, corpus, prompt
+        inputs1: DataLoader[mteb.types.BatchedInput],
+        inputs2: DataLoader[mteb.types.BatchedInput],
         *args,
         **kwargs,
     ) -> np.ndarray:
-        _sentences = []
-        for query, corpus, prompt in sentences:
-            query = self.query_template.format(query=query)
-            corpus = self.document_template.format(doc=corpus, prompt=PROMPT)
-            _sentences.append((query, corpus, prompt))
-
-        return super().predict(_sentences, *args, **kwargs)
+        queries = [
+            self.query_template.format(query=text)
+            for batch in inputs1
+            for text in batch["text"]
+        ]
+        corpus = [
+            self.document_template.format(doc=text, prompt=PROMPT)
+            for batch in inputs2
+            for text in batch["text"]
+        ]
+        outputs = self.llm.score(
+            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
+        )
+        scores = np.array(outputs)
+        return scores
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
