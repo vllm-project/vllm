@@ -41,9 +41,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    prefill_max_num_batched_tokens: int = Field(
-        default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1
-    )
+    prefill_max_num_batched_tokens: int = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration when there
     are no decode requests. If not set (None), defaults to max_num_batched_tokens.
     Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
@@ -203,7 +201,7 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
+    @field_validator("scheduler_cls", "async_scheduling", "prefill_max_num_batched_tokens", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -221,6 +219,11 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
+
+        # Initialize prefill_max_num_batched_tokens based on user input
+        if self.prefill_max_num_batched_tokens is None:
+            # Default to max_num_batched_tokens
+            self.prefill_max_num_batched_tokens = self.max_num_batched_tokens
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
