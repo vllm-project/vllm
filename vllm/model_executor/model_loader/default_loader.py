@@ -31,7 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.utils import list_files_from_hf_or_path
+from vllm.transformers_utils.config import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -104,7 +104,7 @@ class DefaultModelLoader(BaseModelLoader):
             load_format = (
                 "mistral"
                 if len(
-                    list_files_from_hf_or_path(
+                    list_filtered_repo_files(
                         model_name_or_path=model_name_or_path,
                         allow_patterns=["consolidated*.safetensors"],
                         revision=revision,

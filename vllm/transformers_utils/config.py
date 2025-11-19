@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import json
 import os
 import time
@@ -353,6 +354,30 @@ def list_repo_files(
             return []
 
     return with_retry(lookup_files, "Error retrieving file list")
+
+
+def list_filtered_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> list[str]:
+    all_files = list_repo_files(
+        repo_id=model_name_or_path, revision=revision, token=token, repo_type=repo_type
+    )
+
+    file_list = []
+    # Filter patterns on filenames
+    for pattern in allow_patterns:
+        file_list.extend(
+            [
+                file
+                for file in all_files
+                if fnmatch.fnmatch(os.path.basename(file), pattern)
+            ]
+        )
+    return file_list
 
 
 def file_exists(
