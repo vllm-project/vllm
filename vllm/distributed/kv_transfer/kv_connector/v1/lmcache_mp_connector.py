@@ -65,7 +65,7 @@ def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
     vllm_config: VllmConfig,
-) -> int:
+) -> tuple[int, int]:
     """
     Convert the rank for the MLA.
     """
