@@ -454,6 +454,15 @@ class ParallelConfig:
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
+            "data_parallel_master_ip",
+            "data_parallel_master_port",
+            "_data_parallel_master_port_list",
+            "data_parallel_rpc_port",
+            "rank",
+            "master_addr",
+            "master_port",
+            "node_rank",
+            "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
             "ray_workers_use_nsight",
@@ -463,6 +472,8 @@ class ParallelConfig:
             "worker_cls",
             "sd_worker_cls",
             "worker_extension_cls",
+            "_api_process_count",
+            "_api_process_rank",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
