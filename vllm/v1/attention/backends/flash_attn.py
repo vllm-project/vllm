@@ -119,8 +119,8 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:

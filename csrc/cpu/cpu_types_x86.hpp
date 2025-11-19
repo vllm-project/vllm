@@ -104,6 +104,8 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   explicit FP16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
 
+  explicit FP16Vec16(const c10::Half v) : reg(_mm256_set1_epi16(v.x)) {}
+
   explicit FP16Vec16(const FP32Vec16&);
 
   void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
@@ -140,6 +142,8 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   // non-temporal load
   explicit BF16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
+
+  explicit BF16Vec16(const c10::BFloat16 v) : reg(_mm256_set1_epi16(v.x)) {}
 
   explicit BF16Vec16(const FP32Vec16&);
 
@@ -350,6 +354,22 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(__m512 data) : reg(data) {}
 
+  // de-pack 4 bit values
+  explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    int64_t mask_0 = 0x0F0F0F0F0F0F0F0F;
+    int64_t mask_1 = 0xF0F0F0F0F0F0F0F0;
+    int64_t value_0 = value & mask_0;
+    int64_t value_1 = value & mask_1;
+    __m128i vec_0 = _mm_movpi64_epi64((__m64)value_0);
+    __m128i vec_1 = _mm_movpi64_epi64((__m64)value_1);
+    vec_0 = _mm_cvtepu8_epi16(vec_0);
+    vec_1 = _mm_cvtepu8_epi16(vec_1);
+    vec_1 = _mm_slli_epi16(vec_1, 4);
+    __m128i vec = _mm_or_si128(vec_0, vec_1);
+    __m512i vec_i32 = _mm512_cvtepu8_epi32(vec);
+    reg = _mm512_permutexvar_ps(vec_i32, lut.reg);
+  }
+
   explicit FP32Vec16(const FP32Vec4& data)
       : reg((__m512)_mm512_inserti32x4(
             _mm512_inserti32x4(
@@ -425,14 +445,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   float reduce_min() const { return _mm512_reduce_min_ps(reg); }
 
   float get_last_elem() const { return _mm512_cvtss_f32(reg); }
-
-  template <int group_size>
-  float reduce_sub_sum(int idx) {
-    static_assert(VEC_ELEM_NUM % group_size == 0);
-    constexpr uint32_t base_mask = (0xFFFF >> (16 - group_size));
-    __mmask16 mask = _cvtu32_mask16(base_mask << (idx * group_size));
-    return _mm512_mask_reduce_add_ps(mask, reg);
-  }
 
   void save(float* ptr) const { _mm512_storeu_ps(ptr, reg); }
 
@@ -755,6 +767,25 @@ inline void non_temporal_save(BF16Vec16& vec, void* ptr) {
 inline void non_temporal_save(FP32Vec16& vec, void* ptr) {
   _mm512_stream_ps((float*)ptr, vec.reg);
 }
+
+static void interleave_save(const BF16Vec16& vec0, const BF16Vec16& vec1,
+                            void* ptr) {
+  __m512i vec_0 = _mm512_cvtepu16_epi32(vec0.reg);
+  __m512i vec_1 = _mm512_cvtepu16_epi32(vec1.reg);
+  vec_1 = _mm512_slli_epi32(vec_1, 16);
+  vec_0 = _mm512_or_si512(vec_0, vec_1);
+  _mm512_storeu_epi32(ptr, vec_0);
+}
+
+static void interleave_save(const FP16Vec16& vec0, const FP16Vec16& vec1,
+                            void* ptr) {
+  __m512i vec_0 = _mm512_cvtepu16_epi32(vec0.reg);
+  __m512i vec_1 = _mm512_cvtepu16_epi32(vec1.reg);
+  vec_1 = _mm512_slli_epi32(vec_1, 16);
+  vec_0 = _mm512_or_si512(vec_0, vec_1);
+  _mm512_storeu_epi32(ptr, vec_0);
+}
+
 #endif
 
 inline void mem_barrier() { _mm_mfence(); }
