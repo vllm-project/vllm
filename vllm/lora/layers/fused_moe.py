@@ -12,6 +12,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -205,6 +206,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     shrink_config,  ## pass the shrink config
                     expand_config,  ## pass the expand config
                     self.adapter_enabled,
+                    fully_sharded=self.fully_sharded,
                 )
 
                 result = func(*args, **kwargs)
@@ -250,7 +252,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 sorted_token_ids_lora = sorted_token_ids_lora.view(max_loras, -1)
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
-                max_lora_rank = self.w1_lora_a_stacked.shape[-2]
+                max_lora_rank = self.w2_lora_a_stacked.shape[-2]
+
+                shard_size_w2 = divide(self.base_layer.hidden_size, self.tp_size)
+
                 self.punica_wrapper.add_lora_fused_moe(
                     intermediate_cache3,
                     intermediate_cache2,
@@ -266,6 +271,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     expand_config,  ## pass the expand config
                     self.adapter_enabled,
                     True,
+                    fully_sharded=self.fully_sharded,
+                    offset=shard_size_w2 * self.tp_rank if self.fully_sharded else 0,
                 )
 
                 result = func(*args, **kwargs)
@@ -294,6 +301,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+        self.fully_sharded = lora_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -303,7 +311,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                lora_config.max_lora_rank,
+                lora_config.max_lora_rank
+                if not self.fully_sharded
+                else divide(lora_config.max_lora_rank, self.tp_size),
                 self.base_layer.hidden_size,
             ),
             dtype=lora_config.lora_dtype,
@@ -334,7 +344,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                self.base_layer.hidden_size,
+                self.base_layer.hidden_size
+                if not self.fully_sharded
+                else divide(self.base_layer.hidden_size, self.tp_size),
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -345,7 +357,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                lora_config.max_lora_rank,
+                lora_config.max_lora_rank
+                if not self.fully_sharded
+                else divide(lora_config.max_lora_rank, self.tp_size),
                 self.base_layer.hidden_size,
             ),
             dtype=lora_config.lora_dtype,
@@ -418,6 +432,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 w1_lora_b = w1_lora_b[start_idx:end_idx, :]
                 w3_lora_b = w3_lora_b[start_idx:end_idx, :]
                 w2_lora_a = w2_lora_a[:, start_idx:end_idx]
+
+                if self.fully_sharded:
+                    # Based on S-LoRA, we slice W1 and W3 A along the rank dim,
+                    # and W2 B along the hidden_size dim.
+                    w13_shard_size = self.w1_lora_a_stacked[index, eid].shape[0]
+                    w13_start_idx = self.tp_rank * w13_shard_size
+                    w13_end_idx = (self.tp_rank + 1) * w13_shard_size
+                    w1_lora_a = w1_lora_a[w13_start_idx:w13_end_idx, :]
+                    w3_lora_a = w3_lora_a[w13_start_idx:w13_end_idx, :]
+
+                    w2_shard_size = self.w2_lora_b_stacked[index, eid].shape[0]
+                    w2_start_idx = self.tp_rank * w2_shard_size
+                    w2_end_idx = (self.tp_rank + 1) * w2_shard_size
+                    w2_lora_b = w2_lora_b[w2_start_idx:w2_end_idx, :]
 
             self.w1_lora_a_stacked[
                 index, eid, : w1_lora_a.shape[0], : w1_lora_a.shape[1]
