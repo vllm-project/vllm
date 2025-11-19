@@ -15,6 +15,8 @@ pooch==1.8.2
 soundfile==0.13.1
 soxr==0.5.0.post1
 librosa==0.10.2.post1
+num2words==0.5.14
+pqdm==0.2.0
 
 # Entrypoints test
 #vllm[video] # required by entrypoints/openai/test_video.py
