@@ -691,9 +691,7 @@ package_data = {
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
-    assert _is_cuda() or _is_hip(), (
-        "VLLM_USE_PRECOMPILED is only supported for CUDA or ROCm builds."
-    )
+    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds."
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
