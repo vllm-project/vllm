@@ -8,6 +8,7 @@ import pytest
 import torch
 from utils import _extract_step_logprobs, _random_prompt, skip_unsupported
 
+import vllm.model_executor.layers.batch_invariant as batch_invariant
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
@@ -454,13 +455,12 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-
-    vllm_is_batch_invariant.cache_clear()
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    # refresh cached value
+    batch_invariant.VLLM_BATCH_INVARIANT = batch_invariant._read_vllm_batch_invariant()
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
