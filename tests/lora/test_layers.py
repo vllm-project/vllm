@@ -30,6 +30,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import DummyLoRAManager
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -45,8 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
-
-from .utils import DummyLoRAManager
 
 TOLERANCES = {
     torch.float16: (5e-3, 5e-3),

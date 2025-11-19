@@ -24,10 +24,9 @@ from vllm.lora.models import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
+from vllm.lora.utils import create_peft_lora
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.platforms import current_platform
-
-from .utils import create_peft_lora
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
