@@ -1087,7 +1087,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
 
-            self.prepare_finalize.finalize(
+            output = self.prepare_finalize.finalize(
                 output,
                 fused_out,
                 topk_weights,
