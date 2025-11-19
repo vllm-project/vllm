@@ -185,6 +185,9 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
     ]
+    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
+    if not on_gfx9():
+        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def get_vit_attn_backend(
