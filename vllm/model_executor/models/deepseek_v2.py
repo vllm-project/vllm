@@ -977,6 +977,11 @@ class DeepseekV2MLAAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
+            dtype=(
+                current_platform.fp8_dtype()
+                if vllm_config.cache_config.cache_dtype == "fp8"
+                else None
+            )
         )
         if config.rope_parameters["rope_type"] != "default":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)

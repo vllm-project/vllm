@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.forward_context import get_forward_context
 from dataclasses import dataclass
 
+import vllm.envs as envs
 import torch
 
 from vllm.attention.layer import MLAAttention
@@ -81,6 +84,13 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
         self.is_sparse = mla_modules.is_sparse
+        self.fuse_rope_fp8 = (
+            envs.VLLM_FLASHINFER_FUSE_MLA_ROPE_FP8 and 
+            has_flashinfer() and
+            cache_config is not None and
+            cache_config.cache_dtype == "fp8"
+        )
+
 
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
@@ -101,6 +111,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            fuse_rope_fp8=self.fuse_rope_fp8
         )
 
         self.prefix = prefix
@@ -147,11 +158,31 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
 
+        attn_metadata = get_forward_context().attn_metadata
+        # print(f"{attn_metadata=}")
+        if isinstance(attn_metadata, dict):
+            # print(f"{attn_metadata=}")
+            attn_metadata = attn_metadata[f"{self.prefix}.attn"]
+        if self.rotary_emb is not None:
+            decode_only = attn_metadata is not None and attn_metadata.num_prefills == 0
+            if decode_only:
+                print("decode only")
+            if self.fuse_rope_fp8 and decode_only:
+                q_nope = q[..., : self.qk_nope_head_dim]
+                print(f"{q_nope.shape=}, {kv_c_normed.shape=}")
+                # TODO: separate q_rope and decode_ql_nope and return as tuple
+                # TODO: calculate decode_ql_nope here (fix shape potentially)
+                decode_ql_nope = torch.bmm(q[..., :self.qk_nope_head_dim], self.kv_b_proj.weight)
+                q_rope, k_pe, decode_ql_nope, kv_c_normed  = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe, None, decode_ql_nope, kv_c_normed
+                )
+                q = torch.cat(q_rope, decode_ql_nope, dim=-1)
+                print(f"{q.dtype=}, {k_pe.dtype=} {kv_c_normed.dtype=}")
+            else:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
 

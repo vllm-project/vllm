@@ -22,6 +22,7 @@ class RotaryEmbeddingBase(CustomOp):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
+        use_flashinfer: bool = False
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -38,7 +39,7 @@ class RotaryEmbeddingBase(CustomOp):
         #                        and current_platform.is_cuda()
         #                        and has_flashinfer()
         #                        and self.head_size in [64, 128, 256, 512])
-        self.use_flashinfer = False
+        self.use_flashinfer = use_flashinfer
 
         cache = self._compute_cos_sin_cache()
         if not self.use_flashinfer:

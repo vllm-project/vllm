@@ -1087,6 +1087,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_b_proj: ColumnParallelLinear,
         indexer=None,
         q_pad_num_heads: int | None = None,
+        fuse_rope_fp8: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1107,6 +1108,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.fuse_rope_fp8 = fuse_rope_fp8
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1651,7 +1653,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
+            print(f"{k_nope.dtype=}, {k_pe.dtype=}")
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
@@ -1756,6 +1758,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            print(f"{k_nope.dtype=}, {k_pe.dtype=}")
+
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
@@ -1803,6 +1807,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        print(f"{k_nope.dtype=}, {k_pe.dtype=}")
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
@@ -1918,12 +1923,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
+        fp8_rope_fused = fp8_attention and self.fuse_rope_fp8 and not has_prefill
+
         decode_q = q[:num_decode_tokens]
 
         prefill_q = q[num_decode_tokens:]
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
+        if fp8_rope_fused:
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
@@ -1935,7 +1944,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 scale=layer._k_scale,
             )
 
-        if fp8_attention:
+        if fp8_attention and not fp8_rope_fused:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
@@ -1950,66 +1959,65 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_decode:
             assert attn_metadata.decode is not None
-
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
-
-            # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
-
-            if self.q_pad_num_heads is not None:
-                B, N, L = decode_q_pe.shape
-                decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
-                decode_pe_padded.resize_((B, N, L))
-                decode_pe_padded.copy_(decode_q_pe)
-                decode_q_pe = decode_pe_padded
-
-            if self.is_aiter_triton_fp8_bmm_enabled:
-                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    decode_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True,
+            if not fp8_rope_fused:
+                decode_q_nope, decode_q_pe = decode_q.split(
+                    [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
                 )
-            else:
-                # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = decode_q_nope.shape
-                _, _, L = self.W_UK_T.shape
+
+                # Convert from (B, N, P) to (N, B, P)
+                decode_q_nope = decode_q_nope.transpose(0, 1)
 
                 if self.q_pad_num_heads is not None:
-                    decode_ql_nope = decode_q_nope.new_empty(
-                        (self.q_pad_num_heads, B, L)
+                    B, N, L = decode_q_pe.shape
+                    decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                    decode_pe_padded.resize_((B, N, L))
+                    decode_pe_padded.copy_(decode_q_pe)
+                    decode_q_pe = decode_pe_padded
+
+                if self.is_aiter_triton_fp8_bmm_enabled:
+                    # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
+                    decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                        decode_q_nope,
+                        self.W_K,
+                        self.W_K_scale,
+                        group_size=128,
+                        transpose_bm=True,
                     )
-                    decode_ql_nope.resize_((N, B, L))
                 else:
-                    decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+                    # Pads the head_dim if necessary (for the underlying kernel)
+                    N, B, P = decode_q_nope.shape
+                    _, _, L = self.W_UK_T.shape
 
-                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
+                    if self.q_pad_num_heads is not None:
+                        decode_ql_nope = decode_q_nope.new_empty(
+                            (self.q_pad_num_heads, B, L)
+                        )
+                        decode_ql_nope.resize_((N, B, L))
+                    else:
+                        decode_ql_nope = decode_q_nope.new_empty((N, B, L))
 
-                # Convert from (N, B, L) to (B, N, L)
-                decode_ql_nope = decode_ql_nope.transpose(0, 1)
+                    # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                    torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
 
-            if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                decode_ql_nope, _ = ops.scaled_fp8_quant(
-                    decode_ql_nope.reshape(
-                        [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
-                    ),
-                    layer._q_scale,
-                )
-                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
-                q_pe_shape = decode_q_pe.shape
-                decode_q_pe, _ = ops.scaled_fp8_quant(
-                    decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
-                    layer._q_scale,
-                )
-                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+                    # Convert from (N, B, L) to (B, N, L)
+                    decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
-            decode_q = (decode_ql_nope, decode_q_pe)
+                if fp8_attention:
+                    ql_nope_shape = decode_ql_nope.shape
+                    decode_ql_nope, _ = ops.scaled_fp8_quant(
+                        decode_ql_nope.reshape(
+                            [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                        ),
+                        layer._q_scale,
+                    )
+                    decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+                    q_pe_shape = decode_q_pe.shape
+                    decode_q_pe, _ = ops.scaled_fp8_quant(
+                        decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                        layer._q_scale,
+                    )
+                    decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+                decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
@@ -2018,6 +2026,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
             # call decode attn
+            print(f"{decode_ql_nope.shape=}, {decode_ql_nope.dtype=} {decode_q_pe.shape=}, {decode_q_pe.dtype=} {kv_cache.dtype=}")
             attn_out, lse = self._forward_decode(
                 decode_q, kv_cache, attn_metadata, layer
             )

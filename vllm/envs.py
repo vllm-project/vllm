@@ -157,6 +157,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_FLASHINFER_FUSE_MLA_ROPE_FP8: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1163,6 +1164,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
+    ),
+    # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    "VLLM_FLASHINFER_FUSE_MLA_ROPE_FP8": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_FUSE_MLA_ROPE_FP8", "0"))
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
