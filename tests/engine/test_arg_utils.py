@@ -6,6 +6,7 @@ from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Annotated, Literal
+from unittest.mock import patch
 
 import pytest
 
@@ -22,6 +23,7 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
+from vllm.platforms import CpuArchEnum
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -343,3 +345,142 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M"]:
         with pytest.raises(ArgumentError):
             args = parser.parse_args(["--max-model-len", invalid])
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "setting", "value", "error_match"),
+    [
+        (
+            CpuArchEnum.POWERPC,
+            "enable_chunked_prefill",
+            True,
+            "Chunked prefill is not supported",
+        ),
+        (
+            CpuArchEnum.S390X,
+            "enable_chunked_prefill",
+            True,
+            "Chunked prefill is not supported",
+        ),
+        (
+            CpuArchEnum.ARM,
+            "enable_prefix_caching",
+            True,
+            "Prefix caching is not supported",
+        ),
+        (
+            CpuArchEnum.RISCV,
+            "enable_prefix_caching",
+            True,
+            "Prefix caching is not supported",
+        ),
+    ],
+)
+@patch("vllm.engine.arg_utils.current_platform.get_cpu_architecture")
+@patch("vllm.engine.arg_utils.current_platform.is_cpu")
+def test_restricted_cpu_enable_features_error(
+    mock_is_cpu, mock_get_cpu_arch, cpu_arch, setting, value, error_match
+):
+    """Test that enabling features on restricted CPUs raises errors."""
+    mock_is_cpu.return_value = True
+    mock_get_cpu_arch.return_value = cpu_arch
+
+    engine_args = EngineArgs(model="facebook/opt-125m", **{setting: value})
+
+    with pytest.raises(ValueError, match=error_match):
+        engine_args.create_engine_config()
+
+
+@pytest.mark.parametrize(
+    "cpu_arch",
+    [CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM, CpuArchEnum.RISCV],
+)
+@patch("vllm.engine.arg_utils.current_platform.device_type", "cpu")
+@patch("vllm.engine.arg_utils.current_platform.get_cpu_architecture")
+@patch("vllm.engine.arg_utils.current_platform.is_cpu")
+def test_restricted_cpu_auto_disable(mock_is_cpu, mock_get_cpu_arch, cpu_arch):
+    """Test that chunked prefill and prefix caching are auto-disabled."""
+    mock_is_cpu.return_value = True
+    mock_get_cpu_arch.return_value = cpu_arch
+
+    engine_args = EngineArgs(model="facebook/opt-125m")
+
+    config = engine_args.create_engine_config()
+
+    assert config.scheduler_config.enable_chunked_prefill is False
+    assert config.cache_config.enable_prefix_caching is False
+
+
+@patch("vllm.engine.arg_utils.current_platform.is_cpu")
+def test_generation_model_disable_chunked_prefill_error(mock_is_cpu):
+    """Test that disabling chunked prefill for generation models raises an error."""
+    mock_is_cpu.return_value = False
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        enable_chunked_prefill=False,
+    )
+
+    with pytest.raises(
+        ValueError, match="Chunked prefill is required for generation models"
+    ):
+        engine_args.create_engine_config()
+
+
+@pytest.mark.parametrize(
+    "cpu_arch",
+    [CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM, CpuArchEnum.RISCV],
+)
+@patch("vllm.engine.arg_utils.current_platform.device_type", "cpu")
+@patch("vllm.engine.arg_utils.current_platform.get_cpu_architecture")
+@patch("vllm.engine.arg_utils.current_platform.is_cpu")
+def test_restricted_cpu_generation_model_no_error(
+    mock_is_cpu, mock_get_cpu_arch, cpu_arch
+):
+    """Test that platform restrictions take precedence over model requirements.
+
+    On restricted CPUs, a generation model can have chunked prefill disabled.
+    """
+    mock_is_cpu.return_value = True
+    mock_get_cpu_arch.return_value = cpu_arch
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        enable_chunked_prefill=False,
+    )
+
+    config = engine_args.create_engine_config()
+
+    assert config.scheduler_config.enable_chunked_prefill is False
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "config_path"),
+    [
+        ("enable_chunked_prefill", True, "scheduler_config.enable_chunked_prefill"),
+        ("enable_chunked_prefill", None, "scheduler_config.enable_chunked_prefill"),
+        ("enable_prefix_caching", False, "cache_config.enable_prefix_caching"),
+    ],
+)
+@patch("vllm.engine.arg_utils.current_platform.is_cpu")
+def test_non_restricted_platform_settings(mock_is_cpu, setting, value, config_path):
+    """Test that settings work correctly on non-restricted platforms."""
+    mock_is_cpu.return_value = False
+
+    kwargs = {"model": "facebook/opt-125m"}
+    if value is not None:
+        kwargs[setting] = value
+
+    engine_args = EngineArgs(**kwargs)
+    config = engine_args.create_engine_config()
+
+    # Navigate to the config value using the path
+    config_value = config
+    for attr in config_path.split("."):
+        config_value = getattr(config_value, attr)
+
+    # For None (default), generation models default to True for chunked_prefill
+    if value is None and setting == "enable_chunked_prefill":
+        assert config_value is True
+    else:
+        assert config_value == value

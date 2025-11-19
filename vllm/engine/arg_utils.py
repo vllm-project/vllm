@@ -1365,26 +1365,6 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
-        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
-            CpuArchEnum.ARM,
-            CpuArchEnum.RISCV,
-        ):
-            logger.info(
-                "Chunked prefill is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_chunked_prefill = False
-            logger.info(
-                "Prefix caching is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_prefix_caching = False
 
         assert self.enable_chunked_prefill is not None
 
@@ -1947,46 +1927,99 @@ class EngineArgs:
         self, usage_context: UsageContext, model_config: ModelConfig
     ) -> None:
         """Set Default Arguments for V1 Engine."""
+        # Check if running on CPU architecture with feature restrictions
+        is_restricted_cpu = (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture()
+            in (
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.S390X,
+                CpuArchEnum.ARM,
+                CpuArchEnum.RISCV,
+            )
+        )
+        restricted_cpu_names = "ARM, POWER, S390X, and RISC-V CPUs"
+
+        # Validate platform-specific restrictions
+        if is_restricted_cpu:
+            if self.enable_chunked_prefill is True:
+                raise ValueError(
+                    f"Chunked prefill is not supported for {restricted_cpu_names}."
+                )
+            if self.enable_prefix_caching is True:
+                raise ValueError(
+                    f"Prefix caching is not supported for {restricted_cpu_names}."
+                )
+
+        # Validate model-specific requirements
+        # (except on restricted CPUs where chunked prefill must be disabled)
+        if (
+            not is_restricted_cpu
+            and model_config.runner_type == "generate"
+            and self.enable_chunked_prefill is False
+        ):
+            raise ValueError("Chunked prefill is required for generation models. ")
+
+        # Handle defaults for chunked prefill and prefix caching
         (
             default_chunked_prefill,
             default_prefix_caching,
         ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
 
-        if self.enable_chunked_prefill is None:
-            self.enable_chunked_prefill = default_chunked_prefill
+        # Override defaults for restricted CPUs
+        if is_restricted_cpu:
+            if self.enable_chunked_prefill is None:
+                logger.info(
+                    "Chunked prefill is not supported for %s; "
+                    "disabling it for V1 backend.",
+                    restricted_cpu_names,
+                )
+            self.enable_chunked_prefill = False
 
-            logger.debug(
-                "%s chunked prefill by default",
-                "Enabling" if default_chunked_prefill else "Disabling",
-            )
-        elif (
-            model_config.runner_type == "pooling"
-            and self.enable_chunked_prefill
-            and not default_chunked_prefill
-        ):
-            logger.warning(
-                "This model does not officially support chunked prefill. "
-                "Enabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
-            )
+            if self.enable_prefix_caching is None:
+                logger.info(
+                    "Prefix caching is not supported for %s; "
+                    "disabling it for V1 backend.",
+                    restricted_cpu_names,
+                )
+            self.enable_prefix_caching = False
+        else:
+            # Set defaults for supported platforms
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = default_chunked_prefill
 
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = default_prefix_caching
+                logger.debug(
+                    "%s chunked prefill by default",
+                    "Enabling" if default_chunked_prefill else "Disabling",
+                )
+            elif (
+                model_config.runner_type == "pooling"
+                and self.enable_chunked_prefill
+                and not default_chunked_prefill
+            ):
+                logger.warning(
+                    "This model does not officially support chunked prefill. "
+                    "Enabling this manually may cause the engine to crash "
+                    "or produce incorrect outputs.",
+                )
 
-            logger.debug(
-                "%s prefix caching by default",
-                "Enabling" if default_prefix_caching else "Disabling",
-            )
-        elif (
-            model_config.runner_type == "pooling"
-            and self.enable_prefix_caching
-            and not default_prefix_caching
-        ):
-            logger.warning(
-                "This model does not officially support prefix caching. "
-                "Enabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
-            )
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = default_prefix_caching
+
+                logger.debug(
+                    "%s prefix caching by default",
+                    "Enabling" if default_prefix_caching else "Disabling",
+                )
+            elif (
+                model_config.runner_type == "pooling"
+                and self.enable_prefix_caching
+                and not default_prefix_caching
+            ):
+                logger.warning(
+                    "This model does not officially support prefix caching. "
+                    "Enabling this manually may cause the engine to crash "
+                    "or produce incorrect outputs.",
+                )
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
