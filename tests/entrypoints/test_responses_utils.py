@@ -53,7 +53,7 @@ class TestResponsesUtils:
         )
         formatted_item = construct_chat_message_with_tool_call(item)
         assert formatted_item["role"] == "assistant"
-        assert formatted_item["reasoning_content"] == "Leroy Jenkins"
+        assert formatted_item["reasoning"] == "Leroy Jenkins"
 
         item = ResponseReasoningItem(
             id="lol",
@@ -72,7 +72,7 @@ class TestResponsesUtils:
         formatted_item = construct_chat_message_with_tool_call(item)
         assert formatted_item["role"] == "assistant"
         assert (
-            formatted_item["reasoning_content"]
+            formatted_item["reasoning"]
             == 'Hmm, the user has just started with a simple "Hello,"'
         )
 

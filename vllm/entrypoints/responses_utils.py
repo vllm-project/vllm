@@ -48,7 +48,7 @@ def construct_chat_message_with_tool_call(
             reasoning_content = item.content[0].text
         return {
             "role": "assistant",
-            "reasoning_content": reasoning_content,
+            "reasoning": reasoning_content,
         }
     elif item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
