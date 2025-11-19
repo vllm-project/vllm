@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
+from vllm.utils.import_utils import has_deep_ep, has_hybrid_deep_ep, has_pplx
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -32,6 +32,7 @@ if current_platform.is_cuda_alike():
         )
     if has_hybrid_deep_ep():
         from .deepep_hybrid_prepare_finalize import DeepEPHybridPrepareAndFinalize
+
 
 def maybe_roundup_layer_hidden_size(
     hidden_size: int,
