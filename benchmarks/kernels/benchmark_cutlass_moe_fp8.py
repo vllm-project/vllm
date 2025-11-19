@@ -255,8 +255,8 @@ def bench_run(
         torch.cuda.synchronize()
 
         # Timing
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = torch.Event(enable_timing=True)
+        end_event = torch.Event(enable_timing=True)
 
         latencies = []
         for _ in range(num_iters):
