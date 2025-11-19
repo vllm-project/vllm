@@ -45,8 +45,9 @@ if [[ $version == *dev* ]]; then
         new_version="1.0.0.dev"
     fi
     new_wheel="${wheel/$version/$new_version}"
-    # use cp to keep both files in the artifacts directory
     cp -- "$wheel" "$new_wheel"
+    # Update METADATA to match filename (fixes uv compatibility)
+    python3 .buildkite/scripts/update_wheel_metadata.py "$new_wheel" "$new_version"
     wheel="$new_wheel"
     version="$new_version"
 fi
