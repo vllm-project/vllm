@@ -9,8 +9,31 @@ class ParameterSweep(list["ParameterSweepItem"]):
     @classmethod
     def read_json(cls, filepath: os.PathLike):
         with open(filepath, "rb") as f:
-            records = json.load(f)
+            data = json.load(f)
 
+        # Support both list and dict formats
+        if isinstance(data, dict):
+            return cls.read_from_dict(data)
+        
+        return cls.from_records(data)
+
+    @classmethod
+    def read_from_dict(cls, data: dict[str, dict[str, object]]):
+        """
+        Read parameter sweep from a dict format where keys are names.
+        
+        Example:
+            {
+                "experiment1": {"max_tokens": 100, "temperature": 0.7},
+                "experiment2": {"max_tokens": 200, "temperature": 0.9}
+            }
+        """
+        records = []
+        for name, params in data.items():
+            record = {"name": name}
+            record.update(params)
+            records.append(record)
+        
         return cls.from_records(records)
 
     @classmethod
@@ -67,12 +90,20 @@ class ParameterSweepItem(dict[str, object]):
         cmd = list(cmd)
 
         for k, v in self.items():
+            # Serialize dict values as JSON
+            if isinstance(v, dict):
+                v = json.dumps(v)
+            
             for k_candidate in self._iter_cmd_key_candidates(k):
                 try:
                     k_idx = cmd.index(k_candidate)
 
                     if isinstance(v, bool):
-                        cmd[k_idx] = self._normalize_cmd_key(k if v else "no-" + k)
+                        # For nested params (containing "."), use =true/false syntax
+                        if "." in k:
+                            cmd[k_idx] = f"{self._normalize_cmd_key(k)}={'true' if v else 'false'}"
+                        else:
+                            cmd[k_idx] = self._normalize_cmd_key(k if v else "no-" + k)
                     else:
                         cmd[k_idx + 1] = str(v)
 
@@ -81,7 +112,11 @@ class ParameterSweepItem(dict[str, object]):
                     continue
             else:
                 if isinstance(v, bool):
-                    cmd.append(self._normalize_cmd_key(k if v else "no-" + k))
+                    # For nested params (containing "."), use =true/false syntax
+                    if "." in k:
+                        cmd.append(f"{self._normalize_cmd_key(k)}={'true' if v else 'false'}")
+                    else:
+                        cmd.append(self._normalize_cmd_key(k if v else "no-" + k))
                 else:
                     cmd.extend([self._normalize_cmd_key(k), str(v)])
 
