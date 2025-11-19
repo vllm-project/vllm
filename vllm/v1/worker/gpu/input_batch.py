@@ -7,9 +7,8 @@ import numba
 import numba.types as types
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
+from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -71,6 +70,7 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
+    seq_lens_np: np.ndarray
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -107,13 +107,15 @@ class InputBatch:
         query_start_loc_np = input_buffers.query_start_loc.np[: num_reqs + 1]
         query_start_loc = input_buffers.query_start_loc.copy_to_gpu()[: num_reqs + 1]
         # seq_len equals to query_len
-        input_buffers.seq_lens.np[:num_reqs] = num_scheduled_tokens
-        input_buffers.seq_lens.np[num_reqs:] = 0
-        seq_lens_np = input_buffers.seq_lens.np[:num_reqs]
-        seq_lens = input_buffers.seq_lens.copy_to_gpu()[:num_reqs]
+        seq_lens_np = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
+        seq_lens_np[-1] += num_tokens % num_reqs
+        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
+        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[num_reqs:] = 0
+        seq_lens = input_buffers.seq_lens[:num_reqs]
 
         input_ids = input_buffers.input_ids.copy_to_gpu(num_tokens)
-        positions = input_buffers.positions.copy_to_gpu(num_tokens)
+        positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         return cls(
@@ -188,12 +190,12 @@ def _prepare_prefill_inputs(
 def prepare_prefill_inputs(
     idx_mapping: np.ndarray,
     num_scheduled_tokens: np.ndarray,
+    total_num_tokens: int,
     prefill_token_ids: np.ndarray,
     num_computed_prefill_tokens: np.ndarray,
     prefill_len: np.ndarray,
     input_ids: CpuGpuBuffer,
     query_start_loc: CpuGpuBuffer,
-    num_tokens: int,
 ) -> None:
     _prepare_prefill_inputs(
         idx_mapping,
@@ -204,7 +206,7 @@ def prepare_prefill_inputs(
         input_ids.np,
         query_start_loc.np,
     )
-    input_ids.copy_to_gpu(num_tokens)
+    input_ids.copy_to_gpu(total_num_tokens)
     # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
     # tensors from CPU to GPU, because they may include paddings needed
     # for full CUDA graph mode.
@@ -235,7 +237,7 @@ def _prepare_pos_seq_lens_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
         pos = num_computed_tokens + block
-        tl.store(pos_ptr + block, pos, mask=mask)
+        tl.store(pos_ptr + start + block, pos, mask=mask)
 
 
 def prepare_pos_seq_lens(
@@ -245,7 +247,8 @@ def prepare_pos_seq_lens(
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
-    _prepare_pos_seq_lens_kernel(
+    num_reqs = idx_mapping.shape[0]
+    _prepare_pos_seq_lens_kernel[(num_reqs,)](
         pos,
         seq_lens,
         idx_mapping,
@@ -253,16 +256,15 @@ def prepare_pos_seq_lens(
         num_computed_tokens,
         BLOCK_SIZE=1024,
     )
-    num_reqs = idx_mapping.shape[0]
     # Fill unused seq_lens as 0 for full CUDA graphs.
     seq_lens[num_reqs:].zero_()
 
 
 @triton.jit
-def _combine_last_token_ids_kernel(
+def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
     idx_mapping_ptr,
-    last_token_ids_ptr,
+    last_sampled_tokens_ptr,
     query_start_loc_ptr,
     seq_lens_ptr,
     prefill_len_ptr,
@@ -280,7 +282,7 @@ def _combine_last_token_ids_kernel(
         # Handling prefill tokens.
         return
 
-    last_token_id = tl.load(last_token_ids_ptr + req_state_idx)
+    last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
     end = tl.load(query_start_loc_ptr + batch_idx + 1)
 
     if num_draft_tokens_ptr is not None:
@@ -301,10 +303,10 @@ def _combine_last_token_ids_kernel(
     # tl.store(input_ids_ptr + end - num_draft_tokens + block, draft_tokens, mask=mask)
 
 
-def combine_last_token_ids(
+def combine_sampled_and_draft_tokens(
     input_ids: torch.Tensor,
     idx_mapping: torch.Tensor,
-    last_token_ids: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     prefill_len: torch.Tensor,
@@ -312,10 +314,10 @@ def combine_last_token_ids(
     # draft_tokens: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = seq_lens.shape[0]
-    _combine_last_token_ids_kernel[(num_reqs,)](
+    _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
-        last_token_ids,
+        last_sampled_tokens,
         query_start_loc,
         seq_lens,
         prefill_len,

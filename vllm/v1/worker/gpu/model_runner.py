@@ -39,7 +39,7 @@ from vllm.v1.worker.gpu.dp_utils import get_batch_metadata_across_dp
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_last_token_ids,
+    combine_sampled_and_draft_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
     update_num_computed_tokens,
@@ -196,13 +196,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
+        num_computed_tokens = torch.zeros(
+            input_batch.num_reqs, dtype=torch.int32, device=self.device
+        )
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
             query_start_loc=self.input_buffers.query_start_loc,
             seq_lens=self.input_buffers.seq_lens,
-            num_computed_tokens_cpu=None,
+            seq_lens_np=input_batch.seq_lens_np,
+            num_computed_tokens_cpu=num_computed_tokens,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -363,7 +367,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Update the GPU tensors for request states.
         if scheduler_output.scheduled_new_reqs:
             self.req_states.prefill_len.copy_to_gpu()
-            self.req_states.num_computed_tokens.copy_to_gpu()
 
         # Add new blocks for the existing requests.
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -421,12 +424,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prepare_prefill_inputs(
             idx_mapping_np,
             num_scheduled_tokens,
+            num_tokens,
             self.req_states.prefill_token_ids,
             self.req_states.num_computed_prefill_tokens,
             self.req_states.prefill_len.np,
             self.input_buffers.input_ids,
             self.input_buffers.query_start_loc,
-            num_tokens,
         )
         query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
@@ -435,8 +438,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
             idx_mapping,
-            query_start_loc,
-            self.req_states.num_computed_tokens.gpu,
+            query_start_loc_gpu,
+            self.req_states.num_computed_tokens,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
@@ -444,7 +447,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens.
-        combine_last_token_ids(
+        combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids.gpu,
             idx_mapping,
             self.req_states.last_sampled_tokens,
@@ -457,15 +460,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions.gpu[:num_tokens]
-        )
-
-        num_computed_tokens_cpu = torch.from_numpy(
-            self.req_states.num_computed_tokens[idx_mapping_np]
+            query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
         )
 
         # Logits indices to sample next token from.
         logits_indices = query_start_loc_gpu[1:] - 1
+
+        # Get num_computed_tokens.
+        # NOTE(woosuk): Here, we use num_computed_tokens on GPU instead of
+        # num_computed_tokens_cpu. This works for most cases.
+        num_computed_tokens = self.req_states.num_computed_tokens[idx_mapping]
+        # HACK(woosuk): Only GPU has the exact seq_lens because at this point
+        # CPU does not know how many draft tokens are accepted/rejected in the
+        # previous step. Therefore, we use max_model_len to be safe.
+        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
@@ -474,14 +482,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens=num_tokens,
             query_start_loc=self.input_buffers.query_start_loc,
             seq_lens=self.input_buffers.seq_lens,
-            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            seq_lens_np=seq_lens_np,
+            num_computed_tokens_cpu=num_computed_tokens,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
         )
 
         input_ids = self.input_buffers.input_ids.gpu[:num_tokens_after_padding]
-        positions = self.input_buffers.positions.gpu[:num_tokens_after_padding]
+        positions = self.input_buffers.positions[:num_tokens_after_padding]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -493,6 +502,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc=query_start_loc_gpu,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
             attn_metadata=attn_metadata,
@@ -530,14 +540,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Update the number of computed tokens.
         update_num_computed_tokens(
             input_batch.idx_mapping,
-            self.req_states.num_computed_tokens.gpu,
+            self.req_states.num_computed_tokens,
             input_batch.query_start_loc,
         )
         idx_mapping_np = input_batch.idx_mapping_np
         computed_prefill = self.req_states.num_computed_prefill_tokens
         computed_prefill[idx_mapping_np] = np.minimum(
             computed_prefill[idx_mapping_np] + input_batch.num_scheduled_tokens,
-            prefill_len,
+            self.req_states.prefill_len.np[idx_mapping_np],
         )
 
         # Store the last sampled token ids.
@@ -579,8 +589,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         token_ids[n - 1] = 0
 
         # Handle chunked prompts.
-        seq_lens = self.input_buffers.seq_lens.np[: input_batch.num_reqs]
-        is_prompt_chunked = seq_lens < prompt_lens
+        pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
+        is_prompt_chunked = pos_after_step < prompt_lens
         prefill_token_ids = self.req_states.prefill_token_ids
         query_start_loc = self.input_buffers.query_start_loc.np
         for i, req_id in enumerate(input_batch.req_ids):
@@ -590,7 +600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
             # The prompt is chunked. Get the next prompt token.
             req_idx = input_batch.idx_mapping_np[i]
-            next_prompt_token = int(prefill_token_ids[req_idx, seq_lens[i]])
+            next_prompt_token = int(prefill_token_ids[req_idx, pos_after_step[i]])
             idx = int(query_start_loc[i + 1] - 1)
             # Set the next prompt token.
             # NOTE(woosuk): This triggers a GPU operation.
@@ -800,6 +810,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
+            # NOTE(woosuk): req_id_to_index is unused in this model runner.
+            # Only for compatibility with the existing model runner and scheduler.
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,
             logprobs=None,

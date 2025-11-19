@@ -88,8 +88,8 @@ class RequestState:
 
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
+        self.num_computed_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
 
         # Last sampled tokens.
@@ -151,7 +151,9 @@ class RequestState:
         self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
 
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
-        self.num_computed_tokens.np[req_idx] = num_computed_tokens
+        # FIXME(woosuk): This triggers a GPU operation whenever adding a new request.
+        # Optimize this.
+        self.num_computed_tokens[req_idx] = num_computed_tokens
 
         if lora_request is not None:
             self.lora_ids[req_idx] = lora_request.lora_int_id
