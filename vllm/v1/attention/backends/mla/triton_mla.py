@@ -153,7 +153,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8") and (
-            layer._q_scale != 1.0 or layer._k_scale != 1.0 or layer._v_scale != 1.0
+            layer._q_scale.item() != 1.0
+            or layer._k_scale.item() != 1.0
+            or layer._v_scale.item() != 1.0
         ):
             raise NotImplementedError(
                 """
