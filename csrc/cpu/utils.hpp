@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+  #include <sys/sysctl.h>
+#endif
+
 #include "cpu_types.hpp"
 
 namespace cpu_utils {
