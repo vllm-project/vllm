@@ -15,37 +15,53 @@ from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
 class TestParameterSweepItem:
     """Test ParameterSweepItem functionality."""
 
-    def test_nested_boolean_false(self):
-        """Test that nested boolean false params use =false syntax."""
-        item = ParameterSweepItem.from_record({
-            'compilation_config.use_inductor_graph_partition': False
-        })
+    @pytest.mark.parametrize("input_dict,expected", [
+        (
+            {'compilation_config.use_inductor_graph_partition': False},
+            '--compilation-config.use_inductor_graph_partition=false'
+        ),
+        (
+            {'compilation_config.use_inductor_graph_partition': True},
+            '--compilation-config.use_inductor_graph_partition=true'
+        ),
+        (
+            {'compilation_config.use_inductor': False},
+            '--compilation-config.use_inductor=false'
+        ),
+        (
+            {'compilation_config.use_inductor': True},
+            '--compilation-config.use_inductor=true'
+        ),
+    ])
+    def test_nested_boolean_params(self, input_dict, expected):
+        """Test that nested boolean params use =true/false syntax."""
+        item = ParameterSweepItem.from_record(input_dict)
         cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
-        assert '--compilation-config.use_inductor_graph_partition=false' in cmd
+        assert expected in cmd
 
-    def test_nested_boolean_true(self):
-        """Test that nested boolean true params use =true syntax."""
-        item = ParameterSweepItem.from_record({
-            'compilation_config.use_inductor_graph_partition': True
-        })
+    @pytest.mark.parametrize("input_dict,expected", [
+        (
+            {'enable_prefix_caching': False},
+            '--no-enable-prefix-caching'
+        ),
+        (
+            {'enable_prefix_caching': True},
+            '--enable-prefix-caching'
+        ),
+        (
+            {'disable_log_stats': False},
+            '--no-disable-log-stats'
+        ),
+        (
+            {'disable_log_stats': True},
+            '--disable-log-stats'
+        ),
+    ])
+    def test_non_nested_boolean_params(self, input_dict, expected):
+        """Test that non-nested boolean params use --no- prefix."""
+        item = ParameterSweepItem.from_record(input_dict)
         cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
-        assert '--compilation-config.use_inductor_graph_partition=true' in cmd
-
-    def test_non_nested_boolean_false(self):
-        """Test that non-nested boolean false params use --no- prefix."""
-        item = ParameterSweepItem.from_record({
-            'enable_prefix_caching': False
-        })
-        cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
-        assert '--no-enable-prefix-caching' in cmd
-
-    def test_non_nested_boolean_true(self):
-        """Test that non-nested boolean true params work correctly."""
-        item = ParameterSweepItem.from_record({
-            'enable_prefix_caching': True
-        })
-        cmd = item.apply_to_cmd(['vllm', 'serve', 'model'])
-        assert '--enable-prefix-caching' in cmd
+        assert expected in cmd
 
     def test_nested_dict_value(self):
         """Test that nested dict values are serialized as JSON."""
@@ -58,19 +74,58 @@ class TestParameterSweepItem:
         idx = cmd.index('--env')
         assert json.loads(cmd[idx + 1]) == {'CUDA_VISIBLE_DEVICES': '0,1'}
 
-    def test_string_value(self):
-        """Test that string values are preserved."""
-        item = ParameterSweepItem.from_record({'model': 'test-model'})
+    @pytest.mark.parametrize("input_dict,expected_key,expected_value", [
+        (
+            {'model': 'test-model'},
+            '--model',
+            'test-model'
+        ),
+        (
+            {'max_tokens': 100},
+            '--max-tokens',
+            '100'
+        ),
+        (
+            {'temperature': 0.7},
+            '--temperature',
+            '0.7'
+        ),
+    ])
+    def test_string_and_numeric_values(self, input_dict, expected_key, expected_value):
+        """Test that string and numeric values are handled correctly."""
+        item = ParameterSweepItem.from_record(input_dict)
         cmd = item.apply_to_cmd(['vllm', 'serve'])
-        assert '--model' in cmd
-        assert 'test-model' in cmd
+        assert expected_key in cmd
+        assert expected_value in cmd
 
-    def test_numeric_value(self):
-        """Test that numeric values are converted to strings."""
-        item = ParameterSweepItem.from_record({'max_tokens': 100})
-        cmd = item.apply_to_cmd(['vllm', 'serve'])
-        assert '--max-tokens' in cmd
-        assert '100' in cmd
+    @pytest.mark.parametrize("input_dict,expected_key,key_idx_offset", [
+        (
+            {'max_tokens': 200},
+            '--max-tokens',
+            1
+        ),
+        (
+            {'enable_prefix_caching': False},
+            '--no-enable-prefix-caching',
+            0
+        ),
+    ])
+    def test_replace_existing_parameter(self, input_dict, expected_key, key_idx_offset):
+        """Test that existing parameters in cmd are replaced."""
+        item = ParameterSweepItem.from_record(input_dict)
+        
+        if key_idx_offset == 1:
+            # Key-value pair
+            cmd = item.apply_to_cmd(['vllm', 'serve', '--max-tokens', '100', 'model'])
+            assert expected_key in cmd
+            idx = cmd.index(expected_key)
+            assert cmd[idx + 1] == '200'
+            assert '100' not in cmd
+        else:
+            # Boolean flag
+            cmd = item.apply_to_cmd(['vllm', 'serve', '--enable-prefix-caching', 'model'])
+            assert expected_key in cmd
+            assert '--enable-prefix-caching' not in cmd
 
 
 class TestParameterSweep:
@@ -173,22 +228,3 @@ class TestParameterSweepItemKeyNormalization:
         assert any('compilation-config.some_nested_param' in arg
                    for arg in cmd)
 
-    def test_replace_existing_parameter(self):
-        """Test that existing parameters in cmd are replaced."""
-        item = ParameterSweepItem.from_record({'max_tokens': 200})
-        cmd = item.apply_to_cmd(
-            ['vllm', 'serve', '--max-tokens', '100', 'model'])
-        # The 100 should be replaced with 200
-        assert '--max-tokens' in cmd
-        idx = cmd.index('--max-tokens')
-        assert cmd[idx + 1] == '200'
-        assert '100' not in cmd
-
-    def test_replace_existing_boolean_parameter(self):
-        """Test that existing boolean parameters are updated correctly."""
-        item = ParameterSweepItem.from_record({'enable_prefix_caching': False})
-        cmd = item.apply_to_cmd(
-            ['vllm', 'serve', '--enable-prefix-caching', 'model'])
-        # Should become --no-enable-prefix-caching
-        assert '--no-enable-prefix-caching' in cmd
-        assert '--enable-prefix-caching' not in cmd

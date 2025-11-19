@@ -28,12 +28,7 @@ class ParameterSweep(list["ParameterSweepItem"]):
                 "experiment2": {"max_tokens": 200, "temperature": 0.9}
             }
         """
-        records = []
-        for name, params in data.items():
-            record = {"name": name}
-            record.update(params)
-            records.append(record)
-        
+        records = [{"name": name, **params} for name, params in data.items()]
         return cls.from_records(records)
 
     @classmethod
@@ -61,6 +56,17 @@ class ParameterSweepItem(dict[str, object]):
     def __or__(self, other: dict[str, Any]):
         return type(self)(super().__or__(other))
 
+    def name(self) -> str:
+        """
+        Get the name for this parameter sweep item.
+        
+        Returns the 'name' field if present, otherwise returns a text
+        representation of all parameters.
+        """
+        if "name" in self:
+            return self["name"]
+        return self.as_text(sep="-")
+
     # In JSON, we prefer "_"
     def _iter_param_key_candidates(self, param_key: str):
         # Inner config arguments are not converted by the CLI
@@ -86,6 +92,23 @@ class ParameterSweepItem(dict[str, object]):
     def has_param(self, param_key: str) -> bool:
         return any(k in self for k in self._iter_param_key_candidates(param_key))
 
+    def _normalize_cmd_kv_pair(self, k: str, v: object) -> list[str]:
+        """
+        Normalize a key-value pair into command-line arguments.
+        
+        Returns a list containing either:
+        - A single element for boolean flags (e.g., ['--flag'] or ['--flag=true'])
+        - Two elements for key-value pairs (e.g., ['--key', 'value'])
+        """
+        if isinstance(v, bool):
+            # For nested params (containing "."), use =true/false syntax
+            if "." in k:
+                return [f"{self._normalize_cmd_key(k)}={'true' if v else 'false'}"]
+            else:
+                return [self._normalize_cmd_key(k if v else "no-" + k)]
+        else:
+            return [self._normalize_cmd_key(k), str(v)]
+
     def apply_to_cmd(self, cmd: list[str]) -> list[str]:
         cmd = list(cmd)
 
@@ -102,27 +125,22 @@ class ParameterSweepItem(dict[str, object]):
                 try:
                     k_idx = cmd.index(k_candidate)
 
-                    if isinstance(v, bool):
-                        # For nested params (containing "."), use =true/false syntax
-                        if "." in k:
-                            cmd[k_idx] = f"{self._normalize_cmd_key(k)}={'true' if v else 'false'}"
-                        else:
-                            cmd[k_idx] = self._normalize_cmd_key(k if v else "no-" + k)
+                    # Replace existing parameter
+                    normalized = self._normalize_cmd_kv_pair(k, v)
+                    if len(normalized) == 1:
+                        # Boolean flag
+                        cmd[k_idx] = normalized[0]
                     else:
-                        cmd[k_idx + 1] = str(v)
+                        # Key-value pair
+                        cmd[k_idx] = normalized[0]
+                        cmd[k_idx + 1] = normalized[1]
 
                     break
                 except ValueError:
                     continue
             else:
-                if isinstance(v, bool):
-                    # For nested params (containing "."), use =true/false syntax
-                    if "." in k:
-                        cmd.append(f"{self._normalize_cmd_key(k)}={'true' if v else 'false'}")
-                    else:
-                        cmd.append(self._normalize_cmd_key(k if v else "no-" + k))
-                else:
-                    cmd.extend([self._normalize_cmd_key(k), str(v)])
+                # Add new parameter
+                cmd.extend(self._normalize_cmd_kv_pair(k, v))
 
         return cmd
 
