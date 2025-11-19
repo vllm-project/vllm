@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from vllm import envs
@@ -51,6 +51,9 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    engine_core_output_cls: type[EngineCoreOutput] = EngineCoreOutput
+    engine_core_outputs_cls: type[EngineCoreOutputs] = EngineCoreOutputs
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -664,7 +667,7 @@ class Scheduler(SchedulerInterface):
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
             scheduled_resumed_reqs = []
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
@@ -673,7 +676,7 @@ class Scheduler(SchedulerInterface):
             ]
         else:
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req, req_to_new_blocks[req.request_id].get_block_ids()
                 )
                 for req in scheduled_new_reqs
@@ -760,6 +763,14 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _make_new_request_data(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
+    ) -> NewRequestData:
+        return NewRequestData.from_request(request, block_ids, prefill_token_ids)
 
     def _make_cached_request_data(
         self,
@@ -1016,6 +1027,13 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+
+        def mark_running_stopped(req: Request) -> None:
+            stopped_running_reqs.add(req)
+
+        def mark_preempted_stopped(req: Request) -> None:
+            stopped_preempted_reqs.add(req)
+
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1076,11 +1094,19 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
-                kv_transfer_params = self._free_request(request)
-                if status_before_stop == RequestStatus.RUNNING:
-                    stopped_running_reqs.add(request)
-                else:
-                    stopped_preempted_reqs.add(request)
+                kv_transfer_params = self._handle_stopped(
+                    request, 
+                    status_before_stop, 
+                    mark_running_stopped, 
+                    mark_preempted_stopped
+                )
+            else:
+                self._handle_non_stopped(
+                    request, 
+                    status_before_stop, 
+                    mark_running_stopped,
+                    model_runner_output,
+                )
 
             # Extract sample logprobs if needed.
             if (
@@ -1106,7 +1132,8 @@ class Scheduler(SchedulerInterface):
             if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
-                    EngineCoreOutput(
+                    self._make_engine_core_output(
+                        request,
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
@@ -1124,6 +1151,8 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+        self._handle_finished(scheduler_output.finished_req_ids, outputs)
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -1156,7 +1185,7 @@ class Scheduler(SchedulerInterface):
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
+            client_index: self.engine_core_outputs_cls(outputs=outs)
             for client_index, outs in outputs.items()
         }
 
@@ -1169,7 +1198,7 @@ class Scheduler(SchedulerInterface):
                 if (eco := engine_core_outputs.get(client_index)) is not None:
                     eco.finished_requests = finished_set
                 else:
-                    engine_core_outputs[client_index] = EngineCoreOutputs(
+                    engine_core_outputs[client_index] = self.engine_core_outputs_cls(
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
@@ -1181,7 +1210,7 @@ class Scheduler(SchedulerInterface):
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
                 # outputs this step.
-                engine_core_outputs[0] = eco = EngineCoreOutputs()
+                engine_core_outputs[0] = eco = self.engine_core_outputs_cls()
             eco.scheduler_stats = stats
 
         return engine_core_outputs
@@ -1205,6 +1234,43 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _make_engine_core_output(
+        self, 
+        request: Request, 
+        **kwargs: Any,
+    ) -> EngineCoreOutput:
+        return self.engine_core_output_cls(**kwargs)
+
+    def _handle_stopped(
+        self,
+        request: Request,
+        status_before_stop: RequestStatus,
+        mark_running_stopped: Callable[[Request], None],
+        mark_preempted_stopped: Callable[[Request], None],
+    ) -> dict[str, Any] | None:
+        kv_transfer_params = self._free_request(request)
+        if status_before_stop == RequestStatus.RUNNING:
+            mark_running_stopped(request)
+        else:
+            mark_preempted_stopped(request)
+        return kv_transfer_params
+
+    def _handle_non_stopped(
+        self,
+        request: Request,
+        status_before_stop: RequestStatus,
+        mark_running_stopped: Callable[[Request], None],
+        model_runner_output: ModelRunnerOutput,
+    ) -> None:
+        pass
+
+    def _handle_finished(
+        self,
+        finished_req_ids: set[str],
+        outputs: dict[int, list[EngineCoreOutput]],
+    ) -> None:
+        pass
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(

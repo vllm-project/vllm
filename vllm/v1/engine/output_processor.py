@@ -117,9 +117,6 @@ class RequestState:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.prompt_len = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
-        )
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
@@ -135,6 +132,12 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+
+    @property
+    def prompt_len(self) -> int:
+        return length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
 
     @classmethod
     def from_new_request(
@@ -516,7 +519,7 @@ class OutputProcessor:
                     request_outputs.append(request_output)
 
             # Free completed requests.
-            if finish_reason is not None:
+            if self._is_finished(engine_core_output):
                 self.request_states.pop(req_id)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
@@ -540,6 +543,9 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def _is_finished(self, engine_core_output: EngineCoreOutput) -> bool:
+        return engine_core_output.finish_reason is not None
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)

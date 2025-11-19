@@ -465,6 +465,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "Pooling is not supported in TPU yet"
             )
             req_id = new_req_data.req_id
+            if req_id in self.requests:
+                # For streaming case only.
+                self._update_streaming_request(req_id, new_req_data)
+                req_ids_to_add.append(req_id)
+                continue
+
             sampling_params = new_req_data.sampling_params
 
             self.requests[req_id] = CachedRequestState(
@@ -538,6 +544,37 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def _update_streaming_request(
+        self, req_id: str, new_req_data: CachedRequestState
+    ) -> None:
+        """Updates streaming session request from `scheduled_new_reqs`.
+
+        Removes the request from InputBatch (if present), updates the cached
+        state, and prepares it for re-addition to the batch.
+
+        NOTE: prompt_token_ids includes intermediate output tokens - tokens
+        previously generated but now are input context (part of the prompt).
+        """
+        if req_id in self.input_batch.req_id_to_index:
+            self.input_batch.remove_request(req_id)
+
+        req_state = self.requests[req_id]
+
+        req_state.prompt_token_ids = new_req_data.prompt_token_ids
+        req_state.mm_features = new_req_data.mm_features
+        req_state.prompt_embeds = new_req_data.prompt_embeds
+        req_state.sampling_params = new_req_data.sampling_params
+        req_state.pooling_params = new_req_data.pooling_params
+        req_state.block_ids = new_req_data.block_ids
+        req_state.num_computed_tokens = new_req_data.num_computed_tokens
+
+        # Clear `output_token_ids` as previous output tokens are now part of
+        # `prompt_token_ids`.
+        req_state.output_token_ids.clear()
+
+        if self.uses_mrope:
+            self._init_mrope_positions(req_state)
 
     def get_model(self) -> nn.Module:
         return self.model

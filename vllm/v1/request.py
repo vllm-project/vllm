@@ -84,9 +84,6 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            prompt_token_ids, prompt_embeds
-        )
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -100,8 +97,6 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
-        self.num_encoder_inputs = len(self.mm_features)
-        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -185,18 +180,19 @@ class Request:
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
 
-    def get_skip_reading_prefix_cache(self) -> bool:
-        if (
-            self.sampling_params is not None
-            and self.sampling_params.skip_reading_prefix_cache is not None
-        ):
-            return self.sampling_params.skip_reading_prefix_cache
-        elif (
-            self.pooling_params is not None
-            and self.pooling_params.skip_reading_prefix_cache is not None
-        ):
-            return self.pooling_params.skip_reading_prefix_cache
-        return False
+    @property
+    def num_prompt_tokens(self) -> int:
+        return length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
+
+    @property
+    def num_encoder_inputs(self) -> int:
+        return len(self.mm_features)
+
+    @property
+    def has_encoder_inputs(self) -> bool:
+        return self.num_encoder_inputs > 0
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
@@ -229,6 +225,8 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_STREAMING_REQ = enum.auto() 
+    WAITING_FOR_SESSION_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -259,4 +257,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
 }
