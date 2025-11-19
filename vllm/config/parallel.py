@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -60,6 +61,14 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+
+    load_initial_load_window: bool = False
+    save_load_window: bool = False
+    static: bool = False
+    save_dir: Path | None = None
+    """Directory to save expert load balance metrics."""
+    load_path: Path | None = None
+    """Path to load expert load balance metrics."""
 
 
 @config
@@ -694,5 +703,19 @@ class ParallelConfig:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
-
+        if (
+            self.eplb_config.load_initial_load_window
+            and self.eplb_config.load_path is None
+        ):
+            raise ValueError(
+                "load_initial_load_window is set to True,but load_path is not provided."
+            )
+        if self.eplb_config.save_load_window and self.eplb_config.save_dir is None:
+            raise ValueError(
+                "save_load_window is set to True, but save_dir is provided."
+            )
+        if self.eplb_config.save_load_window and self.eplb_config.static:
+            raise ValueError(
+                "save_load_window is set to True, but static is set to True."
+            )
         return self
