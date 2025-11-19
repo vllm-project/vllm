@@ -277,39 +277,13 @@ class DefaultModelLoader(BaseModelLoader):
             "0.14.0"
         ):
             self.load_config.safetensors_load_strategy = "torchao"
+
+        # load weights into model
         weights_to_load = {name for name, _ in model.named_parameters()}
+        weights_iterator = self.get_all_weights(model_config, model)
+        loaded_weights = model.load_weights(weights_iterator)
 
-        # if we don't have `model.weight_metadata_and_attr_saved` defined and
-        # set to True, it means that this is either offline quantization case
-        # or the first run of online quantization
-        # see online_quantization.py for detailed notes
-        offline_quantization_or_first_run_of_online_quantization = not getattr(
-            model, "weight_metadata_and_attr_saved", False
-        )
-
-        if model_config.quantization is None:
-            # model is not quantized
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model)
-            )
-        elif offline_quantization_or_first_run_of_online_quantization:
-            # case 1: offline quantized checkpoint
-            # case 2: Step I1 first run of weight loading with
-            # online quantization
-            # see online_quantization.py for detailed notes
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model)
-            )
-        else:
-            # to avoid circular dependency
-            from vllm.model_executor.model_loader.online_quantization import (
-                load_weights_and_online_quantize,
-            )
-
-            # subsequent runs of weight loading with online
-            # quantization
-            loaded_weights = load_weights_and_online_quantize(self, model, model_config)
-
+        # logging and validation
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",

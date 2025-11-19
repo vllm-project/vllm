@@ -3,6 +3,7 @@
 """Utilities for selecting and loading models."""
 
 import inspect
+import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -18,6 +19,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.model_loader.online_quantization import (
+    RELOADABLE_QUANT_CONFIGS,
+    record_weights_for_reloading,
 )
 from vllm.model_executor.models.adapters import (
     as_embedding_model,
@@ -88,13 +93,11 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
-    # to avoid circular dependency
-    from vllm.model_executor.model_loader.online_quantization import (
-        maybe_save_metadata_and_attributes_for_weight_reloading,
-    )
+    # weight reloading: must be called before weights are processed
+    if model_config.quantization in RELOADABLE_QUANT_CONFIGS:
+        record_weights_for_reloading(model)
 
-    maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
-
+    counter_before_processing_weights = time.perf_counter()
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
@@ -115,6 +118,10 @@ def process_weights_after_loading(
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
+
+    counter_after_processing_weights = time.perf_counter()
+    diff_seconds = counter_after_processing_weights - counter_before_processing_weights
+    logger.debug_once("Processed weights in %.2f seconds", diff_seconds, scope="local")
 
 
 @contextmanager
