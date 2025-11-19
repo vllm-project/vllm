@@ -467,7 +467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logits_indices = query_start_loc_gpu[1:] - 1
 
         # Get num_computed_tokens.
-        # NOTE(woosuk): Here, we use num_computed_tokens on GPU instead of
+        # HACK(woosuk): Here, we use num_computed_tokens on GPU instead of
         # num_computed_tokens_cpu. This works for most cases.
         num_computed_tokens = self.req_states.num_computed_tokens[idx_mapping]
         # HACK(woosuk): Only GPU has the exact seq_lens because at this point
