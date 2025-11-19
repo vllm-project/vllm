@@ -21,7 +21,6 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
-    MLACommonMetadataBuilder,
 )
 
 logger = init_logger(__name__)
@@ -38,10 +37,6 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
-
-    @staticmethod
-    def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
-        return MLACommonMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
