@@ -370,10 +370,11 @@ class OpenCUAForConditionalGeneration(
         """Get M-RoPE input positions for OpenCUA."""
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
-            {"image_grid_thw", "video_grid_thw"},
+            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
         )
         image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
         video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
         hf_config = self.config
         media_placeholder_token_id = getattr(
@@ -385,69 +386,52 @@ class OpenCUAForConditionalGeneration(
             hf_config, "vision_start_token_id", media_placeholder_token_id
         )
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
 
         input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(
-            (input_tokens_tensor == vision_start_token_id)
-            | (input_tokens_tensor == media_placeholder_token_id)
+            input_tokens_tensor == vision_start_token_id
         ).squeeze(1)
-        
-        if len(vision_start_indices) > 0:
-            vision_tokens = input_tokens_tensor[
-                torch.clamp(vision_start_indices + 1, max=len(input_tokens_tensor) - 1)
-            ]
-            vision_tokens_alt = input_tokens_tensor[vision_start_indices]
-            image_nums = ((vision_tokens == image_token_id) | (vision_tokens_alt == media_placeholder_token_id)).sum().item()
-            video_nums = (vision_tokens == video_token_id).sum().item()
-        else:
-            image_nums = (input_tokens_tensor == media_placeholder_token_id).sum().item()
-            video_nums = 0
-        
-        image_nums = min(image_nums, len(image_grid_thw))
-        video_nums = min(video_nums, len(video_grid_thw))
-        
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = (vision_tokens == media_placeholder_token_id).sum()
+        video_nums = (vision_tokens == video_token_id).sum()
+        image_nums = min(image_nums.item() if hasattr(image_nums, 'item') else int(image_nums), len(image_grid_thw))
+        video_nums = min(video_nums.item() if hasattr(video_nums, 'item') else int(video_nums), len(video_grid_thw))
         llm_pos_ids_list: list = []
+
         st = 0
         remain_images, remain_videos = image_nums, video_nums
-        image_index, video_index = 0, 0
-        last_vision_position = -1
 
+        image_index, video_index = 0, 0
         for _ in range(image_nums + video_nums):
-            ed_image = len(input_tokens) + 1
-            ed_video = len(input_tokens) + 1
-            
-            if remain_images > 0 and image_index < len(image_grid_thw):
+            video_second_per_grid_t = 0.0
+            if remain_images > 0:
                 try:
-                    ed_media = input_tokens.index(media_placeholder_token_id, st)
+                    ed_image = input_tokens.index(media_placeholder_token_id, st)
                 except ValueError:
-                    ed_media = len(input_tokens) + 1
-                try:
-                    ed_img = input_tokens.index(image_token_id, st)
-                except ValueError:
-                    ed_img = len(input_tokens) + 1
-                ed_image = min(ed_media, ed_img)
-            
-            if remain_videos > 0 and video_index < len(video_grid_thw):
+                    ed_image = len(input_tokens) + 1
+            else:
+                ed_image = len(input_tokens) + 1
+            if remain_videos > 0:
                 try:
                     ed_video = input_tokens.index(video_token_id, st)
                 except ValueError:
                     ed_video = len(input_tokens) + 1
-            
-            if ed_image > len(input_tokens) and ed_video > len(input_tokens):
-                break
-            
-            if ed_image <= ed_video and image_index < len(image_grid_thw):
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
                 t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
-            elif video_index < len(video_grid_thw):
+            else:
                 t, h, w = video_grid_thw[video_index]
+                video_second_per_grid_t = 1.0
+                if second_per_grid_ts:
+                    video_second_per_grid_t = second_per_grid_ts[video_index]
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video
-            else:
-                break
 
             llm_grid_t, llm_grid_h, llm_grid_w = (
                 t,
@@ -462,11 +446,17 @@ class OpenCUAForConditionalGeneration(
             )
 
             t_index = (
-                torch.arange(llm_grid_t)
-                .view(-1, 1)
-                .expand(-1, llm_grid_h * llm_grid_w)
+                (
+                    torch.arange(llm_grid_t)
+                    .view(-1, 1)
+                    .expand(-1, llm_grid_h * llm_grid_w)
+                    * video_second_per_grid_t
+                    * tokens_per_second
+                )
+                .long()
                 .flatten()
             )
+
             h_index = (
                 torch.arange(llm_grid_h)
                 .view(1, -1, 1)
@@ -479,30 +469,20 @@ class OpenCUAForConditionalGeneration(
                 .expand(llm_grid_t, llm_grid_h, -1)
                 .flatten()
             )
-            vision_st_idx = st_idx + text_len
-            num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            vision_positions = torch.stack([t_index, h_index, w_index]) + vision_st_idx
-            llm_pos_ids_list.append(vision_positions)
-            
-            st = ed + num_vision_tokens
-            last_vision_position = vision_st_idx + num_vision_tokens - 1
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+            )
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
-            if len(llm_pos_ids_list) > 0:
-                st_idx = last_vision_position + 1
-            else:
-                st_idx = 0
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
             )
 
-        if len(llm_pos_ids_list) == 0:
-            llm_positions = torch.zeros((3, len(input_tokens)), dtype=torch.long)
-            mrope_position_delta = 0
-        else:
-            llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-            mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
 
         return llm_positions, mrope_position_delta
 
