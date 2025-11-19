@@ -244,6 +244,10 @@ class Attention(nn.Module, AttentionLayerBase):
             f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
         )
 
+        # TODO in this PR: only for testing now. remove this hardcode later
+        if sliding_window is None:
+            print("set kv_cache_dtype to fp8_e4m3 for layer", prefix)
+            kv_cache_dtype = "fp8_e4m3"
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(
             self, quant_config, prefix, kv_cache_dtype, calculate_kv_scales
