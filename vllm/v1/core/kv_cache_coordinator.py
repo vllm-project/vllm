@@ -287,7 +287,9 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             self.block_size *= dcp_world_size
         if pcp_world_size > 1:
             self.block_size *= pcp_world_size
-        assert hash_block_size == self.block_size
+        assert hash_block_size == self.block_size, (
+            "UnitaryKVCacheCoordinator assumes hash_block_size == block_size"
+        )
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
             "UnitaryKVCacheCoordinator assumes only one kv cache group"
         )
