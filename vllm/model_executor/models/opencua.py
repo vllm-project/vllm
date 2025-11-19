@@ -88,7 +88,79 @@ from .vision import (
 logger = init_logger(__name__)
 
 
-class OpenCUAVisionTransformer(nn.Module):
+class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
+    """Vision Transformer for OpenCUA with upstream flash attention enabled.
+    
+    Extends Qwen2_5_VisionTransformer to enable upstream flash attention
+    when head_dim is not a multiple of 32 (e.g., head_dim=80).
+    """
+    
+    def __init__(
+        self,
+        vision_config: Any,  # OpenCUAConfig.vision_config
+        norm_eps: float = 1e-6,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+        attn_backend_override: AttentionBackendEnum | None = None,
+    ) -> None:
+        # Call parent __init__ first
+        super().__init__(
+            vision_config=vision_config,
+            norm_eps=norm_eps,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
+        )
+        
+        # Check if we need upstream flash attention for head_dim not multiple of 32
+        head_dim = self.hidden_size // self.num_heads
+        if head_dim % 32 != 0:
+            # If head_dim is not a multiple of 32, we need upstream flash_attn
+            # which supports arbitrary head_dim values
+            from vllm.attention.layer import check_upstream_fa_availability
+            from vllm.platforms import current_platform
+            if current_platform.is_cuda() and check_upstream_fa_availability(torch.get_default_dtype()):
+                # Re-initialize with upstream flash attention enabled
+                use_upstream_fa = True
+                self.attn_backend, self.flash_attn_varlen_func = (
+                    maybe_get_vit_flash_attn_backend(
+                        self.attn_backend,
+                        use_upstream_fa,
+                        attn_backend_override=attn_backend_override,
+                    )
+                )
+                # Update all blocks to use upstream flash attention
+                for block in self.blocks:
+                    if hasattr(block, 'attn'):
+                        block.attn.use_upstream_fa = True
+                        block.attn.attn_backend, block.attn.flash_attn_varlen_func = (
+                            maybe_get_vit_flash_attn_backend(
+                                block.attn.attn_backend,
+                                use_upstream_fa,
+                                attn_backend_override=attn_backend_override,
+                            )
+                        )
+            else:
+                # Fallback to XFORMERS if upstream flash_attn is not available
+                from vllm.attention.backends.registry import AttentionBackendEnum
+                attn_backend_override = AttentionBackendEnum.XFORMERS
+                self.attn_backend = get_vit_attn_backend(
+                    head_size=head_dim,
+                    dtype=torch.get_default_dtype(),
+                    attn_backend_override=attn_backend_override,
+                )
+                self.attn_backend, self.flash_attn_varlen_func = (
+                    maybe_get_vit_flash_attn_backend(
+                        self.attn_backend,
+                        False,
+                        attn_backend_override=attn_backend_override,
+                    )
+                )
+
+
+class OpenCUAVisionTransformerOld(nn.Module):
     """Vision Transformer for OpenCUA with 1D-RoPE instead of M-RoPE."""
 
     def __init__(
@@ -1157,8 +1229,9 @@ class OpenCUAForConditionalGeneration(
                 if multimodal_config is not None
                 else None
             )
-            # Use Qwen2_5_VisionTransformer directly, matching original OpenCUA
-            self.visual = Qwen2_5_VisionTransformer(
+            # Use OpenCUAVisionTransformer which extends Qwen2_5_VisionTransformer
+            # with upstream flash attention enabled for head_dim not multiple of 32
+            self.visual = OpenCUAVisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
@@ -1166,7 +1239,7 @@ class OpenCUAForConditionalGeneration(
                 use_data_parallel=self.use_data_parallel,
                 attn_backend_override=attn_backend_override,
             )
-            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__: Created Qwen2_5_VisionTransformer, type={type(self.visual).__name__}")
+            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__: Created OpenCUAVisionTransformer, type={type(self.visual).__name__}")
         else:
             self.visual = None
 
