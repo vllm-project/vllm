@@ -232,8 +232,13 @@ class RocmPlatform(Platform):
                     else AttentionBackendEnum.TRITON_MLA
                 )
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
-                logger.info_once("Using Triton MLA backend.")
-                return AttentionBackendEnum.TRITON_MLA.get_path()
+                if block_size != 1:
+                    logger.info_once("Using Triton MLA backend.")
+                    return AttentionBackendEnum.TRITON_MLA.get_path()
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"does not support block size {block_size}."
+                )
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
                 logger.info("Using AITER MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()

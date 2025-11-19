@@ -5,7 +5,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
@@ -18,15 +17,11 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.aiter_triton_mla import AiterTritonMLAImpl
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-)
-from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-    AiterMLAMetadataBuilder,
 )
 
 logger = init_logger(__name__)
@@ -41,17 +36,11 @@ class TritonMLABackend(MLACommonBackend):
         return "TRITON_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["TritonMLAImpl"] | type["AiterTritonMLAImpl"]:
-        if rocm_aiter_ops.is_mla_enabled():
-            return AiterTritonMLAImpl
+    def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
 
     @staticmethod
-    def get_builder_cls() -> (
-        type["AiterMLAMetadataBuilder"] | type["MLACommonMetadataBuilder"]
-    ):
-        if rocm_aiter_ops.is_mla_enabled():
-            return AiterMLAMetadataBuilder
+    def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
 
     @classmethod
