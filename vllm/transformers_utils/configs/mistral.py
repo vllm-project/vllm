@@ -86,13 +86,13 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "apply_scale": "apply_yarn_scaling",
     }
     yarn_config = config.get("yarn") or {}
-    config["rope_scaling"] = {
+    config["rope_parameters"] = {
         "rope_type": "yarn",
         "mscale_all_dim": 1,
     }
     for old_name, new_name in yarn_config_map.items():
         if old_name in yarn_config:
-            config["rope_scaling"][new_name] = yarn_config.pop(old_name)
+            config["rope_parameters"][new_name] = yarn_config.pop(old_name)
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 

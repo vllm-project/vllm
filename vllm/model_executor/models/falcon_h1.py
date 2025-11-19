@@ -35,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import (
     HasInnerState,
@@ -214,8 +215,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        rope_theta = getattr(config, "rope_theta", 1e11)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        set_default_rope_theta(config, default_theta=1e11)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -240,7 +240,6 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         if hasattr(config, "partial_rotary_factor"):
@@ -254,8 +253,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             head_size=self.head_dim,
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            rope_scaling=rope_scaling,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
             dtype=None,  # see impl of get_rope
         )

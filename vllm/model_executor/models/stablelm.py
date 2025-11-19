@@ -153,7 +153,7 @@ class StablelmAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.config.max_position_embeddings,
-            base=self.config.rope_theta,
+            rope_parameters=self.config.rope_parameters,
             partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(
