@@ -31,10 +31,10 @@ https://docs.ray.io/en/latest/placement-groups.html
 import argparse
 import gc
 import os
+import time
 
 import ray
 import torch
-import time
 import zmq
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
