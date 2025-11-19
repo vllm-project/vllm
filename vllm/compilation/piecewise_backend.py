@@ -62,12 +62,7 @@ class PiecewiseBackend:
         log_string = f"PiecewiseBackend: compile_sizes: {self.compile_sizes}"
         logger.debug_once(log_string)
 
-        self.first_run_finished = False
-
         self.sym_shape_indices = sym_shape_indices
-
-        # the entries for different shapes that we need to compile
-        # self.concrete_size_entries: dict[int, RangeEntry] = {}
 
         # the entries for ranges that we need to either
         self.range_entries: dict[Range, RangeEntry] = {}
@@ -107,6 +102,7 @@ class PiecewiseBackend:
         # it will force specializing the whole shape
         # torch.compile probably should not accept
         # non fake tensors as example inputs!
+        # See issue https://github.com/vllm-project/vllm/issues/27899
         fake_example_inputs = []
         for node in self.graph.graph.nodes:
             # All place holders come first
@@ -143,14 +139,6 @@ class PiecewiseBackend:
             self.check_for_ending_compilation()
 
     def __call__(self, *args) -> Any:
-        if not self.first_run_finished:
-            self.first_run_finished = True
-            self.check_for_ending_compilation()
-
-            # Role of the general graph is taken by the last range graph
-            range_entry = self.range_entries[self.compile_ranges[-1]]
-            self._maybe_compile_for_range_entry(range_entry, args)
-            return range_entry.runnable(*args)
         runtime_shape = args[self.sym_shape_indices[0]]
 
         # First we try to find the range entry for the concrete compile size
@@ -174,5 +162,4 @@ class PiecewiseBackend:
         )
 
         self._maybe_compile_for_range_entry(range_entry, args)
-
         return range_entry.runnable(*args)
