@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
-import json
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -18,7 +16,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import assert_hashable, config, getattr_iter
+from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -33,10 +31,14 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
+    uses_custom_attention_masks,
     uses_mrope,
 )
+from vllm.transformers_utils.gguf_utils import (
+    maybe_patch_hf_config_from_gguf,
+)
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -320,50 +322,50 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.video_pruning_rate)
-        factors.append(self.enable_prompt_embeds)
+        ignored_factors = {
+            "runner",
+            "convert",
+            "task",
+            "tokenizer",
+            "tokenizer_mode",
+            "seed",
+            "hf_config_path",
+            "allowed_local_media_path",
+            "allowed_media_domains",
+            "tokenizer_revision",
+            "spec_target_max_model_len",
+            "enforce_eager",
+            "logprobs_mode",
+            "disable_cascade_attn",
+            "skip_tokenizer_init",
+            "enable_prompt_embeds",
+            "served_model_name",
+            "config_format",
+            "hf_token",
+            "hf_overrides",
+            "logits_processor_pattern",
+            "enable_sleep_mode",
+            "override_attention_dtype",
+            "logits_processors",
+            "io_processor_plugin",
+            "pooler_config",
+            "override_pooler_config",
+            "multimodal_config",
+            "limit_mm_per_prompt",
+            "media_io_kwargs",
+            "mm_processor_kwargs",
+            "mm_processor_cache_gb",
+            "mm_processor_cache_type",
+            "mm_shm_cache_max_object_size_mb",
+            "mm_encoder_tp_mode",
+            "interleave_mm_strings",
+            "skip_mm_profiling",
+        }
 
-        # hf_config can control how the model looks!
-        try:
-            hf_config_json = self.hf_config.to_json_string(use_diff=False)
-        except TypeError:
-            from transformers import PretrainedConfig
+        from vllm.config.utils import get_hash_factors, hash_factors
 
-            from vllm.utils.jsontree import json_map_leaves
-
-            # Handle nested HF configs with unserializable values gracefully
-            hf_config_json = (
-                json.dumps(
-                    json_map_leaves(
-                        lambda v: v.to_dict()
-                        if isinstance(v, PretrainedConfig)
-                        else str(v),
-                        self.hf_config.to_dict(),
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-
-        factors.append(hf_config_json)
-
-        str_factors = str(factors)
-        assert_hashable(str_factors)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def _update_nested(
         self,
@@ -450,6 +452,12 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
+            if check_gguf_file(self.model):
+                raise ValueError(
+                    "Using a tokenizer is mandatory when loading a GGUF model. "
+                    "Please specify the tokenizer path or name using the "
+                    "--tokenizer argument."
+                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -507,6 +515,10 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
+        )
+        hf_config = maybe_patch_hf_config_from_gguf(
+            self.model,
+            hf_config,
         )
 
         self.hf_config = hf_config
@@ -1006,6 +1018,8 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
+                "cpu_gptq",
+                "cpu_awq",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1353,11 +1367,7 @@ class ModelConfig:
         # Coerce to 0 if explicitly set to None
         return num_experts or 0
 
-    def get_layers_start_end_indices(
-        self, parallel_config: ParallelConfig
-    ) -> tuple[int, int]:
-        from vllm.distributed.utils import get_pp_indices
-
+    def get_total_num_hidden_layers(self) -> int:
         if (
             self.hf_text_config.model_type == "deepseek_mtp"
             or self.hf_config.model_type == "mimo_mtp"
@@ -1377,6 +1387,15 @@ class ModelConfig:
             total_num_hidden_layers = getattr(
                 self.hf_text_config, "num_hidden_layers", 0
             )
+        return total_num_hidden_layers
+
+    def get_layers_start_end_indices(
+        self, parallel_config: ParallelConfig
+    ) -> tuple[int, int]:
+        from vllm.distributed.utils import get_pp_indices
+
+        total_num_hidden_layers = self.get_total_num_hidden_layers()
+
         # the layout order is: DP x PP x TP
         pp_rank = (
             parallel_config.rank // parallel_config.tensor_parallel_size
@@ -1604,6 +1623,10 @@ class ModelConfig:
     @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
+
+    @property
+    def uses_custom_attention_masks(self) -> bool:
+        return uses_custom_attention_masks(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
