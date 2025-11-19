@@ -315,31 +315,13 @@ class LongcatMoe(nn.Module):
         )
 
     def _compute_zero_expert_result(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | None:
         if self.zero_expert_num <= 0 or self.zero_expert_type is None:
             return None
-
-        topk_weights, topk_ids = self.experts.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            use_grouped_topk=self.experts.use_grouped_topk,
-            top_k=self.experts.top_k,
-            renormalize=self.experts.renormalize,
-            topk_group=self.experts.topk_group,
-            num_expert_group=self.experts.num_expert_group,
-            custom_routing_function=self.experts.custom_routing_function,
-            scoring_func=self.experts.scoring_func,
-            routed_scaling_factor=self.experts.routed_scaling_factor,
-            e_score_correction_bias=self.router.e_score_correction_bias,
-            indices_type=None,
-            enable_eplb=False,
-            expert_map=None,
-            expert_load_view=None,
-            logical_to_physical_map=None,
-            logical_replica_count=None,
-            num_fused_shared_experts=self.experts.num_fused_shared_experts,
-        )
 
         return zero_experts_compute_triton(
             expert_indices=topk_ids.clone(),
@@ -368,11 +350,36 @@ class LongcatMoe(nn.Module):
         router_logits_full = self.router(
             hidden_states_padded.to(self.rounter_params_dtype)
         )
-        zero_expert_result = self._compute_zero_expert_result(
-            hidden_states_padded, router_logits_full
+
+        # Compute routing once and reuse for both zero expert and FusedMoE
+        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
+        topk_weights, topk_ids = self.experts.select_experts(
+            hidden_states=hidden_states_padded,
+            router_logits=router_logits,
+            use_grouped_topk=self.experts.use_grouped_topk,
+            top_k=self.experts.top_k,
+            renormalize=self.experts.renormalize,
+            topk_group=self.experts.topk_group,
+            num_expert_group=self.experts.num_expert_group,
+            custom_routing_function=self.experts.custom_routing_function,
+            scoring_func=self.experts.scoring_func,
+            routed_scaling_factor=self.experts.routed_scaling_factor,
+            e_score_correction_bias=self.experts.e_score_correction_bias,
+            indices_type=None,
+            enable_eplb=False,
+            expert_map=None,
+            expert_load_view=None,
+            logical_to_physical_map=None,
+            logical_replica_count=None,
+            num_fused_shared_experts=self.experts.num_fused_shared_experts,
         )
 
-        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
+        # Use pre-computed routing results for zero expert computation
+        zero_expert_result = self._compute_zero_expert_result(
+            hidden_states_padded, topk_weights, topk_ids
+        )
+
+        # FusedMoE will still compute routing internally (to be optimized later)
         final_hidden_states = self.experts(
             hidden_states=hidden_states_padded, router_logits=router_logits
         )

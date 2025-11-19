@@ -103,7 +103,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             if self.supports_eplb:
                 assert expert_load_view is not None
