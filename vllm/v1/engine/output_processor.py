@@ -466,7 +466,7 @@ class OutputProcessor:
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
             )
 
-            new_token_ids = engine_core_output.new_token_ids
+            new_token_ids: list[int] = engine_core_output.new_token_ids.tolist()
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason

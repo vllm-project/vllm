@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -107,7 +108,7 @@ class EngineCoreOutput(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    new_token_ids: list[int]
+    new_token_ids: np.ndarray
 
     new_logprobs: LogprobsLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None

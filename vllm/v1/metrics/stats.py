@@ -245,7 +245,7 @@ class IterationStats:
         lora_states: "LoRARequestStates",
         lora_name: str | None,
     ):
-        num_new_generation_tokens = len(output.new_token_ids)
+        num_new_generation_tokens = output.new_token_ids.shape[0]
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
