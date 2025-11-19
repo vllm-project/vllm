@@ -815,7 +815,7 @@ def unified_attention(
     TILE_SIZE_3D_DECODE = 16 if q.element_size() >= 2 else 32
 
     # prefills
-    if num_seqs > num_decodes:  # or total_num_q_blocks * num_kv_heads > 128:
+    if num_seqs > num_decodes:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
