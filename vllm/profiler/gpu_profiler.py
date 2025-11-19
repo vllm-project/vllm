@@ -130,7 +130,7 @@ class WorkerProfiler(ABC):
 
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
-        raise nullcontext()
+        return nullcontext()
 
 
 class TorchProfilerWrapper(WorkerProfiler):
