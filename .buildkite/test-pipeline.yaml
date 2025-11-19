@@ -550,6 +550,26 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  optional: true
+  source_file_dependencies:
+  - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  commands:
+    - pytest -v -s tests/kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s tests/kernels/moe/test_deepgemm.py
+    - pytest -v -s tests/kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s tests/kernels/attention/test_deepgemm_attention.py
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
