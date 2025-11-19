@@ -65,7 +65,7 @@ def maybe_exclude_tp_rank_for_mla_models(
     world_size: int,
     rank: int,
     vllm_config: VllmConfig,
-) -> int:
+) -> tuple[int, int]:
     """
     Convert the rank for the MLA.
     """
