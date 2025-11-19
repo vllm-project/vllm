@@ -3,7 +3,6 @@
 """Utils for model executor."""
 
 import copy
-from types import MethodType
 from typing import Any
 
 import torch
@@ -71,12 +70,6 @@ def replace_parameter(layer: torch.nn.Module, param_name: str, new_data: torch.T
 
     if hasattr(old_param, "weight_loader"):
         weight_loader = old_param.weight_loader
-        if isinstance(weight_loader, MethodType):
-            raise NotImplementedError(
-                "Replacement with weight loader methods is not currently supported, "
-                "but could be via rebinding"
-            )
-
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
