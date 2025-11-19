@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_USE_TRITON_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -646,6 +647,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
     )
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
+    else None,
+    # If set, vllm will use triton sampler. This will override the flashinfer sampler.
+    "VLLM_USE_TRITON_SAMPLER": lambda: bool(
+        int(os.environ.get("VLLM_USE_TRITON_SAMPLER", "0"))
+    )
+    if "VLLM_USE_TRITON_SAMPLER" in os.environ
     else None,
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -1568,6 +1575,7 @@ def compute_hash() -> str:
         "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_USE_TRITON_SAMPLER",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_MOE_USE_DEEP_GEMM",
