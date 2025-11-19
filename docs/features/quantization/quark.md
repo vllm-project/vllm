@@ -306,7 +306,7 @@ As examples, we provide some ready-to-use quantized mixed precision model to sho
 
 ### 2. inference the quantized mixed precision model in vLLM
 
-Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follow:
+Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follows:
 
 ```bash
 lm_eval --model vllm \

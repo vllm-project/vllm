@@ -1506,7 +1506,7 @@ class EngineArgs:
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be spefified if "
+                "data_parallel_rank or node_rank must be specified if "
                 "data_parallel_external_lb is enable."
             )
             assert self.data_parallel_size_local in (1, None), (
