@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Literal, get_args, overload
+from typing import Literal, cast, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -192,6 +192,42 @@ def determine_expert_map(
     return (local_num_experts, expert_map, expert_mask)
 
 
+def determine_expert_placement_strategy(
+    expert_placement_strategy: ExpertPlacementStrategy,
+    moe_parallel_config: FusedMoEParallelConfig,
+    num_expert_group: int | None,
+    num_redundant_experts: int,
+    enable_eplb: bool,
+) -> ExpertPlacementStrategy:
+    if expert_placement_strategy == "round_robin":
+        round_robin_supported = (
+            (num_expert_group is not None and num_expert_group > 1)
+            and num_redundant_experts == 0
+            and not enable_eplb
+        )
+
+        if not round_robin_supported:
+            logger.warning(
+                "Round-robin expert placement is only supported for "
+                "models with multiple expert groups and no redundant "
+                "experts. Falling back to linear expert placement."
+            )
+            return "linear"
+        if (
+            moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.use_deepep_ll_kernels
+        ):
+            logger.warning(
+                "Round-robin expert placement currently only supports "
+                "the DeepEP low-latency backend, but '%s' was configured. "
+                "Falling back to linear expert placement.",
+                moe_parallel_config.all2all_backend,
+            )
+            return "linear"
+
+    return expert_placement_strategy
+
+
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     """
     Compresses the expert map by removing any -1 entries.
@@ -335,8 +371,8 @@ class FusedMoE(CustomOp):
             logger.info_once("Disabling MoE shared_experts cuda stream")
             self.shared_experts_stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda.
-            # aux_stream() returns None on non-cuda platforms.
+            # TODO(rob): enable shared expert overlap with non-cuda-alike.
+            # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
                 logger.info_once("Enabled separate cuda stream for MoE shared_experts")
@@ -400,6 +436,9 @@ class FusedMoE(CustomOp):
         self.expert_load_view: torch.Tensor | None = None
         self.logical_to_physical_map: torch.Tensor | None = None
         self.logical_replica_count: torch.Tensor | None = None
+        self.expert_placement_strategy: ExpertPlacementStrategy = (
+            vllm_config.parallel_config.expert_placement_strategy
+        )
 
         # ROCm aiter shared experts fusion
         self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
@@ -433,38 +472,27 @@ class FusedMoE(CustomOp):
                     "Redundant experts are only supported with EPLB."
                 )
 
-            expert_placement_strategy = (
-                vllm_config.parallel_config.expert_placement_strategy
+            self.expert_placement_strategy = determine_expert_placement_strategy(
+                expert_placement_strategy=self.expert_placement_strategy,
+                moe_parallel_config=self.moe_parallel_config,
+                num_expert_group=num_expert_group,
+                num_redundant_experts=num_redundant_experts,
+                enable_eplb=self.enable_eplb,
             )
-            if expert_placement_strategy == "round_robin":
-                # TODO(Bruce): will support round robin expert placement with
-                # EPLB enabled in the future.
-                round_robin_supported = (
-                    (num_expert_group is not None and num_expert_group > 1)
-                    and num_redundant_experts == 0
-                    and not self.enable_eplb
-                )
-
-                if not round_robin_supported:
-                    logger.warning(
-                        "Round-robin expert placement is only supported for "
-                        "models with multiple expert groups and no redundant "
-                        "experts. Falling back to linear expert placement."
-                    )
-                    expert_placement_strategy = "linear"
 
             self.expert_map: torch.Tensor | None
             local_num_experts, expert_map, expert_mask = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
-                expert_placement_strategy=expert_placement_strategy,
+                expert_placement_strategy=self.expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
+            self._maybe_init_expert_routing_tables()
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
                 "placement strategy: %s. Local/global"
@@ -472,7 +500,7 @@ class FusedMoE(CustomOp):
                 " %s.",
                 self.ep_rank,
                 self.ep_size,
-                expert_placement_strategy,
+                self.expert_placement_strategy,
                 self.local_num_experts,
                 self.global_num_experts,
                 get_compressed_expert_map(self.expert_map),
@@ -624,7 +652,12 @@ class FusedMoE(CustomOp):
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
         self.ensure_moe_quant_config_init()
-        prepare_finalize = self.quant_method.maybe_make_prepare_finalize()
+        # routing_tables only needed for round-robin expert placement with
+        # DeepEP all2all backend.
+        routing_tables = self._maybe_init_expert_routing_tables()
+        prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
+            routing_tables=routing_tables
+        )
         if prepare_finalize is not None:
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
@@ -706,6 +739,84 @@ class FusedMoE(CustomOp):
         # By default, router/gate is called before FusedMoE forward pass
         return False
 
+    def _maybe_init_expert_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        # Currently routing_tables only needed for round-robin expert placement
+        # with DeepEP-ll all2all backend.
+        if (
+            self.expert_placement_strategy != "round_robin"
+            or not self.use_deepep_ll_kernels
+        ):
+            return None
+
+        if hasattr(self, "expert_global_to_physical"):
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                (
+                    self.expert_global_to_physical,
+                    self.expert_physical_to_global,
+                    self.expert_local_to_global,
+                ),
+            )
+
+        if self.expert_map is None:
+            return None
+
+        routing_tables = self.ensure_round_robin_expert_routing_tables(
+            global_num_experts=self.global_num_experts,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            local_num_experts=self.local_num_experts,
+            device=self.expert_map.device,
+        )
+
+        global_to_physical, physical_to_global, local_global = routing_tables
+        self.register_buffer("expert_global_to_physical", global_to_physical)
+        self.register_buffer("expert_physical_to_global", physical_to_global)
+        self.register_buffer("expert_local_to_global", local_global)
+
+        return routing_tables
+
+    @staticmethod
+    def ensure_round_robin_expert_routing_tables(
+        global_num_experts: int,
+        ep_size: int,
+        ep_rank: int,
+        local_num_experts: int,
+        device: torch.device | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        device_kwargs = {"device": device} if device is not None else {}
+        global_indices = torch.arange(
+            global_num_experts, dtype=torch.long, **device_kwargs
+        )
+        owner = torch.remainder(global_indices, ep_size)
+        local_index = torch.div(global_indices, ep_size, rounding_mode="floor")
+        base = global_num_experts // ep_size
+        remainder = global_num_experts % ep_size
+        physical_offset = owner * base
+        if remainder > 0:
+            remainder_tensor = torch.tensor(
+                remainder, dtype=torch.long, **device_kwargs
+            )
+            physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
+
+        global_to_physical = physical_offset + local_index
+        physical_to_global = torch.empty_like(global_to_physical)
+        physical_to_global[global_to_physical] = global_indices
+
+        local_global = torch.arange(
+            ep_rank,
+            global_num_experts,
+            ep_size,
+            dtype=torch.long,
+            **device_kwargs,
+        )
+        if local_global.numel() != local_num_experts:
+            local_global = local_global[:local_num_experts]
+
+        return (global_to_physical, physical_to_global, local_global)
+
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
@@ -714,12 +825,14 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self.expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
+            self._maybe_init_expert_routing_tables()
             if self.aiter_fmoe_shared_expert_enabled:
                 self._init_aiter_shared_experts_topK_buffer(
                     vllm_config=get_current_vllm_config(),
@@ -1755,6 +1868,11 @@ class FusedMoE(CustomOp):
                 hidden_states_combined, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
+            # Run shared experts before matrix multiply.
+            # because matrix multiply maybe modify the hidden_states.
+            if has_separate_shared_experts and not use_shared_experts_stream:
+                assert self.shared_experts is not None
+                shared_output = self.shared_experts(hidden_states)
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1798,8 +1916,6 @@ class FusedMoE(CustomOp):
                         # conflict with the main stream
                         shared_output = self.shared_experts(hidden_states_clone)
                     current_stream().wait_stream(self.shared_experts_stream)
-                else:
-                    shared_output = self.shared_experts(hidden_states)
 
                 final_hidden_states = (
                     shared_output,
