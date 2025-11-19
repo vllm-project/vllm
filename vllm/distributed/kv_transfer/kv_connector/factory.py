@@ -180,6 +180,11 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "MoRIIOConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio_connector",
+    "MoRIIOConnector")
+
+KVConnectorFactory.register_connector(
     "OffloadingConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
     "OffloadingConnector",
