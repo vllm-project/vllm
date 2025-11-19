@@ -85,6 +85,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        global_to_physical: torch.Tensor | None = None,
+        physical_to_global: torch.Tensor | None = None,
+        local_expert_global_ids: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -96,6 +99,17 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+
+        topk_indices_dtype = self.topk_indices_dtype()
+
+        def _maybe_cast(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            if tensor is None or topk_indices_dtype is None:
+                return tensor
+            return tensor.to(dtype=topk_indices_dtype)
+
+        self.global_to_physical = _maybe_cast(global_to_physical)
+        self.physical_to_global = _maybe_cast(physical_to_global)
+        self.local_expert_global_ids = _maybe_cast(local_expert_global_ids)
 
         # We don't have enough information to determine if we should dispatch
         # activation scales in a packed ue8m0 format during object construction
@@ -135,6 +149,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
+
+    def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.global_to_physical is None:
+            return topk_ids
+        return self.global_to_physical[topk_ids]
+
+    def _map_local_to_global_ids(self, expert_topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.local_expert_global_ids is None:
+            return expert_topk_ids
+        return self.local_expert_global_ids[expert_topk_ids]
 
     def _do_quant(
         self,
@@ -226,9 +250,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
             a1,
-            topk_ids,
+            dispatch_topk_ids,
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
@@ -313,11 +338,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
+        combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
-            topk_ids,
+            combine_topk_ids,
             combine_topk_weights,
             handle,
             async_finish=False,
