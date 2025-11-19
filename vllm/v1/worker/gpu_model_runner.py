@@ -1451,9 +1451,12 @@ class GPUModelRunner(
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs
         ]
-        dcp_local_seq_lens = (
-            self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
-        )
+
+        dcp_local_seq_lens, dcp_local_seq_lens_cpu = None, None
+        if self.dcp_world_size > 1:
+            dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs]
+            dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs]
+
         spec_decode_common_attn_metadata = None
 
         if for_cudagraph_capture:
@@ -1521,6 +1524,7 @@ class GPUModelRunner(
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
                 dcp_local_seq_lens=dcp_local_seq_lens,
+                dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:

@@ -92,6 +92,7 @@ class CommonAttentionMetadata:
     encoder_seq_lens: np.ndarray | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
 
