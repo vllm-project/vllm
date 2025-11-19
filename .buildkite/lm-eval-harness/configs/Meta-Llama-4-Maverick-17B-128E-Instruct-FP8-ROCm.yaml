@@ -7,9 +7,11 @@ tasks:
   - name: "exact_match,custom-extract"
     value: 0.80
 limit: 250 # will run on 250 * 14 subjects = 3500 samples
+num_fewshot: 5
+rtol: 0.05
+
 batch_size: 16
 max_model_len: 131072
-num_fewshot: 5
 vllm_args:
   gpu_memory_utilization: 0.80
 env_vars:
