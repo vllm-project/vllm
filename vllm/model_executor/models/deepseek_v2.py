@@ -991,8 +991,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 rotary_dim=qk_rope_head_dim,
                 max_position=max_position_embeddings,
-                base=rope_theta,
-                rope_scaling=rope_scaling,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=True,
             )
             self.indexer = Indexer(
