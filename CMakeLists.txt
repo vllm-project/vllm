@@ -875,7 +875,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
     set(SRCS
        "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
-       "csrc/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu")
+       "csrc/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
+       )
 
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
