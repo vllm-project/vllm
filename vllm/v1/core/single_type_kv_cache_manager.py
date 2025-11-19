@@ -233,6 +233,8 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
+            dcp_world_size: The world size of decode context parallelism.
+            pcp_world_size: The world size of prefill context parallelism.
             alignment: The returned cache hit length should be a multiple of
             this length.
 
@@ -313,7 +315,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
@@ -529,6 +531,10 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
+            dcp_world_size: The world size of decode context parallelism.
+            pcp_world_size: The world size of prefill context parallelism.
+            alignment: The returned cache hit length should be a multiple of
+            this length.
 
         Returns:
             A list of cached blocks
