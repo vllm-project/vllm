@@ -213,12 +213,10 @@ def apply_top_k_top_p(
         # non-associativity of floating-points yields different sum(exp(logits)).
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        print(f"original probs_sum {probs_sum[:, -100:]}")
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
-        print(f"original logits_sort {logits_sort[:, -100:]}")
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
@@ -361,7 +359,7 @@ def apply_top_k_top_p_triton(
         return logits
     if p is None and k is not None:
         return apply_top_k_only_triton(logits, k)
-    # Fallback to torch for small batch sizes for top-p
+    # Fallback to torch for small batch sizes or small vocab sizes for top-p
     if logits.shape[0] < 16 or logits.shape[1] < 32768:
         return apply_top_k_top_p(logits, k, p)
     return apply_top_k_top_p_filtered(logits, k, p)
@@ -538,12 +536,6 @@ def apply_top_k_only_triton(
 
 @triton.jit
 def top_k_top_p_filter(
-    DO_DEDUPLICATE,
-    NUM_DUPLICATES_REMOVED,
-    NUM_DUPLICATES,
-    MIN_LARGER_P_FIL_PIVOT,
-    FILTERED_LOGITS_NO_TOP_K,
-    PFIL_PIVOT,
     LOGITS,
     DO_TOP_K,
     K,
@@ -554,7 +546,6 @@ def top_k_top_p_filter(
     FILTERED_LOGITS,
     FILTERED_INDICES,
     FILTERED_PROBS,
-    NUM_FILTERED,
     PERCENTILE_TO_STD_TABLE,
     VOCAB_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -843,9 +834,9 @@ def top_k_top_p_filter(
         write_pos = tl.zeros((), dtype=tl.int32)
         sum_excluded_probs = tl.zeros((), dtype=tl.float32)
         num_duplicates_removed = tl.zeros((), dtype=tl.uint32)
-        FILTERED_LOGITS_ROW = FILTERED_LOGITS + row_id * (P_FIL + 5)
-        FILTERED_INDICES_ROW = FILTERED_INDICES + row_id * (P_FIL + 5)
-        FILTERED_PROBS_ROW = FILTERED_PROBS + row_id * (P_FIL + 5)
+        FILTERED_LOGITS_ROW = FILTERED_LOGITS + row_id * P_FIL
+        FILTERED_INDICES_ROW = FILTERED_INDICES + row_id * P_FIL
+        FILTERED_PROBS_ROW = FILTERED_PROBS + row_id * P_FIL
         for i in range(0, NUM_TILES):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask_n = offs_n < VOCAB_SIZE
@@ -870,13 +861,6 @@ def top_k_top_p_filter(
             f_mask = keep_mask
             write_idx = tl.where(f_mask, cpos, P_FIL)
 
-            FILTERED_LOGITS_NO_TOP_K_ROW = FILTERED_LOGITS_NO_TOP_K + row_id * (
-                P_FIL + 5
-            )
-            tl.store(
-                FILTERED_LOGITS_NO_TOP_K_ROW + write_idx, logits_blk, mask=keep_mask
-            )
-
             top_k_mask = (logits_blk > k_pivot) & mask_n
             logits_blk = tl.where(top_k_mask, logits_blk, -float("inf"))
 
@@ -887,13 +871,7 @@ def top_k_top_p_filter(
 
             sum_excluded_probs += tl.sum(probs_blk * (keep_mask & (~f_mask) & mask_n))
             write_pos += tl.sum(f_mask, dtype=tl.int32)
-        tl.store(PFIL_PIVOT + row_id, p_fil_pivot)
         tl.store(SUM_EXCLUDED_PROBS + row_id, sum_excluded_probs)
-        tl.store(NUM_FILTERED + row_id, write_pos)
-        tl.store(NUM_DUPLICATES_REMOVED + row_id, num_duplicates_removed)
-        tl.store(NUM_DUPLICATES + row_id, num_min_larger_p_fil_pivot)
-        tl.store(MIN_LARGER_P_FIL_PIVOT + row_id, min_larger_p_fil_pivot)
-        tl.store(DO_DEDUPLICATE + row_id, do_deduplicate)
 
 
 def apply_top_k_top_p_filtered(
@@ -908,14 +886,16 @@ def apply_top_k_top_p_filtered(
 
     # If k is too large, speedup is not significant as the filtered set is large.
     max_k = k.max().item() if k is not None else 0
-    # Our softmax result is different from the original PyTorch top-p implementation ,
-    # as it runs softmax after a sort which produces different sum(exp(logits))
-    # compared to our softmax result which runs softmax on the original unsorted logits.
+
+    # Our softmax result is different from the original PyTorch top-p implementation
+    # which runs softmax after a sort compared to our softmax result which runs
+    # softmax on the original unsorted logits, yielding different sum(exp(logits))
+    # values due to the non-associativity of floating-points.
     # If p is too large, the top-p cutoff falls in the tail section of the distribution,
     # which consists of very small probabilities which has larger relative errors
-    # compared to the sorted PyTorch top-p probabilities. As such, we fallback to
+    # compared to the original PyTorch top-p probabilities. As such, we fallback to
     # the original PyTorch top-p implementation for accuracy when p is too large.
-    if max_k > vocab_size / 10 or (k is None and p.max().item() > 0.97):
+    if max_k > vocab_size / 4 or (k is None and p.max().item() > 0.995):
         return apply_top_k_top_p(logits, k, p)
 
     BLOCK_SIZE = 8192
@@ -930,44 +910,20 @@ def apply_top_k_top_p_filtered(
         min(int(max_k * 1.5), vocab_size - 1) if k is not None else int(vocab_size / 32)
     )
     filtered_logits = torch.full(
-        (batch_size, p_filter + 5), -float("inf"), device=logits.device
+        (batch_size, p_filter), -float("inf"), device=logits.device
     )
-    filtered_logits_no_top_k = torch.full(
-        (batch_size, p_filter + 5), -float("inf"), device=logits.device
-    )
-
     filtered_indices = torch.full(
-        (batch_size, p_filter + 5), p_filter, dtype=torch.int64, device=logits.device
+        (batch_size, p_filter), p_filter, dtype=torch.int64, device=logits.device
     )
-    filtered_probs = torch.full((batch_size, p_filter + 5), 0.0, device=logits.device)
+    filtered_probs = torch.full((batch_size, p_filter), 0.0, device=logits.device)
     sum_excluded_probs = torch.zeros(
         (batch_size,), device=logits.device, dtype=torch.float32
     )
-    num_duplicates = torch.zeros(
-        (batch_size,), device=logits.device, dtype=torch.uint32
-    )
-    min_larger_p_fil_pivot = torch.zeros(
-        (batch_size,), device=logits.device, dtype=torch.float32
-    )
-    num_duplicates_removed = torch.zeros(
-        (batch_size,), device=logits.device, dtype=torch.uint32
-    )
-    do_deduplicate = torch.zeros(
-        (batch_size,), device=logits.device, dtype=torch.uint32
-    )
-    num_filtered = torch.zeros((batch_size,), device=logits.device, dtype=torch.int32)
-    pfil_pivot = torch.zeros((batch_size,), device=logits.device, dtype=torch.float32)
     PERCENTILE_TO_STD_TABLE = torch.tensor(
         _PERCENTILE_TO_STD_TABLE, device=logits.device
     )
 
     top_k_top_p_filter[(NUM_PROGRAMS,)](
-        do_deduplicate,
-        num_duplicates_removed,
-        num_duplicates,
-        min_larger_p_fil_pivot,
-        filtered_logits_no_top_k,
-        pfil_pivot,
         logits,
         (k is not None),
         k if k is not None else filtered_indices,
@@ -978,34 +934,12 @@ def apply_top_k_top_p_filtered(
         filtered_logits,
         filtered_indices,
         filtered_probs,
-        num_filtered,
         PERCENTILE_TO_STD_TABLE,
         VOCAB_SIZE=vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=NUM_WARPS,
         num_stages=NUM_STAGES,
     )
-
-    # print(f"p {p}")
-    # print(f"p_filter {p_filter}")
-    # print(f"do_deduplicate {do_deduplicate}")
-    # print(f"num_duplicates_removed {num_duplicates_removed}")
-    # print(f"num_duplicates {num_duplicates}")
-    # print(f"min_larger_p_fil_pivot {min_larger_p_fil_pivot}")
-    # print(f"num_filtered {num_filtered}")
-    # print(f"pfil_pivot {pfil_pivot}")
-    # print(f"Filtered logits no top k {filtered_logits_no_top_k}")
-    # print(f"Filtered logits {filtered_logits}")
-    # print(f"Filtered indices {filtered_indices}")
-    # print(f"Filtered probs {filtered_probs}")
-    # print(f"Sum excluded probs {sum_excluded_probs}")
-
-    filtered_logits = filtered_logits[:, :p_filter]
-    filtered_indices = filtered_indices[:, :p_filter]
-    filtered_probs = filtered_probs[:, :p_filter]
-
-    if torch.any(num_filtered != p_filter):
-        print(f"num_filtered != p_filter: {num_filtered} != {p_filter}")
 
     if torch.any(sum_excluded_probs >= p):
         return apply_top_k_top_p(logits, k, p)
@@ -1014,22 +948,11 @@ def apply_top_k_top_p_filtered(
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
     sorted_probs = torch.gather(filtered_probs, -1, sort_indices)
 
-    torch.set_printoptions(threshold=float("inf"))
-    print("logits_sort", logits_sort[:, -100:])
-    print("sorted_probs", sorted_probs[:, -100:])
-    print("logits_sort_indices", logits_sort_indices[:, -100:])
-    torch.set_printoptions(threshold=None)
-
     sorted_probs[:, 0] = sorted_probs[:, 0] + sum_excluded_probs
     probs_sum = torch.cumsum(sorted_probs, dim=-1)
-    print("probs_sum", probs_sum[:, -100:])
     top_p_mask = probs_sum <= (1 - p.unsqueeze(dim=-1))
-    print("threashold", 1 - p.unsqueeze(dim=-1))
     top_p_mask[:, -1] = False
-    print("top_p_mask", top_p_mask[:, -100:])
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
-    print("logits_sort_masked", logits_sort[:, -100:])
 
     logits.fill_(-float("inf"))
     logits.scatter_(dim=1, index=logits_sort_indices, src=logits_sort)
