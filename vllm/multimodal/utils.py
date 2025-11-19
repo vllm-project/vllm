@@ -304,7 +304,6 @@ class MediaConnector:
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
-        # Check if direct URL loading is enabled
         direct_url_loading = self.media_io_kwargs.get("video", {}).get(
             "direct_url_loading", False
         )
@@ -324,7 +323,6 @@ class MediaConnector:
                         f"{envs.VLLM_VIDEO_FETCH_TIMEOUT} seconds"
                     ) from e
 
-        # Default: download to bytes
         return self.load_from_url(
             video_url,
             video_io,
@@ -347,7 +345,6 @@ class MediaConnector:
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
-        # Check if direct URL loading is enabled
         direct_url_loading = self.media_io_kwargs.get("video", {}).get(
             "direct_url_loading", False
         )
@@ -371,7 +368,6 @@ class MediaConnector:
                     f"{envs.VLLM_VIDEO_FETCH_TIMEOUT} seconds"
                 ) from e
 
-        # Default: download to bytes
         return await self.load_from_url_async(
             video_url,
             video_io,
