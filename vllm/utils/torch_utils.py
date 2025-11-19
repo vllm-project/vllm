@@ -426,8 +426,7 @@ def aux_stream() -> torch.cuda.Stream | None:
 
     from vllm.platforms import current_platform
 
-    # TODO: validate this works properly on ROCm platform.
-    if _aux_stream is None and current_platform.is_cuda():
+    if _aux_stream is None and current_platform.is_cuda_alike():
         _aux_stream = torch.cuda.Stream()
 
     return _aux_stream
