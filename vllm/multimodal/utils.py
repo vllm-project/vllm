@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioMediaIO
+from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
@@ -341,6 +341,17 @@ class MediaConnector:
         image_embedding_io = ImageEmbeddingMediaIO()
 
         return image_embedding_io.load_base64("", data)
+
+    def fetch_audio_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load audio embedding from a URL.
+        """
+        audio_embedding_io = AudioEmbeddingMediaIO()
+
+        return audio_embedding_io.load_base64("", data)
 
 
 def encode_audio_base64(
