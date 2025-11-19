@@ -1219,11 +1219,16 @@ def _report_kv_cache_config(
         // len(kv_cache_config.kv_cache_groups)
         * min_block_size
     )
-    if vllm_config.parallel_config.decode_context_parallel_size > 1:
-        num_tokens *= vllm_config.parallel_config.decode_context_parallel_size
+    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size * dcp_size > 1:
+        num_tokens *= pcp_size * dcp_size
         logger.info(
-            "Multiplying the GPU KV cache size by the dcp_world_size %d.",
-            vllm_config.parallel_config.decode_context_parallel_size,
+            "Multiplying the GPU KV cache size by the cp_world_size %d "
+            "(pcp_world_size %d * dcp_world_size %d).",
+            pcp_size * dcp_size,
+            pcp_size,
+            dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
     logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
