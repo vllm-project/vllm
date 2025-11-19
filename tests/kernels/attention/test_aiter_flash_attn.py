@@ -8,6 +8,12 @@ import torch
 import vllm.v1.attention.backends.rocm_aiter_fa  # noqa: F401
 from vllm.platforms import current_platform
 
+from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
+
+if not is_flash_attn_varlen_func_available():
+    pytest.skip("flash_attn_varlen_func required to run this test.",
+            allow_module_level=True)
+
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
