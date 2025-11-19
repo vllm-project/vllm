@@ -71,10 +71,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
-    Qwen2_5_VisionBlock,
-    Qwen2_5_VisionPatchEmbed,
-    Qwen2_5_VisionPatchMerger,
-    Qwen2_5_VisionRotaryEmbedding,
+    Qwen2_5_VisionTransformer,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -289,33 +286,191 @@ class OpenCUAVisionTransformer(nn.Module):
         total_seq_len = t * llm_h * llm_w
         logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: llm_h={llm_h}, llm_w={llm_w}, total_seq_len={total_seq_len}")
         
-        # Create 1D positions in row-major order to preserve spatial structure
-        # This matches Qwen2.5-VL's pattern but uses sequential positions
-        # For each frame t: positions go from (h=0, w=0) to (h=llm_h-1, w=llm_w-1)
-        # Position calculation: pos = t * (llm_h * llm_w) + h * llm_w + w
-        # This is equivalent to flattening a 3D grid (t, llm_h, llm_w) in row-major order
-        pos_1d = torch.arange(total_seq_len, dtype=torch.long)
-        # pos_1d shape: (total_seq_len,)
+        # Create 1D positions matching Qwen2.5-VL's spatial merge ordering exactly
+        # Qwen2.5-VL uses hpos_ids and wpos_ids with specific reshape/permute pattern
+        # We need to match this ordering for 1D-RoPE to preserve spatial relationships
+        # 
+        # Qwen2.5-VL pattern (using original h, w):
+        # 1. Create hpos_ids and wpos_ids as 2D grids of size (h, w)
+        # 2. Reshape to [h // spatial_merge_size, spatial_merge_size, w // spatial_merge_size, spatial_merge_size]
+        # 3. Permute to [h // spatial_merge_size, w // spatial_merge_size, spatial_merge_size, spatial_merge_size]
+        # 4. Flatten to get the spatial merge order
+        #
+        # For 1D-RoPE, we create positions that match this spatial merge order
+        # Use original h, w like Qwen2.5-VL does
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        
+        # Match Qwen2.5-VL's reshape/permute pattern exactly
+        hpos_ids_reshaped = (
+            hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        wpos_ids_reshaped = (
+            wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        
+        # For 1D-RoPE, we use a single position value that preserves spatial ordering
+        # We combine h and w positions into a single 1D position
+        # CRITICAL: hpos_ids_reshaped and wpos_ids_reshaped are already in Qwen2.5-VL's
+        # spatial merge order. We need to map them to llm_h and llm_w ranges.
+        # 
+        # The issue: hpos_ids_reshaped has values like [0, 0, 1, 1, ...] which when divided
+        # by spatial_merge_size=2 gives [0, 0, 0, 0, ...], losing information.
+        # 
+        # Solution: Use hpos_ids_reshaped and wpos_ids_reshaped directly, but map them
+        # to llm_h and llm_w ranges by taking unique values from each spatial_merge_unit group.
+        # Each group of spatial_merge_unit elements has the same (hpos, wpos) values,
+        # so we can take the first element of each group.
+        
+        # Reshape to group by spatial_merge_unit: [llm_h * llm_w, spatial_merge_unit]
+        # CRITICAL: hpos_ids_reshaped and wpos_ids_reshaped are in spatial merge order,
+        # but each spatial_merge_unit group may not have identical values.
+        # We need to understand the actual pattern.
+        hpos_ids_grouped = hpos_ids_reshaped.reshape(-1, self.spatial_merge_unit)
+        wpos_ids_grouped = wpos_ids_reshaped.reshape(-1, self.spatial_merge_unit)
+        
+        # Debug: log the grouped values to understand the pattern
+        if len(hpos_ids_grouped) > 0:
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_ids_grouped[:4]={hpos_ids_grouped[:4].tolist()}, wpos_ids_grouped[:4]={wpos_ids_grouped[:4].tolist()}")
+            # Also log more groups to see if pattern changes
+            if len(hpos_ids_grouped) >= 8:
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_ids_grouped[4:8]={hpos_ids_grouped[4:8].tolist()}, wpos_ids_grouped[4:8]={wpos_ids_grouped[4:8].tolist()}")
+            # Log the original hpos_ids_reshaped pattern - check more values to see h variation
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_ids_reshaped[:32]={hpos_ids_reshaped[:32].tolist()}, wpos_ids_reshaped[:32]={wpos_ids_reshaped[:32].tolist()}")
+            # Check if h values change later - check at different llm_w positions
+            if len(hpos_ids_reshaped) >= 256:
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_ids_reshaped[128:160]={hpos_ids_reshaped[128:160].tolist()}, unique_h_count={len(torch.unique(hpos_ids_reshaped))}")
+                # Check hpos_ids_grouped at different llm_w positions to see if h changes
+                if len(hpos_ids_grouped) >= llm_w * 2:
+                    logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_ids_grouped[llm_w:llm_w+4]={hpos_ids_grouped[llm_w:llm_w+4].tolist()}, hpos_ids_grouped[llm_w*2:llm_w*2+4]={hpos_ids_grouped[llm_w*2:llm_w*2+4].tolist()}")
+        
+        # The pattern shows that within each group, values vary:
+        # hpos_ids_grouped: [[0, 0, 1, 1], [0, 0, 1, 1], ...] for llm_h=0
+        #                   [[2, 2, 3, 3], [2, 2, 3, 3], ...] for llm_h=1
+        # wpos_ids_grouped: [[0, 1, 0, 1], [2, 3, 2, 3], ...]
+        # 
+        # For 1D-RoPE, we need to create a single position value per group.
+        # The key insight: each group represents a spatial merge unit, and within
+        # each group, the h and w values represent the original patch positions
+        # before spatial merge. We need to map these to llm_h and llm_w ranges.
+        # 
+        # CRITICAL: Using min() loses information because [0, 0, 1, 1].min() = 0,
+        # which when divided by spatial_merge_size=2 gives 0, losing the distinction
+        # between different llm_h positions.
+        # 
+        # Solution: Use mean() to preserve information, but divide by spatial_merge_size
+        # BEFORE converting to long to avoid information loss:
+        # - [0, 0, 1, 1].mean() = 0.5 -> 0.5 / 2 = 0.25 -> long() = 0 (llm_h=0)
+        # - [2, 2, 3, 3].mean() = 2.5 -> 2.5 / 2 = 1.25 -> long() = 1 (llm_h=1)
+        # This correctly maps to llm_h and llm_w ranges.
+        hpos_mean = hpos_ids_grouped.float().mean(dim=1)  # Keep as float
+        wpos_mean = wpos_ids_grouped.float().mean(dim=1)  # Keep as float
+        
+        # Map to llm_h and llm_w ranges by dividing first, then converting to long
+        hpos_mapped = (hpos_mean / self.spatial_merge_size).long()
+        wpos_mapped = (wpos_mean / self.spatial_merge_size).long()
+        
+        # For debugging, also compute hpos_unique and wpos_unique (original values before mapping)
+        hpos_unique = hpos_mean.long()
+        wpos_unique = wpos_mean.long()
+        
+        # Calculate 1D positions: pos = hpos * llm_w + wpos
+        pos_1d_per_frame = hpos_mapped * llm_w + wpos_mapped
+        # pos_1d_per_frame shape: (llm_h * llm_w,)
+        
+        # Debug: log values to verify
+        if len(pos_1d_per_frame) > 0:
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_unique[:10]={hpos_unique[:10].tolist() if len(hpos_unique) >= 10 else hpos_unique.tolist()}, wpos_unique[:10]={wpos_unique[:10].tolist() if len(wpos_unique) >= 10 else wpos_unique.tolist()}")
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_mapped[:10]={hpos_mapped[:10].tolist() if len(hpos_mapped) >= 10 else hpos_mapped.tolist()}, wpos_mapped[:10]={wpos_mapped[:10].tolist() if len(wpos_mapped) >= 10 else wpos_mapped.tolist()}")
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: pos_1d_per_frame[:10]={pos_1d_per_frame[:10].tolist() if len(pos_1d_per_frame) >= 10 else pos_1d_per_frame.tolist()}, max={pos_1d_per_frame.max().item()}")
+            # Check hpos_unique and hpos_mapped at different llm_w positions to verify h changes
+            if len(hpos_unique) >= llm_w * 2:
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_unique[llm_w:llm_w+10]={hpos_unique[llm_w:llm_w+10].tolist() if len(hpos_unique) >= llm_w+10 else 'N/A'}, hpos_unique[llm_w*2:llm_w*2+10]={hpos_unique[llm_w*2:llm_w*2+10].tolist() if len(hpos_unique) >= llm_w*2+10 else 'N/A'}")
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: hpos_mapped[llm_w:llm_w+10]={hpos_mapped[llm_w:llm_w+10].tolist() if len(hpos_mapped) >= llm_w+10 else 'N/A'}, hpos_mapped[llm_w*2:llm_w*2+10]={hpos_mapped[llm_w*2:llm_w*2+10].tolist() if len(hpos_mapped) >= llm_w*2+10 else 'N/A'}")
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: pos_1d_per_frame[llm_w:llm_w+10]={pos_1d_per_frame[llm_w:llm_w+10].tolist() if len(pos_1d_per_frame) >= llm_w+10 else 'N/A'}, pos_1d_per_frame[llm_w*2:llm_w*2+10]={pos_1d_per_frame[llm_w*2:llm_w*2+10].tolist() if len(pos_1d_per_frame) >= llm_w*2+10 else 'N/A'}")
+        
+        # CRITICAL: Qwen2.5-VL calculates positions from h * w (before spatial merge),
+        # then groups by spatial_merge_unit. We need to do the same.
+        # 
+        # Qwen2.5-VL approach:
+        # 1. Calculate positions for h * w patches (before merge) -> h * w positions
+        # 2. Repeat for t frames -> t * h * w positions
+        # 3. Group by spatial_merge_unit -> (t * h * w // spatial_merge_unit, spatial_merge_unit) = (t * llm_h * llm_w, spatial_merge_unit)
+        #
+        # Our approach should match:
+        # 1. Calculate 1D positions for h * w patches (before merge) -> h * w positions
+        # 2. Repeat for t frames -> t * h * w positions
+        # 3. Group by spatial_merge_unit -> (t * h * w // spatial_merge_unit, spatial_merge_unit) = (t * llm_h * llm_w, spatial_merge_unit)
+        #
+        # The key insight: we need to calculate positions for the ORIGINAL h * w grid,
+        # not the merged llm_h * llm_w grid. The positions should reflect the original
+        # spatial structure before merging.
+        #
+        # hpos_ids_reshaped and wpos_ids_reshaped are already in Qwen2.5-VL's spatial merge order
+        # and have length h * w. We can use them directly to create 1D positions.
+        # For 1D-RoPE, we combine h and w into a single position: pos = hpos * w + wpos
+        # This preserves the spatial ordering while using a single dimension.
+        
+        # Calculate 1D positions directly from hpos_ids_reshaped and wpos_ids_reshaped
+        # This matches Qwen2.5-VL's approach but uses 1D positions instead of 2D
+        # 
+        # Qwen2.5-VL: Uses 2D positions (hpos_ids_reshaped, wpos_ids_reshaped) directly
+        # with max(h, w) sized RoPE cache. For 1D-RoPE, we combine them into a single
+        # 1D position: pos = hpos * max_size + wpos, where max_size = max(h, w)
+        # This preserves the spatial ordering while using 1D positions.
+        #
+        # CRITICAL: Use max(h, w) like Qwen2.5-VL does, not the mapped llm_h/llm_w ranges.
+        # This ensures the position values match Qwen2.5-VL's range exactly.
+        max_size = max(h, w)
+        pos_1d_per_frame_full = hpos_ids_reshaped * max_size + wpos_ids_reshaped
+        # pos_1d_per_frame_full shape: (h * w,)
+        
+        # Debug: log pos_1d_per_frame_full values
+        if len(pos_1d_per_frame_full) > 0:
+            logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: pos_1d_per_frame_full[:10]={pos_1d_per_frame_full[:10].tolist()}, max={pos_1d_per_frame_full.max().item()}, min={pos_1d_per_frame_full.min().item()}")
+            if len(pos_1d_per_frame_full) >= 32:
+                logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: pos_1d_per_frame_full[128:160]={pos_1d_per_frame_full[128:160].tolist()}")
+        
+        # Repeat for each frame t
+        pos_1d = pos_1d_per_frame_full.repeat(t)
+        # pos_1d shape: (t * h * w,)
         
         # Generate RoPE embeddings for these positions
-        # Use max position to ensure cache is large enough (same as Qwen2.5-VL uses max(h, w))
-        max_pos = total_seq_len
+        # CRITICAL: For 1D-RoPE, pos_1d = hpos * max_size + wpos, so the maximum value
+        # is (h-1) * max_size + (w-1), which is much larger than max_size.
+        # We need to use the actual maximum position value, not max_size.
+        max_pos = pos_1d.max().item() + 1 if len(pos_1d) > 0 else max_size
+        logger.info(f"[OpenCUA DEBUG] rotary_pos_emb_1d_thw: max_size={max_size}, max_pos={max_pos}, pos_1d.max()={pos_1d.max().item() if len(pos_1d) > 0 else 'N/A'}")
         rotary_pos_emb_full = self.rotary_pos_emb_1d(max_pos)
         # rotary_pos_emb_full shape: (max_pos, rotary_dim)
         
         # Index into the full RoPE cache using our 1D positions
         rotary_pos_emb_1d = rotary_pos_emb_full[pos_1d]
-        # rotary_pos_emb_1d shape: (total_seq_len, rotary_dim)
+        # rotary_pos_emb_1d shape: (t * h * w, rotary_dim)
         
         # Match Qwen2.5-VL's exact structure:
-        # Qwen2.5-VL: [N, 2*rotary_dim] -> reshape to [N // spatial_merge_unit, spatial_merge_unit, 2*rotary_dim]
-        # OpenCUA: [N, rotary_dim] -> reshape to [N // spatial_merge_unit, spatial_merge_unit, rotary_dim]
-        # This matches Qwen2.5-VL's reshape pattern exactly
+        # Qwen2.5-VL: [t * h * w, 2*rotary_dim] -> reshape to [t * h * w // spatial_merge_unit, spatial_merge_unit, 2*rotary_dim]
+        # OpenCUA: [t * h * w, rotary_dim] -> reshape to [t * h * w // spatial_merge_unit, spatial_merge_unit, rotary_dim]
+        # where t * h * w // spatial_merge_unit = t * llm_h * llm_w
         rotary_pos_emb_reshaped = rotary_pos_emb_1d.reshape(
             rotary_pos_emb_1d.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
             -1,
-        )  # (total_seq_len // spatial_merge_unit, spatial_merge_unit, rotary_dim)
+        )  # (t * h * w // spatial_merge_unit, spatial_merge_unit, rotary_dim) = (t * llm_h * llm_w, spatial_merge_unit, rotary_dim)
         
         return rotary_pos_emb_reshaped
 
@@ -337,23 +492,21 @@ class OpenCUAVisionTransformer(nn.Module):
         # Generate 1D-RoPE with spatial_merge_unit expansion
         # This matches Qwen2.5-VL's rotary_pos_emb_thw structure
         rotary_pos_emb_thw = self.rotary_pos_emb_1d_thw(t, h, w)
-        # rotary_pos_emb_thw shape: (total_seq_len // spatial_merge_unit, spatial_merge_unit, rotary_dim)
+        # rotary_pos_emb_thw shape: (t * llm_h * llm_w, spatial_merge_unit, rotary_dim)
         
-        # CRITICAL: window_index_thw has values in range [0, total_seq_len - 1],
-        # but rotary_pos_emb_thw has first dimension = total_seq_len // spatial_merge_unit.
-        # We need to divide window_index_thw by spatial_merge_unit to match the indexing.
-        # This matches Qwen2.5-VL's behavior exactly.
-        window_index_thw_scaled = window_index_thw // self.spatial_merge_unit
+        # CRITICAL: window_index_thw has values in range [0, grid_t * llm_h * llm_w - 1],
+        # and rotary_pos_emb_thw has first dimension = t * llm_h * llm_w (after our fix).
+        # So they should match exactly now. Use window_index_thw directly like Qwen2.5-VL.
         
         # Debug logging to verify shapes match
-        logger.info(f"[OpenCUA DEBUG] get_rope_by_thw: rotary_pos_emb_thw.shape={rotary_pos_emb_thw.shape}, window_index_thw.shape={window_index_thw.shape}, window_index_thw.max()={window_index_thw.max() if len(window_index_thw) > 0 else 'N/A'}, window_index_thw_scaled.max()={window_index_thw_scaled.max() if len(window_index_thw_scaled) > 0 else 'N/A'}")
+        logger.info(f"[OpenCUA DEBUG] get_rope_by_thw: rotary_pos_emb_thw.shape={rotary_pos_emb_thw.shape}, window_index_thw.shape={window_index_thw.shape}, window_index_thw.max()={window_index_thw.max() if len(window_index_thw) > 0 else 'N/A'}, rotary_pos_emb_thw.shape[0]={rotary_pos_emb_thw.shape[0]}")
         
         # CRITICAL: Apply window indexing to reorder RoPE positions
-        # window_index_thw_scaled contains the reordered indices after window partitioning,
-        # scaled to match rotary_pos_emb_thw's first dimension.
-        # We must index into rotary_pos_emb_thw using these scaled indices to match the
+        # window_index_thw contains the reordered indices after window partitioning.
+        # We must index into rotary_pos_emb_thw using these indices to match the
         # reordered hidden states. This preserves spatial relationships after windowing.
-        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw_scaled, :, :]
+        # This matches Qwen2.5-VL's behavior exactly.
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
         # rotary_pos_emb_thw shape: (len(window_index_thw), spatial_merge_unit, rotary_dim)
         
         # Flatten: exactly like Qwen2.5-VL
@@ -468,12 +621,10 @@ class OpenCUAVisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
-        # CRITICAL: window_index has values in range [0, seq_len - 1],
-        # but hidden_states has first dimension = seq_len // spatial_merge_unit.
-        # We need to divide window_index by spatial_merge_unit to match the indexing.
-        # This matches Qwen2.5-VL's behavior exactly.
-        window_index_scaled = window_index // self.spatial_merge_unit
-        hidden_states = hidden_states[window_index_scaled, :, :]
+        # CRITICAL: window_index has values in range [0, grid_t * llm_h * llm_w - 1],
+        # which matches hidden_states' first dimension = seq_len // spatial_merge_unit.
+        # This matches Qwen2.5-VL's behavior exactly - use window_index directly.
+        hidden_states = hidden_states[window_index, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
@@ -1006,7 +1157,8 @@ class OpenCUAForConditionalGeneration(
                 if multimodal_config is not None
                 else None
             )
-            self.visual = OpenCUAVisionTransformer(
+            # Use Qwen2_5_VisionTransformer directly, matching original OpenCUA
+            self.visual = Qwen2_5_VisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
@@ -1014,7 +1166,7 @@ class OpenCUAForConditionalGeneration(
                 use_data_parallel=self.use_data_parallel,
                 attn_backend_override=attn_backend_override,
             )
-            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__: Created OpenCUAVisionTransformer, type={type(self.visual).__name__}")
+            logger.info(f"[OpenCUA DEBUG] OpenCUAForConditionalGeneration.__init__: Created Qwen2_5_VisionTransformer, type={type(self.visual).__name__}")
         else:
             self.visual = None
 

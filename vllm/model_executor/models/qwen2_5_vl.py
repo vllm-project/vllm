@@ -668,7 +668,19 @@ class Qwen2_5_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
+        # Check if we need upstream flash attention for head_dim not multiple of 32
         use_upstream_fa = False
+        if head_dim % 32 != 0:
+            # If head_dim is not a multiple of 32, we need upstream flash_attn
+            # which supports arbitrary head_dim values
+            from vllm.attention.layer import check_upstream_fa_availability
+            from vllm.platforms import current_platform
+            if current_platform.is_cuda() and check_upstream_fa_availability(torch.get_default_dtype()):
+                use_upstream_fa = True
+            else:
+                # Fallback to XFORMERS if upstream flash_attn is not available
+                attn_backend_override = AttentionBackendEnum.XFORMERS
+        
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
