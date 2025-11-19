@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 import signal
 import socket
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Iterable
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -22,6 +23,32 @@ from vllm.utils.network_utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
+
+
+def build_access_log_path_filter(
+    excluded_paths: Iterable[str] | None = None,
+) -> logging.Filter | None:
+    """Create a lightweight logging.Filter that suppresses selected paths."""
+    normalized_paths = tuple(p for p in (excluded_paths or ()) if p)
+    if not normalized_paths:
+        return None
+
+    def filter(record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        # Uvicorn access log messages typically look like:
+        # '127.0.0.1:54321 - "GET /metrics HTTP/1.1" 200'
+        for path in normalized_paths:
+            if (
+                f" {path} " in message
+                or f" {path}?" in message
+                or f" {path}\"" in message
+            ):
+                return False
+        return True
+
+    filter_obj = logging.Filter()
+    filter_obj.filter = filter  # type: ignore[assignment]
+    return filter_obj
 
 
 async def serve_http(
@@ -50,6 +77,11 @@ async def serve_http(
         "h11_max_incomplete_event_size", None
     )
     h11_max_header_count = uvicorn_kwargs.pop("h11_max_header_count", None)
+    # Extract optional access-log path exclusions, used to suppress
+    # specific noisy endpoints such as /metrics.
+    exclude_access_log_paths = tuple(
+        uvicorn_kwargs.pop("exclude_access_log_paths", ()) or ()
+    )
 
     # Set safe defaults if not provided
     if h11_max_incomplete_event_size is None:
@@ -62,6 +94,13 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
+
+    # Apply access-log filtering only if requested and only after the
+    # logging configuration has been loaded.
+    access_log_filter = build_access_log_path_filter(exclude_access_log_paths)
+    if access_log_filter:
+        logging.getLogger("uvicorn.access").addFilter(access_log_filter)
+
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 

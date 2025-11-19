@@ -2068,6 +2068,15 @@ async def run_server_worker(
             # NOTE: When the 'disable_uvicorn_access_log' value is True,
             # no access log will be output.
             access_log=not args.disable_uvicorn_access_log,
+            # Optionally suppress access logs for the /metrics endpoint only.
+            exclude_access_log_paths=(
+                ("/metrics",)
+                if (
+                    not args.disable_uvicorn_access_log
+                    and args.disable_uvicorn_metrics_access_log
+                )
+                else ()
+            ),
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,
