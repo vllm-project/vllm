@@ -208,23 +208,23 @@ def run_cutlass_moe_fp8(
         mm1_out.fill_(0)
 
     print(f'Printing information for first moe call')
-    print_args_info(
-        mm1_out,
-        a1q,
-        w1,
-        a1q_scale,
-        w1_scale,
-        expert_offsets,
-        problem_sizes1,
-        ab_strides1,
-        ab_strides1,
-        c_strides1,
-        per_act_token,
-        per_out_ch,
-    )
-    # print some stride info
-    print(f'{ab_strides1=}')
-    print(f'{c_strides1=}')
+    # print_args_info(
+    #     mm1_out,
+    #     a1q,
+    #     w1,
+    #     a1q_scale,
+    #     w1_scale,
+    #     expert_offsets,
+    #     problem_sizes1,
+    #     ab_strides1,
+    #     ab_strides1,
+    #     c_strides1,
+    #     per_act_token,
+    #     per_out_ch,
+    # )
+    # print problem shapes and stuff
+    print(f'{problem_sizes1=}')
+    print(f'{expert_offsets=}')
     ops.cutlass_moe_mm(
         mm1_out,
         a1q,
