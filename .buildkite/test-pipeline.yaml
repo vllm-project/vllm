@@ -921,6 +921,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
 
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
