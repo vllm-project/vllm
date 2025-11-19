@@ -1283,7 +1283,7 @@ class FusedMoE(CustomOp):
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
-                        param=param[expert_id],
+                        param=expert_data,
                         tp_rank=self.tp_rank,
                     )
                     return True if return_success else None
