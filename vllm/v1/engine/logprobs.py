@@ -4,6 +4,8 @@
 import itertools
 from dataclasses import dataclass
 
+import numpy as np
+
 from vllm.logger import init_logger
 from vllm.logprobs import (
     PromptLogprobs,
@@ -17,7 +19,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     convert_ids_list_to_tokens,
 )
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsTensors
 
 logger = init_logger(__name__)
 
@@ -64,7 +66,9 @@ class LogprobsProcessor:
             num_logprobs=num_logprobs,
         )
 
-    def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
+    def _update_sample_logprobs(
+        self, token_ids_lst: np.ndarray, logprobs_lst: np.ndarray, ranks_lst: np.ndarray
+    ) -> None:
         """Update with sample logprobs from EngineCore.
 
         Outer lists are only of len > 1 if EngineCore made
@@ -78,8 +82,6 @@ class LogprobsProcessor:
         assert self.num_logprobs is not None
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
-
-        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
         for rank_np, logprobs_np, token_ids_np in zip(
             ranks_lst, logprobs_lst, token_ids_lst
@@ -183,7 +185,15 @@ class LogprobsProcessor:
         return plp
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_logprobs is not None:
-            self._update_sample_logprobs(output.new_logprobs)
+        if (
+            output.new_logprob_token_ids is not None
+            and output.new_logprobs is not None
+            and output.new_sampled_token_ranks is not None
+        ):
+            self._update_sample_logprobs(
+                output.new_logprob_token_ids,
+                output.new_logprobs,
+                output.new_sampled_token_ranks,
+            )
         if output.new_prompt_logprobs_tensors is not None:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -14,7 +15,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
@@ -109,7 +110,11 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: list[int]
 
-    new_logprobs: LogprobsLists | None = None
+    new_logprob_token_ids: np.ndarray | None = None
+    new_logprobs: np.ndarray | None = None
+    new_sampled_token_ranks: np.ndarray | None = None
+    new_cu_num_generated_tokens: np.ndarray | None = None
+
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
     pooling_output: torch.Tensor | None = None

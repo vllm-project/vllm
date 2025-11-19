@@ -27,20 +27,17 @@ class LogprobsLists(NamedTuple):
     # Used for slicing the logprobs in cases like speculative
     # decoding where the number of generated tokens may be
     # different for each request.
-    cu_num_generated_tokens: list[int] | None = None
+    cu_num_generated_tokens: np.ndarray | None = None
 
     def slice(self, start_req_idx: int, end_req_idx: int):
-        if self.cu_num_generated_tokens:
+        if self.cu_num_generated_tokens is not None:
             start = self.cu_num_generated_tokens[start_req_idx]
             end = self.cu_num_generated_tokens[end_req_idx]
             # Recompute cumulative array starting from 0
             cu_num_offset = self.cu_num_generated_tokens[start_req_idx]
-            sliced_cu_num_generated_tokens = [
-                cu_num - cu_num_offset
-                for cu_num in self.cu_num_generated_tokens[
-                    start_req_idx : end_req_idx + 1
-                ]
-            ]
+            sliced_cu_num_generated_tokens = (
+                self.cu_num_generated_tokens[start_req_idx:end_req_idx] - cu_num_offset
+            )
         else:
             start = start_req_idx
             end = end_req_idx
@@ -66,7 +63,9 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens,
+            np.array(cu_num_generated_tokens)
+            if cu_num_generated_tokens is not None
+            else None,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":

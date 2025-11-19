@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
+
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
@@ -1040,7 +1042,6 @@ class Scheduler(SchedulerInterface):
                 )
 
             stopped = False
-            new_logprobs = None
             new_token_ids = generated_token_ids
             kv_transfer_params = None
             status_before_stop = request.status
@@ -1065,6 +1066,10 @@ class Scheduler(SchedulerInterface):
                     stopped_preempted_reqs.add(request)
 
             # Extract sample logprobs if needed.
+            new_logprob_token_ids: np.ndarray | None = None
+            new_logprobs: np.ndarray | None = None
+            new_sampled_token_ranks: np.ndarray | None = None
+            new_cu_num_generated_tokens: np.ndarray | None = None
             if (
                 request.sampling_params is not None
                 and request.sampling_params.logprobs is not None
@@ -1072,7 +1077,12 @@ class Scheduler(SchedulerInterface):
             ):
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
-                new_logprobs = logprobs.slice(req_index, req_index + 1)
+                (
+                    new_logprob_token_ids,
+                    new_logprobs,
+                    new_sampled_token_ranks,
+                    new_cu_num_generated_tokens,
+                ) = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
@@ -1092,7 +1102,10 @@ class Scheduler(SchedulerInterface):
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
+                        new_logprob_token_ids=new_logprob_token_ids,
                         new_logprobs=new_logprobs,
+                        new_sampled_token_ranks=new_sampled_token_ranks,
+                        new_cu_num_generated_tokens=new_cu_num_generated_tokens,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
