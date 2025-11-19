@@ -135,9 +135,8 @@ class BailingAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=config.max_position_embeddings,
-            base=config.rope_theta,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
-            rope_scaling=config.rope_scaling,
             partial_rotary_factor=self.partial_rotary_factor,
         )
 
@@ -599,7 +598,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                     config.vocab_size,
                     config.hidden_size,
                     quant_config=quant_config,
-                    prefix=f"{prefix}.lm_head",
+                    prefix=maybe_prefix(prefix, "lm_head"),
                 )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:

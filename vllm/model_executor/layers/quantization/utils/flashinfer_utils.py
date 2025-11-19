@@ -285,10 +285,17 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         return backend_map[flashinfer_moe_backend]
     elif current_platform.is_device_capability(90):
         return FlashinferMoeBackend.CUTLASS
-    raise ValueError(f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. ")
+
+    raise ValueError(
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
+        f"Expected one of {list(backend_map.keys())}."
+    )
 
 
 def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
     # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (FlashinferMoeBackend.CUTLASS,)
+    backends_supporting_global_sf = (
+        FlashinferMoeBackend.CUTLASS,
+        FlashinferMoeBackend.TENSORRT_LLM,
+    )
     return backend in backends_supporting_global_sf
