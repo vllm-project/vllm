@@ -96,8 +96,11 @@ def freeze_gc_heap() -> None:
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
-    # GC collect all generations
-    gc.collect()
+    # Ensure all static objects are pushed down to the oldest generation for
+    # freeze
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
 
