@@ -14,10 +14,13 @@ from vllm.platforms import current_platform
 from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="bitsandbytes quantization not supported on ROCm (CUDA-only kernels)",
-)
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    pytestmark = pytest.mark.skipif(
+        on_gfx9(),
+        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+    )
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
