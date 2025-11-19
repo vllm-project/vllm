@@ -567,25 +567,6 @@ class MambaMixer2(MambaBase, CustomOp):
             non_spec_token_indx = attn_metadata.non_spec_token_indx
         
             has_spec_decode = spec_sequence_masks is not None and spec_sequence_masks.any() # should be revisit towards cuda graph support
-            # if "layers.0" in self.prefix and "mixer" in self.prefix:
-            #     print(f"\n{'='*70}")
-            #     self._mamba_call_count = getattr(self, '_mamba_call_count', 0) + 1
-            #     print(f"SMOR: [MAMBA-MIXER] call count: {self._mamba_call_count}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_decodes: {num_decodes}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_non_spec_decode_tokens: {num_non_spec_decode_tokens}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_spec_decodes: {num_spec_decodes}")
-            #     print(f"SMOR: [MAMBA-MIXER] has_spec_decode: {has_spec_decode}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_spec_decode_tokens: {num_spec_decode_tokens}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_prefills: {attn_metadata.num_prefills}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_prefill_tokens: {attn_metadata.num_prefill_tokens}")
-            #     print(f"SMOR: [MAMBA-MIXER] num_accepted_tokens: {num_accepted_tokens}")
-            #     print(f"SMOR: [MAMBA-MIXER] spec_sequence_masks: {spec_sequence_masks}")
-            #     print(f"SMOR: [MAMBA-MIXER] spec_query_start_loc: {spec_query_start_loc}")
-            #     print(f"SMOR: [MAMBA-MIXER] non_spec_query_start_loc: {non_spec_query_start_loc}")
-            #     print(f"SMOR: [MAMBA-MIXER] spec_token_indx: {spec_token_indx}")
-            #     print(f"SMOR: [MAMBA-MIXER] non_spec_token_indx: {non_spec_token_indx}")
-            #     print(f"SMOR: [MAMBA-MIXER] non_spec_state_indices_tensor: {non_spec_state_indices_tensor}")
-            #     print(f"SMOR: [MAMBA-MIXER] spec_state_indices_tensor: {spec_state_indices_tensor}")
                 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -603,11 +584,6 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
         
-        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-        #     print(f"SMOR: [MAMBA-MIXER] hidden_states: {hidden_states.shape}")
-        #     print(f"SMOR: [MAMBA-MIXER] hidden_states_B_C: {hidden_states_B_C.shape}")
-        #     print(f"\n{'='*70}")
-
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
@@ -646,8 +622,6 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states_B_C_d_spec = hidden_states_B_C.index_select(0, spec_token_indx)
             dt_d_spec = dt.index_select(0, spec_token_indx)
             
-            # for i in range(hidden_states_B_C.shape[0]):
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C[{i}, :4]: {hidden_states_B_C[i, :4]}")
             hidden_states_B_C_non_spec = hidden_states_B_C.index_select(0, non_spec_token_indx)
             dt_non_spec = dt.index_select(0, non_spec_token_indx)
             
@@ -693,12 +667,6 @@ class MambaMixer2(MambaBase, CustomOp):
             state_indices_tensor_p = None
             state_indices_tensor_d = None
         
-        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-        #     print(f"\n{'='*70}")
-        #     print(f"SMOR: [MAMBA-MIXER] state_indices_tensor_p: {state_indices_tensor_p}")
-        #     print(f"SMOR: [MAMBA-MIXER] state_indices_tensor_d: {state_indices_tensor_d}")
-        #     print(f"\n{'='*70}")
-
         if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
@@ -772,26 +740,6 @@ class MambaMixer2(MambaBase, CustomOp):
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-            # if "layers.0" in self.prefix and "mixer" in self.prefix:
-            #     print(f"\n{'='*70}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] BEFORE causal_conv1d_fn")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[0, :4]: {hidden_states_B_C_p[0, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[1, :4]: {hidden_states_B_C_p[1, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[2, :4]: {hidden_states_B_C_p[2, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[3, :4]: {hidden_states_B_C_p[3, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[4, :4]: {hidden_states_B_C_p[4, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[5, :4]: {hidden_states_B_C_p[5, :4]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] x[:4]: {x[(0,) * (x.ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] conv_state[state_indices_tensor_p]: {conv_state[state_indices_tensor_p][(0,) * (conv_state[state_indices_tensor_p].ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] state_indices_tensor_p: {state_indices_tensor_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] query_start_loc_p: {query_start_loc_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] block_idx_first_scheduled_token_p: {block_idx_first_scheduled_token_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] block_idx_last_scheduled_token_p: {block_idx_last_scheduled_token_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] block_idx_last_computed_token_p: {block_idx_last_computed_token_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] num_computed_tokens_p: {num_computed_tokens_p}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] mamba_block_size: {mamba_block_size}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] attn_metadata: {attn_metadata}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] has_initial_states_p: {has_initial_states_p}")
             
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
@@ -812,14 +760,6 @@ class MambaMixer2(MambaBase, CustomOp):
             
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(hidden_states_B_C_p)
             
-            # if "layers.0" in self.prefix and "mixer" in self.prefix:
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] AFTER causal_conv1d_fn")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_B_C_p[:4]: {hidden_states_B_C_p[(0,) * (hidden_states_B_C_p.ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] conv_state[state_indices_tensor_p]: {conv_state[state_indices_tensor_p][(0,) * (conv_state[state_indices_tensor_p].ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] hidden_states_p[:4]: {hidden_states_p[(0,) * (hidden_states_p.ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] B_p[:4]: {B_p[(0,) * (B_p.ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] C_p[:4]: {C_p[(0,) * (C_p.ndim - 1) + (slice(None, 4),)]}")
-            #     print(f"SMOR: [MAMBA-MIXER-PREFILL] dt_p[:4]: {dt_p[(0,) * (dt_p.ndim - 1) + (slice(None, 4),)]}")
             # 3. State Space Model sequence transformation
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
@@ -934,10 +874,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
-                # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                #     print(f"SMOR: [MAMBA-MIXER] prefix: {self.prefix}")
-                #     print(f"SMOR: [MAMBA-MIXER] state_indices_tensor_p: {state_indices_tensor_p}")
-                #     print(f"SMOR: [MAMBA-MIXER] varlen_states: {varlen_states[(0,) * (varlen_states.ndim - 1) + (slice(None, 4),)]}")
                 ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
@@ -976,10 +912,6 @@ class MambaMixer2(MambaBase, CustomOp):
                             max_spec_len = int(spec_query_start_loc[-1].item())
                         # 2a. Convolution with spec decode support
 
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] before causal_conv1d_update")
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] spec_state_indices_tensor: {spec_state_indices_tensor[:, 0][:num_spec_decodes]}")
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] ssm_state[spec_state_indices_tensor]: {ssm_state[spec_state_indices_tensor][(0,) * (ssm_state[spec_state_indices_tensor].ndim - 1) + (slice(None, 4),)]}")
                         hidden_states_B_C_d_spec = causal_conv1d_update(
                             hidden_states_B_C_d_spec,
                             conv_state,
@@ -993,9 +925,6 @@ class MambaMixer2(MambaBase, CustomOp):
                             validate_data=False,
                         )
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] after causal_conv1d_update")
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] ssm_state: {ssm_state[spec_state_indices_tensor[:, 0][:num_spec_decodes]][(0,) * (ssm_state[spec_state_indices_tensor[:, 0][:num_spec_decodes]].ndim - 1) + (slice(None, 4),)]}")
                         hidden_states_d_spec, B_d_spec, C_d_spec = split_hidden_states_B_C_fn(hidden_states_B_C_d_spec)
                         
                         # 3a. SSM with spec decode support
@@ -1012,10 +941,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         init_slot = state_slots[init_checkpoint_idx].item()
                         
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] init_slot: {init_slot}")
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] ssm_state[init_slot]: {ssm_state[init_slot][(0,) * (ssm_state[init_slot].ndim - 1) + (slice(None, 4),)]}")
-                            
                         # Ensure temp cache is on correct device and dtype
                         if self.spec_temp_cache.device != ssm_state.device:
                             self.spec_temp_cache = torch.zeros(
@@ -1031,9 +956,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         self.spec_temp_cache[0] = ssm_state[init_slot].clone()
                         temp_cache_working_slot = self.spec_temp_cache[0:1]
                         for token_idx in range(num_spec_decode_tokens):
-                            # if token_idx == 0 and "layers.0" in self.prefix and "mixer" in self.prefix:
-                            #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] before first selective_state_update")                      
-                            #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] temp_cache_working_slot: {temp_cache_working_slot[(0,) * (temp_cache_working_slot.ndim - 1) + (slice(None, 4),)]}")
                             selective_state_update(
                                 temp_cache_working_slot,  # [1, num_heads, head_dim, dstate]
                                 hidden_states_d_spec[token_idx:token_idx+1],
@@ -1049,34 +971,19 @@ class MambaMixer2(MambaBase, CustomOp):
                                 dst_state_batch_indices=torch.tensor([0], dtype=torch.int32, device=ssm_state.device),  # Use 0 for single-slot cache
                                 out=preallocated_ssm_out_d_spec[token_idx:token_idx+1].view(1, -1, self.head_dim),
                             )
-                            # if token_idx == 0 and "layers.0" in self.prefix and "mixer" in self.prefix:
-                            #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] after first selective_state_update")                      
-                            #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] temp_cache_working_slot: {temp_cache_working_slot[(0,) * (temp_cache_working_slot.ndim - 1) + (slice(None, 4),)]}")
                             if token_idx + 1 < self.spec_temp_cache.shape[0]:
                                 self.spec_temp_cache[token_idx + 1] = temp_cache_working_slot[0].clone()
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] after selective_state_update")                      
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] ssm_state[init_slot]: {ssm_state[init_slot][(0,) * (ssm_state[init_slot].ndim - 1) + (slice(None, 4),)]}")
                         num_checkpoints_to_save = min(
                             num_accepted_tokens[0].item() if num_accepted_tokens is not None else 1,
                             len(state_slots)
                         )
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                            # print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] num_checkpoints_to_save: {num_checkpoints_to_save}")
                         for checkpoint_idx in range(num_checkpoints_to_save):
                             checkpoint_slot = state_slots[checkpoint_idx].item()
                             ssm_state[checkpoint_slot] = self.spec_temp_cache[checkpoint_idx + 1].clone()
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-SPEC-DECODE] FINAL ssm_state[init_slot]: {ssm_state[init_slot][(0,) * (ssm_state[init_slot].ndim - 1) + (slice(None, 4),)]}")
                     if num_non_spec_decode_tokens > 0:
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] before causal_conv1d_update")
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] state_indices_tensor_d: {state_indices_tensor_d}")
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
-                        
                         hidden_states_B_C_d = causal_conv1d_update(
                             hidden_states_B_C_d,
                             conv_state,
@@ -1085,10 +992,6 @@ class MambaMixer2(MambaBase, CustomOp):
                             self.activation,
                             conv_state_indices=state_indices_tensor_d,
                         )
-                        
-                        if "layers.0" in self.prefix and "mixer" in self.prefix:
-                            print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] after causal_conv1d_update")
-                            print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                         
                         hidden_states_d_non_spec, B_d_non_spec, C_d_non_spec = split_hidden_states_B_C_fn(hidden_states_B_C_d)
                         
@@ -1099,10 +1002,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         hidden_states_d_non_spec = hidden_states_d_non_spec.view(
                             -1, self.num_heads // self.tp_size, self.head_dim
                         )
-                        
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] before selective_state_update")
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                         
                         selective_state_update(
                             ssm_state,
@@ -1120,19 +1019,12 @@ class MambaMixer2(MambaBase, CustomOp):
                             out=preallocated_ssm_out_d_non_spec.view(num_non_spec_decode_tokens, -1, self.head_dim),
                         )
                         
-                        # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] after selective_state_update")
-                        #     print(f"SMOR: [MAMBA-MIXER-NON-SPEC-DECODE-MIXED] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                 else:
                     # ========== NO SPEC DECODE PATH ==========
                     # state_indices_tensor_d_input = non_spec_state_indices_tensor
                     # state_indices_tensor_d_output = non_spec_state_indices_tensor
                     # 2. Convolution sequence transformation      
                     
-                    # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] before causal_conv1d_update")                      
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] state_indices_tensor_d: {state_indices_tensor_d}")
-                        # print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                     hidden_states_B_C_d: Tensor = causal_conv1d_update(
                         hidden_states_B_C_d,
                         conv_state,
@@ -1143,9 +1035,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                         initial_state_idx=block_idx_last_computed_token_d,
                     )
-                    # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] after causal_conv1d_update")                      
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                     hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(hidden_states_B_C_d)
 
                     # 3. State Space Model sequence transformation
@@ -1160,9 +1049,6 @@ class MambaMixer2(MambaBase, CustomOp):
                     # - mamba_cache_params.ssm_state's slots will be selected
                     #   using state_indices_tensor_d
                     # NOTE: final output is an in-place update of out tensor
-                    # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] before selective_state_update")                      
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
                     selective_state_update(
                         ssm_state,
                         hidden_states_d,
@@ -1178,9 +1064,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         dst_state_batch_indices=state_indices_tensor_d, # SMOR should be changed for prefix caching
                         out=preallocated_ssm_out_d_non_spec.view(num_decodes, -1, self.head_dim),
                     )
-                    # if "layers.0" in self.prefix and "mixer" in self.prefix:
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] after selective_state_update")                      
-                    #     print(f"SMOR: [MAMBA-MIXER-NO-SPEC-DECODE] ssm_state[state_indices_tensor_d]: {ssm_state[state_indices_tensor_d][(0,) * (ssm_state[state_indices_tensor_d].ndim - 1) + (slice(None, 4),)]}")
 
         # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
