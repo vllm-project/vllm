@@ -1921,9 +1921,20 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsWNA16MoEMethod` yet."
-            )
+            if expert_load_view is None:
+                raise ValueError("enable_eplb=True requiere expert_load_view != None")
+            if logical_to_physical_map is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_to_physical_map != None"
+                )
+            if logical_replica_count is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_replica_count != None"
+                )
+            if not isinstance(layer, FusedMoE):
+                raise TypeError(
+                    "EPLB is only supported when `layer` is a instance of FusedMoE."
+                )
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -1940,6 +1951,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=getattr(layer, "num_fused_shared_experts", 0),
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         return fused_experts(
@@ -1955,6 +1972,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
