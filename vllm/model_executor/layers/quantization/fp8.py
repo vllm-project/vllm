@@ -1216,14 +1216,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
 
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
         select_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
         )
 
         topk_weights, topk_ids, zero_expert_result = select_result
@@ -1305,7 +1300,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     self.allow_cutlass_block_scaled_grouped_gemm
                 ),
             )
-        if zero_expert_num != 0 and zero_expert_type is not None:
+
+        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )

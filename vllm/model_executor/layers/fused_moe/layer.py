@@ -1473,8 +1473,6 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        zero_expert_num: int | None = None,
-        zero_expert_type: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1595,16 +1593,16 @@ class FusedMoE(CustomOp):
 
         # Compute zero expert result if needed
         if (
-            zero_expert_num is not None
-            and zero_expert_num > 0
-            and zero_expert_type is not None
+            self.zero_expert_num is not None
+            and self.zero_expert_num > 0
+            and self.zero_expert_type is not None
             and self.global_num_experts is not None
         ):
             zero_expert_result = zero_experts_compute_triton(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
                 num_experts=self.global_num_experts,
-                zero_expert_type=zero_expert_type,
+                zero_expert_type=self.zero_expert_type,
                 hidden_states=hidden_states,
             )
         else:
