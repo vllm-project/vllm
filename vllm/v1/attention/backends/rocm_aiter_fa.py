@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -38,7 +39,7 @@ if current_platform.is_rocm():
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
     def num_programs(total_tokens):
-        return min(total_tokens, current_platform.get_cu_count())
+        return min(total_tokens, get_cu_count())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
@@ -728,7 +729,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.prefill_metadata.min_query_len,
+                    min_seqlen_q=1,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
                     causal=True,
@@ -758,7 +759,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.extend_metadata.min_query_len,
+                    min_seqlen_q=1,
                     block_table=attn_metadata.block_table[
                         num_decodes : num_decodes + num_extends
                     ],

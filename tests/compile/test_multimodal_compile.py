@@ -10,8 +10,8 @@ from vllm.platforms import current_platform
 
 def test_compile():
     vllm_config = VllmConfig()
-    # Default configuration compiles mm encoder
-    assert vllm_config.compilation_config.compile_mm_encoder
+    # Default configuration does not compile mm encoder
+    assert not vllm_config.compilation_config.compile_mm_encoder
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
@@ -39,7 +39,10 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
             "Qwen/Qwen2.5-VL-3B-Instruct",
             max_model_len=2048,
             gpu_memory_utilization=0.8,
-            compilation_config={"mode": CompilationMode.VLLM_COMPILE},
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
         ) as _,
     ):
         pass

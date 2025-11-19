@@ -14,13 +14,14 @@ from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
+from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -374,10 +375,22 @@ class VllmConfig:
                     "Async scheduling is not yet compatible with "
                     "pipeline_parallel_size > 1."
                 )
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
             if self.speculative_config is not None:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with speculative decoding."
-                )
+                if self.speculative_config.method not in get_args(EagleModelTypes):
+                    raise ValueError(
+                        "Currently, async scheduling is only supported "
+                        "with EAGLE/MTP kind of speculative decoding"
+                    )
+                if self.speculative_config.disable_padded_drafter_batch:
+                    raise ValueError(
+                        "async scheduling for EAGLE/MTP kind of speculative "
+                        "decoding is enabled, but disable_padded_drafter_batch=True "
+                        "disable_padded_drafter_batch=True is not supported for "
+                        "this situation now. please set "
+                        "disable_padded_drafter_batch=Fasle"
+                    )
             if not executor_supports_async_sched:
                 raise ValueError(
                     "Currently, async scheduling only supports `mp`, `uni`, or "
@@ -411,7 +424,7 @@ class VllmConfig:
 
         if (
             self.model_config is not None
-            and self.scheduler_config.chunked_prefill_enabled
+            and self.scheduler_config.enable_chunked_prefill
             and self.model_config.dtype == torch.float32
             and current_platform.get_device_capability() == (7, 5)
         ):
@@ -445,8 +458,6 @@ class VllmConfig:
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
-            self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
@@ -480,21 +491,6 @@ class VllmConfig:
                     elif self.model_config.is_encoder_decoder:
                         logger.warning_once(
                             "Encoder-decoder models do not support full cudagraphs. "
-                            "Overriding cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                    elif (
-                        current_platform.is_cuda()
-                        and current_platform.is_device_capability(100)
-                        and self.model_config.max_model_len > 131072
-                        and not self.model_config.use_mla
-                    ):
-                        # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
-                        logger.warning_once(
-                            "NVIDIA Blackwell TRTLLM attention cannot support "
-                            "max_model_len >= 131072 (found "
-                            f"{self.model_config.max_model_len}), causing dynamic "
-                            "dispatching that breaks full cudagraphs. "
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
@@ -584,7 +580,7 @@ class VllmConfig:
         ):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
-            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.long_prefill_token_threshold = 0
 
             if self.cache_config is not None:
@@ -634,6 +630,32 @@ class VllmConfig:
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
+
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
+            # With pipeline parallelism or dynamo partitioning,
+            # native rms norm tracing errors due to incorrect residual shape.
+            # Use custom rms norm to unblock. In the future,
+            # the pass will operate on higher-level IR to avoid the issue.
+            # TODO: https://github.com/vllm-project/vllm/issues/27894
+            is_fullgraph = (
+                self.compilation_config.use_inductor_graph_partition
+                or len(self.compilation_config.splitting_ops) == 0
+            )
+            if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
+                if "-rms_norm" not in self.compilation_config.custom_ops:
+                    self.compilation_config.custom_ops.append("+rms_norm")
+                else:
+                    regime = (
+                        "Dynamo partition"
+                        if not is_fullgraph
+                        else "pipeline parallelism"
+                    )
+                    logger.warning_once(
+                        "Sequence parallelism not supported with"
+                        "native rms_norm when using %s, "
+                        "this will likely lead to an error.",
+                        regime,
+                    )
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
@@ -929,7 +951,6 @@ class VllmConfig:
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
-        self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
         if self.model_config is None:
@@ -1026,7 +1047,7 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )

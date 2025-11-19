@@ -4,19 +4,14 @@
 import hashlib
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
+from typing_extensions import Self, deprecated
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import (
-    DEFAULT_MAX_NUM_BATCHED_TOKENS,
-    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -33,25 +28,25 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
+
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = Field(default=None, ge=1)
+    max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
     """Maximum number of tokens to be processed in a single iteration.
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
 
-    max_num_seqs: int = Field(default=None, ge=1)
+    max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
-
-    max_model_len: int = Field(default=None, ge=1)
-    """Maximum length of a sequence (including prompt and generated text). This
-    is primarily set in `ModelConfig` and that value should be manually
-    duplicated here."""
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
 
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
@@ -76,12 +71,22 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    enable_chunked_prefill: bool = Field(default=None)
+    enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
-    on the remaining max_num_batched_tokens."""
+    on the remaining `max_num_batched_tokens`.
+
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
+
+    max_model_len: InitVar[int] = 8192
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
 
     is_encoder_decoder: InitVar[bool] = False
     """True if the model is an encoder-decoder model.
@@ -111,9 +116,6 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties)."""
 
-    chunked_prefill_enabled: bool = Field(init=False)
-    """True if chunked prefill is enabled."""
-
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
     partially schedule a multimodal item. Only used in V1
@@ -141,6 +143,12 @@ class SchedulerConfig:
     Async scheduling is currently not supported with some features such as
     speculative decoding and pipeline parallelism.
     """
+
+    stream_interval: int = Field(default=1, ge=1)
+    """The interval (or buffer size) for streaming in terms of token length.
+    A smaller value (1) makes streaming smoother by sending each token immediately,
+    while a larger value (e.g., 10) reduces host overhead and may increase throughput
+    by batching multiple tokens before sending."""
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
@@ -182,15 +190,7 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator(
-        "max_num_batched_tokens",
-        "max_num_seqs",
-        "max_model_len",
-        "enable_chunked_prefill",
-        "scheduler_cls",
-        "async_scheduling",
-        mode="wrap",
-    )
+    @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -198,53 +198,15 @@ class SchedulerConfig:
             return value
         return handler(value)
 
-    def __post_init__(self, is_encoder_decoder: bool) -> None:
-        if self.max_model_len is None:
-            self.max_model_len = 8192
-
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 128
-
+    def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
-            self.chunked_prefill_enabled = False
             self.enable_chunked_prefill = False
             self.long_prefill_token_threshold = 0
             logger.info(
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
-            )
-
-        if self.max_num_batched_tokens is None:
-            if self.enable_chunked_prefill:
-                self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
-            else:
-                # If max_model_len is too short, use
-                # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
-                # for higher throughput.
-                self.max_num_batched_tokens = max(
-                    self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS
-                )
-
-            if self.runner_type == "pooling":
-                # Choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-            if self.is_multimodal_model:
-                # The value needs to be at least the number of multimodal tokens
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-
-            # When using default settings,
-            # Ensure max_num_batched_tokens does not exceed model limit.
-            # Some models (e.g., Whisper) have embeddings tied to max length.
-            self.max_num_batched_tokens = min(
-                self.max_num_seqs * self.max_model_len, self.max_num_batched_tokens
             )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
@@ -256,10 +218,9 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
             )
 
-        self.chunked_prefill_enabled = self.enable_chunked_prefill
         if self.max_num_partial_prefills > 1:
             if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len * 0.04)
+                self.long_prefill_token_threshold = int(max_model_len * 0.04)
 
             logger.info(
                 "Concurrent partial prefills enabled with "
@@ -270,15 +231,29 @@ class SchedulerConfig:
                 self.long_prefill_token_threshold,
             )
 
-    @model_validator(mode="after")
-    def _verify_args(self) -> Self:
+        self.verify_max_model_len(max_model_len)
+
+    @property
+    @deprecated(
+        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
+        "`SchedulerConfig.enable_chunked_prefill`. "
+        "The old name will be removed in v0.12."
+    )
+    def chunked_prefill_enabled(self) -> bool:
+        return self.enable_chunked_prefill
+
+    @chunked_prefill_enabled.setter
+    def chunked_prefill_enabled(self, value: bool):
+        self.enable_chunked_prefill = value
+
+    def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
-            self.max_num_batched_tokens < self.max_model_len
-            and not self.chunked_prefill_enabled
+            self.max_num_batched_tokens < max_model_len
+            and not self.enable_chunked_prefill
         ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
-                f"smaller than max_model_len ({self.max_model_len}). "
+                f"smaller than max_model_len ({max_model_len}). "
                 "This effectively limits the maximum sequence length to "
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
@@ -292,26 +267,26 @@ class SchedulerConfig:
                 f"({self.max_num_seqs})."
             )
 
-        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
+        if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
             logger.warning(
                 "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len,
+                self.max_num_seqs * max_model_len,
             )
 
         if self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
+            if not self.enable_chunked_prefill:
                 raise ValueError(
                     "Chunked prefill must be enabled to set "
                     "max_num_partial_prefills > 1."
                 )
 
-            if self.long_prefill_token_threshold > self.max_model_len:
+            if self.long_prefill_token_threshold > max_model_len:
                 raise ValueError(
                     "long_prefill_token_threshold "
                     f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({self.max_model_len})."
+                    f"than the max_model_len ({max_model_len})."
                 )
 
         if self.max_long_partial_prefills > self.max_num_partial_prefills:

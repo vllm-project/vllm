@@ -35,7 +35,7 @@ from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausa
 from vllm.model_executor.models.utils import extract_layer_index
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -212,6 +212,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             name, weight = self.permute_qk_weight_for_rotary(name, loaded_weight)
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, weight
 
         loader = AutoWeightsLoader(

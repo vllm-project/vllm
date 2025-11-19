@@ -46,6 +46,9 @@ class CachedRequestState:
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
+    # Used when both async_scheduling and spec_decode are enabled.
+    prev_num_draft_len: int = 0
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -262,7 +265,7 @@ class InputBatch:
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
-        self.async_copy_ready_event: torch.cuda.Event | None = None
+        self.async_copy_ready_event: torch.Event | None = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -888,7 +891,7 @@ class InputBatch:
     def set_async_sampled_token_ids(
         self,
         sampled_token_ids_cpu: torch.Tensor,
-        async_copy_ready_event: torch.cuda.Event,
+        async_copy_ready_event: torch.Event,
     ) -> None:
         """
         In async scheduling case, store ref to sampled_token_ids_cpu
