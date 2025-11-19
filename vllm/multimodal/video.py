@@ -140,7 +140,6 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        # Replace assertion with warning for partial frame loading
         if i < num_frames_to_sample:
             logger.warning(
                 "Expected reading %d frames, but only loaded %d frames from video. "
@@ -260,7 +259,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        # Replace assertion with warning for partial frame loading
         if i < len(frame_indices):
             logger.warning(
                 "Expected reading %d frames, but only loaded %d frames from video. "
