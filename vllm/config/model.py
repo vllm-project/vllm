@@ -11,6 +11,7 @@ import torch
 from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
@@ -2100,31 +2101,32 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
+    # To simplify the verification, we convert it to dict[str, TypedDict].
+    rope_parameters = getattr(hf_config, "rope_parameters", None)
+    if rope_parameters and not set(rope_parameters.keys()).issubset(
+        ALLOWED_LAYER_TYPES
+    ):
+        rope_parameters = {"": rope_parameters}
+
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_scaling is not None and "gemma3" not in hf_config.model_type:
-        # No need to consider "type" key because of patch_rope_scaling when
-        # loading HF config
-        rope_type = rope_scaling["rope_type"]
+    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+        scaling_factor = 1.0
+        for rp in rope_parameters.values():
+            # No need to consider "type" key because of patch_rope_parameters when
+            # loading HF config
+            rope_type = rp["rope_type"]
 
-        if rope_type not in ("su", "longrope", "llama3"):
-            if disable_sliding_window:
-                # TODO(robertgshaw): Find a model that supports rope_scaling
-                # with sliding window to see if this case should be allowed.
-                raise NotImplementedError(
-                    "Disabling sliding window is not supported for models "
-                    "with rope_scaling. Please raise an issue so we can "
-                    "investigate."
-                )
+            if rope_type not in ("su", "longrope", "llama3"):
+                # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
+                # NOTE: This assumes all layer types have the same scaling factor.
+                scaling_factor = rp.get("factor", scaling_factor)
 
-            # NOTE: rope_type == "default" does not define factor
-            # https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-            scaling_factor = rope_scaling.get("factor", 1.0)
-
-            if rope_type == "yarn":
-                derived_max_model_len = rope_scaling["original_max_position_embeddings"]
-            derived_max_model_len *= scaling_factor
+                if rope_type == "yarn":
+                    derived_max_model_len = rp["original_max_position_embeddings"]
+        # Do this outside loop since all layer types should have the same scaling
+        derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
@@ -2134,7 +2136,9 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+        if rope_parameters is not None and any(
+            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
+        ):
             max_model_len = int(
                 getattr(
                     hf_config, "original_max_position_embeddings", derived_max_model_len
@@ -2151,16 +2155,7 @@ def _get_and_verify_max_len(
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
-        if model_max_length is not None and max_model_len <= model_max_length:
-            if disable_sliding_window:
-                # TODO(robertgshaw): Find a model that has model_max_length
-                # with sliding window to see if this case should be allowed.
-                raise NotImplementedError(
-                    "Disabling sliding window is not supported for models "
-                    "model_max_length in the config. Please raise an issue "
-                    "so we can investigate."
-                )
-        else:
+        if model_max_length is None or max_model_len > model_max_length:
             msg = (
                 f"User-specified max_model_len ({max_model_len}) is greater "
                 f"than the derived max_model_len ({max_len_key}="
