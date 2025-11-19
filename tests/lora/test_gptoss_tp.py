@@ -32,10 +32,7 @@ The Competition_ID of competition_record is the foreign key of Competition_ID of
 ###Response:<|end|><|start|>assistant<|channel|>final<|message|>"""  # noqa: E501
 
 EXPECTED_LORA_OUTPUT = [
-    (
-        "SELECT AVG(Working_Horses) AS avg_working_horses\n"
-        "FROM farm\nWHERE Total_Horses > 5000;"
-    ),
+    "SELECT AVG(Working_Horses) FROM farm WHERE Total_Horses > 5000;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
 ]
