@@ -32,6 +32,7 @@ CacheDType = Literal[
 ]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+PrefixCacheEvictionPolicy = Literal["lru", "frequency_cost"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -147,6 +148,17 @@ class CacheConfig:
     """The backend to use for KV cache offloading. Supported backends include
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
+
+    # Eviction policy for prefix caching (experimental, opt-in)
+    prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = "lru"
+    """Eviction policy for prefix caching free cached blocks. Default is LRU.
+    Set to "frequency_cost" to enable frequency × cost-aware eviction."""
+
+    eviction_cost_alpha: float = 2.0
+    """Alpha exponent for the compute cost term (block_size^alpha)."""
+
+    eviction_time_decay: float = 0.0
+    """Optional exponential time decay factor for the frequency term."""
 
     def compute_hash(self) -> str:
         """
