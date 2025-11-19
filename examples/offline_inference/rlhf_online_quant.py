@@ -28,6 +28,7 @@ workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
 """
 
+import json
 import os
 
 import ray
@@ -35,6 +36,11 @@ import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from rlhf_utils import stateless_init_process_group
+from torchao.core.config import config_to_dict
+from torchao.quantization import (
+    Float8DynamicActivationFloat8WeightConfig,
+    PerRow,
+)
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
@@ -73,12 +79,21 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 
 # Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
+
+# generate torchao quantization config for RL rollout
+# see https://github.com/vllm-project/vllm/pull/23014 for instructions to
+# use serialized config files instead of passing around json string
+config = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())
+
+json_str = json.dumps(config_to_dict(config))
+
 llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
     scheduling_strategy=scheduling_inference,
 )(MyLLM).remote(
     model="facebook/opt-125m",
+    hf_overrides={"quantization_config_dict_json": json_str},
     enforce_eager=True,
     worker_extension_cls="rlhf_utils.WorkerExtension",
     tensor_parallel_size=2,
