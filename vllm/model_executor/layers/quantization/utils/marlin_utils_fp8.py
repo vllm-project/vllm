@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_quant_input,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -130,7 +131,7 @@ def prepare_fp8_layer_for_marlin(
         size_n=part_size_n,
         num_bits=8,
     )
-    layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
+    replace_parameter(layer, "weight", marlin_qweight)
 
     # WEIGHT SCALES
     # Permute scales
@@ -177,12 +178,12 @@ def prepare_fp8_layer_for_marlin(
     )
     if input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
-    layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
+    replace_parameter(layer, "weight_scale", marlin_scales)
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
         bias = marlin_permute_bias(layer.bias)
-        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+        replace_parameter(layer, "bias", bias)
 
 
 def prepare_moe_fp8_layer_for_marlin(
