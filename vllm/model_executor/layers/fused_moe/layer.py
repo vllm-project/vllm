@@ -613,7 +613,7 @@ class FusedMoE(CustomOp):
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    ", FP8 and modelopt FP4 checkpoints"
+                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
