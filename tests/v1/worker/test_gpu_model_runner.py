@@ -956,7 +956,7 @@ def test_hybrid_block_table_initialization():
     max_num_reqs = 10
     max_num_blocks_per_req = 20
     max_num_batched_tokens = 512
-    dcp_kv_cache_interleave_size = 8
+    cp_kv_cache_interleave_size = 8
 
     block_table = BlockTable(
         block_size=block_size,
@@ -966,7 +966,7 @@ def test_hybrid_block_table_initialization():
         pin_memory=False,
         device=torch.device(DEVICE),
         kernel_block_size=kernel_block_sizes[0],
-        dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
 
     # Verify hybrid block configuration

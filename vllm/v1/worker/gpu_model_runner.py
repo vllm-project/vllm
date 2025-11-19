@@ -426,7 +426,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1436,7 +1436,7 @@ class GPUModelRunner(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.dcp_kv_cache_interleave_size,
+                self.parallel_config.cp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 

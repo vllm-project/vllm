@@ -15,7 +15,11 @@ from tests.kernels.quantization.nvfp4_utils import (
 )
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_dp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -561,6 +565,7 @@ def make_modular_kernel(
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),
+        pcp_size_=get_pcp_group().world_size,
         dp_size_=get_dp_group().world_size,
         vllm_parallel_config=vllm_config.parallel_config,
     )

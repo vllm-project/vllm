@@ -265,8 +265,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        self.dcp_kv_cache_interleave_size = (
-            self.parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
         )
 
         self.use_full_cuda_graph = (
@@ -388,7 +388,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 dcp_context_kv_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()

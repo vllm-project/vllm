@@ -32,6 +32,7 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -42,8 +43,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
-        if self.dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.pcp_world_size = pcp_world_size
+        if dcp_world_size * pcp_world_size > 1:
+            self.block_size *= dcp_world_size * pcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
 
@@ -212,6 +214,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
@@ -303,6 +306,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
@@ -314,8 +318,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size > 1:
-            block_size *= dcp_world_size
+        if dcp_world_size * pcp_world_size > 1:
+            block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -362,11 +366,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -476,6 +482,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -516,6 +523,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
+        assert pcp_world_size == 1, "PCP not support chunked local attn now."
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (
@@ -611,11 +619,13 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
         assert dcp_world_size == 1, "DCP not support mamba now."
+        assert pcp_world_size == 1, "PCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
@@ -705,6 +715,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"

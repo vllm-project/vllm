@@ -100,6 +100,7 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -124,12 +125,9 @@ class KVCacheManager:
                 0
             ].kv_cache_spec.block_size
 
-            if dcp_world_size > 1:
+            if dcp_world_size * pcp_world_size > 1:
                 assert len(kv_cache_config.kv_cache_groups) == 1
-                # Note(hc): need revisit. When both DCP and any future
-                # PCP are enabled, the block_size may need to be scaled
-                # by a factor of dcp_size × pcp_size?
-                self.block_size *= dcp_world_size
+                self.block_size *= dcp_world_size * pcp_world_size
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -138,6 +136,7 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
