@@ -567,11 +567,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Process through Mamba mixer
-        output = torch.empty_like(hidden_states)
-        self.mamba(
-            hidden_states,
-            output,
-        )
+        output = self.mamba(hidden_states)
 
         # residual connection after mamba
         hidden_states = residual + output
