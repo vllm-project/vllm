@@ -560,6 +560,8 @@ class GPUModelRunner(
             self.vit_cudagraph_batch_sizes = sorted(
                 self.compilation_config.vit_cudagraph_capture_sizes
             )
+        else:
+            self.vit_cudagraph_batch_sizes = None
 
         # Cache the device properties.
         self._init_device_properties()
@@ -4654,7 +4656,7 @@ class GPUModelRunner(
         """
         def _get_dummy_h_w_patches(patches: int):
             merge_size = getattr(self.model_config.hf_config.vision_config, "spatial_merge_size", 1)
-            assert(patches % (merge_size * merge_size) == 0, "Number of patches must be multiple of merge_size squared")
+            assert(patches % (merge_size * merge_size) == 0), "Number of patches must be multiple of merge_size squared"
             h_patches = merge_size
             w_patches = patches // merge_size
             return h_patches, w_patches

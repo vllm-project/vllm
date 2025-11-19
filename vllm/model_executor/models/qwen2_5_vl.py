@@ -641,8 +641,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 prefix=f"{prefix}.merger",
             )
         vllm_config: VllmConfig = get_current_vllm_config()
-        self._persistent_hidden_states_buffer = None
-        self._persistent_rotary_pos_emb_buffer = None
+        self._persistent_hidden_states_buffer: torch.Tensor | None = None
+        self._persistent_rotary_pos_emb_buffer: torch.Tensor | None = None
         if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
             max_compile_size = vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
             self._persistent_hidden_states_buffer = torch.empty(

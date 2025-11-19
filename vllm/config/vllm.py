@@ -1355,6 +1355,8 @@ class VllmConfig:
             self.model_config is not None
             and not self.model_config.enforce_eager
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_encoder_tp_mode != "data"
         ):
             # determine the vit_cudagraph_capture_sizes
             if self.compilation_config.vit_cudagraph_capture_sizes is not None:
@@ -1362,11 +1364,11 @@ class VllmConfig:
                     "vit_cudagraph_capture_sizes should contain at least one element "
                     "when using cuda graph."
                 )
-                # sort to make sure the sizes are in ascending order
-                self.compilation_config.vit_cudagraph_capture_sizes.sort()
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.vit_cudagraph_capture_sizes))
                 vit_cudagraph_capture_sizes = dedup_sizes
+                # sort to make sure the sizes are in ascending order
+                vit_cudagraph_capture_sizes.sort()
             else:
                 max_vit_cudagraph_capture_size = 5120
                 vit_cudagraph_capture_sizes = [
