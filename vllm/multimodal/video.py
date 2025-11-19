@@ -135,10 +135,12 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == num_frames_to_sample, (
-            f"Expected reading {num_frames_to_sample} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        if i != num_frames_to_sample:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Expected reading {num_frames_to_sample} frames, "
+                        f"but only loaded {i} frames from video. Using {i} frames.")
+            frames = frames[:i]
 
         # Use transformers transformers.video_utils.VideoMetadata format
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
@@ -222,10 +224,12 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == len(frame_indices), (
-            f"Expected reading {len(frame_indices)} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        if i != len(frame_indices):
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Expected reading {len(frame_indices)} frames, "
+                        f"but only loaded {i} frames from video. Using {i} frames.")
+            frames = frames[:i]
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
