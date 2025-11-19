@@ -192,8 +192,6 @@ def pplx_cutlass_moe(
 
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def _pplx_moe(
