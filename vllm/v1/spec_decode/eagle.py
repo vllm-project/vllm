@@ -116,9 +116,18 @@ class EagleProposer:
         )
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
-            # M-RoPE need (3, max_num_tokens)
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
