@@ -45,6 +45,16 @@ COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
 COMPLETED_NONE_FUTURE.set_result(None)
 
 
+class RayRemoteWrapper:
+    """A simple wrapper around Ray object reference."""
+
+    def __init__(self, ref):
+        self.ref = ref
+
+    def get(self):
+        return ray.get(self.ref)
+
+
 @dataclass
 class RayWorkerMetaData:
     """
@@ -445,6 +455,18 @@ class RayDistributedExecutor(Executor):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
+
+        if self.scheduler_config.async_scheduling:
+            assert non_block
+            for ref in refs:
+                ref.get()
+
+            refs = [
+                RayRemoteWrapper(
+                    worker.execute_method.remote("get_execute_model_output")
+                )
+                for worker in self.workers
+            ]
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
