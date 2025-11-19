@@ -4,6 +4,7 @@ import random
 from typing import TYPE_CHECKING
 
 import pytest
+import torch
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -210,6 +211,41 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)
         assert len(num_accepted_tokens_per_pos[0].values) == 5
+
+
+def test_kv_cache_metrics_surface_in_llm_get_metrics(vllm_runner):
+    if not torch.cuda.is_available():
+        pytest.skip("KV cache residency metrics smoke test requires CUDA")
+
+    with vllm_runner(
+        MODEL,
+        disable_log_stats=False,
+        kv_cache_metrics=True,
+        kv_cache_metrics_sample=1.0,
+    ) as vllm_model:
+        llm: LLM = vllm_model.llm
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=8)
+
+        outputs = llm.generate(["hello world"], sampling_params)
+        assert outputs
+
+        llm.llm_engine.do_log_stats()
+
+        metrics = llm.get_metrics()
+        histograms = {
+            metric.name: metric for metric in metrics if isinstance(metric, Histogram)
+        }
+
+        lifetime_hist = histograms.get("vllm_kv_block_lifetime_seconds")
+        idle_hist = histograms.get("vllm_kv_block_idle_before_evict_seconds")
+
+        assert lifetime_hist is not None
+        assert idle_hist is not None
+        assert lifetime_hist.count > 0
+        assert idle_hist.count > 0
+
+        assert "vllm_kv_block_reuse_gap_seconds" in histograms
+        assert "vllm_request_prefix_residency_seconds" in histograms
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
