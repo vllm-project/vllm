@@ -3,7 +3,7 @@ Recent papers QuaRot and SpinQuant papers propose a quantization method for larg
 
 To support these features, the ability to add online **hadamard** rotations - explicitly rotating the input before it is passed into the quantized layer - is necessary (see figure below).
 
-![Alt text](../assets/features/quantization/{506D28EB-F734-48C3-A3C8-0A7CF5F31141}.PNG)
+![Alt text](../../assets/features/quantization/{506D28EB-F734-48C3-A3C8-0A7CF5F31141}.PNG)
 # Features
 - Specify specific layers, by regular expression, and corresponding online rotation to be applied to their inputs
 - Specify a custom Python module and method for the rotation function
@@ -24,7 +24,7 @@ Below is a specific example using `benchmarks/benchmark_throughput.py`:
 python3 benchmark_throughput.py --model {name} --num-prompts 50 --input-len 64 --output-len 128
 ```
 
-![Alt text](../assets/features/quantization/image.png)
+![Alt text](../../assets/features/quantization/image.png)
 QuaRot demonstrates very strong performance improvements when integrated with vLLM, close to int8.
 
 ### Accuracy:
