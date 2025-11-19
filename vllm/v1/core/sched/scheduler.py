@@ -122,6 +122,9 @@ class Scheduler(SchedulerInterface):
         self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
 
+        # Track total tokens in preempted requests
+        self._preempted_tokens = 0
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
@@ -317,6 +320,9 @@ class Scheduler(SchedulerInterface):
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
+
+                    preempted_tokens = preempted_req.num_computed_tokens
+                    self._preempted_tokens += preempted_tokens
 
                     self.kv_cache_manager.free(preempted_req)
                     self.encoder_cache_manager.free(preempted_req)
@@ -1330,6 +1336,7 @@ class Scheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            num_tokens_preempted=self._preempted_tokens,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
