@@ -895,7 +895,7 @@ def apply_top_k_top_p_filtered(
     # which consists of very small probabilities which has larger relative errors
     # compared to the original PyTorch top-p probabilities. As such, we fallback to
     # the original PyTorch top-p implementation for accuracy when p is too large.
-    if max_k > vocab_size / 4 or (k is None and p.max().item() > 0.995):
+    if max_k > vocab_size / 4 or (k is None and p.max().item() > 0.99):
         return apply_top_k_top_p(logits, k, p)
 
     BLOCK_SIZE = 8192
