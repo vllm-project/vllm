@@ -42,6 +42,16 @@ def test_prefix_caching_from_cli():
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.prefix_caching_hash_algo == "sha256"
 
+    # set hash algorithm to xxhash (pickle)
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash"
+
+    # set hash algorithm to xxhash_cbor
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
+
     # an invalid hash algorithm raises an error
     parser.exit_on_error = False
     with pytest.raises(ArgumentError):

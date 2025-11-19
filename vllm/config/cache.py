@@ -30,7 +30,7 @@ CacheDType = Literal[
     "fp8_ds_mla",
 ]
 MambaDType = Literal["auto", "float32"]
-PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -79,7 +79,11 @@ class CacheConfig:
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing.\n
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
-    serializes objects using canonical CBOR and hashes them with SHA-256."""
+    serializes objects using canonical CBOR and hashes them with SHA-256.\n
+    - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
+    non-cryptographic hashing. Requires the optional ``xxhash`` package.\n
+    - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
+    reproducible hashing. Requires the optional ``xxhash`` package."""
     cpu_offload_gb: float = Field(default=0, ge=0)
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
