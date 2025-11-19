@@ -8,7 +8,7 @@ from vllm.config import CompilationMode
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
-from ..utils import compare_all_settings
+from ...utils import compare_all_settings
 
 
 @dataclasses.dataclass
