@@ -188,7 +188,6 @@ return curr_o @ W_O
 """
 
 import functools
-from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import ClassVar, Generic, TypeVar
@@ -1048,9 +1047,7 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
-# TODO(Lucas): rename MLACommonBaseImpl -> MLACommonImpl,
-# and MLACommonImpl -> MLACommonDenseImpl or somthing like that
-class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
+class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1098,18 +1095,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
-
-    # process_weights_after_loading and projection helpers have been moved to the layer.
-
-
-class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -1393,24 +1378,22 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
     # process_weights_after_loading is handled in the layer for MLA.
 
-    @abstractmethod
     def _forward_prefill(
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: A,
         k_scale: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    @abstractmethod
     def _forward_decode(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: M,
+        attn_metadata: A,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
