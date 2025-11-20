@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
+from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
@@ -78,6 +79,9 @@ def test_env(
     block_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    is_rocm = current_platform.is_rocm()
+    if (device == "hip" and not is_rocm) or (device == "cuda" and is_rocm):
+        pytest.skip("Test only on correct platform")
     """Test attention backend selection with valid device-backend pairs."""
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, name)
