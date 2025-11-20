@@ -87,8 +87,10 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch profiler. Enabled and configured through env vars:
+        # Torch/CUDA profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # VLLM_TORCH_CUDA_PROFILE=1
+        self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             self.profiler = TorchProfilerWrapper(
@@ -379,8 +381,7 @@ class Worker(WorkerBase):
             with allocator.use_memory_pool(tag="kv_cache"):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            with nullcontext():
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,

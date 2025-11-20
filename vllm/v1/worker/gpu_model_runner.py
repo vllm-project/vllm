@@ -1967,14 +1967,12 @@ class GPUModelRunner(
                     lambda item: item.modality == "video", mm_kwargs
                 ):
                     _, _, micro_batch_mm_inputs = next(
-                        iter(
-                            group_mm_kwargs_by_modality(
-                                [video_mm_kwargs_item],
-                                device=self.device,
-                                pin_memory=self.pin_memory,
-                                merge_by_field_config=model.merge_by_field_config,
-                                multimodal_cpu_fields=model.multimodal_cpu_fields,
-                            )
+                        group_mm_kwargs_by_modality(
+                            [video_mm_kwargs_item],
+                            device=self.device,
+                            pin_memory=self.pin_memory,
+                            merge_by_field_config=model.merge_by_field_config,
+                            multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
 

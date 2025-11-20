@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import Any
 
 import torch
 import torch.distributed
@@ -37,6 +38,7 @@ class XPUWorker(Worker):
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"

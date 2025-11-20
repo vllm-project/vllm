@@ -3,6 +3,7 @@
 import os
 import platform
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -37,6 +38,9 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
