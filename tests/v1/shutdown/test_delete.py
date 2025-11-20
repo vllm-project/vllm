@@ -86,6 +86,8 @@ def test_llm_delete(
     """
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
+    if not enable_multiprocessing:  # TODO: remove this skip
+        pytest.skip(reason="Skip multiprocessing=False - must run test in subprocess")
 
     devices = list(range(tensor_parallel_size))
     check_gpu_memory_usage(devices)
