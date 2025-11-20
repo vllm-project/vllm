@@ -60,10 +60,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     expert_weight_is_col_major,
     requant_weight_ue8m0_inplace,
@@ -462,14 +458,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
             )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.use_marlin or (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-        ):
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
+        if self.use_marlin:
             return None
         elif not self.allow_flashinfer:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
@@ -994,11 +990,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     layer.w2_weight_scale
                 )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or self.rocm_aiter_moe_enabled:
             return None
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -2019,9 +2018,20 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsWNA16MoEMethod` yet."
-            )
+            if expert_load_view is None:
+                raise ValueError("enable_eplb=True requiere expert_load_view != None")
+            if logical_to_physical_map is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_to_physical_map != None"
+                )
+            if logical_replica_count is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_replica_count != None"
+                )
+            if not isinstance(layer, FusedMoE):
+                raise TypeError(
+                    "EPLB is only supported when `layer` is a instance of FusedMoE."
+                )
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -2038,6 +2048,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=getattr(layer, "num_fused_shared_experts", 0),
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         return fused_experts(
@@ -2053,6 +2069,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
