@@ -63,22 +63,25 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
-        output_parallel = self.apply(input_parallel)
+        # Only fuse bias add into GEMM for rank 0 (matches base
+        # RowParallelLinear behavior). This ensures bias will not get
+        # added more than once in TP>1 case and matches the numerical
+        # behavior of the unwrapped layer
+        bias_ = (
+            None
+            if (self.tp_rank > 0 or self.base_layer.skip_bias_add)
+            else self.base_layer.bias
+        )
+        output_parallel = self.apply(input_parallel, bias_)
+
         if self.base_layer.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
 
-        if not self.base_layer.skip_bias_add:
-            output = (
-                output_ + self.base_layer.bias
-                if self.base_layer.bias is not None
-                else output_
-            )
-            output_bias = None
-        else:
-            output = output_
-            output_bias = self.base_layer.bias
+        # Bias was already added by rank 0 in apply(), no need to add again
+        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
+        output = output_
 
         if not self.base_layer.return_bias:
             return output
