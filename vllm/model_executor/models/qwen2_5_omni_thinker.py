@@ -403,7 +403,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
@@ -413,7 +412,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
 
         return prompt_ids, mm_placeholders
