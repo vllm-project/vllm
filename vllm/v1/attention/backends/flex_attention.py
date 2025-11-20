@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
+torch._dynamo.config.recompile_limit = 16
 create_block_mask_compiled = torch.compile(
     create_block_mask, fullgraph=True, mode="reduce-overhead"
 )
@@ -722,6 +723,7 @@ class FlexAttentionImpl(AttentionImpl):
     sliding_window: int | None
     alibi_slopes: torch.Tensor | None
     logits_soft_cap: float | None
+    mm_prefix_range: list[tuple[int, int]] | None = None
 
     def __init__(
         self,
@@ -837,7 +839,7 @@ class FlexAttentionImpl(AttentionImpl):
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
 
-        if attn_metadata.mm_prefix_range:
+        if self.mm_prefix_range != getattr(attn_metadata, "mm_prefix_range", None):
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
 

@@ -192,7 +192,7 @@ class PlaceholderRange:
         ends = torch.nonzero(
             torch.diff(mask_i, append=mask_i.new_zeros(1)) == -1
         ).flatten()
-        ranges = torch.stack((starts, ends), dim=1)
+        ranges = torch.stack((starts, ends), dim=1) + self.offset
         return [tuple(x) for x in ranges.tolist()]
 
     def __eq__(self, other: object) -> bool:
