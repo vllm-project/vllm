@@ -210,7 +210,6 @@ class Worker(WorkerBase):
             )
 
             # Set random seed.
-            assert self.model_config.seed is not None
             set_random_seed(self.model_config.seed)
 
             # Now take memory snapshot after NCCL is initialized
@@ -487,7 +486,6 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
     def reset_mm_cache(self) -> None:

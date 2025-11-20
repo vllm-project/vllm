@@ -140,7 +140,6 @@ class TPUWorker:
         self.device_config.device = self.device
 
         # Set random seed.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
 
@@ -291,7 +290,6 @@ class TPUWorker:
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
     def reset_mm_cache(self) -> None:

@@ -2951,21 +2951,22 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                 )
 
+        spec_config = self.speculative_config
         use_padded_batch_for_eagle = (
-            self.speculative_config is not None
-            and self.speculative_config.use_eagle()
-            and not self.speculative_config.disable_padded_drafter_batch
+            spec_config is not None
+            and spec_config.use_eagle()
+            and not spec_config.disable_padded_drafter_batch
         )
         effective_drafter_max_model_len = self.max_model_len
         if effective_drafter_max_model_len is None:
             effective_drafter_max_model_len = self.model_config.max_model_len
         if (
-            self.speculative_config is not None
-            and self.speculative_config.draft_model_config is not None
-            and self.speculative_config.draft_model_config.max_model_len is not None
+            spec_config is not None
+            and spec_config.draft_model_config is not None
+            and spec_config.draft_model_config.max_model_len is not None
         ):
             effective_drafter_max_model_len = (
-                self.speculative_config.draft_model_config.max_model_len
+                spec_config.draft_model_config.max_model_len
             )
         input_fits_in_drafter = spec_decode_common_attn_metadata and (
             spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens

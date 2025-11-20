@@ -108,7 +108,6 @@ class CPUWorker(Worker):
             current_platform.dist_backend,
         )
         # Set random seed.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
@@ -130,7 +129,6 @@ class CPUWorker(Worker):
     def compile_or_warm_up_model(self) -> None:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
 
