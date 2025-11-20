@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter, Vector, Histogram
 
 try:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -183,12 +185,12 @@ def main(args):
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if args.dataset_path == "philschmid/mt-bench-multiturn":
-        # warmup run
-        print('Warmup start')
-        for _ in range(3):
-            run_mtbench_multiturn(llm, sampling_params, 1, 1)
-        # actually run everything
-        print('Warmup end\nStart the actual run')
+        # # warmup run
+        # print('Warmup start')
+        # for _ in range(3):
+        #     run_mtbench_multiturn(llm, sampling_params, 1, 1)
+        # # actually run everything
+        # print('Warmup end\nStart the actual run')
         outputs = run_mtbench_multiturn(llm, sampling_params, args.num_prompts, args.max_num_seqs)
     elif not args.custom_mm_prompts:
         outputs = llm.generate(
@@ -207,7 +209,7 @@ def main(args):
             print(f"---Finish reason---\n{output.outputs[0].finish_reason}")
             print(f"---Prompt ({len(output.prompt_token_ids)} tokens)---\n{prompt}")
             print(f"---Generated Text ({len(output.outputs[0].token_ids)} tokens)---\n{output.outputs[0].text}")
-            print("*" * 80 + '\n')
+            print('\n')
 
     try:
         metrics = llm.get_metrics()
@@ -215,43 +217,75 @@ def main(args):
         print("Metrics are not supported in the V0 engine.")
         return
 
-    total_num_output_tokens = sum(
-        len(output.outputs[0].token_ids) for output in outputs
-    )
-    num_drafts = 0
-    num_draft_tokens = 0
-    num_accepted_tokens = 0
-    acceptance_counts = [0] * args.num_spec_tokens
+    prefill_tokens = sum(len(output.prompt_token_ids) for output in outputs)
+    decode_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+    total_tokens = prefill_tokens + decode_tokens
+
+    metric_dict = {
+        "prefill_time": 0,
+        "decode_time": 0,
+        "num_drafts": 0,
+        "num_draft_tokens": 0,
+        "num_accepted_tokens": 0,
+        "acceptance_counts": [0] * args.num_spec_tokens,
+    }
+
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
+            metric_dict["num_drafts"] += metric.value
         elif metric.name == "vllm:spec_decode_num_draft_tokens":
-            assert isinstance(metric, Counter)
-            num_draft_tokens += metric.value
+            metric_dict["num_draft_tokens"] += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
-            assert isinstance(metric, Counter)
-            num_accepted_tokens += metric.value
+            metric_dict["num_accepted_tokens"] += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                acceptance_counts[pos] += metric.values[pos]
+            for pos, val in enumerate(metric.values):
+                metric_dict["acceptance_counts"][pos] += val
+        elif metric.name == "vllm:request_prefill_time_seconds":
+            metric_dict["prefill_time"] += metric.sum
+        elif metric.name == "vllm:request_decode_time_seconds":
+            metric_dict["decode_time"] += metric.sum
+
+    metric_dict = {
+        "tokens": {
+            "prefill": prefill_tokens,
+            "decode": decode_tokens,
+            "total": total_tokens,
+        },
+        "timing": {
+            "prefill_secs": metric_dict["prefill_time"],
+            "decode_secs": metric_dict["decode_time"],
+            "total_secs": metric_dict["prefill_time"] + metric_dict["decode_time"],
+        },
+        "throughput": {
+            "prefill_toks_per_sec": prefill_tokens / metric_dict["prefill_time"] if metric_dict["prefill_time"] > 0 else 0,
+            "decode_toks_per_sec": decode_tokens / metric_dict["decode_time"] if metric_dict["decode_time"] > 0 else 0,
+            "total_toks_per_sec": total_tokens / (metric_dict["prefill_time"] + metric_dict["decode_time"]) if (metric_dict["prefill_time"] + metric_dict["decode_time"]) > 0 else 0,
+        },
+        "speculative_decoding": {
+            "num_drafts": metric_dict["num_drafts"],
+            "num_draft_tokens": metric_dict["num_draft_tokens"],
+            "num_accepted_tokens": metric_dict["num_accepted_tokens"],
+            "mean_acceptance_length": round(1 + metric_dict["num_accepted_tokens"] / metric_dict["num_drafts"], 2) if metric_dict["num_drafts"] > 0 else 1,
+            "draft_utilization_rate_percent": round(metric_dict["num_accepted_tokens"] / metric_dict["num_draft_tokens"] * 100, 2) if metric_dict["num_draft_tokens"] > 0 else 0,
+            "acceptance_rates_per_position": {
+                f"token_{i}": round(metric_dict["acceptance_counts"][i] / metric_dict["num_drafts"], 4) if metric_dict["num_drafts"] > 0 else 0
+                for i in range(len(metric_dict["acceptance_counts"]))
+            },
+        },
+    }
+
+    args_dict = {str(k): str(v) for k, v in vars(args).items()}
+    output_dict = {"args": args_dict, "metrics": metric_dict}
 
     print("-" * 50)
-    print(f"total_num_output_tokens: {total_num_output_tokens}")
-    print(f"num_drafts: {num_drafts}")
-    print(f"num_draft_tokens: {num_draft_tokens}")
-    print(f"num_accepted_tokens: {num_accepted_tokens}")
-    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
-    print(f"mean acceptance length: {acceptance_length:.2f}")
+    print(json.dumps(output_dict, indent=2))
     print("-" * 50)
+    
+    output_file = Path("output.json")
+    output_file.write_text(json.dumps(output_dict, indent=2))
+    print(f"output saved to {output_file}")
 
-    # print acceptance at each token position
-    for i in range(len(acceptance_counts)):
-        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
-
-    return acceptance_length
+    return metric_dict["speculative_decoding"]["mean_acceptance_length"]
 
 
 if __name__ == "__main__":
