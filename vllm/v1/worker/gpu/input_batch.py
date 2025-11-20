@@ -220,9 +220,19 @@ def _prepare_pos_seq_lens_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
+    max_num_reqs,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_id = tl.program_id(0)
+    num_reqs = tl.num_programs(0) - 1
+    if req_id == num_reqs:
+        # Pad unused seq_lens as 0 for full CUDA graphs.
+        for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(seq_lens_ptr + block, 0, mask=mask)
+        return
+
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
 
@@ -248,16 +258,17 @@ def prepare_pos_seq_lens(
     seq_lens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _prepare_pos_seq_lens_kernel[(num_reqs,)](
+    # NOTE(woosuk): We do +1 because the last thread block is used
+    # to pad unused seq_lens as 0 for full CUDA graphs.
+    _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
         seq_lens,
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
+        seq_lens.shape[0],
         BLOCK_SIZE=1024,
     )
-    # Fill unused seq_lens as 0 for full CUDA graphs.
-    seq_lens[num_reqs:].zero_()
 
 
 @triton.jit

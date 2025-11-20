@@ -454,8 +454,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             query_start_loc_gpu,
             seq_lens,
             self.req_states.prefill_len.gpu,
-            # num_draft_tokens,
-            # self.req_states.draft_tokens,
         )
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
