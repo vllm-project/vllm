@@ -10,12 +10,12 @@ import torch
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.forward_context import set_forward_context
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def reference_fn(x: torch.Tensor):
@@ -38,7 +38,7 @@ class CompiledMod(torch.nn.Module):
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
         )
     )
 

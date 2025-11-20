@@ -7,12 +7,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Literal, Optional, TypedDict, Union, cast, final
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Optional,
+    TypeAlias,
+    TypedDict,
+    Union,
+    cast,
+    final,
+)
 
 import numpy as np
-from typing_extensions import NotRequired, TypeAlias, TypeVar, deprecated
+from typing_extensions import NotRequired, TypeVar, deprecated
 
-from vllm.utils import LazyLoader, full_groupby, is_list_of
+from vllm.utils.collection_utils import full_groupby, is_list_of
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 
 if TYPE_CHECKING:
@@ -85,7 +96,7 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
+ModalityData: TypeAlias = _T | list[_T | None] | None
 """
 Either a single data item, or a list of data items. Can only be None if UUID
 is provided.
@@ -117,7 +128,7 @@ The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
 """
 
-MultiModalUUIDDict: TypeAlias = Mapping[str, Union[list[Optional[str]], str]]
+MultiModalUUIDDict: TypeAlias = Mapping[str, list[str | None] | str]
 """
 A dictionary containing user-provided UUIDs for items in each modality.
 If a UUID for an item is not provided, its entry will be `None` and
@@ -237,6 +248,19 @@ class MultiModalFeatureSpec:
 
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
+
+    @staticmethod
+    def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
+        kwargs = defaultdict[str, list[NestedTensors]](list)
+
+        for f in features:
+            item = f.data
+            if item is not None:
+                for k in keys:
+                    if k in item:
+                        kwargs[k].append(item[k].data)
+
+        return dict(kwargs)
 
 
 @dataclass
@@ -412,7 +436,7 @@ class MultiModalFlatField(BaseMultiModalField):
         [`MultiModalFieldConfig.flat_from_sizes`][vllm.multimodal.inputs.MultiModalFieldConfig.flat_from_sizes]
     """
 
-    slices: Union[Sequence[slice], Sequence[Sequence[slice]]]
+    slices: Sequence[slice] | Sequence[Sequence[slice]]
     dim: int = 0
 
     def build_elems(
@@ -524,7 +548,7 @@ class MultiModalFieldConfig:
     @staticmethod
     def flat(
         modality: str,
-        slices: Union[Sequence[slice], Sequence[Sequence[slice]]],
+        slices: Sequence[slice] | Sequence[Sequence[slice]],
         dim: int = 0,
     ):
         """
@@ -729,7 +753,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
 _I = TypeVar(
     "_I",
     MultiModalKwargsItem,
-    Optional[MultiModalKwargsItem],
+    MultiModalKwargsItem | None,
     default=MultiModalKwargsItem,
 )
 
@@ -818,10 +842,10 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         )
 
 
-MultiModalKwargsOptionalItems: TypeAlias = Union[
-    MultiModalKwargsItems[MultiModalKwargsItem],
-    MultiModalKwargsItems[Optional[MultiModalKwargsItem]],
-]
+MultiModalKwargsOptionalItems: TypeAlias = (
+    MultiModalKwargsItems[MultiModalKwargsItem]
+    | MultiModalKwargsItems[MultiModalKwargsItem | None]
+)
 
 
 class MultiModalKwargs(UserDict[str, NestedTensors]):

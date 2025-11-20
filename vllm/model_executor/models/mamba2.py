@@ -3,7 +3,6 @@
 """PyTorch MAMBA2 model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -21,12 +20,15 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import HasInnerState, IsAttentionFree
+from vllm.model_executor.models.interfaces import (
+    HasInnerState,
+    IsAttentionFree,
+    SupportsMambaPrefixCaching,
+)
 from vllm.sequence import IntermediateTensors
 
 from .utils import (
@@ -44,9 +46,9 @@ class Mamba2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MambaConfig,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -76,7 +78,7 @@ class Mamba2DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -85,8 +87,7 @@ class Mamba2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        output = torch.empty_like(hidden_states)
-        self.mixer(hidden_states, output)
+        output = self.mixer(hidden_states)
         return output, residual
 
 
@@ -104,18 +105,12 @@ class Mamba2Model(nn.Module):
         assert not is_lora_enabled
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
 
         self.embeddings = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -135,21 +130,21 @@ class Mamba2Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -190,7 +185,9 @@ class Mamba2Model(nn.Module):
         return loaded_params
 
 
-class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
+class Mamba2ForCausalLM(
+    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
+):
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
@@ -233,7 +230,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         super().__init__()
@@ -244,41 +241,30 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         self.backbone = Mamba2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "backbone")
         )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.backbone.embeddings)
 
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.backbone.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.backbone.embed_input_ids(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.backbone(

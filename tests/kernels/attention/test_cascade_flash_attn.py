@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import cascade_attention, merge_attn_states
-from vllm.vllm_flash_attn import (
-    fa_version_unsupported_reason,
-    flash_attn_varlen_func,
-    is_fa_version_supported,
-)
+
+try:
+    from vllm.vllm_flash_attn import (
+        fa_version_unsupported_reason,
+        flash_attn_varlen_func,
+        is_fa_version_supported,
+    )
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "vllm_flash_attn is not supported for vLLM on ROCm.",
+            allow_module_level=True,
+        )
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]
@@ -85,7 +92,7 @@ def test_cascade(
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
     fa_version: int,
 ) -> None:
@@ -171,6 +178,7 @@ def test_cascade(
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
         common_prefix_len=common_prefix_len,
+        max_num_splits=0,  # no max
         fa_version=fa_version,
     )
 

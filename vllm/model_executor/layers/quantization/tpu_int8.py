@@ -119,7 +119,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         try:
             import torch_xla.experimental.custom_kernel  # noqa: F401

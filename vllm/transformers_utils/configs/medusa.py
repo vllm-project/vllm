@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional, Union
 
 from transformers import PretrainedConfig
 
@@ -18,7 +17,7 @@ class MedusaConfig(PretrainedConfig):
         num_hidden_layers: int = 1,
         max_paths: int = 64,
         topk: int = 10,
-        truncated_vocab_size: Optional[int] = None,
+        truncated_vocab_size: int | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -39,7 +38,7 @@ class MedusaConfig(PretrainedConfig):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: Union[str, os.PathLike],
+        pretrained_model_name_or_path: str | os.PathLike,
         **kwargs,
     ) -> "MedusaConfig":
         config_dict, kwargs = cls.get_config_dict(

@@ -4,10 +4,12 @@
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Literal, TypeAlias, TypeVar
 
 import huggingface_hub
 from huggingface_hub import (
@@ -23,9 +25,14 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from transformers import GenerationConfig, PretrainedConfig
+from packaging.version import Version
+from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_MAPPING_NAMES,
+)
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
@@ -47,7 +54,7 @@ MISTRAL_CONFIG_NAME = "params.json"
 logger = init_logger(__name__)
 
 
-def _get_hf_token() -> Optional[str]:
+def _get_hf_token() -> str | None:
     """
     Get the HuggingFace token from environment variable.
 
@@ -64,19 +71,22 @@ def _get_hf_token() -> Optional[str]:
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
+        if isinstance(value := super().__getitem__(key), type):
+            return value
+
         import vllm.transformers_utils.configs as configs
 
-        return getattr(configs, super().__getitem__(key))
+        return getattr(configs, value)
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v3="DeepseekV3Config",
-    deepseek_v32="DeepseekV3Config",
+    deepseek_v32=DeepseekV3Config,
     flex_olmo="FlexOlmoConfig",
+    kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -101,6 +111,7 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
 
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
+    "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
 
@@ -108,10 +119,10 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
-        model: Union[str, Path],
+        model: str | Path,
         trust_remote_code: bool,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
+        revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -173,10 +184,10 @@ class HFConfigParser(ConfigParserBase):
 class MistralConfigParser(ConfigParserBase):
     def parse(
         self,
-        model: Union[str, Path],
+        model: str | Path,
         trust_remote_code: bool,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
+        revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         # This function loads a params.json config which
@@ -247,8 +258,8 @@ def register_config_parser(config_format: str):
          ...         self,
          ...         model: Union[str, Path],
          ...         trust_remote_code: bool,
-         ...         revision: Optional[str] = None,
-         ...         code_revision: Optional[str] = None,
+         ...         revision: str | None = None,
+         ...         code_revision: str | None = None,
          ...         **kwargs,
          ...     ) -> tuple[dict, PretrainedConfig]:
          ...         raise NotImplementedError
@@ -310,9 +321,9 @@ def with_retry(
 def list_repo_files(
     repo_id: str,
     *,
-    revision: Optional[str] = None,
-    repo_type: Optional[str] = None,
-    token: Union[str, bool, None] = None,
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
 ) -> list[str]:
     def lookup_files() -> list[str]:
         # directly list files if model is local
@@ -348,9 +359,9 @@ def file_exists(
     repo_id: str,
     file_name: str,
     *,
-    repo_type: Optional[str] = None,
-    revision: Optional[str] = None,
-    token: Union[str, bool, None] = None,
+    repo_type: str | None = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
 ) -> bool:
     file_list = list_repo_files(
         repo_id, repo_type=repo_type, revision=revision, token=token
@@ -360,7 +371,7 @@ def file_exists(
 
 # In offline mode the result can be a false negative
 def file_or_path_exists(
-    model: Union[str, Path], config_name: str, revision: Optional[str]
+    model: str | Path, config_name: str, revision: str | None
 ) -> bool:
     if (local_path := Path(model)).exists():
         return (local_path / config_name).is_file()
@@ -382,21 +393,61 @@ def file_or_path_exists(
     )
 
 
-def patch_rope_scaling(config: PretrainedConfig) -> None:
+def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
+    """Some models may have no rope_theta in their config but still use RoPE.
+    This function sets a default rope_theta if it's missing."""
+    if getattr(config, "rope_parameters", None) is None:
+        config.rope_parameters = {"rope_type": "default"}
+    if "rope_theta" not in config.rope_parameters:
+        config.rope_parameters["rope_theta"] = default_theta
+
+
+def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        patch_rope_scaling(text_config)
+    # Retrieve rope_parameters differently based on Transformers version
+    if Version(version("transformers")) >= Version("5.0.0.dev0"):
+        from transformers.modeling_rope_utils import RopeParameters
 
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is not None:
-        patch_rope_scaling_dict(rope_scaling)
+        rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
+            config, "rope_parameters", None
+        )
+    elif hasattr(config, "rope_parameters"):
+        # We are in Transformers v4 and rope_parameters
+        # has already been patched for this config
+        return
+    else:
+        # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
+        rope_theta: float | None = getattr(config, "rope_theta", None)
+        rope_scaling: dict | None = getattr(config, "rope_scaling", None)
+        rope_parameters = rope_scaling
+        # Move rope_theta into rope_parameters
+        if rope_theta is not None:
+            rope_parameters = rope_parameters or {"rope_type": "default"}
+            rope_parameters["rope_theta"] = rope_theta
+        # Add original_max_position_embeddings if present
+        if rope_parameters and (
+            ompe := getattr(config, "original_max_position_embeddings", None)
+        ):
+            rope_parameters["original_max_position_embeddings"] = ompe
+        # Write back to config
+        config.rope_parameters = rope_parameters
+
+    # No RoPE parameters to patch
+    if rope_parameters is None:
+        return
+
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        for rope_parameters_layer_type in rope_parameters.values():
+            patch_rope_parameters_dict(rope_parameters_layer_type)
+    else:
+        patch_rope_parameters_dict(rope_parameters)
 
 
-def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
-    if "rope_type" in rope_scaling and "type" in rope_scaling:
-        rope_type = rope_scaling["rope_type"]
-        rope_type_legacy = rope_scaling["type"]
+def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
+    if "rope_type" in rope_parameters and "type" in rope_parameters:
+        rope_type = rope_parameters["rope_type"]
+        rope_type_legacy = rope_parameters["type"]
         if rope_type != rope_type_legacy:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
@@ -404,28 +455,28 @@ def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
                 "You should only specify one of them."
             )
 
-    if "rope_type" not in rope_scaling and "type" in rope_scaling:
-        rope_scaling["rope_type"] = rope_scaling["type"]
+    if "rope_type" not in rope_parameters and "type" in rope_parameters:
+        rope_parameters["rope_type"] = rope_parameters["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
 
-    if "rope_type" not in rope_scaling:
-        raise ValueError("rope_scaling should have a 'rope_type' key")
+    if "rope_type" not in rope_parameters:
+        raise ValueError("rope_parameters should have a 'rope_type' key")
 
-    if rope_scaling["rope_type"] == "su":
-        rope_scaling["rope_type"] = "longrope"
+    if rope_parameters["rope_type"] == "su":
+        rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_scaling["rope_type"] == "mrope":
-        assert "mrope_section" in rope_scaling
-        rope_scaling["rope_type"] = "default"
+    elif rope_parameters["rope_type"] == "mrope":
+        assert "mrope_section" in rope_parameters
+        rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is None:
         return False
 
-    return "mrope_section" in rope_scaling
+    return "mrope_section" in rope_parameters
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
@@ -465,8 +516,7 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     """
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
+        return len(set(layer_types)) > 1
     return False
 
 
@@ -493,10 +543,10 @@ def maybe_override_with_speculators(
     model: str,
     tokenizer: str,
     trust_remote_code: bool,
-    revision: Optional[str] = None,
-    vllm_speculative_config: Optional[dict[str, Any]] = None,
+    revision: str | None = None,
+    vllm_speculative_config: dict[str, Any] | None = None,
     **kwargs,
-) -> tuple[str, str, Optional[dict[str, Any]]]:
+) -> tuple[str, str, dict[str, Any] | None]:
     """
     Resolve model configuration when speculators are detected.
 
@@ -551,13 +601,13 @@ def maybe_override_with_speculators(
 
 
 def get_config(
-    model: Union[str, Path],
+    model: str | Path,
     trust_remote_code: bool,
-    revision: Optional[str] = None,
-    code_revision: Optional[str] = None,
-    config_format: Union[str, ConfigFormat] = "auto",
-    hf_overrides_kw: Optional[dict[str, Any]] = None,
-    hf_overrides_fn: Optional[Callable[[PretrainedConfig], PretrainedConfig]] = None,
+    revision: str | None = None,
+    code_revision: str | None = None,
+    config_format: str | ConfigFormat = "auto",
+    hf_overrides_kw: dict[str, Any] | None = None,
+    hf_overrides_fn: Callable[[PretrainedConfig], PretrainedConfig] | None = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -615,6 +665,18 @@ def get_config(
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
+    # Architecture mapping for models without explicit architectures field
+    if not config.architectures:
+        if config.model_type not in MODEL_MAPPING_NAMES:
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
+        else:
+            model_type = MODEL_MAPPING_NAMES[config.model_type]
+            config.update({"architectures": [model_type]})
+
     # ModelOpt 0.31.0 and after saves the quantization config in the model
     # config file.
     quantization_config = config_dict.get("quantization_config", None)
@@ -660,7 +722,14 @@ def get_config(
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
 
-    patch_rope_scaling(config)
+    # Exhaustively patch RoPE parameters everywhere they might be
+    patch_rope_parameters(config)
+    patch_rope_parameters(config.get_text_config())
+    SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+    sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
+    if sub_configs:
+        for sub_config in sub_configs:
+            patch_rope_parameters(getattr(config, sub_config))
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
@@ -669,8 +738,8 @@ def get_config(
 
 
 def try_get_local_file(
-    model: Union[str, Path], file_name: str, revision: Optional[str] = "main"
-) -> Optional[Path]:
+    model: str | Path, file_name: str, revision: str | None = "main"
+) -> Path | None:
     file_path = Path(model) / file_name
     if file_path.is_file():
         return file_path
@@ -687,7 +756,7 @@ def try_get_local_file(
 
 
 def get_hf_file_to_dict(
-    file_name: str, model: Union[str, Path], revision: Optional[str] = "main"
+    file_name: str, model: str | Path, revision: str | None = "main"
 ):
     """
     Downloads a file from the Hugging Face Hub and returns
@@ -735,7 +804,7 @@ def get_hf_file_to_dict(
 
 
 @cache
-def get_pooling_config(model: str, revision: Optional[str] = "main") -> Optional[dict]:
+def get_pooling_config(model: str, revision: str | None = "main") -> dict | None:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
@@ -799,7 +868,7 @@ def get_pooling_config(model: str, revision: Optional[str] = "main") -> Optional
     return None
 
 
-def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
+def get_pooling_config_name(pooling_name: str) -> str | None:
     if "pooling_mode_" in pooling_name:
         pooling_name = pooling_name.replace("pooling_mode_", "")
 
@@ -820,7 +889,7 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
 
 @cache
 def get_sentence_transformer_tokenizer_config(
-    model: Union[str, Path], revision: Optional[str] = "main"
+    model: str | Path, revision: str | None = "main"
 ):
     """
     Returns the tokenization configuration dictionary for a
@@ -942,7 +1011,7 @@ def maybe_register_config_serialize_by_value() -> None:
             cloudpickle.register_pickle_by_value(transformers_modules)
 
             # ray vendors its own version of cloudpickle
-            from vllm.executor.ray_utils import ray
+            from vllm.v1.executor.ray_utils import ray
 
             if ray:
                 ray.cloudpickle.register_pickle_by_value(transformers_modules)
@@ -958,9 +1027,9 @@ def maybe_register_config_serialize_by_value() -> None:
 
 
 def get_hf_image_processor_config(
-    model: Union[str, Path],
-    hf_token: Optional[Union[bool, str]] = None,
-    revision: Optional[str] = None,
+    model: str | Path,
+    hf_token: bool | str | None = None,
+    revision: str | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
@@ -992,9 +1061,9 @@ def get_hf_text_config(config: PretrainedConfig):
 def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
-    revision: Optional[str] = None,
-    config_format: Union[str, ConfigFormat] = "auto",
-) -> Optional[GenerationConfig]:
+    revision: str | None = None,
+    config_format: str | ConfigFormat = "auto",
+) -> GenerationConfig | None:
     try:
         return GenerationConfig.from_pretrained(
             model,
@@ -1016,7 +1085,7 @@ def try_get_generation_config(
 def try_get_safetensors_metadata(
     model: str,
     *,
-    revision: Optional[str] = None,
+    revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
         get_safetensors_metadata,
@@ -1034,10 +1103,10 @@ def try_get_safetensors_metadata(
 
 
 def try_get_tokenizer_config(
-    pretrained_model_name_or_path: Union[str, os.PathLike],
+    pretrained_model_name_or_path: str | os.PathLike,
     trust_remote_code: bool,
-    revision: Optional[str] = None,
-) -> Optional[dict[str, Any]]:
+    revision: str | None = None,
+) -> dict[str, Any] | None:
     try:
         return get_tokenizer_config(
             pretrained_model_name_or_path,
@@ -1048,10 +1117,44 @@ def try_get_tokenizer_config(
         return None
 
 
+@cache
+def try_get_dense_modules(
+    model: str | Path,
+    revision: str | None = None,
+) -> list[dict[str, Any]] | None:
+    try:
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+        if not modules:
+            return None
+
+        if isinstance(modules, dict):
+            modules = modules.get("modules", [])
+
+        dense_modules = [
+            m for m in modules if m.get("type") == "sentence_transformers.models.Dense"
+        ]
+        if not dense_modules:
+            return None
+
+        layer_configs = []
+        for module in dense_modules:
+            folder = module.get("path", "")
+
+            config_path = f"{folder}/config.json" if folder else "config.json"
+            layer_config = get_hf_file_to_dict(config_path, model, revision)
+            if not layer_config:
+                continue
+            layer_config["folder"] = folder
+            layer_configs.append(layer_config)
+        return layer_configs
+    except Exception:
+        return None
+
+
 def get_safetensors_params_metadata(
     model: str,
     *,
-    revision: Optional[str] = None,
+    revision: str | None = None,
 ) -> dict[str, Any]:
     """
     Get the safetensors metadata for remote model repository.
@@ -1112,7 +1215,7 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
     return max_position_embeddings
 
 
-def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
+def get_model_path(model: str | Path, revision: str | None = None):
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
@@ -1132,8 +1235,8 @@ def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
 
 
 def get_hf_file_bytes(
-    file_name: str, model: Union[str, Path], revision: Optional[str] = "main"
-) -> Optional[bytes]:
+    file_name: str, model: str | Path, revision: str | None = "main"
+) -> bytes | None:
     """Get file contents from HuggingFace repository as bytes."""
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 

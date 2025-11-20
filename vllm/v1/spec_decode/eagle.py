@@ -3,14 +3,13 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import (
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -25,7 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
@@ -38,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -79,15 +79,15 @@ class EagleProposer:
             vllm_config.model_config
         )
 
-        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
-        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
         self.use_cuda_graph = False
 
         compilation_config = self.vllm_config.compilation_config
-        if compilation_config.level == CompilationLevel.PIECEWISE:
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             cudagraph_mode = compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
@@ -104,20 +104,30 @@ class EagleProposer:
             )
 
         self.cudagraph_batch_sizes = (
-            list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
             else []
         )
 
+        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
-            # M-RoPE need (3, max_num_tokens)
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -149,11 +159,15 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: Optional[tuple] = None
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
+        self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(
+                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+            ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata,
                 )
@@ -207,10 +221,10 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: Optional[torch.Tensor],
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -274,7 +288,7 @@ class EagleProposer:
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
-            self.inputs_embeds[:num_tokens] = self.model.get_input_embeddings(
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
                 self.input_ids[:num_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -315,7 +329,12 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+        if self.method in (
+            "deepseek_mtp",
+            "ernie_mtp",
+            "longcat_flash_mtp",
+            "pangu_ultra_moe_mtp",
+        ):
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]
@@ -387,10 +406,13 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-
+            # For data integrity when async scheduling, we shouldn't use in place
+            # operations in case they are modified in next step's `prepare_input`
+            # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            # This is an out-of-place operation to avoid modifying the original tensor.
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 
@@ -437,9 +459,7 @@ class EagleProposer:
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
-                self.inputs_embeds[:batch_size] = self.model.get_input_embeddings(
-                    input_ids
-                )
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
@@ -476,7 +496,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -491,7 +511,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -502,10 +522,9 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
+        return torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
-        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -939,7 +958,7 @@ class EagleProposer:
             self.vllm_config, DeepseekV32IndexerCache
         )
         draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
-        self.attn_layer_names = list(draft_attn_layer_names)
+        self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
@@ -948,7 +967,7 @@ class EagleProposer:
                 indexer_layers[first_layer]
                 .get_attn_backend()
                 .get_builder_cls()(
-                    indexer_layers[first_layer].get_kv_cache_spec(),
+                    indexer_layers[first_layer].get_kv_cache_spec(self.vllm_config),
                     self.indexer_layer_names,
                     self.vllm_config,
                     self.device,
@@ -962,9 +981,7 @@ class EagleProposer:
             # text-only draft models
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.get_input_embeddings(
-                    dummy_input_ids, multimodal_embeddings=None
-                )
+                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
             except (NotImplementedError, AttributeError, TypeError):
                 logger.warning(
                     "Draft model does not support multimodal inputs, "
@@ -986,6 +1003,7 @@ class EagleProposer:
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
+
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
@@ -997,52 +1015,95 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            # Check if shapes match and we found the embedding
-            eagle_shape = self.model.model.embed_tokens.weight.shape
-            target_shape = target_embed_tokens.weight.shape
-            if eagle_shape == target_shape:
-                logger.info(
-                    "Assuming the EAGLE head shares the same vocab embedding"
-                    " with the target model."
-                )
-                del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+            share_embeddings = False
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model."
+                    )
+                elif (
+                    isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    and torch.allclose(
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
+                        rtol=1e-5,
+                        atol=1e-7,
+                    )
+                ):
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
             else:
+                # MTP model
+                share_embeddings = True
                 logger.info(
-                    "The EAGLE head's vocab embedding will be loaded separately"
-                    " from the target model."
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings:
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "The EAGLE head's vocab embedding will be loaded separately"
+                "The draft model's vocab embedding will be loaded separately"
                 " from the target model."
             )
 
         # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3":
-            if hasattr(target_language_model, "lm_head"):
-                logger.info("Loading EAGLE LM head weights from the target model.")
-                self.model.lm_head = target_language_model.lm_head
-        else:
-            if (
-                hasattr(self.model, "lm_head")
-                and hasattr(target_language_model, "lm_head")
-                and self.model.lm_head.weight.shape
-                == target_language_model.lm_head.weight.shape
-            ):
+        share_lm_head = False
+        if hasattr(self.model, "has_own_lm_head"):
+            # EAGLE model
+            if not self.model.has_own_lm_head:
+                share_lm_head = True
                 logger.info(
-                    "Assuming the EAGLE head shares the same lm_head"
-                    " with the target model."
+                    "Detected EAGLE model without its own lm_head in the checkpoint. "
+                    "Sharing target model lm_head weights with the draft model."
                 )
-                del self.model.lm_head
-                self.model.lm_head = target_language_model.lm_head
+            elif (
+                hasattr(target_language_model, "lm_head")
+                and isinstance(target_language_model.lm_head.weight, torch.Tensor)
+                and isinstance(self.model.lm_head.weight, torch.Tensor)
+                and torch.equal(
+                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                )
+            ):
+                share_lm_head = True
+                logger.info(
+                    "Detected EAGLE model with lm_head identical to the target model. "
+                    "Sharing target model lm_head weights with the draft model."
+                )
             else:
                 logger.info(
-                    "The EAGLE head's lm_head will be loaded separately"
-                    " from the target model."
+                    "Detected EAGLE model with distinct lm_head weights. "
+                    "Keeping separate lm_head weights from the target model."
                 )
+        else:
+            # MTP model
+            share_lm_head = True
+            logger.info(
+                "Detected MTP model. "
+                "Sharing target model lm_head weights with the draft model."
+            )
+
+        if share_lm_head and hasattr(target_language_model, "lm_head"):
+            if hasattr(self.model, "lm_head"):
+                del self.model.lm_head
+            self.model.lm_head = target_language_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
@@ -1050,16 +1111,18 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
-        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        # Determine if CUDA graphs should be used for this run.
+        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
+        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-            if use_cudagraphs
-            else CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=(
+                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
+            ),
         ):
             if self.supports_mm_inputs:
                 input_ids = None
@@ -1141,8 +1204,15 @@ def compute_probs_and_sample_next_token(
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
 
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+    assert sampling_metadata.temperature is not None
+
+    # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
+    # consistent with sampler.py's _SAMPLING_EPS threshold
+    temperature = sampling_metadata.temperature
+    # Avoid division by zero if there are greedy requests.
+    if not sampling_metadata.all_random:
+        is_greedy = temperature < _SAMPLING_EPS
+        temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 

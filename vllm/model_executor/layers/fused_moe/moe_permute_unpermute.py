@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -13,14 +12,12 @@ from vllm.model_executor.layers.fused_moe.utils import _fp8_perm
 
 def _moe_permute(
     curr_hidden_states: torch.Tensor,
-    a1q_scale: Optional[torch.Tensor],
+    a1q_scale: torch.Tensor | None,
     curr_topk_ids: torch.Tensor,
     global_num_experts: int,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     block_m: int,
-) -> tuple[
-    torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
@@ -33,7 +30,7 @@ def _moe_permute(
         curr_topk_ids, block_m, global_num_experts, expert_map, pad_sorted_ids=True
     )
 
-    inv_perm: Optional[torch.Tensor] = None
+    inv_perm: torch.Tensor | None = None
 
     num_tokens = top_k_num * tokens_in_chunk
     expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
@@ -53,7 +50,7 @@ def _moe_permute(
 def _moe_unpermute_and_reduce(
     out: torch.Tensor,
     curr_hidden: torch.Tensor,
-    inv_perm: Optional[torch.Tensor],
+    inv_perm: torch.Tensor | None,
     topk_weight: torch.Tensor,
     apply_router_weight_on_input: bool,
 ) -> None:
@@ -73,17 +70,15 @@ def _moe_unpermute_and_reduce(
 
 def moe_permute(
     hidden_states: torch.Tensor,
-    a1q_scale: Optional[torch.Tensor],
+    a1q_scale: torch.Tensor | None,
     topk_ids: torch.Tensor,
     n_expert: int,
     n_local_expert: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    align_block_size: Optional[int] = None,
+    expert_map: torch.Tensor | None = None,
+    align_block_size: int | None = None,
     fill_invalid_expert: int = -1,
-    permuted_hidden_states: Optional[torch.Tensor] = None,
-) -> tuple[
-    torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
-]:
+    permuted_hidden_states: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens
       for each expert.
@@ -198,7 +193,7 @@ def moe_unpermute(
     permuted_hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     inv_permuted_idx: torch.Tensor,
-    expert_first_token_offset: Optional[torch.Tensor] = None,
+    expert_first_token_offset: torch.Tensor | None = None,
 ) -> None:
     """
     This function expands and permutes activation to gathering uncontinuous

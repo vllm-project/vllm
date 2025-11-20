@@ -3,7 +3,6 @@
 
 import operator
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -133,6 +132,23 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
+            # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
+            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+                mutated_args = {1: "qkv"}
+                args = (
+                    "qkv",
+                    "num_heads_q",
+                    "num_heads_k",
+                    "num_heads_v",
+                    "head_dim",
+                    "eps",
+                    "q_weight",
+                    "k_weight",
+                    "cos_sin_cache",
+                    "is_neox",
+                    "position_ids",
+                )
+                self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             else:
                 continue  # skip the count
 
@@ -150,7 +166,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         )
         self.nodes_to_remove.clear()
 
-    def _remove(self, node_or_nodes: Union[torch.fx.Node, Iterable[torch.fx.Node]]):
+    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]):
         """
         Stage a node (or nodes) for removal at the end of the pass.
         """
@@ -163,8 +179,8 @@ class FixFunctionalizationPass(VllmInductorPass):
         self,
         graph: torch.fx.Graph,
         node: torch.fx.Node,
-        mutated_args: dict[int, Union[torch.fx.Node, str]],
-        args: Optional[tuple[Union[torch.fx.Node, str], ...]] = None,
+        mutated_args: dict[int, torch.fx.Node | str],
+        args: tuple[torch.fx.Node | str, ...] | None = None,
     ):
         """
         De-functionalize a node by replacing it with a call to the original.
@@ -176,7 +192,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self._remove(node)
 
     def replace_users_with_mutated_args(
-        self, node: torch.fx.Node, mutated_args: dict[int, Union[torch.fx.Node, str]]
+        self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
     ):
         """
         Replace all getitem users of the auto-functionalized node with the
@@ -207,7 +223,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self,
         graph: torch.fx.Graph,
         node: torch.fx.Node,
-        args: Optional[tuple[Union[torch.fx.Node, str], ...]] = None,
+        args: tuple[torch.fx.Node | str, ...] | None = None,
     ):
         """
         Insert a new defunctionalized node into the graph before node.

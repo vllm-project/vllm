@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
@@ -22,9 +22,9 @@ class ParallelSetup(NamedTuple):
 
 class EPTestOptions(NamedTuple):
     trust_remote_code: bool
-    tokenizer_mode: Optional[str]
-    load_format: Optional[str] = None
-    hf_overrides: Optional[str] = None
+    tokenizer_mode: str | None
+    load_format: str | None = None
+    hf_overrides: str | None = None
 
 
 @dataclass
@@ -40,9 +40,9 @@ class EPTestSettings:
         tp_base: int = 2,
         runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
-        load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
+        tokenizer_mode: str | None = None,
+        load_format: str | None = None,
+        hf_overrides: str | None = None,
     ):
         return EPTestSettings(
             parallel_setups=[
@@ -72,9 +72,9 @@ class EPTestSettings:
         tp_base: int = 2,
         runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
-        tokenizer_mode: Optional[str] = None,
-        load_format: Optional[str] = None,
-        hf_overrides: Optional[str] = None,
+        tokenizer_mode: str | None = None,
+        load_format: str | None = None,
+        hf_overrides: str | None = None,
     ):
         return EPTestSettings(
             parallel_setups=[

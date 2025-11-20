@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -22,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import (
     find_common_prefix,
@@ -34,8 +32,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("llama3_json")
-@ToolParserManager.register_module("llama4_json")
 class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.x and 4 models intended for use with the
@@ -134,7 +130,7 @@ class Llama3JsonToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not (
             current_text.startswith(self.bot_token) or current_text.startswith("{")
         ):

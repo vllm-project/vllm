@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -14,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import has_triton_kernels
+from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
@@ -80,10 +79,10 @@ def triton_kernel_moe_forward(
     topk: int,
     renormalize: bool,
     activation: str = "silu",
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    quant_config: FusedMoEQuantConfig | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     routing_data, gather_idx, scatter_idx = routing(
         gating_output, topk, sm_first=not renormalize
@@ -115,13 +114,13 @@ def triton_kernel_fused_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     activation: str = "silu",
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    a1q_scale: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -261,7 +260,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         workspace1 = (M, K)
@@ -279,12 +278,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         if expert_map is not None:

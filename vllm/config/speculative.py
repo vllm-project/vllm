@@ -3,17 +3,16 @@
 
 import ast
 import hashlib
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -30,28 +29,25 @@ else:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal[
-    "ngram",
-    "eagle",
-    "eagle3",
-    "medusa",
-    "mlp_speculator",
-    "draft_model",
-    "deepseek_mtp",
-    "ernie_mtp",
-    "qwen3_next_mtp",
-    "mimo_mtp",
-    "longcat_flash_mtp",
-    "mtp",
-]
-MTP_MODEL_TYPES = (
+MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
-)
+    "mtp",
+    "pangu_ultra_moe_mtp",
+]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+SpeculativeMethod = Literal[
+    "ngram",
+    "medusa",
+    "mlp_speculator",
+    "draft_model",
+    "suffix",
+    EagleModelTypes,
+]
 
 
 @config
@@ -59,16 +55,16 @@ MTP_MODEL_TYPES = (
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
-    enforce_eager: Optional[bool] = None
+    enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: SkipValidation[int] = None  # type: ignore
+    num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
-    model: Optional[str] = None
+    model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: Optional[SpeculativeMethod] = None
+    method: SpeculativeMethod | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
@@ -76,33 +72,29 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
-    draft_tensor_parallel_size: Optional[int] = None
+    draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
-    disable_logprobs: bool = True
-    """If set to True, token log probabilities are not returned during
-    speculative decoding. If set to False, token log probabilities are returned
-    according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
-    quantization: Optional[me_quant.QuantizationMethods] = None
+    quantization: me_quant.QuantizationMethods | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
-    max_model_len: Optional[int] = None
+    max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
-    revision: Optional[str] = None
+    revision: str | None = None
     """The specific model version to use for the draft model. It can be a
     branch name, a tag name, or a commit id. If unspecified, will use the
     default version."""
-    code_revision: Optional[str] = None
+    code_revision: str | None = None
     """The specific revision to use for the draft model code on Hugging Face
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
 
     # Advanced control
-    disable_by_batch_size: Optional[int] = None
+    disable_by_batch_size: int | None = Field(default=None, ge=2)
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
     disable_padded_drafter_batch: bool = False
@@ -112,14 +104,14 @@ class SpeculativeConfig:
     only affects the EAGLE method of speculation."""
 
     # Ngram proposer configuration
-    prompt_lookup_max: Optional[int] = None
+    prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
     when method is set to ngram."""
-    prompt_lookup_min: Optional[int] = None
+    prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
-    speculative_token_tree: Optional[str] = None
+    speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
@@ -127,18 +119,33 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
-    """Whether vLLM is configured to use chunked prefill or not. Used for
-    raising an error since it's not yet compatible with speculative decode."""
-    disable_log_stats: SkipValidation[bool] = None  # type: ignore
-    """Whether to disable the periodic printing of stage times in speculative
-    decoding."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
     draft_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+
+    # Suffix decoding configuration
+    suffix_decoding_max_tree_depth: int = 24
+    """The maximum depth of the suffix decoding global and prompt trees. The
+    tree depth limits the sum of the prefix match and speculation lengths."""
+
+    suffix_decoding_max_cached_requests: int = 10000
+    """The maximum number of requests to cache in the global suffix tree. If
+    exceeded, will trigger eviction in FIFO order. If set to 0, the global
+    suffix tree is disabled and past responses are not cached (prompt trees
+    are still used)."""
+
+    suffix_decoding_max_spec_factor: float = 1.0
+    """The maximum spec factor for suffix decoding. The spec factor controls
+    speculation lengths based on the prefix match length: max_spec_tokens =
+    max_spec_factor * prefix_match_length."""
+
+    suffix_decoding_min_token_prob: float = 0.1
+    """The minimum token probability for suffix decoding. Will only speculate
+    tokens with estimated probability (based on frequency counts) greater than
+    or equal to this value."""
 
     def compute_hash(self) -> str:
         """
@@ -167,6 +174,13 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+            )
+        if hf_config.model_type in ("pangu_ultra_moe"):
+            hf_config.model_type = "pangu_ultra_moe_mtp"
+        if hf_config.model_type == "pangu_ultra_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -224,7 +238,7 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        if self.method in MTP_MODEL_TYPES:
+        if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
@@ -232,9 +246,8 @@ class SpeculativeConfig:
 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":
-                assert self.target_model_config is not None, (
-                    "target_model_config must be present for mtp"
-                )
+                if self.target_model_config is None:
+                    raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
                     # FIXME(luccafong): cudgraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
@@ -247,6 +260,8 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "suffix":
+                self.model = "suffix"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -268,21 +283,21 @@ class SpeculativeConfig:
                 self.prompt_lookup_min = 5
                 self.prompt_lookup_max = 5
             elif self.prompt_lookup_min is None:
-                assert self.prompt_lookup_max is not None
+                if self.prompt_lookup_max is None:
+                    raise ValueError(
+                        "Either prompt_lookup_max or prompt_lookup_min must be "
+                        "provided when using the ngram method."
+                    )
                 self.prompt_lookup_min = self.prompt_lookup_max
             elif self.prompt_lookup_max is None:
-                assert self.prompt_lookup_min is not None
+                if self.prompt_lookup_min is None:
+                    raise ValueError(
+                        "Either prompt_lookup_max or prompt_lookup_min must be "
+                        "provided when using the ngram method."
+                    )
                 self.prompt_lookup_max = self.prompt_lookup_min
 
             # Validate values
-            if self.prompt_lookup_min < 1:
-                raise ValueError(
-                    f"prompt_lookup_min={self.prompt_lookup_min} must be > 0"
-                )
-            if self.prompt_lookup_max < 1:
-                raise ValueError(
-                    f"prompt_lookup_max={self.prompt_lookup_max} must be > 0"
-                )
             if self.prompt_lookup_min > self.prompt_lookup_max:
                 raise ValueError(
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
@@ -294,6 +309,8 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "suffix":
+            self._validate_suffix_decoding()
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -338,7 +355,9 @@ class SpeculativeConfig:
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in MTP_MODEL_TYPES:
+                elif self.draft_model_config.hf_config.model_type in get_args(
+                    MTPModelTypes
+                ):
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -367,12 +386,6 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
-                        raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible "
-                            "when using V0."
-                        )
-
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
@@ -446,10 +459,47 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+        return self
+
+    def _validate_suffix_decoding(self):
+        if not has_arctic_inference():
+            raise ImportError(
+                "Arctic Inference is required for suffix decoding. "
+                "Install via `pip install arctic-inference==0.1.1`."
+            )
+        if self.num_speculative_tokens is None:
+            # Suffix decoding decides the actual number of speculative tokens
+            # dynamically and treats num_speculative_tokens as a maximum limit.
+            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
+            logger.warning(
+                "Defaulted num_speculative_tokens to %s for suffix decoding.",
+                self.num_speculative_tokens,
+            )
+        # Validate values
+        if self.suffix_decoding_max_tree_depth < 1:
+            raise ValueError(
+                f"suffix_decoding_max_tree_depth="
+                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
+            )
+        if self.suffix_decoding_max_cached_requests < 0:
+            raise ValueError(
+                f"suffix_decoding_max_cached_requests="
+                f"{self.suffix_decoding_max_cached_requests} must be >= 0"
+            )
+        if self.suffix_decoding_max_spec_factor < 0:
+            raise ValueError(
+                f"suffix_decoding_max_spec_factor="
+                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
+            )
+        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
+            raise ValueError(
+                f"suffix_decoding_min_token_prob="
+                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+            )
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
-        speculative_max_model_len: Optional[int],
+        speculative_max_model_len: int | None,
         draft_max_model_len: int,
         target_max_model_len: int,
     ) -> int:
@@ -488,7 +538,7 @@ class SpeculativeConfig:
     @staticmethod
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int],
+        speculative_draft_tensor_parallel_size: int | None,
         draft_hf_config: PretrainedConfig,
     ) -> int:
         """
@@ -584,21 +634,11 @@ class SpeculativeConfig:
 
         return self
 
-    @property
-    def num_lookahead_slots(self) -> int:
-        """The number of additional slots the scheduler should allocate per
-        step, in addition to the slots allocated for each known token.
-
-        This is equal to the number of speculative tokens, as each speculative
-        token must be scored.
-        """
-        return self.num_speculative_tokens
-
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        model = None if method in ("ngram", "suffix") else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

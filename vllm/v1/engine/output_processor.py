@@ -4,7 +4,7 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Optional, Union, cast
+from typing import Any, cast
 
 import torch
 
@@ -22,7 +22,12 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import IterationStats, LoRARequestStates, RequestStateStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    LoRARequestStates,
+    RequestStateStats,
+    SchedulerStats,
+)
 
 
 class RequestOutputCollector:
@@ -36,24 +41,26 @@ class RequestOutputCollector:
 
     def __init__(self, output_kind: RequestOutputKind):
         self.aggregate = output_kind == RequestOutputKind.DELTA
-        self.output: Optional[Union[RequestOutput, PoolingRequestOutput, Exception]] = (
-            None
-        )
+        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
-    def put(
-        self, output: Union[RequestOutput, PoolingRequestOutput, Exception]
-    ) -> None:
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
-        elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
+        elif isinstance(self.output, RequestOutput) and isinstance(
+            output, RequestOutput
+        ):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
+        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
+            output, PoolingRequestOutput
+        ):
+            self.output = output
 
-    async def get(self) -> Union[RequestOutput, PoolingRequestOutput]:
+    async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
         while (output := self.output) is None:
             await self.ready.wait()
@@ -63,7 +70,7 @@ class RequestOutputCollector:
             raise output
         return output
 
-    def get_nowait(self) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
+    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
         """Non-blocking get operation."""
         output = self.output
         if output is not None:
@@ -76,7 +83,7 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-    request_outputs: list[Union[RequestOutput, PoolingRequestOutput]]
+    request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
 
 
@@ -84,22 +91,23 @@ class RequestState:
     def __init__(
         self,
         request_id: str,
-        parent_req: Optional[ParentRequest],
+        parent_req: ParentRequest | None,
         request_index: int,
-        lora_name: Optional[str],
+        lora_name: str | None,
         output_kind: RequestOutputKind,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        prompt_embeds: Optional[torch.Tensor],
-        logprobs_processor: Optional[LogprobsProcessor],
-        detokenizer: Optional[IncrementalDetokenizer],
-        max_tokens_param: Optional[int],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_embeds: torch.Tensor | None,
+        logprobs_processor: LogprobsProcessor | None,
+        detokenizer: IncrementalDetokenizer | None,
+        max_tokens_param: int | None,
         arrival_time: float,
-        queue: Optional[RequestOutputCollector],
+        queue: RequestOutputCollector | None,
         log_stats: bool,
-        top_p: Optional[float] = None,
-        n: Optional[int] = None,
-        temperature: Optional[float] = None,
+        stream_interval: int,
+        top_p: float | None = None,
+        n: int | None = None,
+        temperature: float | None = None,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -124,16 +132,21 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
+        # Stream Interval
+        self.stream_interval = stream_interval
+        self.sent_tokens_offset = 0  # Offset of sent tokens
+
     @classmethod
     def from_new_request(
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
-        prompt: Optional[str],
-        parent_req: Optional[ParentRequest],
+        prompt: str | None,
+        parent_req: ParentRequest | None,
         request_index: int,
-        queue: Optional[RequestOutputCollector],
+        queue: RequestOutputCollector | None,
         log_stats: bool,
+        stream_interval: int,
     ) -> "RequestState":
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
@@ -181,22 +194,46 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            stream_interval=stream_interval,
         )
 
     def make_request_output(
         self,
         new_token_ids: list[int],
-        pooling_output: Optional[torch.Tensor],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
-        kv_transfer_params: Optional[dict[str, Any]] = None,
-    ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
+        pooling_output: torch.Tensor | None,
+        finish_reason: FinishReason | None,
+        stop_reason: int | str | None,
+        kv_transfer_params: dict[str, Any] | None = None,
+    ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
         if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
+
+        if self.stream_interval > 1:
+            assert self.detokenizer is not None
+
+            # Send output request only when
+            # 1. It has finished, or
+            # 2. It is the first token, or
+            # 3. It has reached the stream interval number of tokens
+            if not (
+                finished
+                or self.sent_tokens_offset == 0
+                or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+                >= self.stream_interval
+            ):
+                return None
+
+            if self.output_kind == RequestOutputKind.DELTA:
+                # Send tokens from the offset in DELTA mode, otherwise all
+                # tokens are sent.
+                new_token_ids = self.detokenizer.output_token_ids[
+                    self.sent_tokens_offset :
+                ]
+                self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
 
         request_id = self.request_id
         if pooling_output is not None:
@@ -222,10 +259,10 @@ class RequestState:
     def _new_request_output(
         self,
         request_id: str,
-        outputs: Union[list[CompletionOutput], list[PoolingOutput]],
+        outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
-        kv_transfer_params: Optional[dict[str, Any]] = None,
-    ) -> Union[RequestOutput, PoolingRequestOutput]:
+        kv_transfer_params: dict[str, Any] | None = None,
+    ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
@@ -234,6 +271,7 @@ class RequestState:
             return PoolingRequestOutput(
                 request_id=request_id,
                 outputs=first_output,
+                num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
             )
@@ -264,8 +302,8 @@ class RequestState:
     def _new_completion_output(
         self,
         token_ids: list[int],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
+        finish_reason: FinishReason | None,
+        stop_reason: int | str | None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -302,19 +340,29 @@ class RequestState:
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self, tokenizer: AnyTokenizer, log_stats: bool):
+    def __init__(
+        self, tokenizer: AnyTokenizer, log_stats: bool, stream_interval: int = 1
+    ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
-        self.lora_states = LoRARequestStates()
-        self.tracer: Optional[Tracer] = None
+        self.lora_states = LoRARequestStates(log_stats)
+        self.tracer: Tracer | None = None
+        self._requests_drained = asyncio.Event()
+        self._requests_drained.set()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
+
+    async def wait_for_requests_to_drain(self) -> None:
+        if not self.request_states:
+            return
+        await self._requests_drained.wait()
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
@@ -331,7 +379,7 @@ class OutputProcessor:
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self.lora_states.abort_request(req_state)
+                self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
                 if req_state.queue is not None and (
@@ -355,15 +403,17 @@ class OutputProcessor:
                     child_reqs = self.abort_requests(child_reqs)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
+        if not self.request_states:
+            self._requests_drained.set()
         return request_ids_to_abort
 
     def add_request(
         self,
         request: EngineCoreRequest,
-        prompt: Optional[str],
-        parent_req: Optional[ParentRequest] = None,
+        prompt: str | None,
+        parent_req: ParentRequest | None = None,
         request_index: int = 0,
-        queue: Optional[RequestOutputCollector] = None,
+        queue: RequestOutputCollector | None = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -377,17 +427,19 @@ class OutputProcessor:
             request_index=request_index,
             queue=queue,
             log_stats=self.log_stats,
+            stream_interval=self.stream_interval,
         )
+        if self._requests_drained.is_set():
+            self._requests_drained.clear()
         self.request_states[request_id] = req_state
-        self.lora_states.add_request(req_state)
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
-        engine_core_timestamp: Optional[float] = None,
-        iteration_stats: Optional[IterationStats] = None,
+        engine_core_timestamp: float | None = None,
+        iteration_stats: IterationStats | None = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -411,7 +463,7 @@ class OutputProcessor:
         within the loop below.
         """
 
-        request_outputs: Union[list[RequestOutput], list[PoolingRequestOutput]] = []
+        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
@@ -470,6 +522,8 @@ class OutputProcessor:
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
                     self.parent_requests.pop(parent_req.request_id, None)
+                if not self.request_states:
+                    self._requests_drained.set()
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
@@ -481,18 +535,20 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
-        self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
 
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        self.lora_states.update_scheduler_stats(scheduler_stats)
+
     def do_tracing(
         self,
         engine_core_output: EngineCoreOutput,
         req_state: RequestState,
-        iteration_stats: Optional[IterationStats],
+        iteration_stats: IterationStats | None,
     ) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
@@ -555,13 +611,11 @@ class OutputProcessor:
         self,
         req_state: RequestState,
         engine_core_output: EngineCoreOutput,
-        engine_core_timestamp: Optional[float],
-        iteration_stats: Optional[IterationStats],
+        engine_core_timestamp: float | None,
+        iteration_stats: IterationStats | None,
     ):
         if iteration_stats is None:
             return
-
-        lora_stats = self.lora_states.get_stats(req_state)
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
@@ -571,14 +625,15 @@ class OutputProcessor:
             req_state.is_prefilling,
             req_state.prompt_len,
             req_state.stats,
-            lora_stats,
+            self.lora_states,
+            req_state.lora_name,
         )
 
     def _update_stats_from_finished(
         self,
         req_state: RequestState,
-        finish_reason: Optional[FinishReason],
-        iteration_stats: Optional[IterationStats],
+        finish_reason: FinishReason | None,
+        iteration_stats: IterationStats | None,
     ):
         if iteration_stats is None:
             return
@@ -593,7 +648,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
         )
-        self.lora_states.finish_request(req_state)
+        self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens

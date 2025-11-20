@@ -4,7 +4,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import consume_space
 from vllm.logger import init_logger
@@ -29,7 +28,6 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("hunyuan_a13b")
 class HunyuanA13BToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -73,7 +71,7 @@ class HunyuanA13BToolParser(ToolParser):
 
     def preprocess_model_output(
         self, model_output: str
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         # find the location tool call
         for match in self.answer_tool_calls_pattern.finditer(model_output):
             start, end = match.span()
@@ -176,7 +174,7 @@ class HunyuanA13BToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract tool calls for streaming mode.
         """

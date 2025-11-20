@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Optional
+from typing import Optional, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -29,7 +29,7 @@ class ParentRequest:
     max_num_generation_tokens: int
 
     # To efficiently obtain child sampling params
-    cached_child_sampling_params: Optional[SamplingParams]
+    cached_child_sampling_params: SamplingParams | None
 
     def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
         self.request_id = request_id
@@ -37,7 +37,7 @@ class ParentRequest:
 
         self.child_requests = set()
         self.output_aggregator = (
-            [None] * sampling_params.n
+            [cast(CompletionOutput, None)] * sampling_params.n
             if (sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
             else []
         )
@@ -97,12 +97,21 @@ class ParentRequest:
         child_request_id: str,
         completion_output: CompletionOutput,
     ) -> tuple[str, list[CompletionOutput], bool]:
+        already_finished_and_returned: bool = False
         if completion_output.finished():
-            self.child_requests.remove(child_request_id)
+            if child_request_id in self.child_requests:
+                self.child_requests.remove(child_request_id)
+            else:
+                # child request ID is not available in child_requests
+                # which means the request had finished in previous
+                # batch step and returned to the client earlier
+                already_finished_and_returned = True
 
         if self.sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
-            # If streaming, just return the current output.
-            outputs = [completion_output]
+            # If streaming, just return the current output
+            #
+            # DO NOT output finished and already returned child request to client again
+            outputs = [] if already_finished_and_returned else [completion_output]
         else:
             # If not streaming, aggregate the n final outputs.
             self.output_aggregator[completion_output.index] = completion_output

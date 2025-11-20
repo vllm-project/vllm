@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Optional, Union, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 import torch
 
@@ -12,16 +13,16 @@ logger = init_logger(__name__)
 class TensorShape:
     def __init__(
         self,
-        *dims: Union[int, str],
-        dynamic_dims: Optional[set[str]] = None,
+        *dims: int | str,
+        dynamic_dims: set[str] | None = None,
     ) -> None:
         super().__init__()
 
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def resolve(self, **bindings: int) -> tuple[Union[int, str], ...]:
-        resolved = list[Union[int, str]]()
+    def resolve(self, **bindings: int) -> tuple[int | str, ...]:
+        resolved = list[int | str]()
         for dim in self.dims:
             if isinstance(dim, str) and dim in bindings:
                 resolved.append(bindings[dim])
@@ -48,7 +49,7 @@ class TensorSchema:
         self,
         *,
         validate: bool = True,
-        resolve_bindings: Optional[dict[str, int]] = None,
+        resolve_bindings: dict[str, int] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -71,7 +72,7 @@ class TensorSchema:
         self,
         actual: tuple[int, ...],
         reference: tuple[int, ...],
-        expected_shape: tuple[Union[int, str], ...],
+        expected_shape: tuple[int | str, ...],
         dynamic_dims: set[str],
     ) -> bool:
         if len(actual) != len(reference) or len(actual) > len(expected_shape):
@@ -100,7 +101,7 @@ class TensorSchema:
         self,
         value: object,
         field_name: str,
-        expected_shape: tuple[Union[int, str], ...],
+        expected_shape: tuple[int | str, ...],
         dynamic_dims: set[str],
         leading_idxs: tuple[int, ...] = (),
     ) -> tuple[int, ...]:
@@ -154,7 +155,7 @@ class TensorSchema:
     def _validate_tensor_shape_expected(
         self,
         actual_shape: tuple[int, ...],
-        expected_shape: tuple[Union[int, str], ...],
+        expected_shape: tuple[int | str, ...],
         field_name: str,
         shape_env: dict[str, int],
         dynamic_dims: set[str],
@@ -209,7 +210,8 @@ class TensorSchema:
                     actual_type = args[0]
 
                 # Check arg was provided as Union
-                if get_origin(actual_type) is Union:
+                if get_origin(actual_type) in {Union, UnionType}:
+                    # Union for Union[X, Y] and UnionType for X | Y
                     args = get_args(actual_type)
                     # Skip validation when Union contains None
                     if type(None) in args:

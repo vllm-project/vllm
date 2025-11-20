@@ -5,24 +5,13 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
-import functools
-from typing import Optional
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
-from vllm.utils import round_up
-
-
-@functools.cache
-def deep_gemm_block_shape() -> list[int]:
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-
-    block = dg.get_m_alignment_for_contiguous_layout()
-    return [block, block]
+from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.utils.math_utils import round_up
 
 
 def expert_num_tokens_round_up_and_sum(
@@ -39,7 +28,7 @@ def compute_aligned_M(
     num_topk: int,
     local_num_experts: int,
     alignment: int,
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
 ):
     if (expert_tokens_meta is not None) and (
         expert_tokens_meta.expert_num_tokens_cpu is not None
@@ -175,7 +164,7 @@ def ep_scatter(
     recv_x_scale: torch.Tensor,
     recv_topk: torch.Tensor,
     num_recv_tokens_per_expert: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     expert_start_loc: torch.Tensor,
     output_tensor: torch.Tensor,
     output_tensor_scale: torch.Tensor,
@@ -305,7 +294,7 @@ def ep_gather(
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
     input_index: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
     num_warps = 2
@@ -346,17 +335,16 @@ def deepgemm_moe_permute(
     aq_scale: torch.Tensor,
     topk_ids: torch.Tensor,
     local_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    aq_out: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None,
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    aq_out: torch.Tensor | None = None,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     H = aq.size(1)
     device = aq.device
 
-    block_m = deep_gemm_block_shape()[0]
-    block_k = deep_gemm_block_shape()[1]
+    block_m, block_k = get_mk_alignment_for_contiguous_layout()
 
     M_sum = compute_aligned_M(
         M=topk_ids.size(0),
@@ -415,7 +403,7 @@ def deepgemm_unpermute_and_reduce(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     inv_perm: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output: torch.Tensor,
 ):
     return ep_gather(

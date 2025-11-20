@@ -2,18 +2,36 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
+
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.structured_output import StructuredOutputManager
 
 
 class SchedulerInterface(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+        structured_output_manager: "StructuredOutputManager",
+        block_size: int,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def schedule(self) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
@@ -38,6 +56,12 @@ class SchedulerInterface(ABC):
             A SchedulerOutput object containing information about the scheduled
             requests.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_grammar_bitmask(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "GrammarOutput | None":
         raise NotImplementedError
 
     @abstractmethod
@@ -80,7 +104,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request

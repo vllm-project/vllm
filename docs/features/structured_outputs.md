@@ -204,7 +204,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
             }
         },
     )
-    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("reasoning: ", completion.choices[0].message.reasoning)
     print("content: ", completion.choices[0].message.content)
     ```
 
@@ -298,7 +298,7 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/structured_outputs>
+An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
 
 ## Offline Inference
 

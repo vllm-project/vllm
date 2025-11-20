@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
-from itertools import count
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from itertools import chain, count
+from typing import Any
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -17,13 +20,18 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector,
 )
-from vllm.utils import sha256
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -82,6 +90,7 @@ def create_vllm_config(
     block_size: int = 16,
     max_model_len: int = 10000,
     enable_chunked_prefill: bool = True,
+    enable_permute_local_kv: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     scheduler_config = SchedulerConfig(
@@ -107,6 +116,7 @@ def create_vllm_config(
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
+        enable_permute_local_kv=enable_permute_local_kv,
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -147,7 +157,7 @@ _none_hash_initialized = False
 
 
 def create_request(
-    request_id: Optional[int] = None,
+    request_id: int | None = None,
     num_tokens: int = 10,
     common_prefix_len=0,
     max_tokens: int = 16,
@@ -168,7 +178,7 @@ def create_request(
         init_none_hash(hash_fn)
         _none_hash_initialized = True
 
-    kv_transfer_params: Optional[dict[str, Any]] = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     if do_remote_decode:
         assert not do_remote_prefill
@@ -205,9 +215,9 @@ def create_request(
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[set[str]] = None,
-    finished_recving: Optional[set[str]] = None,
-    invalid_block_ids: Optional[set[int]] = None,
+    finished_sending: set[str] | None = None,
+    finished_recving: set[str] | None = None,
+    invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
 ) -> ModelRunnerOutput:
@@ -219,7 +229,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
-    sampled_token_ids = [[sampled_token] for _ in req_ids]
+    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
 
     kv_connector_output = (
         None
@@ -248,7 +258,7 @@ def create_model_runner_output(
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
-    def __init__(self, config: VllmConfig, role):
+    def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = SharedStorageConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
@@ -304,6 +314,82 @@ class TestSharedStorageConnector(SharedStorageConnector):
         return attr
 
 
+@dataclass(frozen=True)
+class MockKVConfig:
+    matched_tokens: int = 0
+    is_async: bool = False
+
+
+class MockKVConnectorMetadata(KVConnectorMetadata):
+    def __init__(self):
+        # Scheduler tests check metadata.requests
+        self.requests: list = []
+
+
+class MockKVConnector(KVConnectorBase_V1):
+    """Mock KV connector for scheduler tests, supporting both sync and async mode."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig | None = None,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        self.config = MockKVConfig(
+            matched_tokens=extra_config["matched_tokens"],
+            is_async=extra_config["is_async"],
+        )
+
+    def get_num_new_matched_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> tuple[int | None, bool]:
+        return (self.config.matched_tokens, self.config.is_async)
+
+    def update_state_after_alloc(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        num_external_tokens: int,
+    ):
+        pass
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        metadata = MockKVConnectorMetadata()
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id in chain(
+            (req.req_id for req in scheduler_output.scheduled_new_reqs),
+            (
+                req_id
+                for req_id in cached_reqs.req_ids
+                if req_id in cached_reqs.resumed_req_ids
+            ),
+        ):
+            metadata.requests.append({"req_id": req_id})
+        return metadata
+
+    def start_load_kv(self, kv_caches, finished_req_ids):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+
 KVConnectorFactory.register_connector(
     "TestSharedStorageConnector", __name__, TestSharedStorageConnector.__name__
+)
+
+KVConnectorFactory.register_connector(
+    "MockKVConnector", __name__, MockKVConnector.__name__
 )

@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -19,7 +18,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -28,7 +27,6 @@ from vllm.transformers_utils.tokenizers import MistralTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("jamba")
 class JambaToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -69,6 +67,7 @@ class JambaToolParser(ToolParser):
             )
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because jamba use the special
             # tokens to indicate the start and end of the tool calls
@@ -129,7 +128,7 @@ class JambaToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
         if self.tool_calls_start_token not in current_text:
@@ -190,7 +189,7 @@ class JambaToolParser(ToolParser):
                 # auto-generated due to JSON completions, but wasn't
                 # streamed to the client yet.
                 if self.current_tool_id >= 0:
-                    diff: Union[str, None] = current_tool_call.get("arguments")
+                    diff: str | None = current_tool_call.get("arguments")
 
                     if diff:
                         diff = json.dumps(diff, ensure_ascii=False).replace(

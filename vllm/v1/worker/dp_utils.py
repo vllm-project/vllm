@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -21,7 +19,8 @@ logger = init_logger(__name__)
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
-    device = current_platform.device_type
+    # Use the actual device assigned to the DP group, not just the device type
+    device = get_dp_group().device
     group = get_dp_group().device_group
 
     # Transfering this tensor from GPU to CPU will introduce a GPU sync
@@ -95,7 +94,7 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
     parallel_config: ParallelConfig,
-) -> tuple[bool, Optional[torch.Tensor]]:
+) -> tuple[bool, torch.Tensor | None]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -133,12 +132,12 @@ def _synchronize_dp_ranks(
     should_ubatch = _post_process_ubatch(tensor)
 
     if should_ubatch and not should_dp_pad:
-        if is_global_first_rank():
-            logger.debug(
-                "Microbatching has been triggered and requires DP padding. "
-                "Enabling DP padding even though it has been explicitly "
-                "disabled."
-            )
+        logger.debug_once(
+            "Microbatching has been triggered and requires DP padding. "
+            "Enabling DP padding even though it has been explicitly "
+            "disabled.",
+            scope="global",
+        )
         should_dp_pad = True
 
     # Pad all DP ranks up to the maximum token count across ranks if
@@ -156,10 +155,10 @@ def coordinate_batch_across_dp(
     allow_microbatching: bool,
     allow_dp_padding: bool,
     parallel_config: ParallelConfig,
-    num_tokens_padded: Optional[int] = None,
-    uniform_decode: Optional[bool] = None,
-    num_scheduled_tokens_per_request: Optional[np.ndarray] = None,
-) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
+    num_tokens_padded: int | None = None,
+    uniform_decode: bool | None = None,
+    num_scheduled_tokens_per_request: np.ndarray | None = None,
+) -> tuple[UBatchSlices | None, torch.Tensor | None]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.

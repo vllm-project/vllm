@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 import torch
 
@@ -27,7 +23,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
@@ -38,8 +34,8 @@ class ShortConv(MambaBase, CustomOp):
         config,
         dim: int,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -231,11 +227,6 @@ class ShortConv(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "short_conv"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
-
-        return ShortConvAttentionBackend
 
 
 def short_conv(

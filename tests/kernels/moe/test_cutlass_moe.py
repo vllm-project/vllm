@@ -3,7 +3,6 @@
 import copy
 import dataclasses
 from math import prod
-from typing import Optional
 
 import pytest
 import torch
@@ -27,16 +26,13 @@ TOP_KS = [6, 8]
 
 MNK_FACTORS = [
     (2, 1024, 1024),
-    (2, 1024, 1536),
     (2, 3072, 1024),
     (2, 3072, 1536),
     (7, 3072, 1536),
     (64, 1024, 1024),
     (64, 1024, 1536),
     (64, 3072, 1024),
-    (64, 3072, 1536),
     (224, 1024, 1024),
-    (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
     (32768, 1024, 1024),
@@ -46,8 +42,6 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclasses.dataclass
@@ -85,16 +79,16 @@ class MOETensors:
 @dataclasses.dataclass
 class MOETensors8Bit(MOETensors):
     # quantized
-    a_q: Optional[torch.Tensor] = None  # a -> a_q
-    w1_q: Optional[torch.Tensor] = None  # w1 -> w1_q
-    w2_q: Optional[torch.Tensor] = None  # w2 -> w2_q
-    a_scale: Optional[torch.Tensor] = None
-    w1_scale: Optional[torch.Tensor] = None
-    w2_scale: Optional[torch.Tensor] = None
+    a_q: torch.Tensor | None = None  # a -> a_q
+    w1_q: torch.Tensor | None = None  # w1 -> w1_q
+    w2_q: torch.Tensor | None = None  # w2 -> w2_q
+    a_scale: torch.Tensor | None = None
+    w1_scale: torch.Tensor | None = None
+    w2_scale: torch.Tensor | None = None
     # dequantized
-    a_d: Optional[torch.Tensor] = None  # a -> a_q -> a_d
-    w1_d: Optional[torch.Tensor] = None  # w1 -> w1_q -> w1_d
-    w2_d: Optional[torch.Tensor] = None  # w2 -> w2_q -> w2_d
+    a_d: torch.Tensor | None = None  # a -> a_q -> a_d
+    w1_d: torch.Tensor | None = None  # w1 -> w1_q -> w1_d
+    w2_d: torch.Tensor | None = None  # w2 -> w2_q -> w2_d
 
     @staticmethod
     def make_moe_tensors_8bit(
@@ -209,7 +203,7 @@ def run_8_bit(
     topk_ids: torch.Tensor,
     per_act_token: bool,
     per_out_ch: bool,
-    num_local_experts: Optional[int] = None,
+    num_local_experts: int | None = None,
 ) -> torch.Tensor:
     assert not any(
         [
@@ -280,7 +274,7 @@ def test_cutlass_moe_8_bit_no_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
-    ep_size: Optional[int] = None,
+    ep_size: int | None = None,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")

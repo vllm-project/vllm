@@ -3,14 +3,13 @@
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
 )
 from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
@@ -54,17 +53,17 @@ class RocmAttentionMetadata:
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
+    cu_prefix_query_lens: torch.Tensor | None
+    prefix_kv_lens: torch.Tensor | None
+    suffix_kv_lens: torch.Tensor | None
 
     # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    scheduler_metadata: torch.Tensor | None = None
+    prefix_scheduler_metadata: torch.Tensor | None = None
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
@@ -153,10 +152,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -164,12 +160,11 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
+        if not cls.supports_head_size(head_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
+                f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
@@ -181,10 +176,6 @@ class RocmAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
         return RocmAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return RocmAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -217,13 +208,13 @@ class RocmAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
-        sinks: Optional[torch.Tensor] = None,
+        kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -273,9 +264,9 @@ class RocmAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -299,7 +290,7 @@ class RocmAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         assert attn_metadata.use_cascade is False
 

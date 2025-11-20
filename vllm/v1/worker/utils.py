@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -42,10 +42,10 @@ class MultiModalBudget:
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
-        max_tokens_by_modality = (
-            mm_registry.get_max_tokens_per_item_by_nonzero_modality(
-                model_config, cache=cache
-            )
+        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+            model_config,
+            cache=cache,
+            profiler_limits=self.mm_limits,
         )
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
@@ -134,27 +134,37 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
+    layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
+    kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistant buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
-    metadata_builders: list[AttentionMetadataBuilder]
-    layer_names: list[str]
-    kv_cache_spec: KVCacheSpec
+    metadata_builders: list[AttentionMetadataBuilder] = field(
+        default_factory=lambda: []
+    )
 
-    @staticmethod
-    def create_with_metadata_builders(
-        backend: type[AttentionBackend],
-        layer_names: list[str],
-        kv_cache_spec: KVCacheSpec,
-        vllm_config: VllmConfig,
-        device: torch.device,
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size: int | None,
         num_metadata_builders: int = 1,
-    ) -> "AttentionGroup":
-        metadata_builders = [
-            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config, device)
+    ):
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
+        )
+        self.metadata_builders = [
+            self.backend.get_builder_cls()(
+                kv_cache_spec_builder,
+                self.layer_names,
+                vllm_config,
+                device,
+            )
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(backend, metadata_builders, layer_names, kv_cache_spec)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -167,33 +177,33 @@ def sanity_check_mm_encoder_outputs(
 ) -> None:
     """
     Perform sanity checks for the result of
-    [`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`][].
+    [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
         f"or a single 3D tensor, but got {type(mm_embeddings)} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert len(mm_embeddings) == expected_num_items, (
         "Expected number of multimodal embeddings to match number of "
         f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert all(e.ndim == 2 for e in mm_embeddings), (
         "Expected multimodal embeddings to be a sequence of 2D tensors, "
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
 
 def scatter_mm_placeholders(
     embeds: torch.Tensor,
-    is_embed: Optional[torch.Tensor],
+    is_embed: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Scatter the multimodal embeddings into a contiguous tensor that represents
@@ -221,7 +231,7 @@ def scatter_mm_placeholders(
 
 def gather_mm_placeholders(
     placeholders: torch.Tensor,
-    is_embed: Optional[torch.Tensor],
+    is_embed: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     Reconstructs the embeddings from the placeholder tokens.
@@ -238,7 +248,7 @@ def gather_mm_placeholders(
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    runner_only_attn_layers: Optional[set[str]] = None,
+    runner_only_attn_layers: set[str] | None = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -270,7 +280,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
-    num_attn_module: Optional[int] = 1,
+    num_attn_module: int | None = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -306,7 +316,7 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda() or current_platform.is_xpu():
+            if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 # We know that the GPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
@@ -328,8 +338,12 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled, and the number of
-    input tokens is one of the compilation sizes.
+    parallelism and tensor parallelism is enabled.
+
+    This follows the same logic as SequenceParallelismPass.is_applicable():
+    - In full-graph compilation mode (no splitting ops or using inductor graph
+      partition), SP is always applied
+    - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
     if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
         return False
@@ -343,5 +357,10 @@ def is_residual_scattered_for_sp(
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    # Currently, SP is only enabled for static size fx graphs.
+    if (
+        not vllm_config.compilation_config.splitting_ops
+        or vllm_config.compilation_config.use_inductor_graph_partition
+    ):
+        return True
+
     return num_input_tokens in vllm_config.compilation_config.compile_sizes

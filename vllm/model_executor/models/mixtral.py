@@ -27,7 +27,6 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -88,10 +87,10 @@ class MixtralMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        tp_size: Optional[int] = None,
-        dp_size: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        tp_size: int | None = None,
+        dp_size: int | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ):
@@ -99,7 +98,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
 
         # Expert Parallelism Load balancing settings.
@@ -162,9 +161,8 @@ class MixtralAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -190,7 +188,6 @@ class MixtralAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -212,7 +209,7 @@ class MixtralAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=int(self.rope_theta),
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -242,22 +239,19 @@ class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
         self.self_attn = MixtralAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -280,7 +274,7 @@ class MixtralDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -346,21 +340,21 @@ class MixtralModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -547,7 +541,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         )
 
         self.expert_weights = []
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers = []
         example_moe = None
 
         for layer in self.model.layers:
@@ -573,22 +567,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         self.num_expert_groups = 1
         self.num_shared_experts = 0
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -608,16 +586,16 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -626,7 +604,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

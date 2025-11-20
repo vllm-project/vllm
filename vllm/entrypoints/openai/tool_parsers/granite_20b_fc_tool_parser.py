@@ -4,7 +4,6 @@
 import json
 from collections.abc import Sequence
 from json import JSONDecoder
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -22,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import (
     consume_space,
@@ -36,7 +34,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("granite-20b-fc")
 class Granite20bFCToolParser(ToolParser):
     """
     Tool call parser for the granite-20b-functioncalling model intended
@@ -121,7 +118,7 @@ class Granite20bFCToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if len(current_text) < len(self.bot_token) and self.bot_token.startswith(
             current_text
         ):

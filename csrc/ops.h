@@ -92,8 +92,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void poly_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-               torch::Tensor& bias, double epsilon);
+void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps, torch::Tensor& q_weight,
+                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
+                        bool is_neox, torch::Tensor& position_ids);
 
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
@@ -102,8 +105,11 @@ void apply_repetition_penalties_(torch::Tensor& logits,
 
 void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
                    const torch::Tensor& rowEnds, torch::Tensor& indices,
-                   torch::Tensor& values, int64_t numRows, int64_t stride0,
-                   int64_t stride1);
+                   int64_t numRows, int64_t stride0, int64_t stride1);
+
+void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
+                          const torch::Tensor& seq_lens, torch::Tensor& indices,
+                          int64_t numRows, int64_t stride0, int64_t stride1);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
@@ -307,7 +313,7 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit);
+                        bool use_exllama, bool use_v2_format, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
@@ -321,17 +327,19 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
     std::optional<torch::Tensor> const& scale_ub);
 
-void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
-                        const torch::Tensor& A, const torch::Tensor& B,
-                        const torch::Tensor& C,
-                        const std::optional<torch::Tensor>& D_,
-                        const std::optional<torch::Tensor>& z_,
-                        const std::optional<torch::Tensor>& delta_bias_,
-                        bool delta_softplus,
-                        const std::optional<torch::Tensor>& query_start_loc,
-                        const std::optional<torch::Tensor>& cache_indices,
-                        const std::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
+void selective_scan_fwd(
+    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
+    const torch::Tensor& B, const torch::Tensor& C,
+    const std::optional<torch::Tensor>& D_,
+    const std::optional<torch::Tensor>& z_,
+    const std::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
+    const std::optional<torch::Tensor>& query_start_loc,
+    const std::optional<torch::Tensor>& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
+    const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
+    const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
+    const std::optional<torch::Tensor>& initial_state_idx);
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,

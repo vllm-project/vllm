@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 # type: ignore
-from __future__ import annotations
-
 import threading
 from collections.abc import Iterable
 from concurrent import futures

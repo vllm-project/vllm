@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterScaledMMLinearKernel,
@@ -35,7 +34,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
 
 
 def choose_scaled_mm_linear_kernel(
-    config: ScaledMMLinearLayerConfig, compute_capability: Optional[int] = None
+    config: ScaledMMLinearLayerConfig, compute_capability: int | None = None
 ) -> type[ScaledMMLinearKernel]:
     """
     Choose an ScaledMMLinearKernel that can implement the given config for the

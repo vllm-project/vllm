@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -73,7 +72,7 @@ class GraniteMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         prefix: str = "",
     ) -> None:
@@ -112,12 +111,10 @@ class GraniteAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -143,7 +140,6 @@ class GraniteAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.attention_multiplier
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -167,8 +163,7 @@ class GraniteAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -197,21 +192,13 @@ class GraniteDecoderLayer(nn.Module):
     def __init__(
         self,
         config: GraniteConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -225,8 +212,6 @@ class GraniteDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
@@ -318,21 +303,21 @@ class GraniteModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
 
             hidden_states *= self.config.embedding_multiplier
         else:
@@ -473,22 +458,22 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return model_output
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

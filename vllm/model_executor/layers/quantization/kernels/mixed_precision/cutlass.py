@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -26,7 +25,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "CUTLASS only supported on CUDA"
 
@@ -95,7 +94,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
         w_q, w_s, _, _ = self._get_weight_params(layer)

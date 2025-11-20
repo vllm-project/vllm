@@ -4,10 +4,7 @@
 KV cache helper for store.
 """
 
-from collections import defaultdict
-from collections.abc import Sequence
-from concurrent.futures import CancelledError, Future
-from typing import Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
@@ -17,6 +14,9 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -124,24 +124,35 @@ class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
-    def __init__(self, world_size: int):
+    def __init__(self, expected_finished_count: int):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
-        self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
-        self._send_remaining_count = defaultdict[str, int](lambda: world_size)
+        self._recv_remaining_count = dict[str, int]()
+        self._send_remaining_count = dict[str, int]()
+        self._expected_finished_count = expected_finished_count
+
+    @classmethod
+    def from_connector(cls, connector: "KVConnectorBase", world_size: int):
+        return cls(connector.get_finished_count() or world_size)
 
     def aggregate(
-        self, outputs: list[ModelRunnerOutput], output_rank: int = 0
-    ) -> ModelRunnerOutput:
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
+    ) -> ModelRunnerOutput | None:
+        if not outputs[output_rank]:
+            return None
+
         # Aggregate kv_connector_output from all workers
 
         def update_finished_set(
-            req_ids: Optional[set[str]],
+            req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
         ) -> None:
             for req_id in req_ids or ():
-                remaining_count_dict[req_id] -= 1
+                remaining_count = remaining_count_dict.get(
+                    req_id, self._expected_finished_count
+                )
+                remaining_count_dict[req_id] = remaining_count - 1
                 if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
@@ -151,21 +162,35 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
-            output = model_runner_output.kv_connector_output
-            if not output:
+            assert model_runner_output is not None
+            kv_output = model_runner_output.kv_connector_output
+            if not kv_output:
                 continue
+            # Allow the worker to dynamically update the expected number of
+            # finished sending/recving for new requests.
+            if (
+                kv_output.expected_finished_count > 0
+                and kv_output.expected_finished_count != self._expected_finished_count
+            ):
+                logger.debug(
+                    "Expected finished requests updated from %d to %d",
+                    self._expected_finished_count,
+                    kv_output.expected_finished_count,
+                )
+                self._expected_finished_count = kv_output.expected_finished_count
+
             update_finished_set(
-                output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
             update_finished_set(
-                output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
                 # Use the first worker's kv_connector_stats as accumulator.
-                aggregated_kv_connector_stats = output.kv_connector_stats
-            elif kv_connector_stats := output.kv_connector_stats:
+                aggregated_kv_connector_stats = kv_output.kv_connector_stats
+            elif kv_connector_stats := kv_output.kv_connector_stats:
                 if aggregated_kv_connector_stats is None:
                     aggregated_kv_connector_stats = kv_connector_stats
                 else:
@@ -176,62 +201,28 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
-            invalid_block_ids |= output.invalid_block_ids
+            invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
+        assert output is not None
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             invalid_block_ids=invalid_block_ids,
+            expected_finished_count=self._expected_finished_count,
         )
 
         return output
-
-    def async_aggregate(
-        self, output_futures: Sequence[Future[ModelRunnerOutput]], output_rank: int = 0
-    ) -> Future[ModelRunnerOutput]:
-        """Takes a list of futures and returns a single future which resolves
-        to the respective list of outputs."""
-        result_future: Future[ModelRunnerOutput] = Future()
-
-        outputs: list[Optional[ModelRunnerOutput]] = [None] * len(output_futures)
-
-        def make_callback(idx):
-            def callback(fut):
-                if result_future.done():
-                    return
-
-                try:
-                    outputs[idx] = fut.result()
-                except CancelledError:
-                    result_future.cancel()
-                except Exception as e:
-                    result_future.set_exception(e)
-
-                # this check assumes io_thread_pool uses a single thread
-                if all(outputs):
-                    result_future.set_result(
-                        self.aggregate(
-                            cast(list[ModelRunnerOutput], outputs), output_rank
-                        )
-                    )
-
-            return callback
-
-        for i, output_future in enumerate(output_futures):
-            output_future.add_done_callback(make_callback(i))
-
-        return result_future
 
 
 def _make_src_and_dst_indices(
     src_block_ids: list[int],
     dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
+    src_device: torch.device | str,
+    dst_device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     src_indices = torch.tensor(src_block_ids, device=src_device, dtype=torch.int64)
     dst_indices = torch.tensor(dst_block_ids, device=dst_device, dtype=torch.int64)

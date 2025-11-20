@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -67,7 +66,7 @@ class BertWithRopeEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
@@ -91,10 +90,10 @@ class BertWithRopeAttention(nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = True,
-        rotary_kwargs: Optional[dict] = None,
+        rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -166,7 +165,7 @@ class BertWithRopeGatedMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         bias: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -200,7 +199,7 @@ class BertWithRopeMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         bias: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -235,8 +234,8 @@ class NomicMoE(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        tp_size: int | None = None,
     ):
         super().__init__()
 
@@ -344,11 +343,11 @@ class BertWithRopeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         moe: bool = False,
         bias: bool = True,
-        rotary_kwargs: Optional[dict] = None,
+        rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -406,7 +405,7 @@ class BertWithRopeEncoder(nn.Module):
         self,
         vllm_config: VllmConfig,
         bias: bool = True,
-        rotary_kwargs: Optional[dict] = None,
+        rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -464,16 +463,16 @@ class BertWithRope(nn.Module, SupportsQuant):
         )
         self.pooler = BertPooler(self.config) if add_pooling_layer else None
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -696,20 +695,16 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
                     pooling=self.new.pooler,
                     classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.new.pooler,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.new.pooler, classifier=self.classifier, act_fn="score"
                 ),
             }
         )
@@ -719,15 +714,15 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         loaded_params = loader.load_weights(weights)
         return loaded_params
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.new.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.new.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.new(
             input_ids=input_ids,

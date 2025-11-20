@@ -5,7 +5,6 @@ import asyncio
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 
@@ -21,13 +20,6 @@ from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, Schedule
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
-engine_args = AsyncEngineArgs(
-    model="ibm-research/PowerMoE-3b",
-    enforce_eager=True,
-    tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
-    data_parallel_size=DP_SIZE,
-)
-
 
 async def generate(
     engine: AsyncLLM,
@@ -35,8 +27,8 @@ async def generate(
     prompt: PromptType,
     output_kind: RequestOutputKind,
     max_tokens: int,
-    prompt_logprobs: Optional[int] = None,
-    data_parallel_rank: Optional[int] = None,
+    prompt_logprobs: int | None = None,
+    data_parallel_rank: int | None = None,
 ) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -67,6 +59,13 @@ async def generate(
 
 
 @pytest.mark.parametrize(
+    "model",
+    [
+        "ibm-research/PowerMoE-3b",
+        "hmellor/tiny-random-LlamaForCausalLM",
+    ],
+)
+@pytest.mark.parametrize(
     "output_kind",
     [
         RequestOutputKind.DELTA,
@@ -77,8 +76,14 @@ async def generate(
 @pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.asyncio
 async def test_load(
-    output_kind: RequestOutputKind, data_parallel_backend: str, async_scheduling: bool
+    model: str,
+    output_kind: RequestOutputKind,
+    data_parallel_backend: str,
+    async_scheduling: bool,
 ):
+    if async_scheduling and data_parallel_backend == "ray":
+        # TODO(NickLucche) Re-enable when async scheduling is supported
+        pytest.skip("Async scheduling is not supported with ray")
     stats_loggers = {}
 
     @dataclass
@@ -91,9 +96,9 @@ async def test_load(
 
         def record(
             self,
-            scheduler_stats: Optional[SchedulerStats],
-            iteration_stats: Optional[IterationStats],
-            mm_cache_stats: Optional[MultiModalCacheStats] = None,
+            scheduler_stats: SchedulerStats | None,
+            iteration_stats: IterationStats | None,
+            mm_cache_stats: MultiModalCacheStats | None = None,
             engine_idx: int = 0,
         ):
             if iteration_stats:
@@ -105,8 +110,14 @@ async def test_load(
     with ExitStack() as after:
         prompt = "This is a test of data parallel"
 
-        engine_args.data_parallel_backend = data_parallel_backend
-        engine_args.async_scheduling = async_scheduling
+        engine_args = AsyncEngineArgs(
+            model=model,
+            enforce_eager=True,
+            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+            data_parallel_size=DP_SIZE,
+            data_parallel_backend=data_parallel_backend,
+            async_scheduling=async_scheduling,
+        )
         engine = AsyncLLM.from_engine_args(
             engine_args, stat_loggers=[SimpleStatsLogger]
         )

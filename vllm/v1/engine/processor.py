@@ -3,7 +3,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -38,7 +39,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -60,11 +61,11 @@ class Processor:
         )
 
     @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
+    def tokenizer(self) -> AnyTokenizer | None:
         return self.input_preprocessor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
         self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
@@ -149,10 +150,27 @@ class Processor:
             raise ValueError(
                 "vLLM V1 does not support per request user provided logits processors."
             )
+        # Async scheduling + spec decode currently incompatible with some
+        # sampling parameters.
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.scheduler_config.async_scheduling
+            and (
+                params.frequency_penalty != 0.0
+                or params.presence_penalty != 0.0
+                or params.repetition_penalty != 1.0
+                or params.bad_words_token_ids
+                or params.structured_outputs
+            )
+        ):
+            raise ValueError(
+                "async scheduling with spec decoding doesn't yet support "
+                "penalties, bad words or structured outputs in sampling parameters."
+            )
 
     def _validate_params(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
     ):
         """
         Validate supported SamplingParam.
@@ -174,7 +192,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -208,13 +226,13 @@ class Processor:
             enc = prompt.get("encoder_prompt")
             dec = prompt.get("decoder_prompt")
             if enc is not None:
-                _validate_single_prompt(enc)
+                _validate_single_prompt(cast(dict | str, enc))
             if dec is not None:
-                _validate_single_prompt(dec)
+                _validate_single_prompt(cast(dict | str, dec))
         else:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
-    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
 
@@ -270,6 +288,12 @@ class Processor:
             raise ValueError(
                 f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
+        # Reject empty string grammar early to avoid engine-side crashes
+        if (
+            isinstance(params.structured_outputs.grammar, str)
+            and params.structured_outputs.grammar.strip() == ""
+        ):
+            raise ValueError("structured_outputs.grammar cannot be an empty string")
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -309,7 +333,7 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-    ) -> Optional[MultiModalUUIDDict]:
+    ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
         index rather than their content.
@@ -332,9 +356,14 @@ class Processor:
         if not mm_data:
             return None
 
-        mm_uuids: MultiModalUUIDDict = {}
+        mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
-            n = len(data) if isinstance(data, list) else 1
+            # Hash each item for embedding inputs.
+            n = (
+                len(data)
+                if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
+                else 1
+            )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
@@ -342,13 +371,13 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
@@ -384,7 +413,9 @@ class Processor:
             # if provided.
             self._validate_multi_modal_uuids(prompt)
             if isinstance(prompt, dict):
-                mm_uuids = prompt.get("multi_modal_uuids")
+                mm_uuids = cast(
+                    MultiModalUUIDDict | None, prompt.get("multi_modal_uuids")
+                )
             else:
                 mm_uuids = None
 
@@ -410,20 +441,13 @@ class Processor:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
-        # Mypy does not always properly infer the types of some elements of
-        # discriminated unions of TypedDicts, because of how it handles
-        # inheritance of TypedDict. If we explicitly extract the items we want
-        # we can avoid type errors from using `dict.get` later in the method.
-        prompt_token_ids = (
-            decoder_inputs["prompt_token_ids"]
-            if decoder_inputs["type"] != "embeds"
-            else None
-        )
-        prompt_embeds = (
-            decoder_inputs["prompt_embeds"]
-            if decoder_inputs["type"] == "embeds"
-            else None
-        )
+        # Mypy can be conservative for TypedDict unions; normalize access.
+        if decoder_inputs["type"] == "embeds":
+            prompt_token_ids = None
+            prompt_embeds = decoder_inputs["prompt_embeds"]
+        else:
+            prompt_token_ids = decoder_inputs["prompt_token_ids"]
+            prompt_embeds = None
 
         sampling_params = None
         pooling_params = None
@@ -445,7 +469,7 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+        mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
@@ -485,7 +509,7 @@ class Processor:
         )
 
     def _validate_model_inputs(
-        self, encoder_inputs: Optional[SingletonInputs], decoder_inputs: SingletonInputs
+        self, encoder_inputs: SingletonInputs | None, decoder_inputs: SingletonInputs
     ):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
@@ -574,7 +598,23 @@ class Processor:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
-    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        if (
+            prompt_len == max_prompt_len
+            and prompt_type == "decoder"
+            and not model_config.is_multimodal_model
+            and self.model_config.runner_type != "pooling"
+        ):
+            suggestion = (
+                "Make sure that `max_model_len` is no smaller than the "
+                "number of text tokens (prompt + requested output tokens)."
+            )
+            raise ValueError(
+                f"The {prompt_type} prompt (length {prompt_len}) plus the number of "
+                f"requested output tokens (at least 1) is longer than the maximum "
+                f"model length of {max_prompt_len}. {suggestion}"
+            )
+
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()
 
     def clear_mm_cache(self) -> None:

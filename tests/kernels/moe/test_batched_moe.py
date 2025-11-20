@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 import torch
@@ -25,37 +24,28 @@ from vllm.triton_utils import tl
 
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 128, 2048),
     (1, 512, 512),
-    (1, 1024, 128),
     (1, 1024, 2048),
     (32, 128, 128),
     (32, 512, 512),
     (32, 1024, 2048),
-    (45, 128, 128),
     (45, 128, 2048),
-    (45, 512, 512),
     (45, 1024, 128),
-    (45, 1024, 2048),
     (64, 512, 512),
     (64, 1024, 2048),
-    (222, 128, 128),
     (222, 128, 2048),
-    (222, 1024, 128),
     (222, 1024, 2048),
 ]
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclass
 class BatchedMMConfig:
     in_dtype: torch.dtype
-    quant_dtype: Optional[torch.dtype]
+    quant_dtype: torch.dtype | None
     out_dtype: torch.dtype
     num_experts: int
     max_tokens_per_expert: int
@@ -115,12 +105,21 @@ def test_batched_mm(
     K: int,
     N: int,
     dtype: torch.dtype,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if (per_act_token_quant or block_shape is not None) and not use_fp8_w8a8:
         pytest.skip("Don't test blocking for non-quantized types.")
@@ -242,12 +241,21 @@ def test_fused_moe_batched_experts(
     topk: int,
     dtype: torch.dtype,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     input_scales: bool,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
+
+    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
+        89
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
 
     if topk > e:
         pytest.skip("topk > e")

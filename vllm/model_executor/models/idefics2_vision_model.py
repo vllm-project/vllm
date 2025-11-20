@@ -19,7 +19,6 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -31,6 +30,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
 from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -61,7 +61,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -77,7 +77,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self,
         pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
@@ -124,7 +124,7 @@ class Idefics2VisionAttention(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -185,7 +185,7 @@ class Idefics2VisionMLP(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -220,7 +220,7 @@ class Idefics2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -275,9 +275,9 @@ class Idefics2Encoder(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -326,9 +326,9 @@ class Idefics2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -370,8 +370,8 @@ class Idefics2VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values,
-        patch_attention_mask: Optional[torch.BoolTensor] = None,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        patch_attention_mask: torch.BoolTensor | None = None,
+        tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values=pixel_values,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
 
+import numpy as np
 import pytest
 
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,7 +22,7 @@ def _make_model_runner_output(
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-        sampled_token_ids=[[i] for i in range(len(req_ids))],
+        sampled_token_ids=[np.array([i]) for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -34,15 +35,20 @@ def test_stop_by_max_tokens(max_tokens: int):
     requests = create_requests(num_requests=2, max_tokens=max_tokens)
     req0, req1 = requests
 
+    expected_total_num_scheduled_tokens = 0
     sched_outputs: deque[SchedulerOutput] = deque()
     scheduler.add_request(req0)
     sched_outputs.append(scheduler.schedule())
+    expected_total_num_scheduled_tokens += req0.num_prompt_tokens + max_tokens - 1
 
     scheduler.add_request(req1)
     sched_outputs.append(scheduler.schedule())
+    expected_total_num_scheduled_tokens += req1.num_prompt_tokens + max_tokens - 1
 
+    total_num_scheduled_tokens = 0
     while sched_outputs:
         sched_output = sched_outputs.popleft()
+        total_num_scheduled_tokens += sched_output.total_num_scheduled_tokens
         model_runner_output = _make_model_runner_output(sched_output)
         scheduler.update_from_output(sched_output, model_runner_output)
 
@@ -53,6 +59,8 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert scheduler.get_num_unfinished_requests() == 0
     assert req0.num_output_tokens == max_tokens
     assert req1.num_output_tokens == max_tokens
+    # Ensure we aren't scheduling more tokens than necessary.
+    assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
 def test_abort():

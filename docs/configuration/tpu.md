@@ -4,7 +4,7 @@ This doc serves as a collection of handy tips for optimizing your vLLM on TPU wo
 
 ## Get started
 
-Looking for setup and installation instructions? Find them [here](../getting_started/installation/google_tpu.md).
+Looking for setup and installation instructions? Find them [here](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/).
 
 ### TPU workload sizing
 
@@ -96,7 +96,7 @@ Although it’s common to do this with GPUs, don't try to fragment 2 or 8 differ
 
 ### Tune your workloads
 
-Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](gh-file:benchmarks/auto_tune/README.md) to optimize your workloads for your use case.
+Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](../../benchmarks/auto_tune/README.md) to optimize your workloads for your use case.
 
 ### Future Topics We'll Cover
 

@@ -10,7 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
-    AttentionMetadata,
+    MultipleOf,
 )
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.flashmla import (
@@ -19,10 +19,12 @@ from vllm.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -38,28 +40,27 @@ logger = init_logger(__name__)
 """
 NOTE: FlashMLA Sparse uses an fp8 cache with the following format
 
-In the "FP8 with scale" format, each token's KV cache is 656 Bytes, 
+In the "FP8 with scale" format, each token's KV cache is 656 Bytes,
 structured as:
--   **First 512 bytes:** The "quantized NoPE" part, containing 512 
+-   **First 512 bytes:** The "quantized NoPE" part, containing 512
     `float8_e4m3` values.
--   **Next 16 bytes:** Scale factors, containing 4 `float32` values. 
-    The first `float32` is the scale for the first 128 `float8_e4m3` values, 
+-   **Next 16 bytes:** Scale factors, containing 4 `float32` values.
+    The first `float32` is the scale for the first 128 `float8_e4m3` values,
     the second for the next 128, and so on.
--   **Last 128 bytes:** The "RoPE" part, containing 64 `bfloat16` values. This 
+-   **Last 128 bytes:** The "RoPE" part, containing 64 `bfloat16` values. This
     part is not quantized for accuracy.
 """
 
 
 class FlashMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "fp8_ds_mla"]
 
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_metadata_cls() -> type[AttentionMetadata]:
-        return FlashMLASparseMetadata
 
     @staticmethod
     def get_builder_cls() -> type["FlashMLASparseMetadataBuilder"]:
@@ -68,6 +69,22 @@ class FlashMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLASparseImpl"]:
         return FlashMLASparseImpl
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major in [9, 10]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -83,14 +100,6 @@ class FlashMLASparseBackend(AttentionBackend):
             return (num_blocks, block_size, 656)
         else:
             return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
 
 
 @dataclass
@@ -110,12 +119,12 @@ class FlashMLASparseMetadata:
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: Optional[torch.Tensor]
+        scheduler_metadata: torch.Tensor | None
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    fp8_extra_metadata: Optional[FP8KernelMetadata] = None
+    fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
 @triton.jit
@@ -159,7 +168,7 @@ def _convert_req_index_to_global_index_kernel(
     inblock_off = tok % BLOCK_SIZE
 
     # Guard block_table access
-    valid_block = block_id < max_num_blocks_per_req
+    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
@@ -239,7 +248,7 @@ def triton_convert_req_index_to_global_index(
 
 @dataclass
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
@@ -373,14 +382,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: Optional[torch.Tensor] = None,
+        topk_indice_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -466,9 +475,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode

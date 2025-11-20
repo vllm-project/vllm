@@ -3,11 +3,11 @@
 
 import asyncio
 import atexit
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -18,42 +18,47 @@ from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
 
-_M = TypeVar("_M")
-
 if TYPE_CHECKING:
     from .inputs import (
         BatchedTensorInputs,
         MultiModalKwargsItem,
-        MultiModalKwargsItems,
         MultiModalPlaceholderDict,
     )
 else:
     BatchedTensorInputs = Any
     MultiModalKwargsItem = Any
-    MultiModalKwargsItems = Any
     MultiModalPlaceholderDict = Any
+
+logger = init_logger(__name__)
 
 global_thread_pool = ThreadPoolExecutor(
     max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
 )
 atexit.register(global_thread_pool.shutdown)
 
+_M = TypeVar("_M")
 
+MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
+
+
+@MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
     def __init__(
         self,
-        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
-        allowed_media_domains: Optional[list[str]] = None,
+        allowed_media_domains: list[str] | None = None,
     ) -> None:
         """
         Args:
@@ -143,7 +148,7 @@ class MediaConnector:
         url: str,
         media_io: MediaIO[_M],
         *,
-        fetch_timeout: Optional[int] = None,
+        fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
         url_spec = urlparse(url)
 
@@ -173,7 +178,7 @@ class MediaConnector:
         url: str,
         media_io: MediaIO[_M],
         *,
-        fetch_timeout: Optional[int] = None,
+        fetch_timeout: int | None = None,
     ) -> _M:
         url_spec = urlparse(url)
         loop = asyncio.get_running_loop()
@@ -207,7 +212,7 @@ class MediaConnector:
     def fetch_audio(
         self,
         audio_url: str,
-    ) -> tuple[np.ndarray, Union[int, float]]:
+    ) -> tuple[np.ndarray, int | float]:
         """
         Load audio from a URL.
         """
@@ -222,7 +227,7 @@ class MediaConnector:
     async def fetch_audio_async(
         self,
         audio_url: str,
-    ) -> tuple[np.ndarray, Union[int, float]]:
+    ) -> tuple[np.ndarray, int | float]:
         """
         Asynchronously fetch audio from a URL.
         """
@@ -396,7 +401,8 @@ def group_mm_kwargs_by_modality(
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
-    merge_by_field_config: Optional[bool] = None,
+    merge_by_field_config: bool | None = None,
+    multimodal_cpu_fields: Set[str] = frozenset(),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -415,14 +421,21 @@ def group_mm_kwargs_by_modality(
             "`merge_by_field_config` arg, please update your model runner "
             "according to https://github.com/vllm-project/vllm/pull/25676."
         )
+    if merge_by_field_config is False:
+        logger.warning_once(
+            "The legacy code for batching multi-modal kwargs is deprecated and "
+            "will be removed in v0.12. Please update your model with "
+            "`merge_by_field_config=True` to use the new code defined by "
+            "`MultiModalFieldConfig`. You can refer to "
+            "https://github.com/vllm-project/vllm/issues/26149 "
+            "for some examples on how to do this."
+        )
 
     from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # TODO: Deprecate `merge_by_field_config` once
-        # we have migrated all in-tree models
         if merge_by_field_config:
             mm_kwargs_group: BatchedTensorInputs = dict(
                 MultiModalKwargsItems.from_seq(items_lst).get_data(
@@ -431,10 +444,17 @@ def group_mm_kwargs_by_modality(
             )
 
             if device is not None:
-                mm_kwargs_group = json_map_leaves(
-                    lambda x: x.to(device=device),
-                    mm_kwargs_group,
-                )
+                mm_kwargs_group = {
+                    k: json_map_leaves(
+                        lambda x: x.to(device=device, non_blocking=True)
+                        if isinstance(x, torch.Tensor)
+                        else x,
+                        v,
+                    )
+                    if k not in multimodal_cpu_fields
+                    else v
+                    for k, v in mm_kwargs_group.items()
+                }
         else:
             mm_kwargs_group = MultiModalKwargs.as_kwargs(
                 MultiModalKwargs.batch(
@@ -452,8 +472,8 @@ def group_mm_kwargs_by_modality(
 
 def fetch_audio(
     audio_url: str,
-    audio_io_kwargs: Optional[dict[str, Any]] = None,
-) -> tuple[np.ndarray, Union[int, float]]:
+    audio_io_kwargs: dict[str, Any] | None = None,
+) -> tuple[np.ndarray, int | float]:
     """
     Args:
         audio_url: URL of the audio file to fetch.
@@ -466,7 +486,7 @@ def fetch_audio(
 
 def fetch_image(
     image_url: str,
-    image_io_kwargs: Optional[dict[str, Any]] = None,
+    image_io_kwargs: dict[str, Any] | None = None,
 ) -> Image.Image:
     """
     Args:
@@ -480,7 +500,7 @@ def fetch_image(
 
 def fetch_video(
     video_url: str,
-    video_io_kwargs: Optional[dict[str, Any]] = None,
+    video_io_kwargs: dict[str, Any] | None = None,
 ) -> tuple[npt.NDArray, dict[str, Any]]:
     """
     Args:

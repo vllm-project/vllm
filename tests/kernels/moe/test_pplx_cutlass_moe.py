@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -14,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassBatchedExper
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -73,7 +72,7 @@ def pplx_cutlass_moe(
     out_dtype,
     per_act_token: bool,
     per_out_ch: bool,
-    group_name: Optional[str],
+    group_name: str | None,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -193,8 +192,6 @@ def pplx_cutlass_moe(
 
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def _pplx_moe(

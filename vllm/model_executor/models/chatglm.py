@@ -7,7 +7,6 @@
 import json
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -50,8 +49,8 @@ class GLMAttention(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -100,6 +99,7 @@ class GLMAttention(nn.Module):
         # https://huggingface.co/zai-org/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        rope_parameters = {"rope_type": "default", "rope_theta": 10000 * rope_ratio}
         # NOTE: zai-org/cogagent-9b-20241220 uses original_rope=False,
         # which is equivalent to is_neox_style=True
         is_neox_style = not config.original_rope
@@ -107,7 +107,7 @@ class GLMAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
-            base=10000 * rope_ratio,
+            rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
         )
         self.attn = Attention(
@@ -144,7 +144,7 @@ class GLMMLP(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -190,8 +190,8 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -263,8 +263,8 @@ class GLMTransformer(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -295,7 +295,7 @@ class GLMTransformer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
                 hidden_states=hidden_states, position_ids=position_ids
@@ -354,22 +354,22 @@ class ChatGLMModel(nn.Module, SupportsQuant):
             self.encoder.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -434,10 +434,9 @@ class ChatGLMBaseModel(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
-        self.lora_config = lora_config
         self.multimodal_config = multimodal_config
 
         self.quant_config = quant_config
@@ -453,13 +452,13 @@ class ChatGLMBaseModel(nn.Module):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -491,9 +490,9 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP, SupportsQua
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
