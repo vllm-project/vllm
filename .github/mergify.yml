@@ -151,6 +151,23 @@ pull_request_rules:
       add:
         - gpt-oss
 
+- name: label-nvidia
+  description: Automatically apply nvidia label
+  conditions:
+    - label != stale
+    - or:
+      - files~=cuda
+      - files~=cutlass
+      - files~=flashinfer
+      - files~=trtllm
+      - title~=(?i)NVIDIA
+      - title~=(?i)CUDA
+      - title~=(?i)CUTLASS
+  actions:
+    label:
+      add:
+        - nvidia
+
 - name: label-rocm
   description: Automatically apply rocm label
   conditions:

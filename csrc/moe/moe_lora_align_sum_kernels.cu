@@ -28,11 +28,16 @@ __global__ void moe_lora_align_sum_kernel(
     int64_t block_size, int num_experts, int max_loras, size_t numel,
     int max_num_tokens_padded, int max_num_m_blocks,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
-    int topk_num, int32_t* total_tokens_post_pad) {
+    int topk_num, int32_t* total_tokens_post_pad, int32_t* adapter_enabled,
+    int32_t* lora_ids) {
   const size_t tokens_per_thread = div_ceil(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
-  int lora_id = blockIdx.x;
+  int lora_idx = blockIdx.x;
+  int lora_id = lora_ids[lora_idx];
+  if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+    return;
+  }
   extern __shared__ int32_t shared_mem[];
   int32_t* cumsum = shared_mem;
   token_cnts_t* tokens_cnts = (token_cnts_t*)(shared_mem + num_experts + 1);
@@ -121,14 +126,13 @@ __global__ void moe_lora_align_sum_kernel(
   }
 }
 
-void moe_lora_align_block_size(torch::Tensor topk_ids,
-                               torch::Tensor token_lora_mapping,
-                               int64_t num_experts, int64_t block_size,
-                               int64_t max_loras, int64_t max_num_tokens_padded,
-                               int64_t max_num_m_blocks,
-                               torch::Tensor sorted_token_ids,
-                               torch::Tensor expert_ids,
-                               torch::Tensor num_tokens_post_pad) {
+void moe_lora_align_block_size(
+    torch::Tensor topk_ids, torch::Tensor token_lora_mapping,
+    int64_t num_experts, int64_t block_size, int64_t max_loras,
+    int64_t max_num_tokens_padded, int64_t max_num_m_blocks,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_pad, torch::Tensor adapter_enabled,
+    torch::Tensor lora_ids) {
   const int topk_num = topk_ids.size(1);
 
   TORCH_CHECK(block_size > 0, "block_size should be greater than 0. ");
@@ -164,6 +168,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
             max_loras, topk_ids.numel(), max_num_tokens_padded,
             max_num_m_blocks, sorted_token_ids.data_ptr<int32_t>(),
             expert_ids.data_ptr<int32_t>(), topk_num,
-            num_tokens_post_pad.data_ptr<int32_t>());
+            num_tokens_post_pad.data_ptr<int32_t>(),
+            adapter_enabled.data_ptr<int32_t>(), lora_ids.data_ptr<int32_t>());
       });
 }

@@ -14,7 +14,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import Device, EngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -120,8 +120,9 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
+        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats
+            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -159,11 +160,23 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        if (
+            envs.VLLM_TORCH_PROFILER_DIR
+            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+        ):
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
                 envs.VLLM_TORCH_PROFILER_DIR,
             )
+            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
+                logger.warning_once(
+                    "Torch profiler received max_iters or delay_iters setting. These "
+                    "are not compatible with the AsyncLLM profiler and will be ignored "
+                    "for the AsyncLLM process. Engine process profiling will still "
+                    "respect these settings. Consider setting "
+                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
+                    "AsyncLLM profiling."
+                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
@@ -508,6 +521,8 @@ class AsyncLLM(EngineClient):
                             processed_outputs.reqs_to_abort
                         )
 
+                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
+
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
@@ -669,9 +684,7 @@ class AsyncLLM(EngineClient):
         self.processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
-        if device == Device.CPU:
-            raise ValueError("Not supported on CPU.")
+    async def reset_prefix_cache(self) -> None:
         await self.engine_core.reset_prefix_cache_async()
 
     async def sleep(self, level: int = 1) -> None:

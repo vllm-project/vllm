@@ -726,8 +726,6 @@ def tensorize_vllm_model(
         ) as stream:
             stream.write(encryption_params.key)
 
-    assert envs.VLLM_USE_V1
-
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine = LLMEngine.from_vllm_config(engine_config)

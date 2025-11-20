@@ -22,7 +22,7 @@ from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
 logger = init_logger(__name__)
 
-CYAN = "\033[1;36m"
+CYAN = "\033[0;36m"
 RESET = "\033[0;0m"
 
 
@@ -142,7 +142,10 @@ def set_process_title(
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
-    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    if envs.NO_COLOR:
+        prefix = f"({worker_name} pid={pid}) "
+    else:
+        prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
     file_write = file.write
 
     def write_with_prefix(s: str):
