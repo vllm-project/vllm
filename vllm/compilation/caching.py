@@ -136,21 +136,19 @@ class VllmSerializableFunction(SerializableCallable):
 
 
 def compute_env_and_config_hashes(
-    vllm_config: VllmConfig, env_factors: dict[str, object] | None = None
-) -> tuple[str, str]:
+    vllm_config: VllmConfig,
+) -> tuple[str, str, dict[str, object]]:
     """
-    Return the hashed environment factors and vLLM config hash.
+    Return the hashed environment factors, config hash, and raw env factors.
 
     Both AOT and JIT cache paths rely on this helper to ensure their cache keys
-    stay in sync. When ``env_factors`` is omitted the helper will gather them
-    via ``envs.compile_factors()``.
+    stay in sync.
     """
 
-    if env_factors is None:
-        env_factors = envs.compile_factors()
+    env_factors = envs.compile_factors()
     env_hash = hash_factors(env_factors)
     config_hash = vllm_config.compute_hash()
-    return env_hash, config_hash
+    return env_hash, config_hash, env_factors
 
 
 def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:

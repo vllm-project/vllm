@@ -355,7 +355,7 @@ def _support_torch_compile(
             """
 
             # Keep AOT cache key in sync with JIT: env factors + config hash + model.
-            env_hash, config_hash = compute_env_and_config_hashes(self.vllm_config)
+            env_hash, config_hash, _ = compute_env_and_config_hashes(self.vllm_config)
             factors: list[str] = [env_hash, config_hash]
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()

@@ -590,9 +590,8 @@ class VllmBackend:
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
 
-        env_factors = envs.compile_factors()
-        env_hash, config_hash = compute_env_and_config_hashes(
-            vllm_config, env_factors=env_factors
+        env_hash, config_hash, env_factors = compute_env_and_config_hashes(
+            vllm_config
         )
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         traced_files = set(self.compilation_config.traced_files)
