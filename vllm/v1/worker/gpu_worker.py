@@ -36,7 +36,7 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.gpu_profiler import CudaProfilerWrapper
+from vllm.profiler.gpu_profiler import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -90,32 +90,9 @@ class Worker(WorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
-            logger.debug(
-                "Profiler config: record_shapes=%s,"
-                "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-            )
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
-                ),
+            self.profiler = TorchProfilerWrapper(
+                worker_name=worker_name, local_rank=self.local_rank
             )
         elif envs.VLLM_TORCH_CUDA_PROFILE:
             self.profiler = CudaProfilerWrapper()
@@ -526,10 +503,12 @@ class Worker(WorkerBase):
         if not self.profiler:
             return nullcontext()
 
+        self.profiler.step()
+
         num_new = len(scheduler_output.scheduled_new_reqs)
         num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
 
-        return torch.profiler.record_function(
+        return self.profiler.annotate_context_manager(
             f"execute_new_{num_new}_cached_{num_cached}"
         )
 
@@ -587,24 +566,11 @@ class Worker(WorkerBase):
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
+            raise RuntimeError("Profiling is not enabled.")
         if is_start:
             self.profiler.start()
         else:
             self.profiler.stop()
-            if isinstance(self.profiler, torch.profiler.profile):
-                rank = self.local_rank
-                profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                sort_key = "self_cuda_time_total"
-                table = self.profiler.key_averages().table(sort_by=sort_key)
-
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
-
-                # only print profiler results on rank 0
-                if rank == 0:
-                    print(table)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
@@ -865,6 +831,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.profiler is not None:
+            self.profiler.shutdown()
 
 
 def init_worker_distributed_environment(

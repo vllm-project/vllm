@@ -92,11 +92,14 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
+    VLLM_PROFILER_DELAY_ITERS: int = 0
+    VLLM_PROFILER_MAX_ITERS: int = 0
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -872,6 +875,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
         os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
     ),
+    # Disable torch profiling of the AsyncLLMEngine process.
+    # If set to 1, will not profile the engine process.
+    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM", "0") != "0"
+    ),
+    # Delay number of iterations before starting profiling when using
+    # the torch/torch CUDA profiler. If set to 0, will start profiling immediately.
+    "VLLM_PROFILER_DELAY_ITERS": lambda: int(
+        os.getenv("VLLM_PROFILER_DELAY_ITERS", "0")
+    ),
+    # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
+    # If set to 0, will not limit the number of iterations.
+    "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,

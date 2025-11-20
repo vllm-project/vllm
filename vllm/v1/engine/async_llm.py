@@ -160,11 +160,23 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        if (
+            envs.VLLM_TORCH_PROFILER_DIR
+            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+        ):
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
                 envs.VLLM_TORCH_PROFILER_DIR,
             )
+            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
+                logger.warning_once(
+                    "Torch profiler received max_iters or delay_iters setting. These "
+                    "are not compatible with the AsyncLLM profiler and will be ignored "
+                    "for the AsyncLLM process. Engine process profiling will still "
+                    "respect these settings. Consider setting "
+                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
+                    "AsyncLLM profiling."
+                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
