@@ -48,9 +48,15 @@ DEVICE_MLA_BLOCK_SIZES = {
 
 
 def generate_params():
+    is_rocm = current_platform.is_rocm()
     params = []
     for use_mla in [True, False]:
         for device in ["cuda", "hip", "cpu"]:
+            if device == "cuda" and is_rocm:
+                continue
+            if device == "hip" and not is_rocm:
+                continue
+
             backends = (
                 DEVICE_MLA_BACKENDS[device]
                 if use_mla
@@ -79,10 +85,6 @@ def test_env(
     block_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if device == "hip" and not current_platform.is_rocm():
-        pytest.skip("HIP tests require a ROCm platform to run.")
-    elif device == "cuda" and not current_platform.is_cuda():
-        pytest.skip("CUDA tests require a CUDA platform to run.")
     """Test attention backend selection with valid device-backend pairs."""
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, name)
