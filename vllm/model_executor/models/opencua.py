@@ -20,7 +20,6 @@ from transformers.models.qwen2_vl import (
 )
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -41,14 +40,10 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (
     MultiModalEmbeddings,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsPP,
-    SupportsQuant,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
+    Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
@@ -66,7 +61,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    get_vit_attn_backend,
     run_dp_sharded_mrope_vision_model,
 )
 
@@ -91,49 +85,6 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
             use_data_parallel=use_data_parallel,
             attn_backend_override=attn_backend_override,
         )
-
-        head_dim = self.hidden_size // self.num_heads
-        if head_dim % 32 != 0:
-            from vllm.attention.layer import check_upstream_fa_availability
-            from vllm.platforms import current_platform
-
-            if current_platform.is_cuda() and check_upstream_fa_availability(
-                torch.get_default_dtype()
-            ):
-                use_upstream_fa = True
-                self.attn_backend, self.flash_attn_varlen_func = (
-                    maybe_get_vit_flash_attn_backend(
-                        self.attn_backend,
-                        use_upstream_fa,
-                        attn_backend_override=attn_backend_override,
-                    )
-                )
-                for block in self.blocks:
-                    if hasattr(block, "attn"):
-                        block.attn.use_upstream_fa = True
-                        block.attn.attn_backend, block.attn.flash_attn_varlen_func = (
-                            maybe_get_vit_flash_attn_backend(
-                                block.attn.attn_backend,
-                                use_upstream_fa,
-                                attn_backend_override=attn_backend_override,
-                            )
-                        )
-            else:
-                from vllm.attention.backends.registry import AttentionBackendEnum
-
-                attn_backend_override = AttentionBackendEnum.XFORMERS
-                self.attn_backend = get_vit_attn_backend(
-                    head_size=head_dim,
-                    dtype=torch.get_default_dtype(),
-                    attn_backend_override=attn_backend_override,
-                )
-                self.attn_backend, self.flash_attn_varlen_func = (
-                    maybe_get_vit_flash_attn_backend(
-                        self.attn_backend,
-                        False,
-                        attn_backend_override=attn_backend_override,
-                    )
-                )
 
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
@@ -271,14 +222,7 @@ class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     info=OpenCUAProcessingInfo,
     dummy_inputs=OpenCUADummyInputsBuilder,
 )
-class OpenCUAForConditionalGeneration(
-    nn.Module,
-    SupportsMultiModal,
-    SupportsLoRA,
-    SupportsPP,
-    SupportsQuant,
-    SupportsEagle3,
-):
+class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
     merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw"}
 
@@ -306,7 +250,7 @@ class OpenCUAForConditionalGeneration(
         raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
