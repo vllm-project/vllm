@@ -24,6 +24,7 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -352,10 +353,12 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            from .caching import compilation_config_hash_factors
 
-            factors: list[str] = compilation_config_hash_factors(self.vllm_config)
-
+            # Keep AOT cache key in sync with JIT: env factors + config hash + model.
+            env_factors = envs.compile_factors()
+            env_hash = hash_factors(env_factors)
+            config_hash = self.vllm_config.compute_hash()
+            factors: list[str] = [env_hash, config_hash]
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
 
