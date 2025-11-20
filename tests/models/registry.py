@@ -402,6 +402,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "pfnet/plamo-2-1b",
         trust_remote_code=True,
     ),
+    "Plamo3ForCausalLM": _HfExamplesInfo(
+        "pfnet/plamo-3-nict-2b-base",
+        trust_remote_code=True,
+    ),
     "QWenLMHeadModel": _HfExamplesInfo(
         "Qwen/Qwen-7B-Chat",
         max_transformers_version="4.53",
