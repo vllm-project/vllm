@@ -552,8 +552,11 @@ class StreamingHarmonyContext(HarmonyContext):
         for tok in toks:
             self.parser.process(tok)
         self.last_tok = toks[-1]
-        # Add tool output messages to self._messages
-        self._messages.extend(output)
+        # Add tool output messages from parser to self._messages
+        # (same pattern as append_output)
+        msg_count = len(self._messages) - self.num_init_messages
+        if msg_count < len(self.parser.messages):
+            self._messages.extend(self.parser.messages[msg_count:])
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START
