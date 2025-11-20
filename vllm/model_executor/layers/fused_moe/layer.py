@@ -493,7 +493,7 @@ class FusedMoE(CustomOp):
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
-            self.register_buffer("expert_map", expert_map)
+            self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
             logger.info_once(
@@ -847,7 +847,7 @@ class FusedMoE(CustomOp):
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
-            self.register_buffer("expert_map", expert_map)
+            self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
             if self.aiter_fmoe_shared_expert_enabled:
@@ -1806,22 +1806,6 @@ class FusedMoE(CustomOp):
                 layer=self,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
             )
 
             if has_separate_shared_experts:
@@ -1967,23 +1951,6 @@ class FusedMoE(CustomOp):
                 if do_naive_dispatch_combine
                 else hidden_states,
                 router_logits=router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                apply_router_weight_on_input=self.apply_router_weight_on_input,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
             )
 
             if has_separate_shared_experts:
