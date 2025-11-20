@@ -17,7 +17,7 @@ import tempfile
 import time
 import warnings
 from collections.abc import Callable, Iterable
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Literal
@@ -49,6 +49,12 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless
+
+try:
+    from torch._inductor.utils import fresh_cache
+except ImportError:
+    fresh_cache = nullcontext()
+
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -1113,6 +1119,21 @@ def multi_gpu_test(*, num_gpus: int):
             func = mark(func)
 
         return func
+
+    return wrapper
+
+
+def use_fresh_compile_cache(f: Callable[_P, None]) -> Callable[_P, None]:
+    """
+    Decorator to use a fresh inductor cache for the test.
+    This is useful to ensure that the test is not affected by the
+    previous test calls.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        with fresh_cache():
+            return f(*args, **kwargs)
 
     return wrapper
 

@@ -5,10 +5,10 @@ from typing import Any
 import torch
 from torch import fx as fx
 from torch import nn
-from torch._inductor.utils import fresh_cache
 
 # This import automatically registers `torch.ops.silly.attention`
 import tests.compile.silly_attention  # noqa
+from tests.utils import use_fresh_compile_cache
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.inductor_pass import (
@@ -67,44 +67,44 @@ class PostGradRangeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
+@use_fresh_compile_cache
 def test_compile_ranges():
-    with fresh_cache():
-        post_grad_pass_manager = PostGradRangeChecker(
-            [
-                Range(start=1, end=8),
-                Range(start=16, end=16),
-                Range(start=9, end=32),
-                Range(start=64, end=64),
-                Range(start=33, end=8192),
-            ]
-        )
-        torch.set_default_device("cuda")
-        vllm_config = VllmConfig(
-            scheduler_config=SchedulerConfig(
-                max_num_batched_tokens=8192,
-            ),
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                compile_ranges_split_points=[8, 32],
-                compile_sizes=[16, 64, 128],
-                inductor_compile_config={
-                    "post_grad_custom_post_pass": post_grad_pass_manager,
-                },
-            ),
-        )
+    post_grad_range_checker = PostGradRangeChecker(
+        [
+            Range(start=1, end=8),
+            Range(start=16, end=16),
+            Range(start=9, end=32),
+            Range(start=64, end=64),
+            Range(start=33, end=8192),
+        ]
+    )
+    torch.set_default_device("cuda")
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            compile_ranges_split_points=[8, 32],
+            compile_sizes=[16, 64, 128],
+            inductor_compile_config={
+                "post_grad_custom_post_pass": post_grad_range_checker,
+            },
+        ),
+    )
 
-        with set_current_vllm_config(vllm_config):
-            model = TestModel(vllm_config=vllm_config, prefix="").eval()
-            # Number of compilations: 3 for each compile range + 2 compile sizes
-            batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
+    with set_current_vllm_config(vllm_config):
+        model = TestModel(vllm_config=vllm_config, prefix="").eval()
+        # Number of compilations: 3 for each compile range + 2 compile sizes
+        batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
 
-            with compilation_counter.expect(
-                num_graphs_seen=1,
-                num_piecewise_graphs_seen=1,
-                num_backend_compilations=5,
-            ):
-                run_model(vllm_config, model, batch_sizes)
-            assert post_grad_pass_manager.num_calls == 5
+        with compilation_counter.expect(
+            num_graphs_seen=1,
+            num_piecewise_graphs_seen=1,
+            num_backend_compilations=5,
+        ):
+            run_model(vllm_config, model, batch_sizes)
+        assert post_grad_range_checker.num_calls == 5
 
 
 def test_compile_config_get_compile_ranges():
@@ -124,11 +124,12 @@ def test_compile_config_get_compile_ranges():
     ]
 
 
+@use_fresh_compile_cache
 def test_inductor_cache_compile_ranges(monkeypatch):
     # To force multiple compilations, we disable the compile cache
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
-    post_grad_pass_manager = PostGradRangeChecker(
+    post_grad_range_checker = PostGradRangeChecker(
         ranges=[
             Range(start=1, end=8),
             Range(start=9, end=8192),
@@ -146,26 +147,25 @@ def test_inductor_cache_compile_ranges(monkeypatch):
                 mode=CompilationMode.VLLM_COMPILE,
                 compile_ranges_split_points=[8],
                 inductor_compile_config={
-                    "post_grad_custom_post_pass": post_grad_pass_manager,
+                    "post_grad_custom_post_pass": post_grad_range_checker,
                 },
             ),
         )
 
-    with fresh_cache():
-        vllm_config_1 = create_vllm_config()
-        with set_current_vllm_config(vllm_config_1):
-            model1 = TestModel(vllm_config=vllm_config_1, prefix="").eval()
-            batch_sizes = [1, 16]
-            run_model(vllm_config_1, model1, batch_sizes)
-            assert post_grad_pass_manager.num_calls == 2
+    vllm_config_1 = create_vllm_config()
+    with set_current_vllm_config(vllm_config_1):
+        model1 = TestModel(vllm_config=vllm_config_1, prefix="").eval()
+        batch_sizes = [1, 16]
+        run_model(vllm_config_1, model1, batch_sizes)
+        assert post_grad_range_checker.num_calls == 2
 
-        post_grad_pass_manager.num_calls = 0
-        # Create a new vllm config with the new pass context
-        vllm_config_2 = create_vllm_config()
-        with set_current_vllm_config(vllm_config_2):
-            model2 = TestModel(vllm_config=vllm_config_2, prefix="").eval()
-            batch_sizes = [4, 32]
-            run_model(vllm_config_2, model2, batch_sizes)
-            # Check that cache is used, so the number of calls
-            # should be 0
-            assert post_grad_pass_manager.num_calls == 0
+    post_grad_range_checker.num_calls = 0
+    # Create a new vllm config with the new pass context
+    vllm_config_2 = create_vllm_config()
+    with set_current_vllm_config(vllm_config_2):
+        model2 = TestModel(vllm_config=vllm_config_2, prefix="").eval()
+        batch_sizes = [4, 32]
+        run_model(vllm_config_2, model2, batch_sizes)
+        # Check that cache is used, so the number of calls
+        # should be 0
+        assert post_grad_range_checker.num_calls == 0
