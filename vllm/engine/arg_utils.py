@@ -544,7 +544,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
-    attention_backend: Optional[str] = AttentionConfig.backend
+    attention_backend: str | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -1769,7 +1769,7 @@ class EngineArgs:
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
-        
+
         attention_config = self.create_attention_config()
 
         load_config = self.create_load_config()

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
@@ -15,14 +15,14 @@ from vllm.config.utils import config
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: Optional[str] = None
+    backend: str | None = None
     """Attention backend to use. If None, will be selected automatically.
     Example options: FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
 
     use_triton_flash_attn: bool = True
     """Whether to use triton flash attention."""
 
-    flash_attn_version: Optional[int] = None
+    flash_attn_version: int | None = None
     """Force vllm to use a specific flash-attention version (2 or 3).
     Only valid when using the flash-attention backend."""
 
@@ -42,7 +42,7 @@ class AttentionConfig:
     use_trtllm_ragged_deepseek_prefill: bool = False
     """Whether to use TRTLLM ragged deepseek prefill."""
 
-    use_trtllm_attention: Optional[bool] = None
+    use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
 

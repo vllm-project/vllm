@@ -10,7 +10,6 @@ from typing import cast, get_args
 
 import torch
 
-import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import (
     MAMBA_TYPE_TO_BACKEND_MAP,
