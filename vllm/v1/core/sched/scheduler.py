@@ -182,6 +182,12 @@ class Scheduler(SchedulerInterface):
 
         # TODO(wentao): fix prefix caching for batch invariance of TRITON_MLA.
         if vllm_is_batch_invariant() and envs.VLLM_ATTENTION_BACKEND == "TRITON_MLA":
+            if enable_caching:
+                logger.warning_once(
+                    "Disabling prefix caching for TRITON_MLA with batch "
+                    "invariance, as it is not yet supported.",
+                    scope="local",
+                )
             enable_caching = False
 
         self.kv_cache_manager = KVCacheManager(
