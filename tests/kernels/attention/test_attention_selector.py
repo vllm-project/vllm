@@ -50,13 +50,9 @@ DEVICE_MLA_BLOCK_SIZES = {
 def generate_params():
     is_rocm = current_platform.is_rocm()
     params = []
+    device_list = ["cuda", "cpu"] if not is_rocm else ["hip", "cpu"]
     for use_mla in [True, False]:
-        for device in ["cuda", "hip", "cpu"]:
-            if device == "cuda" and is_rocm:
-                continue
-            if device == "hip" and not is_rocm:
-                continue
-
+        for device in device_list:
             backends = (
                 DEVICE_MLA_BACKENDS[device]
                 if use_mla
