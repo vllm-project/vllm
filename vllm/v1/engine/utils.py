@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
@@ -1000,6 +1000,7 @@ def wait_for_engine_startup(
                     f"dp lb mode"
                 )
 
+        parallel_hash = cast(str, parallel_config.compile_factors())
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info and config hash.
             # The config hash ensures all DP workers have compatible configs.
@@ -1015,7 +1016,7 @@ def wait_for_engine_startup(
                             "data_parallel_size",
                         )
                     },
-                    parallel_config_hash=parallel_config.compile_factors()
+                    parallel_config_hash=parallel_hash
                     if parallel_config.data_parallel_size > 1
                     else None,
                 )
@@ -1041,7 +1042,7 @@ def wait_for_engine_startup(
             # Validate config hash consistency across DP workers
             if parallel_config.data_parallel_size > 1:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compile_factors()
+                expected_hash = parallel_hash
                 if worker_config_hash != expected_hash:
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
