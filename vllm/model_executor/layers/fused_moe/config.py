@@ -31,7 +31,8 @@ if has_triton_kernels():
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible."
+            "version is compatible. Error: %s",
+            e,
         )
 
 
