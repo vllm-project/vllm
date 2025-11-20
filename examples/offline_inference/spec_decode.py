@@ -223,29 +223,28 @@ def main(args):
     decode_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
     total_tokens = prefill_tokens + decode_tokens
 
-    metric_dict = {
-        "prefill_time": 0,
-        "decode_time": 0,
-        "num_drafts": 0,
-        "num_draft_tokens": 0,
-        "num_accepted_tokens": 0,
-        "acceptance_counts": [0] * args.num_spec_tokens,
-    }
+    prefill_time = 0
+    decode_time = 0
+
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
+    acceptance_counts = [0] * args.num_spec_tokens
 
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
-            metric_dict["num_drafts"] += metric.value
+            num_drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_draft_tokens":
-            metric_dict["num_draft_tokens"] += metric.value
+            num_draft_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
-            metric_dict["num_accepted_tokens"] += metric.value
+            num_accepted_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             for pos, val in enumerate(metric.values):
-                metric_dict["acceptance_counts"][pos] += val
+                acceptance_counts[pos] += val
         elif metric.name == "vllm:request_prefill_time_seconds":
-            metric_dict["prefill_time"] += metric.sum
+            prefill_time += metric.sum
         elif metric.name == "vllm:request_decode_time_seconds":
-            metric_dict["decode_time"] += metric.sum
+            decode_time += metric.sum
 
     metric_dict = {
         "tokens": {
@@ -254,24 +253,24 @@ def main(args):
             "total": total_tokens,
         },
         "timing": {
-            "prefill_secs": metric_dict["prefill_time"],
-            "decode_secs": metric_dict["decode_time"],
-            "total_secs": metric_dict["prefill_time"] + metric_dict["decode_time"],
+            "prefill_secs": prefill_time,
+            "decode_secs": decode_time,
+            "total_secs": prefill_time + decode_time,
         },
         "throughput": {
-            "prefill_toks_per_sec": prefill_tokens / metric_dict["prefill_time"] if metric_dict["prefill_time"] > 0 else 0,
-            "decode_toks_per_sec": decode_tokens / metric_dict["decode_time"] if metric_dict["decode_time"] > 0 else 0,
-            "total_toks_per_sec": total_tokens / (metric_dict["prefill_time"] + metric_dict["decode_time"]) if (metric_dict["prefill_time"] + metric_dict["decode_time"]) > 0 else 0,
+            "prefill_toks_per_sec": prefill_tokens / prefill_time if prefill_time > 0 else 0,
+            "decode_toks_per_sec": decode_tokens / decode_time if decode_time > 0 else 0,
+            "total_toks_per_sec": total_tokens / (prefill_time + decode_time) if (prefill_time + decode_time) > 0 else 0,
         },
         "speculative_decoding": {
-            "num_drafts": metric_dict["num_drafts"],
-            "num_draft_tokens": metric_dict["num_draft_tokens"],
-            "num_accepted_tokens": metric_dict["num_accepted_tokens"],
-            "mean_acceptance_length": round(1 + metric_dict["num_accepted_tokens"] / metric_dict["num_drafts"], 2) if metric_dict["num_drafts"] > 0 else 1,
-            "draft_utilization_rate_percent": round(metric_dict["num_accepted_tokens"] / metric_dict["num_draft_tokens"] * 100, 2) if metric_dict["num_draft_tokens"] > 0 else 0,
+            "num_drafts": num_drafts,
+            "num_draft_tokens": num_draft_tokens,
+            "num_accepted_tokens": num_accepted_tokens,
+            "mean_acceptance_length": round(1 + num_accepted_tokens / num_drafts, 2) if num_drafts > 0 else 1,
+            "draft_utilization_rate_percent": round(num_accepted_tokens / num_draft_tokens * 100, 2) if num_draft_tokens > 0 else 0,
             "acceptance_rates_per_position": {
-                f"token_{i}": round(metric_dict["acceptance_counts"][i] / metric_dict["num_drafts"], 4) if metric_dict["num_drafts"] > 0 else 0
-                for i in range(len(metric_dict["acceptance_counts"]))
+                f"token_{i}": round(acceptance_counts[i] / num_drafts, 4) if num_drafts > 0 else 0
+                for i in range(len(acceptance_counts))
             },
         },
     }
