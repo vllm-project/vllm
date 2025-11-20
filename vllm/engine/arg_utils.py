@@ -490,7 +490,6 @@ class EngineArgs:
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
-    num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
@@ -1084,9 +1083,6 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
-        scheduler_group.add_argument(
-            "--num-lookahead-slots", **scheduler_kwargs["num_lookahead_slots"]
-        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -1669,18 +1665,11 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
 
-        # make sure num_lookahead_slots is set appropriately depending on
-        # whether speculative decoding is enabled
-        num_lookahead_slots = self.num_lookahead_slots
-        if speculative_config is not None:
-            num_lookahead_slots = speculative_config.num_lookahead_slots
-
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
-            num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,

@@ -68,15 +68,6 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
 
-    num_lookahead_slots: int = Field(default=0, ge=0)
-    """The number of slots to allocate per sequence per
-    step, beyond the known token ids. This is used in speculative
-    decoding to store KV activations of tokens which may or may not be
-    accepted.
-
-    NOTE: This will be replaced by speculative config in the future; it is
-    present to enable correctness tests until then."""
-
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
     on the remaining `max_num_batched_tokens`.
