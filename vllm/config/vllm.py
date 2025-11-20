@@ -1360,10 +1360,6 @@ class VllmConfig:
         ):
             # determine the vit_cudagraph_capture_sizes
             if self.compilation_config.vit_cudagraph_capture_sizes is not None:
-                assert len(self.compilation_config.vit_cudagraph_capture_sizes) > 0, (
-                    "vit_cudagraph_capture_sizes should contain at least one element "
-                    "when using cuda graph."
-                )
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.vit_cudagraph_capture_sizes))
                 vit_cudagraph_capture_sizes = dedup_sizes
