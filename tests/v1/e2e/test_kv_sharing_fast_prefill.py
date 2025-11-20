@@ -8,7 +8,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
 
-from ...utils import check_answers, fork_new_process_for_each_test, prep_prompts
+from ...utils import check_answers, spawn_new_process_for_each_test, prep_prompts
 
 # global seed
 SEED = 42
@@ -43,7 +43,7 @@ def test_prompts():
     return prompts
 
 
-@fork_new_process_for_each_test
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
