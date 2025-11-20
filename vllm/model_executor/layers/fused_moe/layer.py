@@ -483,7 +483,7 @@ class FusedMoE(CustomOp):
                 enable_eplb=self.enable_eplb,
             )
 
-            self.expert_map: torch.Tensor | None
+            self._expert_map: torch.Tensor | None
             local_num_experts, expert_map, expert_mask = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -506,10 +506,10 @@ class FusedMoE(CustomOp):
                 self.expert_placement_strategy,
                 self.local_num_experts,
                 self.global_num_experts,
-                get_compressed_expert_map(self.expert_map),
+                get_compressed_expert_map(self._expert_map),
             )
         else:
-            self.local_num_experts, self.expert_map, self.expert_mask = (
+            self.local_num_experts, self._expert_map, self.expert_mask = (
                 self.global_num_experts,
                 None,
                 None,
@@ -777,7 +777,7 @@ class FusedMoE(CustomOp):
                 ),
             )
 
-        if self.expert_map is None:
+        if self._expert_map is None:
             return None
 
         routing_tables = self.ensure_round_robin_expert_routing_tables(
@@ -785,7 +785,7 @@ class FusedMoE(CustomOp):
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             local_num_experts=self.local_num_experts,
-            device=self.expert_map.device,
+            device=self._expert_map.device,
         )
 
         global_to_physical, physical_to_global, local_global = routing_tables
@@ -836,8 +836,8 @@ class FusedMoE(CustomOp):
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
-        assert self.expert_map is not None
-        with self.expert_map.device:
+        assert self._expert_map is not None
+        with self._expert_map.device:
             local_num_experts, expert_map, expert_mask = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
@@ -1063,9 +1063,9 @@ class FusedMoE(CustomOp):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
-        if self.expert_map is None:
+        if self._expert_map is None:
             return expert_id
-        return self.expert_map[expert_id].item()
+        return self._expert_map[expert_id].item()
 
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
@@ -1739,6 +1739,12 @@ class FusedMoE(CustomOp):
                 reduce_output(fused_output)[..., :og_hidden_states],
             )
 
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return (
+            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
+        )
+
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
@@ -1804,9 +1810,7 @@ class FusedMoE(CustomOp):
                 renormalize=self.renormalize,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map
-                if not self.rocm_aiter_fmoe_enabled
-                else self.expert_mask,
+                expert_map=self.expert_map,
                 topk_group=self.topk_group,
                 num_expert_group=self.num_expert_group,
                 custom_routing_function=self.custom_routing_function,
@@ -1967,9 +1971,7 @@ class FusedMoE(CustomOp):
                 renormalize=self.renormalize,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map
-                if not self.rocm_aiter_fmoe_enabled
-                else self.expert_mask,
+                expert_map=self.expert_map,
                 topk_group=self.topk_group,
                 num_expert_group=self.num_expert_group,
                 custom_routing_function=self.custom_routing_function,
