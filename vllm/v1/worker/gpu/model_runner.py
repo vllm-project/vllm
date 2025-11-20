@@ -90,6 +90,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
+        self.output_copy_event = torch.cuda.Event()
         if self.use_async_scheduling:
             self.input_prep_event = torch.cuda.Event()
             self.structured_outputs_event = torch.cuda.Event()
@@ -645,6 +646,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled_tokens,
             copy_stream=self.output_copy_stream,
+            copy_event=self.output_copy_event,
         )
         if self.use_async_scheduling:
             return async_output
