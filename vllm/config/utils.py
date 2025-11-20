@@ -284,7 +284,7 @@ def get_compile_factors(
             continue
         value = getattr(config, factor, None)
         # Nested configs expose factors via compile_factors; unwrap first.
-        if hasattr(value, "compile_factors") and callable(value.compile_factors):
+        if isinstance(value, SupportsCompileFactors):
             nested = value.compile_factors(return_factors=True)
             value = [] if nested is None else nested
         try:

@@ -45,16 +45,14 @@ class LlamaConfig:
     tractable_init: bool = False
     random_seed: int = 0
 
-    def compile_factors(self) -> str:
-        factors: list[Any] = []
-        for k, v in self.__dict__.items():
-            if k == "random_seed":
+    def compile_factors(self) -> list[tuple[str, Any]]:
+        factors: list[tuple[str, Any]] = []
+        for key, value in self.__dict__.items():
+            if key == "random_seed":
                 continue
-            factors.append((k, v))
+            factors.append((key, value))
         factors.sort()
-        import hashlib
-
-        return hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        return factors
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size

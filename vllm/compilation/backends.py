@@ -590,8 +590,8 @@ class VllmBackend:
         env_factors = envs.compile_factors()
         env_hash = hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compile_factors()
-        compiler_hash = self.compiler_manager.compile_factors(vllm_config)
+        config_compile_signature = vllm_config.compile_factors()
+        compiler_compile_signature = self.compiler_manager.compile_factors(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
 
         logger.debug(
@@ -619,7 +619,12 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            factors = [
+                env_hash,
+                config_compile_signature,
+                code_hash,
+                compiler_compile_signature,
+            ]
             # Use SHA-256 for cache key hashing to be consistent across
             # compile_factors functions. Truncate for a short cache dir name.
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
@@ -660,8 +665,8 @@ class VllmBackend:
         logger.debug(
             "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
             env_hash,
-            config_hash,
-            compiler_hash,
+            config_compile_signature,
+            compiler_compile_signature,
             code_hash,
             local_cache_dir,
         )
@@ -671,7 +676,7 @@ class VllmBackend:
             logger.debug(
                 "Compile env factors (raw):\n%s\nVllm config hash: %s",
                 lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
+                config_compile_signature,
             )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
@@ -679,9 +684,9 @@ class VllmBackend:
                     json.dump(
                         {
                             "env": env_factors,  # raw factors used for env_hash
-                            "config_hash": config_hash,
+                            "config_hash": config_compile_signature,
                             "code_hash": code_hash,
-                            "compiler_hash": compiler_hash,
+                            "compiler_hash": compiler_compile_signature,
                         },
                         f,
                         indent=2,
