@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
+if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
 class AttentionType:
@@ -40,6 +45,9 @@ class AttentionBackend(ABC):
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
 
     @staticmethod
     @abstractmethod
@@ -50,19 +58,6 @@ class AttentionBackend(ABC):
     @abstractmethod
     def get_impl_cls() -> type["AttentionImpl"]:
         raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return cls.get_impl_cls().get_supported_kernel_block_size()
-
-    @classmethod
-    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
-        return cls.get_metadata_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -87,6 +82,148 @@ class AttentionBackend(ABC):
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def supports_dtype(cls, dtype: torch.dtype) -> bool:
+        return dtype in cls.supported_dtypes
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype is None:
+            return True
+        return (not cls.supported_kv_cache_dtypes) or (
+            kv_cache_dtype in cls.supported_kv_cache_dtypes
+        )
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        from vllm.config.cache import BlockSize
+
+        if block_size is None:
+            return True
+
+        valid_sizes = get_args(BlockSize)
+        if block_size not in valid_sizes:
+            return False
+
+        if not cls.supported_kernel_block_sizes:
+            return True
+
+        for supported_size in cls.supported_kernel_block_sizes:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
+                return True
+        return False
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """Check if backend supports a given attention type.
+
+        By default, only supports decoder attention.
+        Backends should override this to support other attention types.
+        """
+        from vllm.attention import AttentionType
+
+        return attn_type == AttentionType.DECODER
+
+    @classmethod
+    def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
+        return True
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+    ) -> str | None:
+        return None
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+        attn_type: str,
+    ) -> list[str]:
+        invalid_reasons = []
+        if not cls.supports_head_size(head_size):
+            invalid_reasons.append("head_size not supported")
+        if not cls.supports_dtype(dtype):
+            invalid_reasons.append("dtype not supported")
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
+            invalid_reasons.append("kv_cache_dtype not supported")
+        if not cls.supports_block_size(block_size):
+            invalid_reasons.append("block_size not supported")
+        if use_mla != cls.is_mla():
+            if use_mla:
+                invalid_reasons.append("MLA not supported")
+            else:
+                invalid_reasons.append("non-MLA not supported")
+        if has_sink and not cls.supports_sink():
+            invalid_reasons.append("sink setting not supported")
+        if use_sparse != cls.is_sparse():
+            if use_sparse:
+                invalid_reasons.append("sparse not supported")
+            else:
+                invalid_reasons.append("non-sparse not supported")
+        if not cls.supports_compute_capability(device_capability):
+            invalid_reasons.append("compute capability not supported")
+        if not cls.supports_attn_type(attn_type):
+            invalid_reasons.append(f"attention type {attn_type} not supported")
+        combination_reason = cls.supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            device_capability,
+        )
+        if combination_reason is not None:
+            invalid_reasons.append(combination_reason)
+        return invalid_reasons
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return None
 
 
 class AttentionMetadata:
@@ -127,6 +264,12 @@ class AttentionImpl(ABC, Generic[T]):
     dcp_world_size: int
     dcp_rank: int
 
+    pcp_world_size: int
+    pcp_rank: int
+
+    total_cp_world_size: int
+    total_cp_rank: int
+
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
@@ -139,6 +282,17 @@ class AttentionImpl(ABC, Generic[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )
@@ -159,11 +313,6 @@ class AttentionImpl(ABC, Generic[T]):
         kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # TODO: implement this function for all backends.
-        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(
