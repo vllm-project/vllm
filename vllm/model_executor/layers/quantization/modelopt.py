@@ -178,12 +178,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
-            new_exclude_modules = self.exclude_modules.copy()
-            for exclude in self.exclude_modules:
-                if len(exclude) >= 2 and exclude[-1] == "*" and exclude[-2] != ".":
-                    new_exclude_modules.append(exclude[:-1])
-                    new_exclude_modules.append(exclude[:-1] + ".*")
-            self.exclude_modules = new_exclude_modules
             self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
 
     @staticmethod
