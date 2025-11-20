@@ -1678,7 +1678,7 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         expected_engine_id: str,
         remote_dp_rank: int = 0,
-    ) -> set[str]:
+    ) -> dict[int, str]:
         """Do a MoRIIO handshake with a remote instance."""
 
         start_time = time.perf_counter()
@@ -2263,7 +2263,7 @@ class MoRIIOConnectorWorker:
             self._recving_transfers[request_id].append(transfer_status)
             self._recving_transfers_callback_addr[request_id] = (
                 remote_host,
-                remote_notify_port + self.tp_rank,
+                str(remote_notify_port + self.tp_rank),
             )
 
 
