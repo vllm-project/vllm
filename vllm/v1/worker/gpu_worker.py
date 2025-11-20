@@ -91,7 +91,7 @@ class Worker(WorkerBase):
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            if getattr(self.parallel_config, "data_parallel_rank", 0) == 0:
+            if self.parallel_config.data_parallel_rank_local in (None, 0):
                 logger.info(
                     "Profiling enabled. Traces will be saved to: %s",
                     torch_profiler_trace_dir,
