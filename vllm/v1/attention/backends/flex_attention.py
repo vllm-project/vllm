@@ -840,6 +840,7 @@ class FlexAttentionImpl(AttentionImpl):
             needs_rebuild_block_mask = True
 
         if self.mm_prefix_range != getattr(attn_metadata, "mm_prefix_range", None):
+            self.mm_prefix_range = attn_metadata.mm_prefix_range
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
 

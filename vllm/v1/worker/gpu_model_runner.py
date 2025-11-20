@@ -1928,6 +1928,7 @@ class GPUModelRunner(
                     img_doc_range = pos_info.extract_embeds_range()
                     image_doc_ranges.extend(img_doc_range)
                 self.image_doc_ranges = image_doc_ranges
+                print(image_doc_ranges)
             else:
                 image_doc_ranges = self.image_doc_ranges
             attn_metadata_group = get_forward_context().attn_metadata
@@ -2408,6 +2409,18 @@ class GPUModelRunner(
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions.gpu[:num_input_tokens]
+
+        if self.is_prefix_lm:
+            image_doc_ranges = []
+            for req_id in self.input_batch.req_ids:
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    image_doc_ranges.extend(img_doc_range)
+            attn_metadata_group = get_forward_context().attn_metadata
+            for attn_metadata in attn_metadata_group.values():
+                attn_metadata.mm_prefix_range = image_doc_ranges
 
         if is_first_rank:
             intermediate_tensors = None
