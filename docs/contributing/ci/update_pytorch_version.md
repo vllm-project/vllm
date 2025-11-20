@@ -98,11 +98,6 @@ to warm it up so that future builds are faster.
     <img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/a8ff0fcd-76e0-4e91-b72f-014e3fdb6b94">
 </p>
 
-## Update dependencies
-
-Some vLLM dependencies depend on PyTorch and need to be updated accordingly.
-Rather than waiting for all of them to publish new releases (which would take
-too much time), they can be built from source to unblock the update process.
 
 ## Update all the different vLLM platforms
 
