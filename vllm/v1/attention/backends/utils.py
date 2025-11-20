@@ -92,9 +92,14 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: np.ndarray | None = None
 
-    dcp_local_seq_lens: torch.Tensor | None = None
-    dcp_local_seq_lens_cpu: torch.Tensor | None = None
-    """Sequence lengths of the local rank in decode context parallelism world"""
+    cp_local_seq_lens: torch.Tensor | None = None
+    cp_local_seq_lens_cpu: torch.Tensor | None = None
+    """
+    Sequence lengths of the local rank in (decode & prefill) context parallelism world
+    """
+
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    """ Indices to restore the original order of KV in prefill context parallelism """
 
 
 def slice_query_start_locs(

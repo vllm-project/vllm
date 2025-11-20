@@ -353,6 +353,7 @@ class MLACommonPrefillMetadata:
     query_seq_lens: torch.Tensor | None = None
 
     # For PCP
+    pcp_allgather_restore_idx: torch.Tensor | None = None
     kv_head_indices: torch.Tensor | None = None
     kv_tail_indices: torch.Tensor | None = None
     query_head_indices: torch.Tensor | None = None
@@ -527,7 +528,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[M] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_cp_with_varlen: bool = False,
     ):
         self.metadata_cls = (
             metadata_cls if metadata_cls is not None else MLACommonMetadata
@@ -635,7 +636,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+            self.reorder_batch_threshold, supports_spec_decode, supports_cp_with_varlen
         )
 
         # Validate consistency between query_len_support and reorder_batch_threshold
@@ -764,6 +765,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        pcp_allgather_restore_idx = common_attn_metadata.pcp_allgather_restore_idx
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -980,6 +982,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
+                pcp_allgather_restore_idx=pcp_allgather_restore_idx,
                 kv_head_indices=kv_head_indices,
                 kv_tail_indices=kv_tail_indices,
                 query_head_indices=query_head_indices,
@@ -1001,24 +1004,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
-            dcp_tot_seq_lens_device = None
-            if self.dcp_world_size > 1:
-                dcp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens_cpu = dcp_local_seq_lens_cpu
-                seq_lens = dcp_local_seq_lens
+            cp_tot_seq_lens_device = None
+            if self.cp_world_size > 1:
+                cp_tot_seq_lens_device = seq_lens[:num_decodes]
+                seq_lens_cpu = cp_local_seq_lens_cpu
+                seq_lens = cp_local_seq_lens
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
-                seq_lens_device=cp_local_seq_lens[:num_decodes]
-                if self.cp_world_size > 1 and cp_local_seq_lens is not None
-                else seq_lens[:num_decodes],
+                seq_lens_device=seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
-                cp_tot_seq_lens_device=seq_lens[:num_decodes]
-                if self.cp_world_size > 1
-                else None,
+                cp_tot_seq_lens_device=cp_tot_seq_lens_device,
             )
 
         attn_metadata = self.metadata_cls(
@@ -1396,6 +1395,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def _run_prefill_new_tokens_fa(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
+        assert self.pcp_world_size is not None
+        assert self.pcp_rank is not None
         if self.pcp_world_size > 1:
             # NOTE(yyj) PCP split the sequence using the DualChunkSwap strategy
             # to ensure load balancing, so we need to split the query, key and
@@ -2026,13 +2027,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if self.pcp_world_size > 1:
-            assert attn_metadata.pcp_allgather_restore_idx is not None
+        if attn_metadata.prefill is not None and self.pcp_world_size > 1:
+            # NOTE Skip pcp kv all-gather when there are only decode requests.
+            assert attn_metadata.prefill.pcp_allgather_restore_idx is not None
             k_c_normed, k_pe = pcp_kv_allgather_and_restore(
                 k_c_normed,
                 k_pe,
                 num_actual_toks,
-                attn_metadata.pcp_allgather_restore_idx,
+                attn_metadata.prefill.pcp_allgather_restore_idx,
                 get_pcp_group(),
             )
 
@@ -2051,12 +2053,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_q = q[:num_decode_tokens]
-
-        prefill_q = q[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens * self.pcp_world_size :]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens * self.pcp_world_size :]
-
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
@@ -2072,6 +2068,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
+            prefill_q = q[num_decode_tokens:]
+            prefill_k_pe = k_pe[num_decode_tokens * self.pcp_world_size :]
+            prefill_k_c_normed = k_c_normed[num_decode_tokens * self.pcp_world_size :]
             output[num_decode_tokens:] = self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
@@ -2084,6 +2083,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_decode:
             assert attn_metadata.decode is not None
 
+            decode_q = q[:num_decode_tokens]
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )

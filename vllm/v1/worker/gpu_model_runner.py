@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -93,7 +94,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -299,7 +300,11 @@ class GPUModelRunner(
         # Always set to false after the first forward pass
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
+        self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
+        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
+        self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
+        self.cp_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -459,8 +464,8 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        if self.dcp_world_size > 1:
-            self.dcp_local_seq_lens = self._make_buffer(
+        if self.cp_world_size > 1:
+            self.cp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
@@ -1431,14 +1436,14 @@ class GPUModelRunner(
                 )
 
         # update seq_lens of decode reqs under DCP.
-        if self.dcp_world_size > 1:
-            self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
+        if self.cp_world_size > 1:
+            self.cp_local_seq_lens.cpu[:num_reqs] = get_cp_local_seq_lens(
                 self.seq_lens.cpu[:num_reqs],
-                self.dcp_world_size,
-                self.dcp_rank,
+                self.cp_world_size,
+                self.cp_rank,
                 self.parallel_config.cp_kv_cache_interleave_size,
             )
-            self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
+            self.cp_local_seq_lens.copy_to_gpu(num_reqs)
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1453,10 +1458,10 @@ class GPUModelRunner(
             :num_reqs
         ]
 
-        dcp_local_seq_lens, dcp_local_seq_lens_cpu = None, None
-        if self.dcp_world_size > 1:
-            dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs]
-            dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs]
+        cp_local_seq_lens, cp_local_seq_lens_cpu = None, None
+        if self.cp_world_size > 1:
+            cp_local_seq_lens = self.cp_local_seq_lens.gpu[:num_reqs]
+            cp_local_seq_lens_cpu = self.cp_local_seq_lens.cpu[:num_reqs]
 
         spec_decode_common_attn_metadata = None
 
@@ -1524,8 +1529,8 @@ class GPUModelRunner(
                 num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
-                dcp_local_seq_lens=dcp_local_seq_lens,
-                dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+                cp_local_seq_lens=cp_local_seq_lens,
+                cp_local_seq_lens_cpu=cp_local_seq_lens_cpu,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -5039,11 +5044,11 @@ class GPUModelRunner(
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.dcp_world_size > 1:
+        if self.cp_world_size > 1:
             layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
             for layer in layers.values():
                 assert layer.impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
+                    "PCP & DCP requires attention impls to return"
                     " the softmax lse for decode, but the impl "
                     f"{layer.impl.__class__.__name__} "
                     "does not return the softmax lse for decode."

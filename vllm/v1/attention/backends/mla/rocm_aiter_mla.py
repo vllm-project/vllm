@@ -104,7 +104,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: torch.Tensor | None,
+        cp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
         # kernel block size is always 1, although the kv block size is not 1.
         device = self.device
@@ -159,7 +159,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
             qo_indptr=qo_indptr,
-            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
         )
 
         return attn_metadata
