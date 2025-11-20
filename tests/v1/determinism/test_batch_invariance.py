@@ -186,7 +186,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
+        # enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
@@ -393,7 +393,7 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
         gpu_memory_utilization=0.9,
         max_model_len=2048,
         dtype="bfloat16",
-        enable_prefix_caching=False,
+        # enable_prefix_caching=False,
     )
 
     prompt = "the capital of france is"
@@ -457,7 +457,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
+        # enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",
@@ -682,7 +682,7 @@ def test_decode_logprobs_match_prefill_logprobs(
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
+        # enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",
@@ -929,7 +929,7 @@ def LLM_with_max_seqs(
         max_model_len=max_model_len,
         dtype="bfloat16",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        enable_prefix_caching=False,
+        # enable_prefix_caching=False,
         # Enable for MOE models
         # enable_expert_parallel=True,
     )

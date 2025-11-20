@@ -16,6 +16,7 @@ skip_unsupported = pytest.mark.skipif(
 BACKENDS: list[str] = [
     "FLASH_ATTN",
     "FLASHINFER",
+    "TRITON_MLA",
 ]
 
 if current_platform.is_cuda() and current_platform.is_device_capability(90):
