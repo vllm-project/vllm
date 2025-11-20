@@ -26,8 +26,6 @@ pytestmark = pytest.mark.skipif(
     reason="AITER ops are only available on ROCm with aiter package installed",
 )
 
-USE_TRITON = False
-
 
 def test_rocm_aiter_group_fp8_quant_fake_implementation():
     """Test that the fake implementation is correctly
@@ -43,7 +41,7 @@ def test_rocm_aiter_group_fp8_quant_fake_implementation():
     # This checks that the fake function returns tensors with correct shapes and dtypes
     torch.library.opcheck(
         torch.ops.vllm.rocm_aiter_group_fp8_quant,
-        (input_tensor, group_size, USE_TRITON),
+        (input_tensor, group_size),
         test_utils=("test_faketensor",),
     )
 
@@ -61,7 +59,7 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
 
     # Define a function that uses the op
     def group_fp8_quant_fn(x):
-        return rocm_aiter_ops.group_fp8_quant(x, group_size, USE_TRITON)
+        return rocm_aiter_ops.group_fp8_quant(x, group_size)
 
     # Compile with cudagraph mode
     compiled_fn = torch.compile(
@@ -125,9 +123,7 @@ def test_rocm_aiter_group_fp8_quant_different_shapes():
     for M, N in test_shapes:
         input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
-        x_fp8, scales = rocm_aiter_ops.group_fp8_quant(
-            input_tensor, group_size, USE_TRITON
-        )
+        x_fp8, scales = rocm_aiter_ops.group_fp8_quant(input_tensor, group_size)
 
         # Verify shapes
         assert x_fp8.shape == (M, N)
