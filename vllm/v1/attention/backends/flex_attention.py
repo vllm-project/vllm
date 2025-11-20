@@ -908,7 +908,23 @@ def get_kernel_options(
 
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
-            max_shared_memory = device_props.shared_memory_per_block_optin
+            # ROCm doesn't expose shared_memory_per_block_optin attribute
+            # AMD GPUs typically have 64KB LDS (Local Data Share) per workgroup
+            if hasattr(device_props, "shared_memory_per_block_optin"):
+                max_shared_memory = device_props.shared_memory_per_block_optin
+            else:
+                # ROCm fallback: use 64KB (typical for MI300 series)
+                # Map GCN architecture to known LDS sizes
+                ROCM_LDS_SIZE_MAP = {
+                    "gfx950": 65536,  # MI325/MI355 - 64KB
+                    "gfx942": 65536,  # MI300X - 64KB
+                    "gfx90a": 65536,  # MI200 series - 64KB
+                    "gfx908": 65536,  # MI100 - 64KB
+                }
+
+                arch = device_props.gcnArchName.split(":")[0]
+                max_shared_memory = ROCM_LDS_SIZE_MAP.get(arch, 65536)  # default 64KB
+
             if max_shared_memory < 144 * 1024:
                 block_m_candidate = ensure_divisible(
                     max(1, block_m_candidate // 2), block_m

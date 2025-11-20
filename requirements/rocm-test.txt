@@ -1,45 +1,69 @@
 # Common dependencies
 -r common.txt
+
+# Test infrastructure
 tblib==3.1.0
-bm25s==0.2.13
-pystemmer==3.0.0
 
-# Entrypoints test
+# Audio processing dependencies
 audioread==3.0.1
+    # via librosa
 cffi==1.17.1
+    # via soundfile
 decorator==5.2.1
+    # via librosa
 lazy-loader==0.4
+    # via librosa
 platformdirs==4.3.6
+    # via pooch
 pooch==1.8.2
-#pycparse==2.22
+    # via librosa
 soundfile==0.13.1
+    # via librosa
 soxr==0.5.0.post1
+    # via librosa
 librosa==0.10.2.post1
-num2words==0.5.14
-pqdm==0.2.0
+    # via -r requirements/rocm-test.in
 
-# Entrypoints test
-#vllm[video] # required by entrypoints/openai/test_video.py
-decord==0.6.0
+# HTTP/async dependencies
+aiohttp==3.13.0
+    # via gpt-oss
 
-# Entrypoints test
-#sentence-transformers # required by entrypoints/openai/test_score.py
-sentence-transformers==3.4.1
+# Retrieval and search
+bm25s==0.2.13
+    # via mteb
+pystemmer==3.0.0
+    # via mteb
 
-# Basic Models Test
-matplotlib==3.10.3
-
-# Datasets and Evaluate Test
-multiprocess==0.70.16
-
-# Multi-Modal Models Test (Extended) 3
+# Multi-modal processing
 blobfile==3.0.0
+    # via -r requirements/rocm-test.in (Multi-Modal Models Test)
+decord==0.6.0
+    # via -r requirements/rocm-test.in (video processing, required by entrypoints/openai/test_video.py)
 
-# Required for openai schema test.
+# OpenAI compatibility and testing
+gpt-oss==0.0.8
+    # via -r requirements/rocm-test.in
 schemathesis==3.39.15
+    # via -r requirements/rocm-test.in (OpenAI schema test)
 
-# Required for mteb test
-mteb[bm25s]>=1.38.11, <2
-
-# Required for eval tests
+# Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
+    # via -r requirements/rocm-test.in (eval tests)
+mteb[bm25s]>=1.38.11, <2
+    # via -r requirements/rocm-test.in (mteb test)
+sentence-transformers==3.4.1
+    # via -r requirements/rocm-test.in (required by entrypoints/openai/test_score.py)
+
+# Visualization and plotting
+matplotlib==3.10.3
+    # via -r requirements/rocm-test.in (Basic Models Test)
+
+# Data processing
+multiprocess==0.70.16
+    # via -r requirements/rocm-test.in (Datasets and Evaluate Test)
+
+# Utilities
+num2words==0.5.14
+    # via -r requirements/rocm-test.in
+pqdm==0.2.0
+    # via -r requirements/rocm-test.in
