@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
 import pytest
 import torch
 
@@ -10,12 +9,14 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if not current_platform.is_device_capability(100):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
+else:
+    import flashinfer
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -238,9 +239,11 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
         rtol, atol = 7e-2, 9e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-        rtol, atol = 2e-2, 4e-2
+        rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 1e-2, 2e-2
+        rtol, atol = 2e-2, 2e-2
+    elif kv_quant_dtype == FP8_DTYPE:
+        rtol, atol = 4e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 

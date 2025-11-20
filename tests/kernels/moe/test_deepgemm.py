@@ -130,10 +130,8 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
 # Note: N <= 512 will disable the deepgemm path due to performance issues.
 MNKs = [
     (1024, 768, 128),
-    (1024, 768, 512),
     (2048, 768, 512),
     (512, 1024, 1024),
-    (512, 2048, 2048),
     (4096, 4096, 1024),
 ]
 

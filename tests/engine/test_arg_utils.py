@@ -22,7 +22,7 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(
@@ -129,6 +129,8 @@ class DummyConfig:
     """List with literal choices"""
     list_union: list[str | type[object]] = field(default_factory=list)
     """List with union type"""
+    set_n: set[int] = field(default_factory=lambda: {1, 2, 3})
+    """Set with variable length"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
@@ -184,6 +186,9 @@ def test_get_kwargs():
     # lists with unions should become str type.
     # If not, we cannot know which type to use for parsing
     assert kwargs["list_union"]["type"] is str
+    # sets should work like lists
+    assert kwargs["set_n"]["type"] is int
+    assert kwargs["set_n"]["nargs"] == "+"
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help

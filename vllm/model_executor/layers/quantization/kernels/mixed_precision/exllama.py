@@ -145,10 +145,15 @@ class ExllamaLinearKernel(MPLinearKernel):
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
 
+        # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
+        # However, the MPLinearLayerConfig doesn't contain format info.
+        # So hardcode GPTQv1 format here, to keep its behavior unchanged.
+        use_v2_format = False
+
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
         output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, w_g_idx, True, c.weight_type.size_bits
+            x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
         )
 
         if bias is not None:

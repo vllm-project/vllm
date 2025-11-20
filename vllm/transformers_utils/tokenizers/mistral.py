@@ -121,8 +121,8 @@ def _prepare_apply_chat_template_tools_and_messages(
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
     for message in messages:
-        # Remove reasoning_content as unsupported by Mistral
-        _ = message.pop("reasoning_content", None)  # type: ignore
+        # Remove reasoning as unsupported by Mistral
+        _ = message.pop("reasoning", None)  # type: ignore
 
     # The Mistral client, in comparison to the OpenAI client, requires the
     # "parameters" dict and the "description" string to be present
@@ -165,6 +165,7 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
 
 class MistralTokenizer(TokenizerBase):
     def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
+        from mistral_common.protocol.instruct.validator import ValidationMode
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
         )
@@ -174,6 +175,14 @@ class MistralTokenizer(TokenizerBase):
         self.mistral = tokenizer.tokenizer
         self.instruct = self.mistral.instruct_tokenizer
         self.tokenizer = self.instruct.tokenizer
+
+        mode = self.mistral._chat_completion_request_validator._mode
+        if mode != ValidationMode.test:
+            raise ValueError(
+                "Mistral tokenizer must be in test mode. Make sure to "
+                "set `mode='ValidationMode.test'` when creating the "
+                "Mistral tokenizer."
+            )
 
         _mistral_version_str = str(self.tokenizer.version.value)
         self.version: int = int(_mistral_version_str.split("v")[-1])
@@ -191,6 +200,12 @@ class MistralTokenizer(TokenizerBase):
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
 
+        # Cache special tokens for faster access.
+        self._special_token_ids = self._get_special_token_ids()
+        self._special_token_ids_set = set(self._special_token_ids)
+        self._special_tokens = self._get_special_tokens(self._special_token_ids)
+        self._special_tokens_set = set(self._special_tokens)
+
         # Vocab sorted by token id.
         self._vocab = self.tokenizer._vocab
         self._max_token_id = self.vocab_size - 1
@@ -199,6 +214,7 @@ class MistralTokenizer(TokenizerBase):
     def from_pretrained(
         cls, path_or_repo_id: str, *, revision: str | None = None
     ) -> "MistralTokenizer":
+        from mistral_common.protocol.instruct.validator import ValidationMode
         from transformers.tokenization_mistral_common import (
             MistralCommonTokenizer as TransformersMistralTokenizer,
         )
@@ -206,27 +222,11 @@ class MistralTokenizer(TokenizerBase):
         str_revision = "main" if revision is None else revision
         return cls(
             TransformersMistralTokenizer.from_pretrained(
-                path_or_repo_id, revision=str_revision
+                path_or_repo_id, revision=str_revision, mode=ValidationMode.test
             )
         )
 
-    # the following attributes are set to fit vLLM's design and are used
-    # by the structured output backends.
-    @property
-    def all_special_tokens_extended(self) -> list[str]:
-        return self.all_special_tokens
-
-    @property
-    def all_special_tokens(self) -> list[str]:
-        from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
-
-        return [
-            self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
-            for i in self.all_special_ids
-        ]
-
-    @property
-    def all_special_ids(self) -> list[int]:
+    def _get_special_token_ids(self) -> list[int]:
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
         )
@@ -243,6 +243,28 @@ class MistralTokenizer(TokenizerBase):
         else:
             raise ValueError(f"Unknown tokenizer type: {type(self.tokenizer)}")
         return sorted(special_ids)
+
+    def _get_special_tokens(self, all_special_ids: list[int]) -> list[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+
+        return [
+            self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
+            for i in all_special_ids
+        ]
+
+    # the following attributes are set to fit vLLM's design and are used
+    # by the structured output backends.
+    @property
+    def all_special_tokens_extended(self) -> list[str]:
+        return self.all_special_tokens
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return self._special_tokens
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return self._special_token_ids
 
     @property
     def bos_token_id(self) -> int:
@@ -277,21 +299,7 @@ class MistralTokenizer(TokenizerBase):
         raise NotImplementedError()
 
     def _is_special_token_id(self, token_id: int) -> bool:
-        from mistral_common.tokens.tokenizers.sentencepiece import (
-            SentencePieceTokenizer,
-        )
-        from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-
-        if self.is_spm:
-            assert isinstance(self.tokenizer, SentencePieceTokenizer), type(
-                self.tokenizer
-            )
-            return token_id in self.tokenizer._control_tokens
-        if self.is_tekken:
-            assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
-            return token_id < self.tokenizer.num_special_tokens
-        else:
-            raise ValueError(f"Unknown tokenizer type: {type(self.tokenizer)}")
+        return token_id in self._special_token_ids_set
 
     def __len__(self) -> int:
         return self.vocab_size
@@ -341,20 +349,14 @@ class MistralTokenizer(TokenizerBase):
         max_length: int | None = None,
         add_special_tokens: bool | None = None,
     ) -> list[int]:
-        if add_special_tokens is not None:
-            return self.transformers_tokenizer.encode(
-                text,
-                truncation=truncation,
-                max_length=max_length,
-                add_special_tokens=add_special_tokens,
-            )
-        else:
-            encoded = self.tokenizer.encode(text, bos=True, eos=False)
+        encoded = self.tokenizer.encode(
+            text, bos=add_special_tokens is not False, eos=False
+        )
 
-            if truncation is not False and max_length is not None:
-                return encoded[:max_length]
-            else:
-                return encoded
+        if truncation is not False and max_length is not None:
+            return encoded[:max_length]
+        else:
+            return encoded
 
     def apply_chat_template(
         self,
@@ -385,6 +387,9 @@ class MistralTokenizer(TokenizerBase):
         )
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+        if isinstance(ids, int):
+            ids = [ids]
+
         return self.transformers_tokenizer.decode(
             ids, skip_special_tokens=skip_special_tokens
         )
@@ -405,7 +410,7 @@ class MistralTokenizer(TokenizerBase):
             tokens = [
                 t
                 for t in tokens
-                if (t in to_decode_special_tokens or t not in self.all_special_tokens)
+                if (t in to_decode_special_tokens or t not in self._special_tokens_set)
             ]
 
             if any(isinstance(t, bytes) for t in tokens):
@@ -489,7 +494,7 @@ class MistralTokenizer(TokenizerBase):
             # We filtered unwanted special tokens so we can decode the rest.
             tokens = [
                 self.tokenizer.id_to_byte_piece(token_id, SpecialTokenPolicy.KEEP)
-                if token_id not in self.all_special_ids
+                if token_id not in self._special_token_ids_set
                 else self.tokenizer.decode([token_id], SpecialTokenPolicy.KEEP)
                 for token_id in ids_kept
             ]

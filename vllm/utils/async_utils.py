@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contains helpers related to asynchronous code."""
+"""
+Contains helpers related to asynchronous code.
+
+This is similar in concept to the `asyncio` module.
+"""
 
 import asyncio
 import contextlib

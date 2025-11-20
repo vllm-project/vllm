@@ -4,7 +4,7 @@ This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09
 
 LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vllm.model_executor.models.interfaces.SupportsLoRA].
 
-Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
+Adapters can be efficiently served on a per-request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
 ```python
@@ -47,7 +47,7 @@ the third parameter is the path to the LoRA adapter.
     )
     ```
 
-Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 

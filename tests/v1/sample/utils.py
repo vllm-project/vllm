@@ -9,7 +9,7 @@ import regex as re
 import torch
 
 from vllm import CompletionOutput
-from vllm.utils import make_tensor_with_pad
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 

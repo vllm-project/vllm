@@ -5,6 +5,7 @@
 #include "common/memory.hpp"
 
 #include "dnnl_helper.h"
+#include "scratchpad_manager.h"
 
 static dnnl::engine& default_engine() {
   static dnnl::engine engine(dnnl::engine::kind::cpu, 0);
@@ -20,23 +21,6 @@ void release_dnnl_matmul_handler(int64_t handler) {
   DNNLMatMulPrimitiveHandler* ptr =
       reinterpret_cast<DNNLMatMulPrimitiveHandler*>(handler);
   delete ptr;
-}
-
-DNNLScratchPadManager::DNNLScratchPadManager() : size_(0), ptr_(nullptr) {
-  this->realloc(allocation_unit * 128);
-}
-
-void DNNLScratchPadManager::realloc(size_t new_size) {
-  new_size = round(new_size);
-  if (new_size > size_) {
-    ptr_ = std::aligned_alloc(64, new_size);
-    size_ = new_size;
-  }
-}
-
-DNNLScratchPadManager* DNNLScratchPadManager::get_dnnl_scratchpad_manager() {
-  static DNNLScratchPadManager manager;
-  return &manager;
 }
 
 template <typename KT, typename VT>
@@ -187,7 +171,8 @@ template <>
 struct hash<MatMulPrimitiveHandler::ClassMatmulCacheKey> {
   size_t operator()(
       const MatMulPrimitiveHandler::ClassMatmulCacheKey& val) const {
-    return hash<dnnl_dim_t>()(val.b_n_size) ^ hash<dnnl_dim_t>()(val.b_k_size);
+    return hash<dnnl_dim_t>()(val.b_n_size) ^ hash<dnnl_dim_t>()(val.b_k_size) ^
+           hash<int>()(static_cast<int>(val.b_type));
   }
 };
 
@@ -216,7 +201,8 @@ bool operator==(const W8A8MatMulPrimitiveHandler::MSizeCacheKey& l,
 
 bool operator==(const MatMulPrimitiveHandler::ClassMatmulCacheKey& l,
                 const MatMulPrimitiveHandler::ClassMatmulCacheKey& r) {
-  return l.b_n_size == r.b_n_size && l.b_k_size == r.b_k_size;
+  return l.b_n_size == r.b_n_size && l.b_k_size == r.b_k_size &&
+         l.b_type == r.b_type;
 }
 
 bool operator==(const MatMulPrimitiveHandler::MSizeCacheKey& l,
@@ -410,9 +396,9 @@ MatMulPrimitiveHandler::MatMulPrimitiveHandler(const Args& args)
     : DNNLMatMulPrimitiveHandler(
           static_cast<DNNLMatMulPrimitiveHandler::Args>(args), args.ab_type),
       m_size_cache_(nullptr) {
-  assert(ab_type_ == dnnl::memory::data_type::f32 ||
-         ab_type_ == dnnl::memory::data_type::bf16 ||
-         ab_type_ == dnnl::memory::data_type::f16);
+  assert(b_type_ == dnnl::memory::data_type::f32 ||
+         b_type_ == dnnl::memory::data_type::bf16 ||
+         b_type_ == dnnl::memory::data_type::f16);
 
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});
@@ -493,8 +479,10 @@ void MatMulPrimitiveHandler::execute(ExecArgs& args) {
 dnnl::matmul MatMulPrimitiveHandler::get_matmul_cache(
     const MSizeCacheKey& key) {
   if (m_size_cache_.get() == nullptr) {
-    ClassMatmulCacheKey key = {.b_n_size = b_n_size_, .b_k_size = b_k_size_};
-    m_size_cache_ = get_matul_class_primitive_cache(key, primitive_cache_size_);
+    ClassMatmulCacheKey class_key = {
+        .b_n_size = b_n_size_, .b_k_size = b_k_size_, .b_type = b_type_};
+    m_size_cache_ =
+        get_matul_class_primitive_cache(class_key, primitive_cache_size_);
   }
   return m_size_cache_->get_or_create(key, [&]() {
     dnnl::matmul::primitive_desc desc = this->create_primitive_desc(key, false);

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
 
-import contextlib
 import inspect
 import warnings
 from contextlib import contextmanager
@@ -27,18 +26,9 @@ from vllm.model_executor.models.adapters import (
     try_create_mm_pooling_model_cls,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-
-@contextlib.contextmanager
-def set_default_torch_dtype(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
 
 
 def initialize_model(
@@ -98,6 +88,14 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    if getattr(model, "process_weights_after_loading_already_called", False):
+        # In case `process_weights_after_loading` is called multiple times
+        # we'll skip it at later times
+        logger.debug_once(
+            "process_weights_after_loading already called for model %s", model
+        )
+        return
+
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
         maybe_save_metadata_and_attributes_for_weight_reloading,

@@ -28,7 +28,7 @@ except ImportError as e:
 
 from bitblas import Matmul, MatmulConfig, auto_detect_nvidia_target
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 parser = FlexibleArgumentParser(
     description="Benchmark BitBLAS int4 on a specific target."

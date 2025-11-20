@@ -3,6 +3,7 @@
 
 import hashlib
 import inspect
+import os
 import pickle
 from unittest.mock import patch
 
@@ -168,7 +169,8 @@ def _compute_code_hash(files: set[str]) -> str:
     )
     file_contents = {}
     for filepath in files:
-        if filepath == "<string>":
+        # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
+        if not os.path.isfile(filepath):
             file_contents[filepath] = ""
         else:
             with open(filepath) as f:

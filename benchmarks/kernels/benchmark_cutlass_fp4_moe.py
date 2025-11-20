@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.scalar_type import scalar_types
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 WEIGHT_SHAPES_MOE = {
     "nvidia/DeepSeek-R1-FP4": [

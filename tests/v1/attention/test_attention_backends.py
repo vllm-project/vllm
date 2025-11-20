@@ -15,10 +15,11 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -26,11 +27,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN,
-    _Backend.FLASHINFER,
-    _Backend.FLEX_ATTENTION,
-    _Backend.TRITON_ATTN,
-    _Backend.TREE_ATTN,
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLASHINFER,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
+    AttentionBackendEnum.TREE_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
@@ -38,7 +39,7 @@ BACKENDS_TO_TEST = [
 try:
     import flashinfer  # noqa: F401
 except ImportError:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -191,7 +192,7 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -210,13 +211,13 @@ def run_attention_backend(
 
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
-        actual_backend = _Backend.FLEX_ATTENTION
+        actual_backend = AttentionBackendEnum.FLEX_ATTENTION
         use_direct_block_mask = False
 
     builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == _Backend.FLASHINFER:
+    if actual_backend == AttentionBackendEnum.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -245,7 +246,7 @@ def run_attention_backend(
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == _Backend.FLEX_ATTENTION:
+        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -288,12 +289,13 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[_Backend | str],
+    backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
     block_size: int = 16,
     atol: float = 1e-2,
     rtol: float = 1e-2,
+    tensor_parallel_size: int = 1,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -309,13 +311,38 @@ def _test_backend_correctness(
     4. Running each vLLM attention backend with the new queries and the
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
+
+    Note: When tensor_parallel_size > 1, we simulate the head partitioning
+    by overriding the model config to use fewer heads, without requiring
+    multiple GPUs. This tests that backends work correctly with different
+    head counts.
     """
     current_platform.seed_everything(42)
+
+    hf_config_override = None
+    if tensor_parallel_size > 1:
+        from vllm.config import ModelConfig
+
+        temp_config = ModelConfig(model=model, max_model_len=1)
+        original_num_heads = temp_config.hf_text_config.num_attention_heads
+        original_num_kv_heads = getattr(
+            temp_config.hf_text_config, "num_key_value_heads", None
+        )
+        hf_config_override = {
+            "num_attention_heads": original_num_heads // tensor_parallel_size,
+        }
+        if original_num_kv_heads is not None:
+            hf_config_override["num_key_value_heads"] = max(
+                1, original_num_kv_heads // tensor_parallel_size
+            )
+
     vllm_config = create_vllm_config(
         model_name=model,
+        tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
         max_model_len=max(batch_spec.seq_lens),
         block_size=block_size,
         num_gpu_blocks=8192,
+        hf_config_override=hf_config_override,
     )
     device = torch.device("cuda:0")
 
@@ -423,32 +450,44 @@ def _test_backend_correctness(
     for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer:
+        # FlashInfer + Triton:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == _Backend.FLASHINFER:
+        reset_kv_cache_layout = False
+        if backend_name in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TRITON_ATTN,
+        ):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+        if backend_name == AttentionBackendEnum.FLASHINFER:
             # For FlashInfer default to HND layout and
             kv_cache_for_backend = (
                 kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
             )
             set_kv_cache_layout("HND")
+            reset_kv_cache_layout = True
+        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
+            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
-        backend_output = run_attention_backend(
-            backend_name,
-            kv_cache_spec,
-            ["placeholder"],
-            vllm_config,
-            device,
-            common_attn_metadata,
-            query_vllm,
-            key_vllm,
-            value_vllm,
-            kv_cache_for_backend,
-            sliding_window=sliding_window,
-        )
+        try:
+            backend_output = run_attention_backend(
+                backend_name,
+                kv_cache_spec,
+                ["placeholder"],
+                vllm_config,
+                device,
+                common_attn_metadata,
+                query_vllm,
+                key_vllm,
+                value_vllm,
+                kv_cache_for_backend,
+                sliding_window=sliding_window,
+            )
+        finally:
+            if reset_kv_cache_layout:
+                set_kv_cache_layout(None)
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (
@@ -493,7 +532,10 @@ def _test_backend_correctness(
     ],
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
-def test_causal_backend_correctness(batch_spec_name: str, model: str):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_causal_backend_correctness(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
     """Test backend's correctness with causal attention."""
 
     def causal_mask_mod(
@@ -508,24 +550,37 @@ def test_causal_backend_correctness(batch_spec_name: str, model: str):
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     LARGE_BLOCK_BACKENDS = (
-        [_Backend.FLEX_ATTENTION] if is_torch_equal_or_newer("2.9.0.dev0") else []
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
     )
     SMALL_BLOCK_BACKENDS = [
         x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
     ]
-    _test_backend_correctness(batch_spec, model, SMALL_BLOCK_BACKENDS, causal_mask_mod)
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        causal_mask_mod,
+        tensor_parallel_size=tensor_parallel_size,
+    )
 
     # Fast FlexAttention needs to run with block_size=128
     if LARGE_BLOCK_BACKENDS:
         _test_backend_correctness(
-            batch_spec, model, LARGE_BLOCK_BACKENDS, causal_mask_mod, block_size=128
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            causal_mask_mod,
+            block_size=128,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN,
-    _Backend.FLEX_ATTENTION,
-    _Backend.TRITON_ATTN,
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
@@ -535,7 +590,10 @@ SLIDING_WINDOW_BACKENDS_TO_TEST = [
     ["small_decode", "small_prefill", "mixed_medium", "large_decode", "large_prefill"],
 )
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
-def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_sliding_window_backend_correctness(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
     """Test backend's correctness with sliding window attention."""
 
     def sliding_window_mask_mod(
@@ -559,13 +617,19 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
     )
 
     LARGE_BLOCK_BACKENDS = (
-        [_Backend.FLEX_ATTENTION] if is_torch_equal_or_newer("2.9.0.dev0") else []
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
     )
     SMALL_BLOCK_BACKENDS = [
         x for x in SLIDING_WINDOW_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
     ]
     _test_backend_correctness(
-        batch_spec, model, SMALL_BLOCK_BACKENDS, sliding_window_mask_mod_fn
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        sliding_window_mask_mod_fn,
+        tensor_parallel_size=tensor_parallel_size,
     )
 
     # Fast FlexAttention needs to run with block_size=128
@@ -576,4 +640,5 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
             LARGE_BLOCK_BACKENDS,
             sliding_window_mask_mod_fn,
             block_size=128,
+            tensor_parallel_size=tensor_parallel_size,
         )

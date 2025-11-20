@@ -32,6 +32,7 @@ def test_inference(
         dtype="half",
         enforce_eager=True,
         skip_tokenizer_init=True,
+        enable_mm_embeds=True,
         # Limit the maximum number of sequences to avoid the
         # test going OOM during the warmup run
         max_num_seqs=32,

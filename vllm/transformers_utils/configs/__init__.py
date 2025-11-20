@@ -7,8 +7,8 @@ Model configs may be defined in this directory for the following reasons:
 - There is a need to override the existing config to support vLLM.
 """
 
+from vllm.transformers_utils.configs.afmoe import AfmoeConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
-from vllm.transformers_utils.configs.deepseek_v3 import DeepseekV3Config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -19,6 +19,7 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
@@ -27,7 +28,6 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
-from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.olmo3 import Olmo3Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -41,9 +41,9 @@ from vllm.transformers_utils.configs.step3_vl import (
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
+    "AfmoeConfig",
     "ChatGLMConfig",
     "DeepseekVLV2Config",
-    "DeepseekV3Config",
     "DotsOCRConfig",
     "EAGLEConfig",
     "FlexOlmoConfig",
@@ -54,10 +54,10 @@ __all__ = [
     "MiDashengLMConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",
+    "KimiLinearConfig",
     "KimiVLConfig",
     "NemotronConfig",
     "NemotronHConfig",
-    "Nemotron_Nano_VL_Config",
     "Olmo3Config",
     "OvisConfig",
     "RadioConfig",

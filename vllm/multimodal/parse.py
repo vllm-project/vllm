@@ -19,7 +19,8 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm.utils import LazyLoader, is_list_of
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler
 from .inputs import (
@@ -358,13 +359,14 @@ class MultiModalDataParser:
         )
         self.video_needs_metadata = video_needs_metadata
 
-    def _is_embeddings(
-        self, data: object
+    @classmethod
+    def is_embeddings(
+        cls, data: object
     ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
-            return data[0].ndim == 2
+            return data[0].ndim == 2  # type: ignore[index]
 
         return False
 
@@ -419,9 +421,10 @@ class MultiModalDataParser:
         ):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return AudioEmbeddingItems(data)
 
+        data_items: list[AudioItem]
         if (
             is_list_of(data, float)
             or isinstance(data, (np.ndarray, torch.Tensor))
@@ -432,7 +435,7 @@ class MultiModalDataParser:
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
         else:
-            data_items = data
+            data_items = data  # type: ignore[assignment]
 
         new_audios = list[np.ndarray]()
         for data_item in data_items:
@@ -456,7 +459,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return ImageEmbeddingItems(data)
 
         if (
@@ -482,9 +485,10 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return VideoEmbeddingItems(data)
 
+        data_items: list[VideoItem]
         if (
             is_list_of(data, PILImage.Image)
             or isinstance(data, (np.ndarray, torch.Tensor))
@@ -496,13 +500,18 @@ class MultiModalDataParser:
         elif isinstance(data, tuple) and len(data) == 2:
             data_items = [data]
         else:
-            data_items = data
+            data_items = data  # type: ignore[assignment]
 
         new_videos = list[tuple[np.ndarray, dict[str, Any] | None]]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
+                if metadata is None:
+                    raise ValueError(
+                        "Video metadata is required but not found in mm input. "
+                        "Please check your video input in `multi_modal_data`"
+                    )
                 new_videos.append((video, metadata))
                 metadata_lst.append(metadata)
             else:

@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):

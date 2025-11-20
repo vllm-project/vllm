@@ -14,11 +14,11 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 def evil_forward(self, *args, **kwargs):

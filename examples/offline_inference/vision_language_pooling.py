@@ -18,7 +18,7 @@ from PIL.Image import Image
 from vllm import LLM, EngineArgs
 from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.multimodal.utils import fetch_image
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 EXAMPLES_DIR = ROOT_DIR / "examples"
@@ -100,6 +100,53 @@ def run_e5_v(query: Query) -> ModelRequestData:
         model="royokong/e5-v",
         runner="pooling",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
+def run_jinavl_reranker(query: Query) -> ModelRequestData:
+    if query["modality"] != "text+images":
+        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
+
+    engine_args = EngineArgs(
+        model="jinaai/jina-reranker-m0",
+        runner="pooling",
+        max_model_len=32768,
+        trust_remote_code=True,
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 602112,
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        query=query["text"],
+        documents=query["image"],
+    )
+
+
+def run_siglip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="google/siglip-base-patch16-224",
+        runner="pooling",
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -211,29 +258,6 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
     )
 
 
-def run_jinavl_reranker(query: Query) -> ModelRequestData:
-    if query["modality"] != "text+images":
-        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
-
-    engine_args = EngineArgs(
-        model="jinaai/jina-reranker-m0",
-        runner="pooling",
-        max_model_len=32768,
-        trust_remote_code=True,
-        mm_processor_kwargs={
-            "min_pixels": 3136,
-            "max_pixels": 602112,
-        },
-        limit_mm_per_prompt={"image": 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        query=query["text"],
-        documents=query["image"],
-    )
-
-
 def get_query(modality: QueryModality):
     if modality == "text":
         return TextQuery(modality="text", text="A dog sitting in the grass")
@@ -242,7 +266,7 @@ def get_query(modality: QueryModality):
         return ImageQuery(
             modality="image",
             image=fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/American_Eskimo_Dog.jpg/360px-American_Eskimo_Dog.jpg"  # noqa: E501
+                "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/eskimo.jpg"  # noqa: E501
             ),
         )
 
@@ -251,7 +275,7 @@ def get_query(modality: QueryModality):
             modality="text+image",
             text="A cat standing in the snow.",
             image=fetch_image(
-                "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Felis_catus-cat_on_snow.jpg/179px-Felis_catus-cat_on_snow.jpg"  # noqa: E501
+                "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"  # noqa: E501
             ),
         )
 
@@ -328,9 +352,10 @@ def run_score(model: str, modality: QueryModality, seed: int | None):
 model_example_map = {
     "clip": run_clip,
     "e5_v": run_e5_v,
+    "jinavl_reranker": run_jinavl_reranker,
+    "siglip": run_siglip,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
-    "jinavl_reranker": run_jinavl_reranker,
 }
 
 

@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
-from vllm.utils import ClassRegistry
+from vllm.utils.collection_utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
@@ -152,6 +152,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
+        profiler_limits: Mapping[str, int] | None = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -164,39 +165,14 @@ class MultiModalRegistry:
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
-        mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
+        profiler_limits = (
+            profiler.get_mm_limits() if profiler_limits is None else profiler_limits
+        )
 
         return profiler.get_mm_max_contiguous_tokens(
             seq_len,
-            {modality: 1 for modality, limit in mm_limits.items() if limit > 0},
+            {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
         )
-
-    def get_max_tokens_per_item_by_nonzero_modality(
-        self,
-        model_config: "ModelConfig",
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user
-        explicitly disabled via `limit_mm_per_prompt`.
-
-        Note:
-            This is currently directly used only in V1 for profiling the memory
-            usage of a model.
-        """
-        mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
-        max_tokens_per_item = self.get_max_tokens_per_item_by_modality(
-            model_config,
-            cache=cache,
-        )
-
-        return {
-            key: max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in max_tokens_per_item.items()
-            if mm_limits[key] > 0
-        }
 
     def get_mm_limits_per_prompt(
         self,
@@ -307,7 +283,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
@@ -340,7 +316,7 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by ``model_config``.
+        The model is identified by `model_config`.
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
@@ -369,7 +345,7 @@ class MultiModalRegistry:
         """
         if not model_config.is_encoder_decoder:
             return 0
-        max_tokens = self.get_max_tokens_per_item_by_nonzero_modality(model_config)
+        max_tokens = self.get_max_tokens_per_item_by_modality(model_config)
         if not max_tokens:
             # TODO - this function assumes encoder-decoder models are
             # multimodal. This will need to change when adding support for more

@@ -7,7 +7,7 @@ import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
-from vllm.utils import current_stream
+from vllm.utils.torch_utils import current_stream
 
 _THREAD_ID_TO_CONTEXT: dict = {}
 _CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = [None, None]
@@ -27,8 +27,8 @@ class UBatchContext:
         ready_barrier: threading.Barrier,
         cpu_wait_event: threading.Event,
         cpu_signal_event: threading.Event,
-        gpu_comm_done_event: torch.cuda.Event,
-        gpu_compute_done_event: torch.cuda.Event,
+        gpu_comm_done_event: torch.Event,
+        gpu_compute_done_event: torch.Event,
         schedule: str = "default",
     ):
         self.id = id
@@ -185,6 +185,15 @@ def dbo_register_recv_hook(recv_hook):
         next_ctx.recv_hook = recv_hook
 
 
+def dbo_get_previous_event(func, *args, **kwargs):
+    if len(_THREAD_ID_TO_CONTEXT) > 0:
+        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        ctx = _CURRENT_CONTEXTS[ctx_idx]
+        # execute callable on the ubatch compute stream to record/wait events there
+        with torch.cuda.stream(ctx.compute_stream):
+            return func(*args, **kwargs)
+
+
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.cuda.Stream,
@@ -198,8 +207,8 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_comm_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
-    gpu_compute_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
+    gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
+    gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 
     assert len(forward_contexts) == 2
 

@@ -49,10 +49,11 @@ from functools import cached_property
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.activations import ACT2FN, PytorchGELUTanh
+from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available
 
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -244,7 +245,7 @@ class MoonVisionPatchEmbed(nn.Module):
         )
         self.patch_size = patch_size
 
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             in_dim, out_dim, kernel_size=patch_size, stride=patch_size
         )
 
@@ -651,7 +652,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "num_heads": config.num_attention_heads,
                 "hidden_dim": config.hidden_size,
                 "mlp_dim": config.intermediate_size,
-                "activation": PytorchGELUTanh(),
+                "activation": ACT2FN["gelu_pytorch_tanh"],
                 "attn_bias": True,
                 "attn_implementation": config._attn_implementation,
             },

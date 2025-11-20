@@ -32,7 +32,7 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     import librosa
@@ -170,11 +170,6 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            if lora_request:
-                return self.create_error_response(
-                    f"Currently do not support LoRA for {self.task_type.title()}."
-                )
-
             prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
@@ -199,7 +194,7 @@ class OpenAISpeechToText(OpenAIServing):
                 # It will not display special tokens like <|startoftranscript|>
                 request.prompt,
                 params=sampling_params,
-                lora_request=None,
+                lora_request=lora_request,
             )
 
             list_result_generator = [
@@ -207,6 +202,7 @@ class OpenAISpeechToText(OpenAIServing):
                     prompt,
                     sampling_params,
                     request_id,
+                    lora_request=lora_request,
                 )
                 for prompt in prompts
             ]

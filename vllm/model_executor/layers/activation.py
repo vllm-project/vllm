@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import LazyDict
+from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 
@@ -80,7 +80,8 @@ class SiluAndMul(CustomOp):
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def forward_native(x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]

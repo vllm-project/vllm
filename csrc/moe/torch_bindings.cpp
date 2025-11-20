@@ -5,7 +5,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
-      "token_expert_indices, Tensor gating_output) -> ()");
+      "token_expert_indices, Tensor gating_output, bool renormalize) -> ()");
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 
   // Calculate the result of moe by summing up the partial results
@@ -21,6 +21,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size, but for the batched case.
+  m.def(
+      "batched_moe_align_block_size(int max_tokens_per_batch,"
+      "                     int block_size, Tensor expert_num_tokens,"
+      "                     Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad) -> ()");
+  m.impl("batched_moe_align_block_size", torch::kCUDA,
+         &batched_moe_align_block_size);
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size.
+  m.def(
+      "moe_lora_align_block_size(Tensor topk_ids,"
+      "                     Tensor token_lora_mapping,"
+      "                     int num_experts,"
+      "                     int block_size, int max_loras, "
+      "                     int max_num_tokens_padded, "
+      "                     int max_num_m_blocks, "
+      "                     Tensor !sorted_token_ids,"
+      "                     Tensor !experts_ids,"
+      "                     Tensor !num_tokens_post_pad,"
+      "                     Tensor !adapter_enabled,"
+      "                     Tensor !lora_ids) -> () ");
+  m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM
   m.def(
@@ -80,9 +107,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Apply grouped topk routing to select experts.
   m.def(
-      "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
+      "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor) -> (Tensor, Tensor)");
+      "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
+      "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 #endif
 }

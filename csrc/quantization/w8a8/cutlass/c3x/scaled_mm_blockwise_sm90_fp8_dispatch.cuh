@@ -48,7 +48,8 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using ElementBlockScale = float;
 
   using ScaleConfig = cutlass::detail::Sm90BlockwiseScaleConfig<
-        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK>;
+        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
+        cute::GMMA::Major::MN, cute::GMMA::Major::K>;
 
   using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
   using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());

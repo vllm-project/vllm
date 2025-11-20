@@ -31,6 +31,13 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
+# TODO: move registration of custom op to aiter_ops.py
+# `from vllm._aiter_ops import rocm_aiter_ops`
+# use `rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()`
+# for envs checks which does not require @cache anymore.
+# triton kernel is torch compile compatible.
+# does not require direct registeration.
+# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
     return (
@@ -45,7 +52,7 @@ try:
     from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     if is_rocm_aiter_fp4_asm_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
