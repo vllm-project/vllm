@@ -1571,12 +1571,8 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def compile_factors() -> dict[str, object]:
-    """Return env vars used for torch.compile cache keys.
-
-    Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers."""
-
+def _collect_compile_factors() -> dict[str, object]:
+    """Collect env vars used for torch.compile cache keys."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
@@ -1682,9 +1678,9 @@ def compile_factors() -> dict[str, object]:
     return factors
 
 
-def compile_factors(*, return_factors: bool = False):
-    """Return a canonical hash for the environment compile factors."""
-    factors = compile_factors()
+def compile_factors(*, return_factors: bool = True):
+    """Return env compile factors (dict) or hashed string when requested."""
+    factors = _collect_compile_factors()
     if return_factors:
-        return factors if factors else None
+        return factors
     return hash_factors(factors)
