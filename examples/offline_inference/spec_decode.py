@@ -359,7 +359,7 @@ def main(args):
     print_dict(stats, newlines=[1, 4, 7, 10, 13, 16])
     print_dict(stats, file=outputs_dir / "stats.jsonl")
 
-    return acceptance_length
+    return mean_acceptance_length
 
 
 if __name__ == "__main__":

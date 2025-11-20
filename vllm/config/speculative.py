@@ -93,6 +93,14 @@ class SpeculativeConfig:
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
 
+    # Draft model vocabulary configuration
+    draft_vocab_frequency_path: str | None = None
+    """The path to the scores used to prune the draft model vocabulary.
+    Can be the token frequencies or something else."""
+    draft_vocab_frequency_keep_threshold: float | None = None
+    """If `None`, do not prune the vocabulary. Otherwise must be in (0, 1)
+    and keep the threshold% most frequent tokens."""
+
     # Advanced control
     disable_by_batch_size: int | None = Field(default=None, ge=2)
     """Disable speculative decoding for new incoming requests when the number
