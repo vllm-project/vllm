@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -111,8 +113,9 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
     generate_and_test(llm, olmoe_lora_files, lora_id=[1, None, 3, None])
 
 
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
-def test_olmoe_lora_tp2(olmoe_lora_files):
+def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -122,14 +125,16 @@ def test_olmoe_lora_tp2(olmoe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
+        fully_sharded_loras=fully_sharded_loras,
     )
 
     generate_and_test(llm, olmoe_lora_files, lora_id=1)
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
 
 
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=4)
-def test_olmoe_lora_tp4(olmoe_lora_files):
+def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -139,6 +144,7 @@ def test_olmoe_lora_tp4(olmoe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=4,
+        fully_sharded_loras=fully_sharded_loras,
     )
 
     generate_and_test(llm, olmoe_lora_files, lora_id=1)

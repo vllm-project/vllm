@@ -119,8 +119,8 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -265,8 +265,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        self.dcp_kv_cache_interleave_size = (
-            self.parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
         )
 
         self.use_full_cuda_graph = (
@@ -388,7 +388,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 dcp_context_kv_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
@@ -704,6 +704,7 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
+            max_num_splits=attn_metadata.max_num_splits,
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
@@ -950,6 +951,7 @@ def cascade_attention(
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
+    max_num_splits: int,
     fa_version: int,
     prefix_scheduler_metadata: torch.Tensor | None = None,
     suffix_scheduler_metadata: torch.Tensor | None = None,
@@ -994,7 +996,7 @@ def cascade_attention(
         # s_aux is incorporated into prefix_lse inside the GPU kernel,
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
-        num_splits=1 if vllm_is_batch_invariant() else 0,
+        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -1019,7 +1021,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        num_splits=1 if vllm_is_batch_invariant() else 0,
+        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
