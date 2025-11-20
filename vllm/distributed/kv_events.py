@@ -71,11 +71,11 @@ class KVEventBatch(EventBatch):
         """
         Combine non duplicated events with another `KVEventBatch` object.
         """
-        combined_events = self.events[:]
+        checked_events = set(self.events)
         for item in other.events:
-            if item not in combined_events:
-                combined_events.append(item)
-        self.events = combined_events
+            if item not in checked_events:
+                self.events.append(item)
+                checked_events.add(item)
         return self
 
 
