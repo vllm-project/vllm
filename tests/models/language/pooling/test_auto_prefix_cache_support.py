@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: SIM117
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
@@ -23,10 +24,7 @@ def test_classify_models(
     example_prompts = [s * 10 for s in example_prompts]
 
     with vllm_runner(
-        model,
-        max_model_len=512,
-        dtype=dtype,
-        enable_prefix_caching=True,
+        model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
     ) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert cache_config.enable_prefix_caching
@@ -108,8 +106,9 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with vllm_runner(
-        model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
-    ) as vllm_model:
-        cache_config = vllm_model.llm.llm_engine.cache_config
-        assert not cache_config.enable_prefix_caching
+    with pytest.raises(ValueError):
+        with vllm_runner(
+            model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
+        ) as vllm_model:
+            cache_config = vllm_model.llm.llm_engine.cache_config
+            assert not cache_config.enable_prefix_caching

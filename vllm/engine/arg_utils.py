@@ -1366,8 +1366,6 @@ class EngineArgs:
         self._check_feature_supported(model_config)
         self._set_default_args(usage_context, model_config)
 
-        assert self.enable_chunked_prefill is not None
-
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1931,7 +1929,7 @@ class EngineArgs:
                 is_prefix_caching_supported.reason,
                 "Enabling" if is_prefix_caching_supported.state else "Disabling",
             )
-        elif self.enable_chunked_prefill:
+        elif self.enable_prefix_caching:
             is_prefix_caching_supported.raise_if_false()
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
