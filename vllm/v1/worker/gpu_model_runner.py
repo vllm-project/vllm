@@ -1921,20 +1921,6 @@ class GPUModelRunner(
             scheduler_output
         )
 
-        if self.is_prefix_lm:
-            if scheduler_output.scheduled_new_reqs:
-                image_doc_ranges = []
-                for _, pos_info in mm_hashes_pos:
-                    img_doc_range = pos_info.extract_embeds_range()
-                    image_doc_ranges.extend(img_doc_range)
-                self.image_doc_ranges = image_doc_ranges
-                print(image_doc_ranges)
-            else:
-                image_doc_ranges = self.image_doc_ranges
-            attn_metadata_group = get_forward_context().attn_metadata
-            for attn_metadata in attn_metadata_group.values():
-                attn_metadata.mm_prefix_range = image_doc_ranges
-
         if not mm_kwargs:
             return
 
