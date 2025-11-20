@@ -1405,8 +1405,8 @@ class MoRIIOConnectorWorker:
         self.block_shape = None
         self.kv_element_size = 0
 
-        # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
+        # Map of engine_id -> {agent_name0, agent_name1..}.
+        self._remote_agents: dict[EngineId, set[str]] = {}
 
         self.side_channel_port: int = (
             self.moriio_config.handshake_port
@@ -1448,7 +1448,7 @@ class MoRIIOConnectorWorker:
             thread_name_prefix="vllm-moriio-handshake-initiator",
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+        self._handshake_futures: dict[EngineId, Future[set[str]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -1678,7 +1678,7 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         expected_engine_id: str,
         remote_dp_rank: int = 0,
-    ) -> dict[int, str]:
+    ) -> set[str]:
         """Do a MoRIIO handshake with a remote instance."""
 
         start_time = time.perf_counter()
@@ -1777,7 +1777,7 @@ class MoRIIOConnectorWorker:
             )
             fut_list.append(future)
 
-            def done_callback(f: Future[dict[int, str]], eid=dp_engine_id):
+            def done_callback(f: Future[set[str]], eid=dp_engine_id):
                 with self._handshake_lock:
                     self._handshake_futures.pop(eid, None)
                     try:
