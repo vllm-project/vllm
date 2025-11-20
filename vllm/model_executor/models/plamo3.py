@@ -157,7 +157,6 @@ class Plamo3AttentionMixer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         is_sliding = layer_type == "sliding_attention"
-        self.sliding_window = config.sliding_window if is_sliding else None
 
         # Initialize the rotary embedding.
         if layer_type in config.rope_parameters:
