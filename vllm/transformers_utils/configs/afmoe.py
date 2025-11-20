@@ -24,7 +24,7 @@ class AfmoeConfig(PretrainedConfig):
         rms_norm_eps: float = 1e-5,
         use_cache: bool = True,
         tie_word_embeddings: bool = False,
-        rope_theta: float = 10000.0,
+        rope_parameters: dict | None = None,
         rope_scaling: dict | None = None,
         num_experts: int = 64,
         num_experts_per_tok: int = 6,
@@ -56,7 +56,10 @@ class AfmoeConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
+        rope_theta = kwargs.pop("rope_theta", 10000.0)
+        if rope_parameters is None:
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        self.rope_parameters = rope_parameters
         self.rope_scaling = rope_scaling
 
         self.moe_intermediate_size = moe_intermediate_size
