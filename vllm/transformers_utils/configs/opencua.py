@@ -10,15 +10,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 
 
 class OpenCUAConfig(PretrainedConfig):
-    """OpenCUA-7B model configuration.
-    
-    OpenCUA is based on Qwen2.5-VL but uses 1D-RoPE instead of M-RoPE
-    for the vision encoder.
-    
-    This matches the HF repo implementation at:
-    https://huggingface.co/xlangai/OpenCUA-7B/blob/main/configuration_opencua.py
-    """
-
     model_type = "opencua"
 
     def __init__(
@@ -46,14 +37,11 @@ class OpenCUAConfig(PretrainedConfig):
         self.media_placeholder_token_id = media_placeholder_token_id
 
         super().__init__(pad_token_id=pad_token_id, **kwargs)
-        
-        # Backward compatibility: support old configs with separate token IDs
-        # These are used internally by vLLM but not in HF repo
+
         if not hasattr(self, "image_token_id"):
             self.image_token_id = media_placeholder_token_id
         if not hasattr(self, "video_token_id"):
             self.video_token_id = media_placeholder_token_id
         if not hasattr(self, "vision_start_token_id"):
-            # OpenCUA uses media_placeholder_token_id for vision start
-            self.vision_start_token_id = media_placeholder_token_id
+            self.vision_start_token_id = 151661
 

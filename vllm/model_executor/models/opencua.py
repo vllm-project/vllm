@@ -2,33 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Adapted from Qwen2.5-VL implementation
-# OpenCUA-7B uses 1D-RoPE instead of M-RoPE (Multimodal RoPE)
 # Copyright 2025 The vLLM team.
 # Copyright 2025 XLANG Lab, The University of Hong Kong
 
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.activation import get_act_and_mul_fn
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargs,
 )
@@ -39,7 +33,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.platform_utils import is_pin_memory_available
 
 from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
@@ -47,7 +40,6 @@ from .qwen2_vl import (
     _create_qwen2vl_field_factory,
 )
 from .qwen2_vl import Qwen2VLDummyInputsBuilder
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from transformers.models.qwen2_vl import (
     Qwen2VLImageProcessor,
     Qwen2VLProcessor,
@@ -58,7 +50,6 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -75,7 +66,6 @@ from .qwen2_5_vl import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    cast_overflow_tensors,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -86,22 +76,17 @@ from .vision import (
 
 
 class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
-    """Vision Transformer for OpenCUA with upstream flash attention enabled.
-    
-    Extends Qwen2_5_VisionTransformer to enable upstream flash attention
-    when head_dim is not a multiple of 32 (e.g., head_dim=80).
-    """
-    
+    """Vision Transformer for OpenCUA with upstream flash attention enabled."""
+
     def __init__(
         self,
-        vision_config: Any,  # OpenCUAConfig.vision_config
+        vision_config: Any,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
-        # Call parent __init__ first
         super().__init__(
             vision_config=vision_config,
             norm_eps=norm_eps,
@@ -110,16 +95,14 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
             use_data_parallel=use_data_parallel,
             attn_backend_override=attn_backend_override,
         )
-        
-        # Check if we need upstream flash attention for head_dim not multiple of 32
+
         head_dim = self.hidden_size // self.num_heads
         if head_dim % 32 != 0:
-            # If head_dim is not a multiple of 32, we need upstream flash_attn
-            # which supports arbitrary head_dim values
             from vllm.attention.layer import check_upstream_fa_availability
             from vllm.platforms import current_platform
-            if current_platform.is_cuda() and check_upstream_fa_availability(torch.get_default_dtype()):
-                # Re-initialize with upstream flash attention enabled
+            if current_platform.is_cuda() and check_upstream_fa_availability(
+                torch.get_default_dtype()
+            ):
                 use_upstream_fa = True
                 self.attn_backend, self.flash_attn_varlen_func = (
                     maybe_get_vit_flash_attn_backend(
@@ -128,9 +111,8 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
                         attn_backend_override=attn_backend_override,
                     )
                 )
-                # Update all blocks to use upstream flash attention
                 for block in self.blocks:
-                    if hasattr(block, 'attn'):
+                    if hasattr(block, "attn"):
                         block.attn.use_upstream_fa = True
                         block.attn.attn_backend, block.attn.flash_attn_varlen_func = (
                             maybe_get_vit_flash_attn_backend(
@@ -141,6 +123,7 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
                         )
             else:
                 from vllm.attention.backends.registry import AttentionBackendEnum
+
                 attn_backend_override = AttentionBackendEnum.XFORMERS
                 self.attn_backend = get_vit_attn_backend(
                     head_size=head_dim,
@@ -157,16 +140,7 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
 
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
-    """Processing info for OpenCUA models."""
-
     def get_hf_config(self):
-        """Load OpenCUAConfig.
-        
-        When trust_remote_code=True, HuggingFace loads the config class
-        from the model repository, which may differ from vLLM's OpenCUAConfig.
-        We skip type validation to allow both cases.
-        """
-        # Skip type validation to support trust_remote_code configs
         return self.ctx.get_hf_config(None)
 
     def get_hf_processor(self, **kwargs: object):
@@ -181,10 +155,7 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class OpenCUAProcessor(Qwen2VLProcessor):
-    """Custom processor for OpenCUA that accepts TikTokenV3 tokenizer."""
-    
     def check_argument_for_proper_class(self, attribute_name: str, arg: object) -> None:
-        """Override to bypass type validation for tokenizer."""
         if attribute_name == "tokenizer":
             return
         return super().check_argument_for_proper_class(attribute_name, arg)
@@ -218,7 +189,6 @@ class OpenCUAProcessor(Qwen2VLProcessor):
         return_tensors=None,
         **kwargs,
     ):
-        """Override __call__ to ensure compatibility with TikTokenV3 tokenizer."""
         if text is not None:
             if not isinstance(text, list):
                 text = [text]
@@ -246,8 +216,6 @@ class OpenCUAProcessor(Qwen2VLProcessor):
 
 
 class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo]):
-    """Multi-modal processor for OpenCUA using transformers processor."""
-
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2VLMultiModalDataParser(
             self.info.get_hf_config().vision_config.spatial_merge_size
@@ -268,7 +236,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        """Get prompt updates for OpenCUA."""
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -295,7 +262,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         merge_length = image_processor.merge_size**2
 
         def get_replacement_opencua(item_idx: int, modality: str):
-            """Calculate replacement tokens for a multimodal item."""
             out_item = out_mm_kwargs[modality][item_idx]
             grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -314,8 +280,6 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
 
 
 class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
-    """Dummy inputs builder for OpenCUA that uses <|media_placeholder|> instead of <|image_pad|>."""
-    
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -338,10 +302,7 @@ class OpenCUAForConditionalGeneration(
     SupportsPP,
     SupportsQuant,
     SupportsEagle3,
-    SupportsMRoPE,
 ):
-    """OpenCUA-7B model with 1D-RoPE for vision encoder."""
-
     merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
 
@@ -362,133 +323,8 @@ class OpenCUAForConditionalGeneration(
 
     supports_encoder_tp_data = True
 
-    def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
-    ) -> tuple[torch.Tensor, int]:
-        """Get M-RoPE input positions for OpenCUA."""
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
-        )
-        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
-        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
-
-        hf_config = self.config
-        media_placeholder_token_id = getattr(
-            hf_config, "media_placeholder_token_id", 151664
-        )
-        image_token_id = getattr(hf_config, "image_token_id", media_placeholder_token_id)
-        video_token_id = getattr(hf_config, "video_token_id", media_placeholder_token_id)
-        vision_start_token_id = getattr(
-            hf_config, "vision_start_token_id", media_placeholder_token_id
-        )
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
-
-        input_tokens_tensor = torch.tensor(input_tokens)
-        vision_start_indices = torch.argwhere(
-            input_tokens_tensor == vision_start_token_id
-        ).squeeze(1)
-        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
-        image_nums = (vision_tokens == media_placeholder_token_id).sum()
-        video_nums = (vision_tokens == video_token_id).sum()
-        image_nums = min(image_nums.item() if hasattr(image_nums, 'item') else int(image_nums), len(image_grid_thw))
-        video_nums = min(video_nums.item() if hasattr(video_nums, 'item') else int(video_nums), len(video_grid_thw))
-        llm_pos_ids_list: list = []
-
-        st = 0
-        remain_images, remain_videos = image_nums, video_nums
-
-        image_index, video_index = 0, 0
-        for _ in range(image_nums + video_nums):
-            video_second_per_grid_t = 0.0
-            if remain_images > 0:
-                try:
-                    ed_image = input_tokens.index(media_placeholder_token_id, st)
-                except ValueError:
-                    ed_image = len(input_tokens) + 1
-            else:
-                ed_image = len(input_tokens) + 1
-            if remain_videos > 0:
-                try:
-                    ed_video = input_tokens.index(video_token_id, st)
-                except ValueError:
-                    ed_video = len(input_tokens) + 1
-            else:
-                ed_video = len(input_tokens) + 1
-            if ed_image < ed_video:
-                t, h, w = image_grid_thw[image_index]
-                image_index += 1
-                remain_images -= 1
-                ed = ed_image
-            else:
-                t, h, w = video_grid_thw[video_index]
-                video_second_per_grid_t = 1.0
-                if second_per_grid_ts:
-                    video_second_per_grid_t = second_per_grid_ts[video_index]
-                video_index += 1
-                remain_videos -= 1
-                ed = ed_video
-
-            llm_grid_t, llm_grid_h, llm_grid_w = (
-                t,
-                h // spatial_merge_size,
-                w // spatial_merge_size,
-            )
-            text_len = ed - st
-
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(
-                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-            )
-
-            t_index = (
-                (
-                    torch.arange(llm_grid_t)
-                    .view(-1, 1)
-                    .expand(-1, llm_grid_h * llm_grid_w)
-                    * video_second_per_grid_t
-                    * tokens_per_second
-                )
-                .long()
-                .flatten()
-            )
-
-            h_index = (
-                torch.arange(llm_grid_h)
-                .view(1, -1, 1)
-                .expand(llm_grid_t, -1, llm_grid_w)
-                .flatten()
-            )
-            w_index = (
-                torch.arange(llm_grid_w)
-                .view(1, 1, -1)
-                .expand(llm_grid_t, llm_grid_h, -1)
-                .flatten()
-            )
-            llm_pos_ids_list.append(
-                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
-            )
-            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
-
-        if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            text_len = len(input_tokens) - st
-            llm_pos_ids_list.append(
-                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-            )
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-
-        return llm_positions, mrope_position_delta
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        """Get placeholder string for OpenCUA."""
         if modality.startswith("image"):
             return "<|media_placeholder|>"
         if modality.startswith("video"):
@@ -702,7 +538,6 @@ class OpenCUAForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for OpenCUA."""
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -728,7 +563,6 @@ class OpenCUAForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger.",
