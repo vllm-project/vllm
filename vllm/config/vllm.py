@@ -1351,10 +1351,44 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
     def _set_vit_cudagraph_sizes(self):
+        """Sets the CUDA graph capture sizes for the Vision Transformer (ViT).
+
+        This method determines the batch sizes for which ViT CUDA graphs will be
+        captured. CUDA graphs improve performance by reducing kernel launch
+        overhead for the vision encoder.
+
+        The logic is as follows:
+        1.  The feature is only enabled if all of the following conditions are met:
+            - Eager mode is not enforced.
+            - CUDA graph mode is enabled.
+            - The multimodal encoder compilation is enabled.
+            - A multimodal config is present.
+            - The multimodal encoder tensor parallelism mode is not "data".
+            If these conditions are not met, the list of capture sizes will be empty,
+            effectively disabling ViT CUDA graphs.
+
+        2.  If the user has explicitly provided `vit_cudagraph_capture_sizes` in the
+            compilation config, those sizes are used. The list is de-duplicated
+            and sorted in ascending order.
+
+        3.  If no sizes are provided by the user, a default list of sizes is
+            generated up to a maximum of 5120. The default sizes are:
+            [16, 32, 64, 128, 256] + list(range(512, 2048, 64)) + list(
+            range(2048, 5120 + 1, 128))
+
+        The final list of sizes is stored in
+        `self.compilation_config.vit_cudagraph_capture_sizes`.
+
+        - If a batch's size matches or is smaller than a captured size, the
+          closest captured graph is used.
+        - If a batch's size is larger than the largest captured size, a CUDA
+          graph will not be used for that batch.
+        """
         if (
             self.model_config is not None
             and not self.model_config.enforce_eager
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.compile_mm_encoder
             and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_encoder_tp_mode != "data"
         ):

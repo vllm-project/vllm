@@ -2490,7 +2490,7 @@ class GPUModelRunner(
                     ), self.timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx, num_items
                     ):
-                    curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
                 # Remove the padded items before sanity check
                 if original_num_imgs != -1:
                     curr_group_outputs = curr_group_outputs[:original_num_imgs]
@@ -4652,7 +4652,7 @@ class GPUModelRunner(
         Returns:
             A BatchedTensorInputs dictionary containing `pixel_values` and
             `image_grid_thw` that can be passed as kwargs to
-            `get_multimodal_embeddings`.
+            `embed_multimodal`.
         """
         def _get_dummy_h_w_patches(patches: int):
             merge_size = getattr(self.model_config.hf_config.vision_config, "spatial_merge_size", 1)
@@ -5249,7 +5249,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_descriptor,
                 ),
             ):
-                self.model.get_multimodal_embeddings(**dummy_mm_inputs)
+                self.model.embed_multimodal(**dummy_mm_inputs)
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.

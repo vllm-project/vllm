@@ -253,11 +253,10 @@ By default, vLLM will try to determine a set of sizes to capture cudagraph. You 
 vllm serve meta-llama/Llama-3.2-1B \
   --compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8]}'
 ```
-Similarly, For `Qwen2.5-VL` series model, you can specify the capture sizes for the vision transformer (ViT) using `vit_cudagraph_capture_sizes`, the capture sizes should be multiples of the square of `merge_size`. Note that ViT DP mode is **not supported**. You can use `--compilation-config '{"vit_cudagraph_capture_sizes": []}'` to disable only the ViT part of the CUDA graph, or use `--enforce-eager` to disable the entire CUDA graph.
-
+Similarly, For `Qwen2.5-VL` series model, you can specify the capture sizes for the vision transformer (ViT) using `vit_cudagraph_capture_sizes`, the capture sizes should be multiples of the square of `merge_size`. Note that ViT DP mode is **not supported**. By default, this is disabled as `compile_mm_encoder` is `False`. To enable it and specify capture sizes, you can do the following:
 ```bash
 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
-  --compilation-config '{"vit_cudagraph_capture_sizes": [512, 1024]}'
+  --compilation-config '{"compile_mm_encoder": true, "vit_cudagraph_capture_sizes": [512, 1024]}'
 ```
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
