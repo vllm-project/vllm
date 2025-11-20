@@ -214,6 +214,9 @@ class HarmonyContext(ConversationContext):
 
     def append_output(self, output: RequestOutput) -> None:
         output_token_ids = output.outputs[0].token_ids
+        # Reset parser for each append_output call to handle multi-turn scenarios
+        # where the parser needs to start fresh for each assistant response
+        self.parser = get_streamable_parser_for_assistant()
         for token_id in output_token_ids:
             self.parser.process(token_id)
             # Check if the current token is part of reasoning content
