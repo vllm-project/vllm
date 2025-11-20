@@ -44,6 +44,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         value_layout = StridedLayout
         if on_gfx950():
             from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
+            
             scale_layout = GFX950MXScaleLayout
         else:
             scale_layout = StridedLayout
