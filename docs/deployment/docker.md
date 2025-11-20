@@ -93,7 +93,6 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-    python3 use_existing_torch.py
     DOCKER_BUILDKIT=1 docker build . \
     --file docker/Dockerfile \
     --target vllm-openai \
