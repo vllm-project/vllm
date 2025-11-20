@@ -98,7 +98,6 @@ to warm it up so that future builds are faster.
     <img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/a8ff0fcd-76e0-4e91-b72f-014e3fdb6b94">
 </p>
 
-
 ## Update all the different vLLM platforms
 
 Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
