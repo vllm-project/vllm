@@ -196,13 +196,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
+        num_computed_tokens_cpu = torch.zeros(
+            input_batch.num_reqs, dtype=torch.int32, device="cpu"
+        )
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
             query_start_loc=self.input_buffers.query_start_loc,
             seq_lens=self.input_buffers.seq_lens,
-            num_computed_tokens_cpu=None,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
