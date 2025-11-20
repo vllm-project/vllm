@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config, get_hash_factors, hash_factors
+from vllm.config.utils import HashResult, config, get_compile_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import get_cpu_memory
@@ -147,7 +147,7 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config, review
         `ignored_factors` to decide whether the field should be excluded.
@@ -181,7 +181,7 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
         if return_factors:
             return factors or None
         return hash_factors(factors)

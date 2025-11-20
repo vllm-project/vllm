@@ -1015,7 +1015,7 @@ def wait_for_engine_startup(
                             "data_parallel_size",
                         )
                     },
-                    parallel_config_hash=parallel_config.compute_hash()
+                    parallel_config_hash=parallel_config.compile_factors()
                     if parallel_config.data_parallel_size > 1
                     else None,
                 )
@@ -1041,7 +1041,7 @@ def wait_for_engine_startup(
             # Validate config hash consistency across DP workers
             if parallel_config.data_parallel_size > 1:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compute_hash()
+                expected_hash = parallel_config.compile_factors()
                 if worker_config_hash != expected_hash:
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "

@@ -45,7 +45,7 @@ class LlamaConfig:
     tractable_init: bool = False
     random_seed: int = 0
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> str:
         factors: list[Any] = []
         for k, v in self.__dict__.items():
             if k == "random_seed":

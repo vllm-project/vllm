@@ -28,7 +28,7 @@ class DeviceConfig:
     """Device type from the current platform. This is set in
     `__post_init__`."""
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

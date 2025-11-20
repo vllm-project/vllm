@@ -86,7 +86,7 @@ class PoolerConfig:
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

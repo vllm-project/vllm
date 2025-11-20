@@ -93,8 +93,8 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compute_hash(vllm_config)
+    def compile_factors(self, vllm_config: VllmConfig) -> str:
+        return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
     def compile_context(self, runtime_shape: int | None = None):
@@ -590,8 +590,8 @@ class VllmBackend:
         env_factors = envs.compile_factors()
         env_hash = hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
-        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+        config_hash = vllm_config.compile_factors()
+        compiler_hash = self.compiler_manager.compile_factors(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
 
         logger.debug(
@@ -621,7 +621,7 @@ class VllmBackend:
             # graph.
             factors = [env_hash, config_hash, code_hash, compiler_hash]
             # Use SHA-256 for cache key hashing to be consistent across
-            # compute_hash functions. Truncate for a short cache dir name.
+            # compile_factors functions. Truncate for a short cache dir name.
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key

@@ -46,12 +46,12 @@ class CompilerInterface:
         """
         pass
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> str:
         """
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
+        See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
         to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
@@ -195,7 +195,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]):
         self.save_format = save_format
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
         hash_str = hashlib.md5(
             str(factors).encode(), usedforsecurity=False
@@ -284,7 +284,7 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
         hash_str = hashlib.md5(
             str(factors).encode(), usedforsecurity=False

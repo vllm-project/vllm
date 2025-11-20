@@ -69,7 +69,7 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

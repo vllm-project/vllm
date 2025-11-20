@@ -385,7 +385,7 @@ class EplbState:
             )
             self.expert_rearrangement_step = 0
 
-        self.model_states[model_config.compute_hash()] = EplbModelState(
+        self.model_states[model_config.compile_factors()] = EplbModelState(
             physical_to_logical_map,
             logical_to_physical_map,
             logical_replica_count,

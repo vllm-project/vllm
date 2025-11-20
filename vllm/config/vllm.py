@@ -40,7 +40,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import HashResult, SupportsHash, config
+from .utils import HashResult, SupportsCompileFactors, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -110,14 +110,14 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = Field(default_factory=dict)
+    additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -137,31 +137,31 @@ class VllmConfig:
 
         vllm_factors.append(__version__)
         if self.model_config:
-            vllm_factors.append(self.model_config.compute_hash())
+            vllm_factors.append(self.model_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.cache_config:
-            vllm_factors.append(self.cache_config.compute_hash())
+            vllm_factors.append(self.cache_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.parallel_config:
-            vllm_factors.append(self.parallel_config.compute_hash())
+            vllm_factors.append(self.parallel_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.scheduler_config:
-            vllm_factors.append(self.scheduler_config.compute_hash())
+            vllm_factors.append(self.scheduler_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.device_config:
-            vllm_factors.append(self.device_config.compute_hash())
+            vllm_factors.append(self.device_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.load_config:
-            vllm_factors.append(self.load_config.compute_hash())
+            vllm_factors.append(self.load_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.lora_config:
-            vllm_factors.append(self.lora_config.compute_hash())
+            vllm_factors.append(self.lora_config.compile_factors())
             # LoRA creates static buffers based on max_num_batched_tokens.
             # The tensor sizes and strides get captured in the torch.compile
             # graph explicitly.
@@ -169,26 +169,26 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         if self.speculative_config:
-            vllm_factors.append(self.speculative_config.compute_hash())
+            vllm_factors.append(self.speculative_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.structured_outputs_config:
-            vllm_factors.append(self.structured_outputs_config.compute_hash())
+            vllm_factors.append(self.structured_outputs_config.compile_factors())
         else:
             vllm_factors.append("None")
-        vllm_factors.append(self.observability_config.compute_hash())
+        vllm_factors.append(self.observability_config.compile_factors())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
-            vllm_factors.append(self.compilation_config.compute_hash())
+            vllm_factors.append(self.compilation_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.kv_transfer_config:
-            vllm_factors.append(self.kv_transfer_config.compute_hash())
+            vllm_factors.append(self.kv_transfer_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.ec_transfer_config:
-            vllm_factors.append(self.ec_transfer_config.compute_hash())
+            vllm_factors.append(self.ec_transfer_config.compile_factors())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -198,7 +198,7 @@ class VllmConfig:
                     usedforsecurity=False,
                 ).hexdigest()
             else:
-                additional_config_hash = additional_config.compute_hash()
+                additional_config_hash = additional_config.compile_factors()
             vllm_factors.append(additional_config_hash)
         else:
             vllm_factors.append("None")

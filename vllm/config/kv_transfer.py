@@ -63,7 +63,7 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

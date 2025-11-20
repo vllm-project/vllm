@@ -88,7 +88,7 @@ class LoadConfig:
     see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
     """
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

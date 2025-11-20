@@ -18,8 +18,8 @@ def test_mm_encoder_attn_backend_invalid():
 
 
 def test_mm_encoder_attn_backend_hash_updates():
-    base_hash = MultiModalConfig().compute_hash()
+    base_hash = MultiModalConfig().compile_factors()
     overridden_hash = MultiModalConfig(
         mm_encoder_attn_backend=AttentionBackendEnum.FLASH_ATTN
-    ).compute_hash()
+    ).compile_factors()
     assert base_hash != overridden_hash

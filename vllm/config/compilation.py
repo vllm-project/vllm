@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import HashResult, config, get_hash_factors, hash_factors
+from vllm.config.utils import HashResult, config, get_compile_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -159,7 +159,7 @@ class PassConfig:
             current_platform.get_device_capability().to_int(), {}
         )
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -506,7 +506,7 @@ class CompilationConfig:
         "vllm::sparse_attn_indexer",
     ]
 
-    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -529,8 +529,8 @@ class CompilationConfig:
             "pass_config",  # handled separately below
         }
 
-        factors = get_hash_factors(self, ignored_factors)
-        factors["pass_config"] = self.pass_config.compute_hash()
+        factors = get_compile_factors(self, ignored_factors)
+        factors["pass_config"] = self.pass_config.compile_factors()
         if return_factors:
             return factors or None
         return hash_factors(factors)

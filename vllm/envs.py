@@ -1657,7 +1657,7 @@ def compile_factors() -> dict[str, object]:
     return factors
 
 
-def compute_hash(*, return_factors: bool = False):
+def compile_factors(*, return_factors: bool = False):
     """Return a canonical hash for the environment compile factors."""
     factors = compile_factors()
     if return_factors:

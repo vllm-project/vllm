@@ -753,7 +753,7 @@ class EngineCoreProc(EngineCore):
             }
             if vllm_config.parallel_config.data_parallel_size > 1:
                 ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                    vllm_config.parallel_config.compile_factors()
                 )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
