@@ -169,7 +169,9 @@ class Gemma3Attention(nn.Module):
             rope_parameters = config.rope_parameters.copy()
             # Local attention. Override the values in config.json.
             if self.is_sliding:
-                rope_parameters["rope_theta"] = config.rope_local_base_freq
+                rope_parameters = dict(
+                    rope_type="default", rope_theta=config.rope_local_base_freq
+                )
 
         self.rotary_emb = get_rope(
             self.head_dim,
