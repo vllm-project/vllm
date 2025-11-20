@@ -46,6 +46,18 @@ def check_gguf_file(model: str | PathLike) -> bool:
         return False
 
 
+@cache
+def is_remote_gguf(model: str) -> bool:
+    """Check if the model is a remote GGUF model."""
+    return "/" in model and ":" in model
+
+
+def is_gguf(model: str | Path, gguf_quant_type: str | None = None) -> bool:
+    return (
+        gguf_quant_type is not None or check_gguf_file(model) or (is_remote_gguf(model))
+    )
+
+
 def modelscope_list_repo_files(
     repo_id: str,
     revision: str | None = None,

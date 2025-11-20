@@ -38,7 +38,10 @@ from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    is_gguf,
+    maybe_model_redirect,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -112,6 +115,8 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    gguf_quant_type: str | None = None
+    """The quant type of the GGUF model to use."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -439,7 +444,9 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            if check_gguf_file(self.model):
+            # Check if this is a GGUF model (either local file, remote GGUF, or
+            # has gguf_quant_type set)
+            if is_gguf(self.model, self.gguf_quant_type):
                 raise ValueError(
                     "Using a tokenizer is mandatory when loading a GGUF model. "
                     "Please specify the tokenizer path or name using the "
@@ -502,6 +509,7 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
+            gguf_quant_type=self.gguf_quant_type,
         )
         hf_config = maybe_patch_hf_config_from_gguf(
             self.model,
@@ -969,13 +977,19 @@ class ModelConfig:
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
 
+        # For GGUF models, ignore quantization info from HF config
+        # GGUF quantization is handled separately
+
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = self._parse_quant_hf_config(self.hf_config)
-        if quant_cfg is None and (
-            text_config := getattr(self.hf_config, "text_config", None)
-        ):
-            # Check the text config as well for multi-modal models.
-            quant_cfg = self._parse_quant_hf_config(text_config)
+        if self.quantization == "gguf" or is_gguf(self.model, self.gguf_quant_type):
+            quant_cfg = None
+        else:
+            quant_cfg = self._parse_quant_hf_config(self.hf_config)
+            if quant_cfg is None and (
+                text_config := getattr(self.hf_config, "text_config", None)
+            ):
+                # Check the text config as well for multi-modal models.
+                quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'

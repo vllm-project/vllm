@@ -43,6 +43,17 @@ class GGUFModelLoader(BaseModelLoader):
                 f"load format {load_config.load_format}"
             )
 
+    def _get_model_path_for_download(self, model_config: ModelConfig) -> str:
+        """
+        Get the model path for downloading GGUF files.
+
+        If gguf_quant_type is set, construct the model:quant_type format.
+        Otherwise, use model_config.model.
+        """
+        if model_config.gguf_quant_type:
+            return f"{model_config.model}:{model_config.gguf_quant_type}"
+        return model_config.model
+
     def _prepare_weights(self, model_name_or_path: str):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
@@ -55,11 +66,73 @@ class GGUFModelLoader(BaseModelLoader):
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
             return hf_hub_download(repo_id=repo_id, filename=filename)
-        else:
-            raise ValueError(
-                f"Unrecognised GGUF reference: {model_name_or_path} "
-                "(expected local file, raw URL, or <repo_id>/<filename>.gguf)"
+        # repo_id:quant_type
+        elif "/" in model_name_or_path and ":" in model_name_or_path:
+            repo_id, quant_type = model_name_or_path.rsplit(":", 1)
+            return self.download_gguf(repo_id, quant_type)
+
+        raise ValueError(
+            f"Unrecognised GGUF reference: {model_name_or_path} "
+            "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
+            "or <repo_id>:<quant_type>)"
+        )
+
+    @staticmethod
+    def download_gguf(repo_id: str, quant_type: str) -> str:
+        # Lazy import to avoid hard dependency
+        import glob
+
+        from vllm.model_executor.model_loader.weight_utils import (
+            download_weights_from_hf,
+        )
+
+        # Use patterns that snapshot_download can handle directly
+        # Patterns to match:
+        # - *-{quant_type}.gguf (root)
+        # - *-{quant_type}-*.gguf (root sharded)
+        # - */*-{quant_type}.gguf (subdir)
+        # - */*-{quant_type}-*.gguf (subdir sharded)
+        allow_patterns = [
+            f"*-{quant_type}.gguf",
+            f"*-{quant_type}-*.gguf",
+            f"*/*-{quant_type}.gguf",
+            f"*/*-{quant_type}-*.gguf",
+        ]
+
+        # Use download_weights_from_hf which handles caching and downloading
+        folder = download_weights_from_hf(
+            model_name_or_path=repo_id,
+            cache_dir=None,
+            allow_patterns=allow_patterns,
+            revision=None,
+            ignore_patterns=None,
+        )
+
+        # Find the downloaded file(s) in the folder
+        local_files = []
+        for pattern in allow_patterns:
+            # Convert pattern to glob pattern for local filesystem
+            glob_pattern = os.path.join(folder, pattern)
+            local_files.extend(glob.glob(glob_pattern))
+
+        if not local_files:
+            # Fallback: search for any GGUF file with quant_type in name
+            all_gguf_files = glob.glob(
+                os.path.join(folder, "**/*.gguf"), recursive=True
             )
+            local_files = [
+                f for f in all_gguf_files if quant_type in os.path.basename(f)
+            ]
+
+        if not local_files:
+            raise ValueError(
+                f"Downloaded GGUF files not found in {folder} "
+                f"for quant_type {quant_type}"
+            )
+
+        # Sort to ensure consistent ordering (prefer non-sharded files)
+        local_files.sort(key=lambda x: (x.count("-"), x))
+        return local_files[0]
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
@@ -244,7 +317,7 @@ class GGUFModelLoader(BaseModelLoader):
         gguf_to_hf_name_map: dict[str, str],
     ) -> dict[str, str]:
         weight_type_map = get_gguf_weight_type_map(
-            model_config.model, gguf_to_hf_name_map
+            model_name_or_path, gguf_to_hf_name_map
         )
         is_multimodal = hasattr(model_config.hf_config, "vision_config")
         if is_multimodal:
@@ -290,10 +363,12 @@ class GGUFModelLoader(BaseModelLoader):
         yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
-        self._prepare_weights(model_config.model)
+        model_path = self._get_model_path_for_download(model_config)
+        self._prepare_weights(model_path)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        local_model_path = self._prepare_weights(model_config.model)
+        model_path = self._get_model_path_for_download(model_config)
+        local_model_path = self._prepare_weights(model_path)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         model.load_weights(
             self._get_weights_iterator(model_config, local_model_path, gguf_weights_map)
@@ -303,7 +378,8 @@ class GGUFModelLoader(BaseModelLoader):
         self, vllm_config: VllmConfig, model_config: ModelConfig
     ) -> nn.Module:
         device_config = vllm_config.device_config
-        local_model_path = self._prepare_weights(model_config.model)
+        model_path = self._get_model_path_for_download(model_config)
+        local_model_path = self._prepare_weights(model_path)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
         if "lm_head.weight" in get_gguf_extra_tensor_names(

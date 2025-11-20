@@ -42,6 +42,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
+    is_gguf,
     parse_safetensors_file_metadata,
 )
 
@@ -647,11 +648,20 @@ def get_config(
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
+    gguf_quant_type = kwargs.pop("gguf_quant_type", None)
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        model = Path(model).parent
+    _is_gguf = is_gguf(model, gguf_quant_type)
+    if _is_gguf:
+        if check_gguf_file(model):
+            # Local GGUF file
+            kwargs["gguf_file"] = Path(model).name
+            model = Path(model).parent
+        elif gguf_quant_type:
+            # Remote GGUF - use repo_id for config loading
+            # The actual GGUF file will be downloaded later by GGUFModelLoader
+            pass
+        # For is_remote_gguf case, model is already repo_id:quant_type format
+        # but we need repo_id only for config, so it's handled below
 
     if config_format == "auto":
         try:
@@ -659,7 +669,7 @@ def get_config(
             # Transformers implementation.
             if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
-            elif is_gguf or file_or_path_exists(
+            elif _is_gguf or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
             ):
                 config_format = "hf"
@@ -699,7 +709,7 @@ def get_config(
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
-    if is_gguf:
+    if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
