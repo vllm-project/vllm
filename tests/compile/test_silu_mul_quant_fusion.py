@@ -5,9 +5,9 @@ import itertools
 import pytest
 import torch
 
-from vllm.compilation.rocm_aiter_fusion import RocmAiterSiluMulFp8GroupQuantFusionPass
 import vllm.envs as envs
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
+from vllm._aiter_ops import IS_AITER_FOUND
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.activation_quant_fusion import (
     FUSED_OPS,
@@ -17,6 +17,7 @@ from vllm.compilation.activation_quant_fusion import (
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.rocm_aiter_fusion import RocmAiterSiluMulFp8GroupQuantFusionPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -36,7 +37,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
-from vllm._aiter_ops import rocm_aiter_ops, IS_AITER_FOUND
+
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
 
@@ -127,6 +128,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def ops_in_model_after(self):
         return [FUSED_OPS[kNvfp4Quant]]
 
+
 class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
@@ -159,6 +161,7 @@ class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
     def ops_in_model_after(self):
         return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
 
+
 @pytest.mark.parametrize("num_tokens", [32, 64])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -166,7 +169,10 @@ class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
-    + [(TestSiluMulNvfp4QuantModel, False, False), (TestAiterSiluMulGroupFp8QuantModel, False, False)],
+    + [
+        (TestSiluMulNvfp4QuantModel, False, False),
+        (TestAiterSiluMulGroupFp8QuantModel, False, False),
+    ],
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
@@ -177,7 +183,11 @@ def test_fusion_silu_and_mul_quant(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    model_class: type[TestSiluMulFp8QuantModel | TestSiluMulNvfp4QuantModel | TestAiterSiluMulGroupFp8QuantModel],
+    model_class: type[
+        TestSiluMulFp8QuantModel
+        | TestSiluMulNvfp4QuantModel
+        | TestAiterSiluMulGroupFp8QuantModel
+    ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     cuda_force_torch: bool,
