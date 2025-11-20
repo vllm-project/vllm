@@ -187,7 +187,7 @@ class SchedulerConfig:
         # this config will not affect the computation graph.
         factors: list[Any] = []
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors({"factors": normalize_value(factors)})
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")

@@ -465,8 +465,9 @@ class ParallelConfig:
         This hash is also used for DP worker configuration validation
         to prevent hangs from mismatched collective communication patterns.
 
-        This is an opt-out hash: begin with every dataclass field on the config
-        and drop the `ignored_factors` listed below.
+        When adding new fields to this config, review `ignored_factors` to
+        decide whether they should be excluded. All other dataclass fields are
+        included automatically by the opt-out hashing scheme.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
@@ -501,7 +502,7 @@ class ParallelConfig:
         # Explicitly include backend affecting env factor as before
         factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors(factors)
 
     def __post_init__(self) -> None:

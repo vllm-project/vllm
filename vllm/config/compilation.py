@@ -167,7 +167,7 @@ class PassConfig:
         """
         factors = asdict(self)
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return InductorPass.hash_dict(factors)
 
     def __post_init__(self) -> None:
@@ -532,7 +532,7 @@ class CompilationConfig:
         factors = get_hash_factors(self, ignored_factors)
         factors["pass_config"] = self.pass_config.compute_hash()
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors(factors)
 
     def __repr__(self) -> str:

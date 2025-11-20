@@ -149,9 +149,9 @@ class CacheConfig:
 
     def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        WARNING: Whenever a new field is added to this config, review
+        `ignored_factors` to decide whether the field should be excluded.
+        All other dataclass fields participate in the hash automatically.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -183,7 +183,7 @@ class CacheConfig:
 
         factors = get_hash_factors(self, ignored_factors)
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors(factors)
 
     def metrics_info(self):

@@ -210,7 +210,7 @@ class MultiModalConfig:
             else None
         ]
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors({"factors": normalize_value(factors)})
 
     def get_limit_per_prompt(self, modality: str) -> int:

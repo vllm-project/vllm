@@ -26,7 +26,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
-HashResult = str | dict[str, object] | list[Any]
+HashResult = str | dict[str, object] | list[Any] | None
 
 
 def config(cls: ConfigT) -> ConfigT:

@@ -79,7 +79,7 @@ class KVTransferConfig:
         # this config will not affect the computation graph.
         factors: list[Any] = []
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors({"factors": normalize_value(factors)})
 
     def __post_init__(self) -> None:

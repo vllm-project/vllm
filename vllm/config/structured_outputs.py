@@ -58,7 +58,7 @@ class StructuredOutputsConfig:
         # this config will not affect the computation graph.
         factors: list[Any] = []
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors({"factors": normalize_value(factors)})
 
     @model_validator(mode="after")

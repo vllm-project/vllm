@@ -163,7 +163,7 @@ class SpeculativeConfig:
         # hidden states in addition to the final hidden state.
         factors.append(self.method == "eagle3")
         if return_factors:
-            return factors if factors else []
+            return factors or None
         return hash_factors({"factors": normalize_value(factors)})
 
     @staticmethod

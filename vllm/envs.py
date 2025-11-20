@@ -10,6 +10,8 @@ import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
+from vllm.config.utils import hash_factors, normalize_value
+
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
@@ -1610,8 +1612,6 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
     }
 
-    from vllm.config.utils import normalize_value
-
     factors: dict[str, object] = {}
     for factor, getter in environment_variables.items():
         if factor in ignored_factors:
@@ -1655,3 +1655,11 @@ def compile_factors() -> dict[str, object]:
         factors[var] = normalize_value(os.getenv(var))
 
     return factors
+
+
+def compute_hash(*, return_factors: bool = False):
+    """Return a canonical hash for the environment compile factors."""
+    factors = compile_factors()
+    if return_factors:
+        return factors if factors else None
+    return hash_factors(factors)
