@@ -94,7 +94,10 @@ def test_cpu_offloading(cpu_block_size: int) -> None:
 
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
-        gpu_memory_utilization=0.5,
+        # Reserve more GPU memory so the KV cache has enough room for the
+        # model's 131072-token context. 0.9 still leaves headroom for weights
+        # while giving the cache ~4 GiB on a 12 GB card.
+        gpu_memory_utilization=0.9,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
     )
