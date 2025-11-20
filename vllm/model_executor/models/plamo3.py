@@ -170,8 +170,7 @@ class Plamo3AttentionMixer(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         set_weight_attrs(
