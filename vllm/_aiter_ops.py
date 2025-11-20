@@ -7,8 +7,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.import_utils import has_aiter
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 # `find_spec` is not torch.compile compatible.
 # In cases where aiter availability might have

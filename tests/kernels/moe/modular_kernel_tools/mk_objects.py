@@ -41,11 +41,11 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import (
+    has_aiter,
     has_deep_ep,
     has_deep_gemm,
     has_mori,
     has_pplx,
-    has_aiter,
 )
 
 
@@ -520,7 +520,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
-    elif cutlass_fp8_supported() and fused_experts_type.__name__ == "CutlassBatchedExpertsFp8":
+    elif (
+        cutlass_fp8_supported()
+        and fused_experts_type.__name__ == "CutlassBatchedExpertsFp8"
+    ):
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
@@ -541,7 +544,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
-    elif has_flashinfer_cutlass_fused_moe() and fused_experts_type.__name__ == "FlashInferExperts":
+    elif (
+        has_flashinfer_cutlass_fused_moe()
+        and fused_experts_type.__name__ == "FlashInferExperts"
+    ):
         kwargs = {
             "out_dtype": moe.in_dtype,
             "ep_rank": moe.ep_rank,
