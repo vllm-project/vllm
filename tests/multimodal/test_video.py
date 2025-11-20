@@ -18,6 +18,7 @@ from .utils import cosine_similarity, create_video_from_image, normalize_image
 
 pytestmark = pytest.mark.cpu_test
 
+ASSETS_DIR = Path(__file__).parent / "assets"
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
@@ -140,3 +141,39 @@ def test_opencv_video_io_colorspace(is_color: bool, fourcc: str, ext: str):
             )
             assert np.sum(np.isnan(sim)) / sim.size < 0.001
             assert np.nanmean(sim) > 0.99
+
+
+def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
+    """
+    Regression test for handling videos with broken frames.
+    This test uses a pre-corrupted video file (assets/corrupted.mp4) that
+    contains broken/unreadable frames to verify the video loader handles
+    them gracefully without crashing and returns accurate metadata.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Load the pre-corrupted video file that contains broken frames
+        corrupted_video_path = ASSETS_DIR / "corrupted.mp4"
+
+        with open(corrupted_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        frames, metadata = loader.load_bytes(video_data, num_frames=-1)
+
+        # Verify metadata consistency:
+        # frames_indices must match actual loaded frames
+        assert frames.shape[0] == len(metadata["frames_indices"]), (
+            f"Frames array size must equal frames_indices length. "
+            f"Got {frames.shape[0]} frames but "
+            f"{len(metadata['frames_indices'])} indices"
+        )
+
+        # Verify that broken frames were skipped:
+        # loaded frames should be less than total
+        assert frames.shape[0] < metadata["total_num_frames"], (
+            f"Should load fewer frames than total due to broken frames. "
+            f"Expected fewer than {metadata['total_num_frames']} frames, "
+            f"but loaded {frames.shape[0]} frames"
+        )
