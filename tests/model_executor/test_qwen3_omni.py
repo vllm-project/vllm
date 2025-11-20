@@ -8,7 +8,8 @@ from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
 
-# Helper function to print input IDs with coalesced audio/video tokens. 
+
+# Helper function to print input IDs with coalesced audio/video tokens.
 def print_input_ids(input_ids):
     """
     Print input IDs, compressing consecutive special tokens.
@@ -87,24 +88,28 @@ def mock_tokenizer():
     """Create a mock tokenizer."""
     tokenizer = Mock()
     # Token IDs from https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct/blob/main/tokenizer_config.json
-    tokenizer.get_vocab = Mock(return_value={
-        "<|audio_pad|>": 151675,
-        "<|video_pad|>": 151656,
-        "<|image_pad|>": 151655,
-        "<|audio_start|>": 151669,
-        "<|audio_end|>": 151670,
-        "<|vision_start|>": 151652,
-        "<|vision_end|>": 151653,
-    })
-    tokenizer.encode = Mock(side_effect=lambda x: {
-        "<|vision_start|>": [151652],
-        "<|vision_end|>": [151653],
-        "<|audio_start|>": [151669],
-        "<|audio_end|>": [151670],
-        "<|audio_pad|>": [151675],
-        "<|image_pad|>": [151655],
-        "<|video_pad|>": [151656],
-    }.get(x, [0]))
+    tokenizer.get_vocab = Mock(
+        return_value={
+            "<|audio_pad|>": 151675,
+            "<|video_pad|>": 151656,
+            "<|image_pad|>": 151655,
+            "<|audio_start|>": 151669,
+            "<|audio_end|>": 151670,
+            "<|vision_start|>": 151652,
+            "<|vision_end|>": 151653,
+        }
+    )
+    tokenizer.encode = Mock(
+        side_effect=lambda x: {
+            "<|vision_start|>": [151652],
+            "<|vision_end|>": [151653],
+            "<|audio_start|>": [151669],
+            "<|audio_end|>": [151670],
+            "<|audio_pad|>": [151675],
+            "<|image_pad|>": [151655],
+            "<|video_pad|>": [151656],
+        }.get(x, [0])
+    )
     tokenizer.vision_bos_token = "<|vision_start|>"
     tokenizer.vision_eos_token = "<|vision_end|>"
     tokenizer.audio_bos_token = "<|audio_start|>"
@@ -152,7 +157,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     # Test parameters from reference video
     # https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4
     audio_len = 85
-    video_grid_thw = [6, 36, 64] 
+    video_grid_thw = [6, 36, 64]
     video_second_per_grid_t = 2.0
 
     # Call the method
@@ -185,7 +190,9 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     audio_count = updates.count(audio_token_id)
     video_count = updates.count(video_token_id)
 
-    assert audio_count == audio_len, f"Expected {audio_len} audio tokens, got {audio_count}"
+    assert audio_count == audio_len, (
+        f"Expected {audio_len} audio tokens, got {audio_count}"
+    )
 
     # Calculate expected video token count
     spatial_merge_size = mock_qwen3_omni_config.vision_config.spatial_merge_size
