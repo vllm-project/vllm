@@ -431,3 +431,77 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 
     with pytest.raises(ValueError):
         _, _ = await connector.fetch_video_async(disallowed_url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+async def test_fetch_video_direct_url_loading(video_url: str):
+    """Test direct URL loading produces valid results."""
+    connector_direct = MediaConnector(
+        media_io_kwargs={"video": {"direct_url_loading": True}}
+    )
+    connector_bytes = MediaConnector(
+        media_io_kwargs={"video": {"direct_url_loading": False}}
+    )
+
+    video_direct, meta_direct = connector_direct.fetch_video(video_url)
+    video_bytes, meta_bytes = connector_bytes.fetch_video(video_url)
+    video_async, meta_async = await connector_direct.fetch_video_async(video_url)
+
+    # Verify frames were loaded
+    assert video_direct.shape[0] > 0, "Direct URL loading should produce frames"
+    assert video_bytes.shape[0] > 0, "Bytes loading should produce frames"
+    assert video_async.shape[0] > 0, "Async direct URL loading should produce frames"
+
+    # Verify metadata is present
+    assert "total_num_frames" in meta_direct
+    assert "fps" in meta_direct
+    assert "duration" in meta_direct
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+async def test_fetch_video_direct_url_with_dynamic_backend(
+    video_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Test direct URL loading with opencv_dynamic backend."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+        connector = MediaConnector(
+            media_io_kwargs={
+                "video": {"direct_url_loading": True, "fps": 2, "max_duration": 60}
+            }
+        )
+
+        video_sync, metadata_sync = connector.fetch_video(video_url)
+        video_async, metadata_async = await connector.fetch_video_async(video_url)
+
+        assert video_sync.shape[0] > 0
+        assert video_async.shape[0] > 0
+        assert np.array_equal(video_sync, video_async)
+        assert metadata_sync == metadata_async
+        assert metadata_sync["video_backend"] == "opencv_dynamic"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+async def test_fetch_video_direct_url_respects_domain_restrictions(video_url: str):
+    """Test that direct URL loading respects allowed_media_domains."""
+    connector = MediaConnector(
+        media_io_kwargs={"video": {"direct_url_loading": True}},
+        allowed_media_domains=["www.bogotobogo.com", "github.com"],
+    )
+
+    # These should work
+    video_sync, _ = connector.fetch_video(video_url)
+    video_async, _ = await connector.fetch_video_async(video_url)
+    assert video_sync.shape[0] > 0
+    assert video_async.shape[0] > 0
+
+    # This should fail
+    disallowed_url = "https://example.com/video.mp4"
+    with pytest.raises(ValueError, match="allowed domains"):
+        connector.fetch_video(disallowed_url)
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        await connector.fetch_video_async(disallowed_url)
