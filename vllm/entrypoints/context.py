@@ -506,6 +506,8 @@ class StreamingHarmonyContext(HarmonyContext):
         self.encoding = get_encoding()
         self.last_tok = None
         self.first_tok_of_message = True
+        # Track how many tokens have been processed to avoid buggy token search
+        self.processed_token_count = 0
 
     @property
     def messages(self) -> list:
@@ -524,6 +526,7 @@ class StreamingHarmonyContext(HarmonyContext):
         token_ids = output.outputs[0].token_ids
         for tok in token_ids:
             self.parser.process(tok)
+            self.processed_token_count += 1
         self._update_decode_token_usage(output)
 
         # For streaming, update previous turn when message is complete
@@ -551,6 +554,7 @@ class StreamingHarmonyContext(HarmonyContext):
         toks = self.encoding.render(msg)
         for tok in toks:
             self.parser.process(tok)
+            self.processed_token_count += 1
         self.last_tok = toks[-1]
         # Add tool output messages from parser to self._messages
         # (same pattern as append_output)
@@ -565,17 +569,15 @@ class StreamingHarmonyContext(HarmonyContext):
         return self.last_tok in self.encoding.stop_tokens_for_assistant_actions()
 
     def render_for_completion(self) -> list[int]:
-        # now this list of tokens as next turn's starting tokens
-        # `<|start|>assistant`,
-        # we need to process them in parser.
+        # Render all messages including the new turn start tokens
+        # e.g. [...previous tokens...] [<|start|>] [assistant]
         rendered_tokens = super().render_for_completion()
 
-        last_n = -1
-        to_process = []
-        while rendered_tokens[last_n] != self.last_tok:
-            to_process.append(rendered_tokens[last_n])
-            last_n -= 1
-        for tok in reversed(to_process):
+        # Process only the NEW tokens that we haven't seen before
+        # This avoids the buggy token search that could match at wrong positions
+        to_process = rendered_tokens[self.processed_token_count :]
+        for tok in to_process:
             self.parser.process(tok)
+            self.processed_token_count += 1
 
         return rendered_tokens
