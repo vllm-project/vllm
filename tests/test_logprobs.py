@@ -103,6 +103,44 @@ def test_append_logprobs_for_next_position_flat() -> None:
     assert logprobs.decoded_tokens == ["1", "2", "3"]
 
 
+def test_append_logprobs_for_next_position_rank_sequence_list() -> None:
+    logprobs = create_sample_logprobs(flat_logprobs=False)
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[10, 11],
+        logprobs=[0.5, 0.6],
+        decoded_tokens=["10", "11"],
+        rank=[7, 9],
+        num_logprobs=2,
+    )
+    assert isinstance(logprobs, list)
+    assert logprobs == [
+        {
+            10: Logprob(logprob=0.5, rank=7, decoded_token="10"),
+            11: Logprob(logprob=0.6, rank=9, decoded_token="11"),
+        }
+    ]
+
+
+def test_append_logprobs_for_next_position_rank_sequence_flat() -> None:
+    logprobs = create_sample_logprobs(flat_logprobs=True)
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[10, 11, 12],
+        logprobs=[0.5, 0.6, 0.7],
+        decoded_tokens=["10", "11", "12"],
+        rank=[3, 4, 8],
+        num_logprobs=3,
+    )
+    assert isinstance(logprobs, FlatLogprobs)
+    assert logprobs.start_indices == [0]
+    assert logprobs.end_indices == [3]
+    assert logprobs.token_ids == [10, 11, 12]
+    assert logprobs.logprobs == [0.5, 0.6, 0.7]
+    assert logprobs.ranks == [3, 4, 8]
+    assert logprobs.decoded_tokens == ["10", "11", "12"]
+
+
 LOGPROBS_ONE_POSITION_0: LogprobsOnePosition = {
     1: Logprob(logprob=0.1, rank=10, decoded_token="10")
 }
@@ -208,3 +246,37 @@ def test_flat_logprobs_access() -> None:
     assert logprobs_last2.logprobs == [0.4, 0.5, 0.6, 0.1]
     assert logprobs_last2.ranks == [40, 50, 60, 10]
     assert logprobs_last2.decoded_tokens == ["40", "50", "60", "10"]
+
+
+def test_flat_logprobs_empty_slice() -> None:
+    logprobs = FlatLogprobs()
+    logprobs.extend([LOGPROBS_ONE_POSITION_1, LOGPROBS_ONE_POSITION_2])
+
+    empty_slice = logprobs[1:1]
+
+    assert isinstance(empty_slice, FlatLogprobs)
+    assert len(empty_slice) == 0
+    assert empty_slice.start_indices == []
+    assert empty_slice.end_indices == []
+    assert empty_slice.token_ids == []
+    assert empty_slice.logprobs == []
+    assert empty_slice.ranks == []
+    assert empty_slice.decoded_tokens == []
+
+
+def test_append_logprobs_rank_length_mismatch() -> None:
+    """Test that ValueError is raised when rank length doesn't match token_ids"""
+    logprobs = create_sample_logprobs(flat_logprobs=True)
+    try:
+        append_logprobs_for_next_position(
+            logprobs,
+            token_ids=[10, 11],
+            logprobs=[0.5, 0.6],
+            decoded_tokens=["10", "11"],
+            rank=[7],
+            num_logprobs=2,
+        )
+        assert False, "Expected ValueError but no exception was raised"
+    except ValueError as e:
+        assert "Expected 2 ranks" in str(e)
+        assert "got 1" in str(e)

@@ -75,7 +75,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
         self,
         token_ids: list[int],
         logprobs: list[float],
-        ranks: itertools.chain[int],
+        ranks: Iterable[int | None],
         decoded_tokens: Iterable[str | None],
     ) -> None:
         """
@@ -119,13 +119,19 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
                 for i in range(self.start_indices[index], self.end_indices[index])
             }
         elif isinstance(index, slice):
-            min_index = self.start_indices[index][0]
-            max_index = self.end_indices[index][-1]
+            start_indices = self.start_indices[index]
+            end_indices = self.end_indices[index]
+
+            if not start_indices:
+                return FlatLogprobs()
+
+            min_index = start_indices[0]
+            max_index = end_indices[-1]
             return FlatLogprobs(
                 # Shift updated start_indices and end_indices to
                 # be 0-indexed
-                start_indices=[i - min_index for i in self.start_indices[index]],
-                end_indices=[i - min_index for i in self.end_indices[index]],
+                start_indices=[i - min_index for i in start_indices],
+                end_indices=[i - min_index for i in end_indices],
                 token_ids=self.token_ids[min_index:max_index],
                 logprobs=self.logprobs[min_index:max_index],
                 ranks=self.ranks[min_index:max_index],
@@ -177,17 +183,29 @@ def append_logprobs_for_next_position(
     token_ids: list[int],
     logprobs: list[float],
     decoded_tokens: Iterable[str | None],
-    rank: int,
+    rank: int | Iterable[int],
     num_logprobs: int,
 ) -> None:
     """Appends logprobs for the next position"""
     if num_logprobs == -1:
         num_logprobs = len(logprobs)
-    # We do not need a special case for the sampled token
-    # being in the topk, since inserting duplicated data
-    # into a dictionary twice is the same as doing it once.
-    topk_ranks = range(1, num_logprobs + 1)
-    ranks = itertools.chain((rank,), topk_ranks)
+
+    # Accept either a single sampled-token rank (legacy path) or
+    # a full sequence of ranks (e.g., prompt logprobs already provide
+    # per-token ranks). When provided, enforce 1:1 with token_ids.
+    if isinstance(rank, (list, tuple)):
+        ranks = list(rank)
+        if len(ranks) != len(token_ids):
+            raise ValueError(
+                f"Expected {len(token_ids)} ranks for {len(token_ids)} token_ids, "
+                f"got {len(ranks)}."
+            )
+    else:
+        # We do not need a special case for the sampled token
+        # being in the topk, since inserting duplicated data
+        # into a dictionary twice is the same as doing it once.
+        topk_ranks = range(1, num_logprobs + 1)
+        ranks = itertools.chain((rank,), topk_ranks)
 
     if isinstance(request_logprobs, FlatLogprobs):
         request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
