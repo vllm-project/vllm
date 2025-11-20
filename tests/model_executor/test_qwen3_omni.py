@@ -169,7 +169,13 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     )
 
     # Updated input ids should align with HF implementation.
-    # 151669, <|video_pad|> * 576, <|audio_pad|> * 25, <|video_pad|> * 576, <|audio_pad|> * 25, <|video_pad|> * 576, <|audio_pad|> * 25, <|video_pad|> * 576, <|audio_pad|> * 10, <|video_pad|> * 1152, 151670
+    # 151669, 
+    # <|video_pad|> * 576, <|audio_pad|> * 25, 
+    # <|video_pad|> * 576, <|audio_pad|> * 25, 
+    # <|video_pad|> * 576, <|audio_pad|> * 25, 
+    # <|video_pad|> * 576, <|audio_pad|> * 10, 
+    # <|video_pad|> * 1152, 
+    # 151670
     print_input_ids(updates)
 
     # Verify structure
