@@ -324,7 +324,6 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -426,7 +425,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1436,7 +1435,7 @@ class GPUModelRunner(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.dcp_kv_cache_interleave_size,
+                self.parallel_config.cp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
@@ -2352,24 +2351,6 @@ class GPUModelRunner(
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-
-            # Generate custom attention masks for models that require them.
-            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
-            # Check mm_features (mm_embeds is empty during decode).
-            has_mm_features = any(
-                req_state.mm_features for req_state in self.requests.values()
-            )
-            if (
-                self.uses_custom_attention_masks
-                and has_mm_features
-                and hasattr(self.model, "generate_attention_masks")
-            ):
-                mask_kwargs = self.model.generate_attention_masks(
-                    self.input_ids.gpu[:num_scheduled_tokens],
-                    self.positions.gpu[:num_scheduled_tokens],
-                    mask_dtype=self.model.dtype,
-                )
-                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.

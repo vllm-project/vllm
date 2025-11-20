@@ -191,7 +191,7 @@ def apply_rotary_pos_emb(
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
     if is_flash_attn_backend and not current_platform.is_xpu():
-        from flash_attn.layers.rotary import apply_rotary_emb
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         apply_rotary_emb_func = apply_rotary_emb
     else:
