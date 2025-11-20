@@ -197,7 +197,10 @@ class DbrxAttention(nn.Module):
         self.head_dim = self.d_model // self.total_num_heads
         self.total_num_kv_heads = config.attn_config.kv_n_heads
         self.clip_qkv = config.attn_config.clip_qkv
-        self.rope_theta = config.attn_config.rope_theta
+        rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": int(config.attn_config.rope_theta),
+        }
         self.max_position = config.max_seq_len
 
         # pylint: disable=invalid-name
@@ -221,7 +224,7 @@ class DbrxAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position,
-            base=int(self.rope_theta),
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
 
