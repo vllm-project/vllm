@@ -52,3 +52,17 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Docs
 /docs @hmellor
 mkdocs.yaml @hmellor
+
+# TT-Fork Specific
+/examples/offline_inference_tt.py @skhorasganiTT
+/examples/server_example_tt.py @skhorasganiTT
+/tt_metal @skhorasganiTT
+/vllm/platforms/tt.py @skhorasganiTT
+/vllm/model_executor/model_loader/tt_loader.py @skhorasganiTT
+/vllm/worker/tt_worker.py @skhorasganiTT
+/vllm/worker/tt_model_runner.py @skhorasganiTT @sraizada-tt @tchedaTT
+/vllm/v1/worker/tt_worker.py @skhorasganiTT
+/vllm/v1/worker/tt_model_runner.py @skhorasganiTT
+/vllm/v1/worker/tt_input_batch.py @skhorasganiTT
+/vllm/v1/core/sched/ascend_scheduler.py @skhorasganiTT
+/vllm/v1/engine/core.py @skhorasganiTT
