@@ -32,6 +32,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   #define stride_tag
 #endif
 
+  ops.def(
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
+      "y_q, Tensor! y_s,"
+      "bool use_ue8m0) -> ()");
+  ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
+           &persistent_masked_m_silu_mul_quant);
+
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
@@ -168,12 +175,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
+  // Function for fused QK Norm and RoPE
+  ops.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids) -> ()");
+  ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
       "Tensor output_mask, Tensor repetition_penalties) -> ()");
   ops.impl("apply_repetition_penalties_", torch::kCUDA,
            &apply_repetition_penalties_);
+
+  // Optimized top-k per row operation
+  ops.def(
+      "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1) -> ()");
+  ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, int numRows, "
+      "int stride0, int stride1) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -207,16 +235,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
-
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key
-  // (supports multiple loras).
-  ops.def(
-      "batched_rotary_embedding(Tensor positions, Tensor! query,"
-      "                         Tensor!? key, int head_size,"
-      "                         Tensor cos_sin_cache, bool is_neox,"
-      "                         int rot_dim,"
-      "                         Tensor cos_sin_cache_offsets) -> ()");
-  ops.impl("batched_rotary_embedding", torch::kCUDA, &batched_rotary_embedding);
 
   // Quantization ops
 #ifndef USE_ROCM
@@ -394,7 +412,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()",
       {stride_tag});
-  ops.impl("cutlass_fp4_group_mm", torch::kCUDA, &cutlass_fp4_group_mm);
+  // conditionally compiled so impl registration is in source file
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -507,13 +525,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
   ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
 
-  // CUTLASS MLA decode
-  ops.def(
-      "cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                   Tensor page_table, float scale) -> ()");
-  ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
-
   // SM100 CUTLASS MLA decode
   ops.def(
       "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
@@ -554,7 +565,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // to prevent the meta function registry.
   ops.def(
       "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, int bit) "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "use_v2_format, int bit) "
       "-> Tensor",
       {stride_tag});
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
@@ -607,8 +619,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
+      "int pad_slot_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  // Hadamard transforms
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
 #ifndef USE_ROCM
   // Compute per-token-group FP8 quantized tensor and scaling factor.
@@ -714,6 +733,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
+
+  cache_ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
+      "slot_mapping, "
+      "int quant_block_size, str kv_cache_dtype) -> ()");
+  cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
+                 &indexer_k_quant_and_cache);
+
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
+                 &cp_gather_indexer_k_quant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

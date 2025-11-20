@@ -41,8 +41,6 @@ which indicates that the logits processor is running. However, on a non-"cuda"
 device, the first and third requests would not repeat the same token.
 """
 
-from typing import Optional
-
 import torch
 
 from vllm import LLM, SamplingParams
@@ -79,6 +77,14 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
     info about the device type"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token = params.extra_args and params.extra_args.get("target_token")
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"`target_token` has to be an integer, got {target_token}."
+            )
+
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
@@ -91,7 +97,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 
@@ -114,13 +120,6 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
             )
             is None
         ):
-            return None
-        if not isinstance(target_token, int):
-            logger.warning(
-                "target_token value %s is not int; not applying logits"
-                " processor to request.",
-                target_token,
-            )
             return None
         return DummyPerReqLogitsProcessor(target_token)
 

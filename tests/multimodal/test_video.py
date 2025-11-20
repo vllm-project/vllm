@@ -12,11 +12,13 @@ from PIL import Image
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.image import ImageMediaIO
-from vllm.multimodal.video import (VIDEO_LOADER_REGISTRY, VideoLoader,
-                                   VideoMediaIO)
+from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader, VideoMediaIO
 
 from .utils import cosine_similarity, create_video_from_image, normalize_image
 
+pytestmark = pytest.mark.cpu_test
+
+ASSETS_DIR = Path(__file__).parent / "assets"
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
@@ -24,7 +26,6 @@ FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_1")
 class TestVideoLoader1(VideoLoader):
-
     @classmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         return FAKE_OUTPUT_1
@@ -32,7 +33,6 @@ class TestVideoLoader1(VideoLoader):
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_2")
 class TestVideoLoader2(VideoLoader):
-
     @classmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         return FAKE_OUTPUT_2
@@ -55,13 +55,10 @@ def test_video_loader_type_doesnt_exist():
 
 @VIDEO_LOADER_REGISTRY.register("assert_10_frames_1_fps")
 class Assert10Frames1FPSVideoLoader(VideoLoader):
-
     @classmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   fps: float = -1.0,
-                   **kwargs) -> npt.NDArray:
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, fps: float = -1.0, **kwargs
+    ) -> npt.NDArray:
         assert num_frames == 10, "bad num_frames"
         assert fps == 1.0, "bad fps"
         return FAKE_OUTPUT_2
@@ -77,11 +74,8 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
         _ = videoio.load_bytes(b"test")
 
         videoio = VideoMediaIO(
-            imageio, **{
-                "num_frames": 10,
-                "fps": 1.0,
-                "not_used": "not_used"
-            })
+            imageio, **{"num_frames": 10, "fps": 1.0, "not_used": "not_used"}
+        )
         _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
@@ -104,8 +98,9 @@ def test_opencv_video_io_colorspace(is_color: bool, fourcc: str, ext: str):
     Test all functions that use OpenCV for video I/O return RGB format.
     Both RGB and grayscale videos are tested.
     """
-    image_path = get_vllm_public_assets(filename="stop_sign.jpg",
-                                        s3_prefix="vision_model_images")
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
     image = Image.open(image_path)
     with tempfile.TemporaryDirectory() as tmpdir:
         if not is_color:
@@ -125,21 +120,60 @@ def test_opencv_video_io_colorspace(is_color: bool, fourcc: str, ext: str):
 
         frames = video_to_ndarrays(video_path)
         for frame in frames:
-            sim = cosine_similarity(normalize_image(np.array(frame)),
-                                    normalize_image(np.array(image)))
+            sim = cosine_similarity(
+                normalize_image(np.array(frame)), normalize_image(np.array(image))
+            )
             assert np.sum(np.isnan(sim)) / sim.size < 0.001
             assert np.nanmean(sim) > 0.99
 
         pil_frames = video_to_pil_images_list(video_path)
         for frame in pil_frames:
-            sim = cosine_similarity(normalize_image(np.array(frame)),
-                                    normalize_image(np.array(image)))
+            sim = cosine_similarity(
+                normalize_image(np.array(frame)), normalize_image(np.array(image))
+            )
             assert np.sum(np.isnan(sim)) / sim.size < 0.001
             assert np.nanmean(sim) > 0.99
 
         io_frames, _ = VideoMediaIO(ImageMediaIO()).load_file(Path(video_path))
         for frame in io_frames:
-            sim = cosine_similarity(normalize_image(np.array(frame)),
-                                    normalize_image(np.array(image)))
+            sim = cosine_similarity(
+                normalize_image(np.array(frame)), normalize_image(np.array(image))
+            )
             assert np.sum(np.isnan(sim)) / sim.size < 0.001
             assert np.nanmean(sim) > 0.99
+
+
+def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
+    """
+    Regression test for handling videos with broken frames.
+    This test uses a pre-corrupted video file (assets/corrupted.mp4) that
+    contains broken/unreadable frames to verify the video loader handles
+    them gracefully without crashing and returns accurate metadata.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Load the pre-corrupted video file that contains broken frames
+        corrupted_video_path = ASSETS_DIR / "corrupted.mp4"
+
+        with open(corrupted_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        frames, metadata = loader.load_bytes(video_data, num_frames=-1)
+
+        # Verify metadata consistency:
+        # frames_indices must match actual loaded frames
+        assert frames.shape[0] == len(metadata["frames_indices"]), (
+            f"Frames array size must equal frames_indices length. "
+            f"Got {frames.shape[0]} frames but "
+            f"{len(metadata['frames_indices'])} indices"
+        )
+
+        # Verify that broken frames were skipped:
+        # loaded frames should be less than total
+        assert frames.shape[0] < metadata["total_num_frames"], (
+            f"Should load fewer frames than total due to broken frames. "
+            f"Expected fewer than {metadata['total_num_frames']} frames, "
+            f"but loaded {frames.shape[0]} frames"
+        )

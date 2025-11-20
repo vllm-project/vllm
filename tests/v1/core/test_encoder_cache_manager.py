@@ -1,16 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+
+pytestmark = pytest.mark.cpu_test
 
 
 # ------------------ Mock Classes ------------------ #
 class MockRequest:
-
     def __init__(self, request_id, mm_hashes, token_counts):
         self.request_id = request_id
-        self.mm_hashes = mm_hashes
         self._token_counts = token_counts
+        self.mm_features = []
+        for i, mm_hash in enumerate(mm_hashes):
+            feature = MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=mm_hash,
+                mm_position=PlaceholderRange(offset=0, length=self._token_counts[i]),
+            )
+            self.mm_features.append(feature)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         return self._token_counts[input_id]
@@ -154,8 +165,7 @@ def test_schedule_request_multi_images_respect_space_limit():
     num_tokens_to_schedule += req.get_num_encoder_tokens(0)
     compute_budget -= req.get_num_encoder_tokens(0)
 
-    assert not manager.can_allocate(req, 1, compute_budget,
-                                    num_tokens_to_schedule)
+    assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
 
 
 def test_schedule_request_multi_images_respect_compute_limit():
@@ -167,5 +177,4 @@ def test_schedule_request_multi_images_respect_compute_limit():
     num_tokens_to_schedule += req.get_num_encoder_tokens(0)
     compute_budget -= req.get_num_encoder_tokens(0)
 
-    assert not manager.can_allocate(req, 1, compute_budget,
-                                    num_tokens_to_schedule)
+    assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
