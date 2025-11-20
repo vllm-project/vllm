@@ -1364,18 +1364,23 @@ class EngineArgs:
         - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
         """
 
-        # Warn if VLLM_ATTENTION_BACKEND env var is used instead of CLI arg
-        if envs.is_set("VLLM_ATTENTION_BACKEND"):
-            logger.warning(
-                "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
-                "and will be removed in a future release. "
-                "Please use --attention-backend CLI argument instead."
-            )
-
-        # Handle backend: prefer CLI arg, fall back to env var
-        backend = self.attention_backend
-        if backend is None:
+        if self.attention_backend is not None:
+            backend = self.attention_backend
+            if envs.is_set("VLLM_ATTENTION_BACKEND"):
+                logger.warning(
+                    "Both --attention-backend CLI argument and "
+                    "VLLM_ATTENTION_BACKEND environment variable are set. "
+                    "--attention-backend will take precedence. VLLM_ATTENTION_BACKEND "
+                    "is deprecated and will be removed in a future release."
+                )
+        else:
             backend = envs.VLLM_ATTENTION_BACKEND
+            if envs.is_set("VLLM_ATTENTION_BACKEND"):
+                logger.warning(
+                    "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
+                    "and will be removed in a future release. "
+                    "Please use --attention-backend CLI argument instead."
+                )
 
         return AttentionConfig(backend=backend)
 

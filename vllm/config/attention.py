@@ -75,11 +75,6 @@ class AttentionConfig:
     def __post_init__(self) -> None:
         from vllm import envs
 
-        # Apply environment variable overrides only if explicitly set
-        # Backend env var fallback
-        if envs.is_set("VLLM_ATTENTION_BACKEND") and self.backend is None:
-            self.backend = envs.VLLM_ATTENTION_BACKEND
-
         if envs.is_set("VLLM_FLASH_ATTN_VERSION"):
             self.flash_attn_version = envs.VLLM_FLASH_ATTN_VERSION
 
