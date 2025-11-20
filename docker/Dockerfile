@@ -523,4 +523,3 @@ FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER ####################
-
