@@ -46,6 +46,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     paged_kv_last_page_len: torch.Tensor | None = None
     # The query indptr, shape : [num_decode + 1]
     qo_indptr: torch.Tensor | None = None
+    # The dtype of MLA out tensor
+    attn_out_dtype: torch.dtype = torch.bfloat16
 
 
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
@@ -71,6 +73,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
 
         self.compilation_config = vllm_config.compilation_config
+        self.decode_attn_out_dtype = vllm_config.model_config.dtype
         max_num_pages_per_req = cdiv(
             vllm_config.model_config.max_model_len, self.kv_cache_spec.block_size
         )
@@ -191,6 +194,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_last_page_len=paged_kv_last_page_len,
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            attn_out_dtype=self.decode_attn_out_dtype,
         )
 
         return attn_metadata
@@ -271,7 +275,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         o = torch.zeros(
-            B, self.num_heads, self.kv_lora_rank, dtype=torch.bfloat16, device=q.device
+            B, self.num_heads, self.kv_lora_rank, dtype=attn_metadata.decode.attn_out_dtype, device=q.device
         )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
