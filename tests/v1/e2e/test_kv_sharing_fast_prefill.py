@@ -17,7 +17,7 @@ from vllm.model_executor.models.registry import ModelRegistry
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import spawn_new_process_for_each_test
 
 # global seed
 SEED = 42
@@ -117,7 +117,7 @@ def cleanup(llm: LLM, compilation_config: CompilationConfig):
     cleanup_dist_env_and_memory()
 
 
-@fork_new_process_for_each_test
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
