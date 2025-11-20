@@ -227,7 +227,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self.vocab_size,
             )
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i] = []
+            valid_sampled_token_ids[i].clear()
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
