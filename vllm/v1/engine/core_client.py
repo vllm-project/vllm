@@ -589,21 +589,18 @@ class MPClient(EngineCoreClient):
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
             died = multiprocessing.connection.wait(sentinels)
-            
+
+            # the program exits before calling the gc,
+            # needs an explicit gc here to make sure the gc is done before the check
             gc.collect()
+
             _self = self_ref()
             if not _self or _self.resources.engine_dead:
                 return
-            
-            refs = gc.get_referrers(self_ref())
-            import inspect
-            for r in refs:
-                logger.error("Object referencing to client. object: %s", r)
 
-                # If r is a call frame: show info
-                if inspect.isframe(r):
-                    logger.error("Frame at: %s, locals: %s", 
-                                 r.f_code.co_name, r.f_locals.keys())
+            refs = gc.get_referrers(self_ref())
+            for r in refs:
+                logger.error("Object referencing to client. object: %s", r)                
 
             _self.resources.engine_dead = True
             proc_name = next(
