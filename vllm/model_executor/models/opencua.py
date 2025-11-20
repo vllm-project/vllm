@@ -513,10 +513,6 @@ class OpenCUAForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -524,11 +520,16 @@ class OpenCUAForConditionalGeneration(
 
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        for modality in mm_input_by_modality:
+        # Sort modalities to ensure a deterministic processing order.
+        for modality in sorted(mm_input_by_modality.keys()):
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
+            elif modality == "video":
+                video_embeddings = self._process_video_input(multimodal_input)
+                multimodal_embeddings += tuple(video_embeddings)
+        return multimodal_embeddings
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
