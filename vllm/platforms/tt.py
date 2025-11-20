@@ -167,9 +167,6 @@ class TTPlatform(Platform):
         """Raises if this request is unsupported on this platform"""
 
         if isinstance(params, SamplingParams):
-            if params.n != 1:
-                raise ValueError(
-                    f"Currently only supporting n=1 on {cls.device_name}.")
             if params.best_of is not None:
                 raise ValueError(
                     f"Currently not supporting best_of on {cls.device_name}")

@@ -594,16 +594,18 @@ def generate_tokens(
     for output in outputs:
         request_id = int(output.request_id) + 1
         prompt = output.prompt
-        generated_text = output.outputs[0].text
         num_tokens_prompt = len(output.prompt_token_ids)
-        num_tokens_output = len(output.outputs[0].token_ids)
-        if print_output:
-            prompt = _format_prompt_for_display(prompt)
+        if not print_output:
+            continue
+        formatted_prompt = _format_prompt_for_display(prompt)
+        for sample_idx, completion in enumerate(output.outputs):
+            generated_text = completion.text
+            num_tokens_output = len(completion.token_ids)
             print(
                 f"Prompt #{request_id} "
-                f"({num_tokens_prompt} tokens): {prompt!r}, "
-                "Generated text "
-                f"({num_tokens_output} tokens): {generated_text!r}\n"
+                f"({num_tokens_prompt} tokens), sample {sample_idx}: "
+                f"{formatted_prompt!r} -> {generated_text!r} "
+                f"({num_tokens_output} tokens)\n"
             )
 
 
@@ -643,17 +645,18 @@ async def generate_tokens_async(
     async for i, res in all_gens:
         request_id = res.request_id
         prompt = res.prompt
-        generated_text = res.outputs[0].text
         num_tokens_prompt = len(res.prompt_token_ids)
-        num_tokens_output = len(res.outputs[0].token_ids)
         if print_output and res.finished:
-            prompt = _format_prompt_for_display(prompt)
-            print(
-                f"Prompt {request_id} "
-                f"({num_tokens_prompt} tokens): {prompt!r}, "
-                "Generated text "
-                f"({num_tokens_output} tokens): {generated_text!r}\n"
-            )
+            formatted_prompt = _format_prompt_for_display(prompt)
+            for sample_idx, completion in enumerate(res.outputs):
+                generated_text = completion.text
+                num_tokens_output = len(completion.token_ids)
+                print(
+                    f"Prompt {request_id} "
+                    f"({num_tokens_prompt} tokens), sample {sample_idx}: "
+                    f"{formatted_prompt!r} -> {generated_text!r} "
+                    f"({num_tokens_output} tokens)\n"
+                )
 
 
 if __name__ == "__main__":
