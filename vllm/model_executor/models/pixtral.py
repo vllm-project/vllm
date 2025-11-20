@@ -73,6 +73,7 @@ from .vision import (
     resolve_visual_encoder_outputs,
 )
 
+# Note: vLLM does not install xformers by default.
 try:
     from xformers import ops as xops
 

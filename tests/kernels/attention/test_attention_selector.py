@@ -33,7 +33,7 @@ DEVICE_MLA_BACKENDS = {
 }
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
-    "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
+    "cuda": ["FLASHINFER", "FLASH_ATTN"],
     "hip": ["ROCM_ATTN"],
     "cpu": ["CPU_ATTN"],
 }
@@ -203,12 +203,6 @@ def test_env(
                         64, torch.float16, None, block_size, use_mla=use_mla
                     )
                     expected = "FLASHINFER"
-                    assert backend.get_name() == expected
-                elif name == "XFORMERS":
-                    backend = get_attn_backend(
-                        32, torch.float16, None, block_size, use_mla=use_mla
-                    )
-                    expected = "XFORMERS"
                     assert backend.get_name() == expected
                 elif name == "FLASH_ATTN":
                     backend = get_attn_backend(

@@ -100,18 +100,9 @@ to warm it up so that future builds are faster.
 
 ## Update dependencies
 
-Several vLLM dependencies like xFormers depend on PyTorch and need
-to be updated accordingly. Rather than waiting for all of them to publish new
-releases (which would take too much time), they can be built from
-source to unblock the update process.
-
-### xFormers
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
-```
+Some vLLM dependencies depend on PyTorch and need to be updated accordingly.
+Rather than waiting for all of them to publish new releases (which would take
+too much time), they can be built from source to unblock the update process.
 
 ## Update all the different vLLM platforms
 
