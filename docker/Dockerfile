@@ -484,7 +484,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.0'
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.0' 'grpcio>=1.75.1'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
@@ -497,5 +497,5 @@ ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
-ENTRYPOINT ["vllm", "serve"]
+#ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER ####################
