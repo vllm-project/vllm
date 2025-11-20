@@ -37,6 +37,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
+ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -122,6 +123,15 @@ WORKDIR /workspace/vllm
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    remove_packages_not_supported_on_aarch64() { \
+      case "$(uname -m)" in \
+        aarch64|arm64) \
+          sed -i '/decord/d' requirements/cpu-test.in; \
+          sed -i '/terratorch/d' requirements/cpu-test.in; \
+          ;; \
+      esac; \
+    }; \
+    remove_packages_not_supported_on_aarch64 && \
     sed -i 's/^torch==.*/torch==2.8.0/g' requirements/cpu-test.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
