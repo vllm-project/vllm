@@ -9,15 +9,13 @@ import socket
 import threading
 import uuid
 
+import aiohttp
 import msgpack
 import zmq
 from quart import Quart, make_response, request
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-import aiohttp
-
 prefill_instances = []
 decode_instances = []
 request_nums = 0
@@ -69,15 +67,21 @@ def _listen_for_register(hostname, port):
             data = msgpack.loads(msg)
             if data["type"] == "HELLO":
                 pass
-            elif data["type"] == "register" and data["role"] == "P":
-                if data["request_address"] not in prefill_instances:
-                    with _list_lock:
-                        _append_whole_dict_unique(prefill_instances, data)
+            elif (
+                data["type"] == "register"
+                and data["role"] == "P"
+                and data["request_address"] not in prefill_instances
+            ):
+                with _list_lock:
+                    _append_whole_dict_unique(prefill_instances, data)
 
-            elif data["type"] == "register" and data["role"] == "D":
-                if data["request_address"] not in decode_instances:
-                    with _list_lock:
-                        _append_whole_dict_unique(decode_instances, data)
+            elif (
+                data["type"] == "register"
+                and data["role"] == "D"
+                and data["request_address"] not in decode_instances
+            ):
+                with _list_lock:
+                    _append_whole_dict_unique(decode_instances, data)
 
 
 def start_service_discovery(hostname, port):
@@ -133,7 +137,7 @@ async def send_request_to_prefill(
 
             else:
                 raise RuntimeError(
-                    "send_request_to_prefill response.status != 200,response.statuus = ",
+                    "send_request_to_prefill response.status != 200response.status = ",
                     response.status,
                 )
 
