@@ -61,7 +61,11 @@ class FlashAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
-        if model_config and model_config.is_hybrid:
+        cache_config = vllm_config.cache_config
+        if model_config.is_hybrid and (
+            cache_config.mamba_ssm_cache_dtype == "float32"
+            or cache_config.mamba_cache_dtype == "float32"
+        ):
             # NOTE(tdoublep): while in principle, FA supports
             # MultipleOf(16), these are the block sizes that do not
             # suffer from the NaN propagation problem described here:
