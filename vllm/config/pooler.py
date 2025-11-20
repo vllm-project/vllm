@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from typing import Any
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -87,7 +86,7 @@ class PoolerConfig:
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -102,8 +101,9 @@ class PoolerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
 
 def get_use_activation(o: object):

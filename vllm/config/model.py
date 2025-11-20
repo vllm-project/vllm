@@ -17,7 +17,13 @@ import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import (
+    HashResult,
+    config,
+    getattr_iter,
+    get_hash_factors,
+    hash_factors,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -311,7 +317,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -322,6 +328,9 @@ class ModelConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This config is opt-out hashed: include every dataclass field except for
+        those explicitly listed in `ignored_factors`.
         """
         ignored_factors = {
             "runner",
@@ -363,9 +372,9 @@ class ModelConfig:
             "skip_mm_profiling",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
         factors = get_hash_factors(self, ignored_factors)
+        if return_factors:
+            return factors if factors else []
         return hash_factors(factors)
 
     def _update_nested(

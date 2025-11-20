@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import torch
@@ -9,7 +8,7 @@ from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -70,7 +69,7 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -90,8 +89,9 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
 
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:

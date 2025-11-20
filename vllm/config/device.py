@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import Any, Literal
 
@@ -9,7 +8,7 @@ import torch
 from pydantic import ConfigDict, SkipValidation
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
@@ -29,7 +28,7 @@ class DeviceConfig:
     """Device type from the current platform. This is set in
     `__post_init__`."""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -45,8 +44,9 @@ class DeviceConfig:
         # the device/platform information will be summarized
         # by torch/vllm automatically.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
     def __post_init__(self):
         if self.device == "auto":

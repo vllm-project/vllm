@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -10,7 +9,7 @@ from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self, deprecated
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -172,7 +171,7 @@ class SchedulerConfig:
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -187,8 +186,9 @@ class SchedulerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

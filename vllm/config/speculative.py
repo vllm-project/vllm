@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import hashlib
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -10,7 +9,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -147,7 +146,7 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -163,8 +162,9 @@ class SpeculativeConfig:
         # Eagle3 affects the computation graph because it returns intermediate
         # hidden states in addition to the final hidden state.
         factors.append(self.method == "eagle3")
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

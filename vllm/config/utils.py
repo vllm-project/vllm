@@ -26,6 +26,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
+HashResult = str | dict[str, object] | list[Any]
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -156,7 +157,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 @runtime_checkable
 class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult: ...
 
 
 class SupportsMetricsInfo(Protocol):

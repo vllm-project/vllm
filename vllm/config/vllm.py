@@ -40,7 +40,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import HashResult, SupportsHash, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -117,7 +117,7 @@ class VllmConfig:
     instance_id: str = ""
     """The ID of the vLLM instance."""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -203,6 +203,9 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         factors.append(vllm_factors)
+
+        if return_factors:
+            return vllm_factors if vllm_factors else []
 
         hash_str = hashlib.md5(
             str(factors).encode(), usedforsecurity=False

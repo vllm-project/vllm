@@ -11,7 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -454,7 +454,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -464,6 +464,9 @@ class ParallelConfig:
 
         This hash is also used for DP worker configuration validation
         to prevent hangs from mismatched collective communication patterns.
+
+        This is an opt-out hash: begin with every dataclass field on the config
+        and drop the `ignored_factors` listed below.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
@@ -494,11 +497,11 @@ class ParallelConfig:
             "_api_process_rank",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
         factors = get_hash_factors(self, ignored_factors)
         # Explicitly include backend affecting env factor as before
         factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
+        if return_factors:
+            return factors if factors else []
         return hash_factors(factors)
 
     def __post_init__(self) -> None:

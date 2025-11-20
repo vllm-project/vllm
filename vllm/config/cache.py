@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import get_cpu_memory
@@ -147,7 +147,7 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -158,6 +158,9 @@ class CacheConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This config uses an opt-out hash: start from every dataclass field and
+        then drop the `ignored_factors` below.
         """
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
@@ -178,9 +181,9 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
         factors = get_hash_factors(self, ignored_factors)
+        if return_factors:
+            return factors if factors else []
         return hash_factors(factors)
 
     def metrics_info(self):

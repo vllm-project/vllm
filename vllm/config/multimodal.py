@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, hash_factors, normalize_value
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import AttentionBackendEnum
@@ -193,7 +192,7 @@ class MultiModalConfig:
             )
         return self
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, *, return_factors: bool = False) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -210,8 +209,9 @@ class MultiModalConfig:
             if self.mm_encoder_attn_backend is not None
             else None
         ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        if return_factors:
+            return factors if factors else []
+        return hash_factors({"factors": normalize_value(factors)})
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """
