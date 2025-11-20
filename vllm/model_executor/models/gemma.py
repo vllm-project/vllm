@@ -20,6 +20,7 @@
 from collections.abc import Iterable
 from functools import cache
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -127,8 +128,8 @@ class GemmaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
-        rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -153,7 +154,6 @@ class GemmaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -176,7 +176,7 @@ class GemmaAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -218,7 +218,7 @@ class GemmaDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            rope_theta=config.rope_theta,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",

@@ -14,13 +14,14 @@ from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
+from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -374,10 +375,22 @@ class VllmConfig:
                     "Async scheduling is not yet compatible with "
                     "pipeline_parallel_size > 1."
                 )
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
             if self.speculative_config is not None:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with speculative decoding."
-                )
+                if self.speculative_config.method not in get_args(EagleModelTypes):
+                    raise ValueError(
+                        "Currently, async scheduling is only supported "
+                        "with EAGLE/MTP kind of speculative decoding"
+                    )
+                if self.speculative_config.disable_padded_drafter_batch:
+                    raise ValueError(
+                        "async scheduling for EAGLE/MTP kind of speculative "
+                        "decoding is enabled, but disable_padded_drafter_batch=True "
+                        "disable_padded_drafter_batch=True is not supported for "
+                        "this situation now. please set "
+                        "disable_padded_drafter_batch=Fasle"
+                    )
             if not executor_supports_async_sched:
                 raise ValueError(
                     "Currently, async scheduling only supports `mp`, `uni`, or "
@@ -464,6 +477,14 @@ class VllmConfig:
                 if self.parallel_config.decode_context_parallel_size > 1:
                     logger.warning_once(
                         "Decode context parallel (DCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                # prefill context parallel do not support full cudagraphs
+                elif self.parallel_config.prefill_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Prefill context parallel (PCP) is enabled, which is "
                         "incompatible with full CUDA graphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
@@ -597,22 +618,34 @@ class VllmConfig:
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
             assert (
-                self.parallel_config.dcp_kv_cache_interleave_size
+                self.parallel_config.cp_kv_cache_interleave_size
                 <= self.cache_config.block_size
                 and self.cache_config.block_size
-                % self.parallel_config.dcp_kv_cache_interleave_size
+                % self.parallel_config.cp_kv_cache_interleave_size
                 == 0
             ), (
                 f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by dcp_kv_cache_interleave_size "
-                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
         assert (
-            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            self.parallel_config.cp_kv_cache_interleave_size == 1
             or self.speculative_config is None
-        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
+        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:

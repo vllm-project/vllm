@@ -483,6 +483,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         expand_config,
         adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
+        fully_sharded: bool = False,
+        offset: int = 0,
     ):
         """
         Performs a fused forward computation for LoRA of
