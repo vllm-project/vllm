@@ -218,7 +218,9 @@ async def handle_request():
         req_data['kv_transfer_params']['remote_dp_size'] = prefill_instance_endpoint['dp_size']
         req_data['kv_transfer_params']['remote_tp_size'] = prefill_instance_endpoint['tp_size']
         
- 
+        if selected_prefill_dp_rank is not None:
+            req_data['kv_transfer_params']['remote_dp_rank'] = selected_prefill_dp_rank
+
         decode_request_task = asyncio.create_task(
             start_decode_request(decode_instance_endpoint['request_address'], req_data, request_id)
         )
