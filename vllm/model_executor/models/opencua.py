@@ -7,7 +7,7 @@
 
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
@@ -20,8 +20,6 @@ from transformers.models.qwen2_vl import (
 )
 
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -33,20 +31,13 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import (
-    MultiModalEmbeddings,
-)
 from .qwen2_5_vl import (
     Qwen2_5_VisionTransformer as OpenCUAVisionTransformer,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLImageEmbeddingInputs,
-    Qwen2_5_VLImageInputs,
-    Qwen2_5_VLImagePixelInputs,
 )
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
@@ -55,13 +46,9 @@ from .qwen2_vl import (
     _create_qwen2vl_field_factory,
 )
 from .utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
-)
-from .vision import (
-    run_dp_sharded_mrope_vision_model,
 )
 
 
@@ -241,6 +228,9 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
 
         if multimodal_config.get_limit_per_prompt("image"):
             attn_backend_override = (
@@ -268,129 +258,4 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
-        )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
-
-    def _parse_and_validate_image_input(
-        self, **kwargs: object
-    ) -> Qwen2_5_VLImageInputs | None:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-        image_grid_thw = kwargs.pop("image_grid_thw", None)
-
-        if pixel_values is None and image_embeds is None:
-            return None
-
-        if pixel_values is not None:
-            return Qwen2_5_VLImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-            )
-
-        if image_embeds is not None:
-            return Qwen2_5_VLImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
-
-    def _process_image_input(
-        self, image_input: Qwen2_5_VLImageInputs
-    ) -> tuple[torch.Tensor, ...]:
-        grid_thw = image_input["image_grid_thw"]
-        if grid_thw is None:
-            raise ValueError("image_grid_thw is required for image input")
-        assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
-
-        if self.visual is None:
-            raise ValueError("Visual encoder is not initialized")
-
-        if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
-        else:
-            pixel_values = image_input["pixel_values"]
-            with set_forward_context(None, self.vllm_config):
-                if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-                    )
-                else:
-                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
-
-        merge_size = self.visual.spatial_merge_size
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        image_embeds_split = image_embeds.split(sizes)
-        return image_embeds_split
-
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
-
-        for input_key in kwargs:
-            if input_key in ("pixel_values", "image_embeds"):
-                mm_input_by_modality["image"] = self._parse_and_validate_image_input(
-                    **kwargs
-                )
-                break
-        return mm_input_by_modality
-
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
-        if not mm_input_by_modality:
-            return []
-
-        if "image" in mm_input_by_modality:
-            image_input = mm_input_by_modality["image"]
-            image_embeddings = self._process_image_input(image_input)
-            return tuple(image_embeddings)
-
-        return []
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
-        if intermediate_tensors is not None:
-            inputs_embeds = None
-
-        hidden_states = self.language_model.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.language_model.compute_logits(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.extend(["visual."])
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    def get_mm_mapping(self) -> MultiModelKeys:
-        return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector="visual.merger.",
-            tower_model="visual.",
         )
