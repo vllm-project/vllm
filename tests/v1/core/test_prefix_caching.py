@@ -1571,6 +1571,7 @@ def test_different_block_size():
         hash_block_size=block_size,
     )
 
+    # 10 blocks of 16 tokens each. Token ids are not strictly aligned for each block.
     common_token_ids = [i for i in range(10) for _ in range(block_size)]
 
     req0 = make_request("0", common_token_ids, block_size, sha256)

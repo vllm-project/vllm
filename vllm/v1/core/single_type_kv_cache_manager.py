@@ -339,6 +339,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if use_eagle and computed_blocks[0]:
+            # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
         while len(computed_blocks[0]) * block_size % alignment != 0:
@@ -664,6 +665,9 @@ class MambaManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
+                # For Mamba, a cache hit only depends on finding the cached
+                # state for an exact position (i). Positions that are not
+                # properly aligned are ignored.
                 if (i + 1) % alignment != 0:
                     continue
                 for computed, cached in zip(computed_blocks, cached_block):
