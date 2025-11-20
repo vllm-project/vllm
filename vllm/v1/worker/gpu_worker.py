@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
-import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
@@ -20,20 +19,24 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
+from vllm.profiler.gpu_profiler import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -42,7 +45,6 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ModelRunnerOutput,
@@ -88,33 +90,12 @@ class Worker(WorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
+            self.profiler = TorchProfilerWrapper(
+                worker_name=worker_name, local_rank=self.local_rank
             )
-            logger.debug(
-                "Profiler config: record_shapes=%s,"
-                "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-            )
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
-                ),
-            )
+        elif envs.VLLM_TORCH_CUDA_PROFILE:
+            self.profiler = CudaProfilerWrapper()
         else:
             self.profiler = None
 
@@ -184,6 +165,7 @@ class Worker(WorkerBase):
                 and self.parallel_config.distributed_executor_backend
                 not in ["ray", "external_launcher"]
                 and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
@@ -200,7 +182,14 @@ class Worker(WorkerBase):
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
-
+                visible_device_count = (
+                    torch.cuda.device_count() if torch.cuda.is_available() else 0
+                )
+                assert self.parallel_config.local_world_size <= visible_device_count, (
+                    f"local_world_size ({self.parallel_config.local_world_size}) must "
+                    f"be less than or equal to the number of visible devices "
+                    f"({visible_device_count})."
+                )
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -508,9 +497,24 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def annotate_profile(self, scheduler_output):
+        # add trace annotation so that we can easily distinguish
+        # new/cached request numbers in each iteration
+        if not self.profiler:
+            return nullcontext()
+
+        self.profiler.step()
+
+        num_new = len(scheduler_output.scheduled_new_reqs)
+        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+
+        return self.profiler.annotate_context_manager(
+            f"execute_new_{num_new}_cached_{num_cached}"
+        )
+
     @torch.inference_mode()
     def sample_tokens(
-        self, grammar_output: "GrammarOutput"
+        self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
@@ -535,9 +539,12 @@ class Worker(WorkerBase):
                 )
             )
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, NoneType)):
-            return output
+        with self.annotate_profile(scheduler_output):
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors
+            )
+            if isinstance(output, (ModelRunnerOutput, NoneType)):
+                return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
@@ -552,34 +559,18 @@ class Worker(WorkerBase):
             all_gather_tensors=all_gather_tensors,
         )
 
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
+            raise RuntimeError("Profiling is not enabled.")
         if is_start:
             self.profiler.start()
         else:
             self.profiler.stop()
-            # only print profiler results on rank 0
-            if self.local_rank == 0:
-                print(
-                    self.profiler.key_averages().table(sort_by="self_cuda_time_total")
-                )
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
@@ -613,7 +604,6 @@ class Worker(WorkerBase):
         }
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
-            self.model_runner.model,
             execute_shuffle=True,
             global_expert_load=None,
             rank_mapping=rank_mapping,
@@ -626,7 +616,7 @@ class Worker(WorkerBase):
         self,
         old_ep_size: int,
         new_ep_size: int,
-        global_expert_load: torch.Tensor | None,
+        global_expert_loads: list[torch.Tensor] | None,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
 
@@ -635,9 +625,8 @@ class Worker(WorkerBase):
         rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
-            self.model_runner.model,
             execute_shuffle=True,
-            global_expert_load=global_expert_load,
+            global_expert_loads=global_expert_loads,
             rank_mapping=rank_mapping,
         )
         if get_ep_group().rank == 0:
@@ -684,31 +673,57 @@ class Worker(WorkerBase):
             get_ep_group,
             prepare_communication_buffer_for_model,
         )
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+        from vllm.model_executor.layers.fused_moe.layer import (
+            FusedMoE,
+            FusedMoEParallelConfig,
+        )
 
         parallel_config = self.vllm_config.parallel_config
-        moe_modules = [
-            module
-            for module in self.model_runner.model.modules()
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
-        ]
-        num_local_experts = moe_modules[0].moe_config.num_local_experts
-        assert all(
-            module.moe_config.num_local_experts == num_local_experts
-            for module in moe_modules
-        ), "All MoE modules must have the same number of experts"
-        for module in moe_modules:
-            module.moe_config.num_experts = num_local_experts * new_ep_size
-            module.global_num_experts = module.moe_config.num_experts
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=get_tp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                vllm_parallel_config=parallel_config,
-            )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+
+        def get_moe_modules(model: torch.nn.Module) -> list[FusedMoE]:
+            return [
+                module
+                for module in model.modules()
+                if (
+                    module.__class__.__name__ == "FusedMoE"
+                    or module.__class__.__name__ == "SharedFusedMoE"
+                )
+            ]
+
+        def update_moe_modules(moe_modules: list[FusedMoE], num_local_experts: int):
+            assert all(
+                module.moe_config.num_local_experts == num_local_experts
+                for module in moe_modules
+            ), "All MoE modules must have the same number of experts"
+            for module in moe_modules:
+                module.moe_config.num_experts = num_local_experts * new_ep_size
+                module.global_num_experts = module.moe_config.num_experts
+                module.moe_parallel_config = FusedMoEParallelConfig.make(
+                    tp_size_=get_tp_group().world_size,
+                    pcp_size_=get_pcp_group().world_size,
+                    dp_size_=get_dp_group().world_size,
+                    vllm_parallel_config=parallel_config,
+                )
+                module.moe_config.moe_parallel_config = module.moe_parallel_config
+            return moe_modules
+
+        model_moe_modules = get_moe_modules(self.model_runner.model)
+        num_local_experts = model_moe_modules[0].moe_config.num_local_experts
+
+        update_moe_modules(model_moe_modules, num_local_experts)
+        drafter_model = None
+        if hasattr(self.model_runner, "drafter") and hasattr(
+            self.model_runner.drafter, "model"
+        ):
+            drafter_model = self.model_runner.drafter.model
+        if drafter_model is not None and is_mixture_of_experts(drafter_model):
+            drafter_moe_modules = get_moe_modules(drafter_model)
+            # Check if drafter and model have matching configs
+            assert (
+                drafter_moe_modules[0].moe_config.num_local_experts == num_local_experts
+            ), "Drafter and model configs should be the same"
+            update_moe_modules(drafter_moe_modules, num_local_experts)
+
         if new_ep_size < old_ep_size:
             num_local_physical_experts = num_local_experts
             assert self.model_runner.eplb_state is not None
@@ -719,7 +734,7 @@ class Worker(WorkerBase):
                 new_physical_experts
                 - self.model_runner.eplb_state.logical_replica_count.shape[1]
             )
-            global_expert_load = None
+            global_expert_loads = None
         else:
             num_local_physical_experts = torch.tensor(
                 [num_local_experts], dtype=torch.int32, device="cpu"
@@ -730,18 +745,20 @@ class Worker(WorkerBase):
             num_local_physical_experts = num_local_physical_experts.item()
             new_physical_experts = num_local_physical_experts * new_ep_size
             assert self.model_runner.eplb_state is not None
-            global_expert_load = self.model_runner.eplb_state.rearrange(
-                self.model_runner.model, execute_shuffle=False
+            global_expert_loads = self.model_runner.eplb_state.rearrange(
+                execute_shuffle=False
             )
             parallel_config.eplb_config.num_redundant_experts = (
-                new_physical_experts - global_expert_load.shape[1]
+                new_physical_experts - global_expert_loads[0].shape[1]
             )
         prepare_communication_buffer_for_model(self.model_runner.model)
+        if drafter_model is not None:
+            prepare_communication_buffer_for_model(drafter_model)
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
         )
-        return global_expert_load
+        return global_expert_loads
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
@@ -782,11 +799,11 @@ class Worker(WorkerBase):
                 self.local_rank,
             )
 
-        global_expert_load = self._reconfigure_moe(old_ep_size, new_ep_size)
+        global_expert_loads = self._reconfigure_moe(old_ep_size, new_ep_size)
 
         if new_ep_size > old_ep_size:
-            assert global_expert_load is not None
-            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_load)
+            assert global_expert_loads is not None
+            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_loads)
 
     def save_sharded_state(
         self,
@@ -814,6 +831,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.profiler is not None:
+            self.profiler.shutdown()
 
 
 def init_worker_distributed_environment(
@@ -837,5 +856,10 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
+        parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+    # Init ec connector here before KV caches caches init
+    # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+    ensure_ec_transfer_initialized(vllm_config)

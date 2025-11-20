@@ -99,6 +99,7 @@ class GLMAttention(nn.Module):
         # https://huggingface.co/zai-org/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        rope_parameters = {"rope_type": "default", "rope_theta": 10000 * rope_ratio}
         # NOTE: zai-org/cogagent-9b-20241220 uses original_rope=False,
         # which is equivalent to is_neox_style=True
         is_neox_style = not config.original_rope
@@ -106,7 +107,7 @@ class GLMAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
-            base=10000 * rope_ratio,
+            rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
         )
         self.attn = Attention(
@@ -353,7 +354,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
             self.encoder.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
     def forward(
@@ -368,7 +369,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -433,10 +434,9 @@ class ChatGLMBaseModel(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
-        self.lora_config = lora_config
         self.multimodal_config = multimodal_config
 
         self.quant_config = quant_config
@@ -452,8 +452,8 @@ class ChatGLMBaseModel(nn.Module):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def compute_logits(
         self,

@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import torch
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
@@ -20,6 +20,10 @@ if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
     from typing_extensions import TypedDict
+
+from openai.types.responses import (
+    ToolChoiceFunction,
+)
 
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
@@ -36,8 +40,11 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationRequest,
     ClassificationResponse,
     CompletionRequest,
@@ -49,6 +56,10 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    FunctionCall,
+    FunctionDefinition,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorRequest,
     PoolingResponse,
     RerankRequest,
@@ -107,13 +118,16 @@ CompletionLikeRequest: TypeAlias = (
     | DetokenizeRequest
     | EmbeddingCompletionRequest
     | RerankRequest
-    | ClassificationRequest
+    | ClassificationCompletionRequest
     | ScoreRequest
     | TokenizeCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -122,6 +136,7 @@ AnyRequest: TypeAlias = (
     | SpeechToTextRequest
     | ResponsesRequest
     | IOProcessorRequest
+    | GenerateRequest
 )
 
 AnyResponse: TypeAlias = (
@@ -133,6 +148,7 @@ AnyResponse: TypeAlias = (
     | PoolingResponse
     | ClassificationResponse
     | ScoreResponse
+    | GenerateResponse
 )
 
 
@@ -807,7 +823,11 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and "content" in message
@@ -900,7 +920,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -908,7 +929,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
@@ -1091,13 +1113,13 @@ class OpenAIServing:
         )
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                msg = (
+                    "Tool usage is only supported for Chat Completions API "
+                    "or Responses API requests."
+                )
                 raise NotImplementedError(msg)
-
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request
-            )
+            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (
@@ -1220,7 +1242,7 @@ class OpenAIServing:
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
-            context.append_output(tool_output)
+            context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
             # yield context
@@ -1304,6 +1326,77 @@ class OpenAIServing:
             return int(rank_str)
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_tool_calls_from_content(
+        request: ResponsesRequest | ChatCompletionRequest,
+        tokenizer: AnyTokenizer,
+        enable_auto_tools: bool,
+        tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
+        content: str | None = None,
+    ) -> tuple[list[FunctionCall] | None, str | None]:
+        function_calls = list[FunctionCall]()
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                [
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls
+                ]
+            )
+            content = None  # Clear content since tool is called.
+        elif (
+            tool_parser_cls
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
+            # Automatic Tool Call Parsing
+            try:
+                tool_parser = tool_parser_cls(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
+            else:
+                # No tool calls.
+                return None, content
+
+        return function_calls, content
 
     @staticmethod
     def _get_decoded_token(
