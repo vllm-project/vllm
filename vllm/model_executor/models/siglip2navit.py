@@ -16,6 +16,7 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -67,7 +68,7 @@ class Siglip2VisionEmbeddings(nn.Module):
                 self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
         else:
-            self.patch_embedding = nn.Conv2d(
+            self.patch_embedding = Conv2dLayer(
                 in_channels=config.num_channels,
                 out_channels=self.embed_dim,
                 kernel_size=self.patch_size,
@@ -99,7 +100,7 @@ class Siglip2VisionEmbeddings(nn.Module):
         target_dtype = self.patch_embedding.weight.dtype
         if isinstance(self.patch_embedding, LinearBase):
             patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
-        elif isinstance(self.patch_embedding, nn.Conv2d):
+        elif isinstance(self.patch_embedding, Conv2dLayer):
             pixel_values = pixel_values.view(
                 -1,
                 self.config.num_channels * self.config.temporal_patch_size,
@@ -190,7 +191,7 @@ def apply_rotary_pos_emb(
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
     if is_flash_attn_backend and not current_platform.is_xpu():
-        from flash_attn.layers.rotary import apply_rotary_emb
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         apply_rotary_emb_func = apply_rotary_emb
     else:

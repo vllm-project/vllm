@@ -173,6 +173,10 @@ class _HfExamplesInfo:
 
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "AfmoeForCausalLM": _HfExamplesInfo(
+        "arcee-ai/Trinity-Nano",
+        is_available_online=False,
+    ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
@@ -396,6 +400,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
+        trust_remote_code=True,
+    ),
+    "Plamo3ForCausalLM": _HfExamplesInfo(
+        "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
     ),
     "QWenLMHeadModel": _HfExamplesInfo(

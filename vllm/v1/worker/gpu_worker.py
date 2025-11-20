@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
-import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
@@ -27,6 +26,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -36,7 +36,7 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.gpu_profiler import CudaProfilerWrapper
+from vllm.profiler.gpu_profiler import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -45,7 +45,6 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ModelRunnerOutput,
@@ -91,32 +90,9 @@ class Worker(WorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
-            logger.debug(
-                "Profiler config: record_shapes=%s,"
-                "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-            )
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
-                ),
+            self.profiler = TorchProfilerWrapper(
+                worker_name=worker_name, local_rank=self.local_rank
             )
         elif envs.VLLM_TORCH_CUDA_PROFILE:
             self.profiler = CudaProfilerWrapper()
@@ -189,6 +165,7 @@ class Worker(WorkerBase):
                 and self.parallel_config.distributed_executor_backend
                 not in ["ray", "external_launcher"]
                 and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
@@ -205,7 +182,14 @@ class Worker(WorkerBase):
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
-
+                visible_device_count = (
+                    torch.cuda.device_count() if torch.cuda.is_available() else 0
+                )
+                assert self.parallel_config.local_world_size <= visible_device_count, (
+                    f"local_world_size ({self.parallel_config.local_world_size}) must "
+                    f"be less than or equal to the number of visible devices "
+                    f"({visible_device_count})."
+                )
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -519,10 +503,12 @@ class Worker(WorkerBase):
         if not self.profiler:
             return nullcontext()
 
+        self.profiler.step()
+
         num_new = len(scheduler_output.scheduled_new_reqs)
         num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
 
-        return torch.profiler.record_function(
+        return self.profiler.annotate_context_manager(
             f"execute_new_{num_new}_cached_{num_cached}"
         )
 
@@ -573,42 +559,18 @@ class Worker(WorkerBase):
             all_gather_tensors=all_gather_tensors,
         )
 
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
+            raise RuntimeError("Profiling is not enabled.")
         if is_start:
             self.profiler.start()
         else:
             self.profiler.stop()
-            if isinstance(self.profiler, torch.profiler.profile):
-                rank = self.local_rank
-                profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                sort_key = "self_cuda_time_total"
-                table = self.profiler.key_averages().table(sort_by=sort_key)
-
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
-
-                # only print profiler results on rank 0
-                if rank == 0:
-                    print(table)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
@@ -738,6 +700,7 @@ class Worker(WorkerBase):
                 module.global_num_experts = module.moe_config.num_experts
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
                     tp_size_=get_tp_group().world_size,
+                    pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
                     vllm_parallel_config=parallel_config,
                 )
@@ -868,6 +831,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.profiler is not None:
+            self.profiler.shutdown()
 
 
 def init_worker_distributed_environment(
@@ -891,6 +856,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
+        parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
 

@@ -384,9 +384,15 @@ class EngineArgs:
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    master_addr: str = ParallelConfig.master_addr
+    master_port: int = ParallelConfig.master_port
+    nnodes: int = ParallelConfig.nnodes
+    node_rank: int = ParallelConfig.node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -394,6 +400,7 @@ class EngineArgs:
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
+    data_parallel_external_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str | None = ParallelConfig.all2all_backend
@@ -481,7 +488,6 @@ class EngineArgs:
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
-    num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
@@ -749,6 +755,10 @@ class EngineArgs:
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
         )
+        parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
+        parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
+        parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
+        parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
@@ -760,6 +770,15 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--cp-kv-cache-interleave-size",
+            **parallel_kwargs["cp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--prefill-context-parallel-size",
+            "-pcp",
+            **parallel_kwargs["prefill_context_parallel_size"],
         )
         parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
@@ -803,7 +822,14 @@ class EngineArgs:
             help='Backend for data parallel, either "mp" or "ray".',
         )
         parallel_group.add_argument(
-            "--data-parallel-hybrid-lb", **parallel_kwargs["data_parallel_hybrid_lb"]
+            "--data-parallel-hybrid-lb",
+            "-dph",
+            **parallel_kwargs["data_parallel_hybrid_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-external-lb",
+            "-dpe",
+            **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
             "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
@@ -1030,10 +1056,18 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
-            "--max-num-batched-tokens", **scheduler_kwargs["max_num_batched_tokens"]
+            "--max-num-batched-tokens",
+            **{
+                **scheduler_kwargs["max_num_batched_tokens"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
-            "--max-num-seqs", **scheduler_kwargs["max_num_seqs"]
+            "--max-num-seqs",
+            **{
+                **scheduler_kwargs["max_num_seqs"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
@@ -1046,16 +1080,17 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
-        scheduler_group.add_argument(
-            "--num-lookahead-slots", **scheduler_kwargs["num_lookahead_slots"]
-        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
         scheduler_group.add_argument(
-            "--enable-chunked-prefill", **scheduler_kwargs["enable_chunked_prefill"]
+            "--enable-chunked-prefill",
+            **{
+                **scheduler_kwargs["enable_chunked_prefill"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
@@ -1428,12 +1463,56 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
-
-        data_parallel_external_lb = self.data_parallel_rank is not None
+        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
+            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
+        )
+        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
+            "nnodes > 1 is only supported with data_parallel_backend=mp"
+        )
+        inferred_data_parallel_rank = 0
+        if self.nnodes > 1:
+            world_size = (
+                self.data_parallel_size
+                * self.pipeline_parallel_size
+                * self.tensor_parallel_size
+            )
+            world_size_within_dp = (
+                self.pipeline_parallel_size * self.tensor_parallel_size
+            )
+            local_world_size = world_size // self.nnodes
+            assert world_size % self.nnodes == 0, (
+                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
+            )
+            assert self.node_rank < self.nnodes, (
+                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
+            )
+            inferred_data_parallel_rank = (
+                self.node_rank * local_world_size
+            ) // world_size_within_dp
+            if self.data_parallel_size > 1 and self.data_parallel_external_lb:
+                self.data_parallel_rank = inferred_data_parallel_rank
+                logger.info(
+                    "Inferred data_parallel_rank %d from node_rank %d for external lb",
+                    self.data_parallel_rank,
+                    self.node_rank,
+                )
+            elif self.data_parallel_size_local is None:
+                # Infer data parallel size local for internal dplb:
+                self.data_parallel_size_local = max(
+                    local_world_size // world_size_within_dp, 1
+                )
+        data_parallel_external_lb = (
+            self.data_parallel_external_lb or self.data_parallel_rank is not None
+        )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
+            assert self.data_parallel_rank is not None, (
+                "data_parallel_rank or node_rank must be specified if "
+                "data_parallel_external_lb is enable."
+            )
             assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 when data_parallel_rank is set"
+                "data_parallel_size_local must be 1 or None when data_parallel_rank "
+                "is set"
             )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
@@ -1447,6 +1526,11 @@ class EngineArgs:
 
             if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
                 # Use full external lb if we have local_size of 1.
+                logger.warning(
+                    "data_parallel_hybrid_lb is not eligible when "
+                    "data_parallel_size_local = 1, autoswitch to "
+                    "data_parallel_external_lb."
+                )
                 data_parallel_external_lb = True
                 self.data_parallel_hybrid_lb = False
 
@@ -1454,7 +1538,15 @@ class EngineArgs:
                 # Disable hybrid LB mode if set for a single node
                 self.data_parallel_hybrid_lb = False
 
-            self.data_parallel_rank = self.data_parallel_start_rank or 0
+            self.data_parallel_rank = (
+                self.data_parallel_start_rank or inferred_data_parallel_rank
+            )
+            if self.nnodes > 1:
+                logger.info(
+                    "Inferred data_parallel_rank %d from node_rank %d",
+                    self.data_parallel_rank,
+                    self.node_rank,
+                )
         else:
             assert not self.data_parallel_hybrid_lb, (
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
@@ -1484,7 +1576,9 @@ class EngineArgs:
                     "data_parallel_backend can only be ray or mp, got %s",
                     self.data_parallel_backend,
                 )
-                data_parallel_address = ParallelConfig.data_parallel_master_ip
+                data_parallel_address = (
+                    self.master_addr or ParallelConfig.data_parallel_master_ip
+                )
         else:
             data_parallel_address = self.data_parallel_address
 
@@ -1513,10 +1607,15 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
+            master_addr=self.master_addr,
+            master_port=self.master_port,
+            nnodes=self.nnodes,
+            node_rank=self.node_rank,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -1540,6 +1639,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
@@ -1549,18 +1649,11 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
 
-        # make sure num_lookahead_slots is set appropriately depending on
-        # whether speculative decoding is enabled
-        num_lookahead_slots = self.num_lookahead_slots
-        if speculative_config is not None:
-            num_lookahead_slots = speculative_config.num_lookahead_slots
-
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
-            num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
@@ -1860,6 +1953,15 @@ class EngineArgs:
             default_chunked_prefill,
             default_prefix_caching,
         ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
+
+        if self.prefill_context_parallel_size > 1:
+            default_chunked_prefill = False
+            default_prefix_caching = False
+            logger.warning(
+                "--prefill-context-parallel-size > 1 is not compatible with "
+                "chunked prefill and prefix caching now. Chunked prefill "
+                "and prefix caching have been disabled by default."
+            )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
