@@ -10,6 +10,7 @@ from tests.utils import check_gpu_memory_usage, wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
+    assert_mp_fork_context,
 )
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -55,6 +56,7 @@ async def test_async_llm_model_error(
     check_gpu_memory_usage(devices)
 
     # Monkeypatch an error in the model.
+    assert_mp_fork_context()
     monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
 
     engine_args = AsyncEngineArgs(
@@ -103,18 +105,17 @@ async def test_async_llm_model_error(
 
 
 @pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
-@pytest.mark.parametrize("enable_multiprocessing", [True])
+@pytest.mark.parametrize("enable_multiprocessing", [False, True])
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 def test_llm_model_error(
     monkeypatch, tensor_parallel_size: int, enable_multiprocessing: bool, model: str
 ) -> None:
-    """Test that LLM propagates a forward pass error and frees memory.
-    TODO(andy) - LLM without multiprocessing; LLM with multiprocessing
-    and >1 rank
-    """
+    """Test that LLM propagates a forward pass error and frees memory."""
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
+    if not enable_multiprocessing:  # TODO: remove this skip
+        pytest.skip(reason="Skip multiprocessing=False - must run test in subprocess")
 
     devices = list(range(tensor_parallel_size))
     check_gpu_memory_usage(devices)
@@ -124,6 +125,7 @@ def test_llm_model_error(
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         # Monkeypatch an error in the model.
+        assert_mp_fork_context()
         m.setattr(LlamaForCausalLM, "forward", evil_forward)
 
         llm = LLM(
