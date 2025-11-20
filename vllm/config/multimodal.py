@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 
@@ -140,6 +141,17 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    enable_mm_processor_stats: bool = Field(
+        default_factory=lambda: bool(
+            int(os.getenv("VLLM_ENABLE_MM_PROCESSOR_STATS", "0"))
+        )
+    )
+    """If `True`, enables collection of timing statistics for multimodal
+    processor operations. This can be useful for performance analysis and
+    debugging. Defaults to `False` (disabled).
+    
+    Can be set via the `VLLM_ENABLE_MM_PROCESSOR_STATS` environment variable
+    or via the `--enable-mm-processor-stats` command-line argument."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
