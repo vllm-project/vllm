@@ -669,9 +669,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_size is not None:
                 # Use full CUDA graph.
                 return CUDAGraphMode.FULL, cudagraph_size, None
-            else:
-                # Fall back to eager mode.
-                return CUDAGraphMode.NONE, total_num_scheduled_tokens, None
+            # Fall back to eager mode.
+            # TODO(woosuk): Support piecewise CUDA graphs.
+            return CUDAGraphMode.NONE, total_num_scheduled_tokens, None
 
         # Consider DP padding and CUDA graph.
         if total_num_scheduled_tokens == 0:
