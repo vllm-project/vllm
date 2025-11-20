@@ -1690,8 +1690,9 @@ class MoRIIOConnectorWorker:
             )
 
             self.moriio_wrapper.remote_engine_ip = host
-   
-            remote_agent_name = EngineDesc.unpack(metadata.agent_metadata).key
+            remote_agent_name=self.moriio_wrapper.register_remote_engine(
+                metadata.agent_metadata
+            )
 
             logger.info(
                 f"MoRIIO handshake: registered remote agent "
@@ -1751,8 +1752,7 @@ class MoRIIOConnectorWorker:
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
 
         for cur_dp_rank in range(remote_dp_size):
-            dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
-
+            dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
             future = self._handshake_initiation_executor.submit(
                 self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
             )
@@ -1990,8 +1990,6 @@ class MoRIIOConnectorWorker:
             self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
 
         while True:
-            if remote_engine_id is None:
-                break
             if (
                 self._ready_requests.empty()
                 and remote_engine_id not in self.write_ready_flags
@@ -2021,7 +2019,7 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE:
             return
 
-        wait_handshage_readd_req = False
+        wait_handshake_readd_req = False
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_recv.items():
@@ -2037,7 +2035,7 @@ class MoRIIOConnectorWorker:
                         self._background_moriio_handshake(
                             req_id, remote_engine_id, meta
                         )
-                        wait_handshage_readd_req = True
+                        wait_handshake_readd_req = True
 
                         continue
 
@@ -2049,7 +2047,7 @@ class MoRIIOConnectorWorker:
             if (
                 self._ready_requests.empty()
                 and not self.load_ready_flag
-                and wait_handshage_readd_req
+                and wait_handshake_readd_req
             ):
                 continue
             elif not self._ready_requests.empty() and self.load_ready_flag:
