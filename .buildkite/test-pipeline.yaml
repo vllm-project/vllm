@@ -551,6 +551,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Kernels DeepGEMM Test (H100)
+  working_dir: "/vllm-workspace/"
   timeout_in_minutes: 45
   gpu: h100
   num_gpus: 1
