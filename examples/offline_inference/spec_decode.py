@@ -46,6 +46,39 @@ def get_custom_mm_prompts(num_prompts):
     return [[{"role": "user", "content": prompt}] for prompt in prompts[:num_prompts]]
 
 
+def run_mtbench_multiturn(llm, sampling_params, num_prompts):
+    from datasets import load_dataset
+    from tqdm import tqdm
+    ds = load_dataset("philschmid/mt-bench", split="train")
+
+    # from fr-spec https://github.com/thunlp/FR-Spec/blob/29d0136b43d372d7d48806db8702cc9c813fdccf/evaluation/mt_bench/eval.py#L97
+    MTBENCH_SYSTEM_PROMPT = (
+        "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. "
+        "Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. "
+        "Please ensure that your responses are socially unbiased and positive in nature.\n\n"
+        "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. "
+        "If you don't know the answer to a question, please don't share false information."
+    )
+
+    outputs = []
+    total_samples = min(sum([len(data["turns"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
+    print(f'Running on {total_samples} samples.')
+
+    for i, data in tqdm(enumerate(ds), total=total_samples):
+        if i >= total_samples: break
+        messages = [{"role": "system", "content": MTBENCH_SYSTEM_PROMPT}]
+        for i in range(len(data["turns"])):
+            qs = data["turns"][i]
+            messages.append({"role": "user", "content": qs})
+            output = llm.chat(messages, sampling_params=sampling_params, use_tqdm=False)[0]
+            outputs.append(output)
+            messages.append({
+                "role": "assistant",
+                "content": output.outputs[0].text
+            })
+    return outputs
+
+
 def parse_args():
     parser = FlexibleArgumentParser()
     add_dataset_parser(parser)
@@ -89,7 +122,9 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     args.custom_skip_chat_template = True
 
-    if not args.custom_mm_prompts:
+    if args.dataset_path == "philschmid/mt-bench-multiturn":
+        prompts = None
+    elif not args.custom_mm_prompts:
         prompts = get_samples(args, tokenizer)
         # add_special_tokens is False to avoid adding bos twice
         # when using chat templates
@@ -142,7 +177,15 @@ def main(args):
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    if not args.custom_mm_prompts:
+    if args.dataset_path == "philschmid/mt-bench-multiturn":
+        # warmup run
+        print('Warmup start')
+        for _ in range(3):
+            run_mtbench_multiturn(llm, sampling_params, 1)
+        # actually run everything
+        print('Warmup end\nStart the actual run')
+        outputs = run_mtbench_multiturn(llm, sampling_params, args.num_prompts)
+    elif not args.custom_mm_prompts:
         outputs = llm.generate(
             [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
             sampling_params=sampling_params,
