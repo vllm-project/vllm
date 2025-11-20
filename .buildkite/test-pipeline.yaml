@@ -356,7 +356,7 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
-    - pytest -v -s v1/determinism/test_rms_norm_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
