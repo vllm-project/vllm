@@ -217,7 +217,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
-
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
