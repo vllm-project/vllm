@@ -25,7 +25,6 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionImpl
-    from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -34,6 +33,7 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
