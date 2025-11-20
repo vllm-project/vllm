@@ -714,17 +714,13 @@ class EngineArgs:
         )
 
         # Attention arguments
+        attention_kwargs = get_kwargs(AttentionConfig)
         attention_group = parser.add_argument_group(
             title="AttentionConfig",
             description=AttentionConfig.__doc__,
         )
         attention_group.add_argument(
-            "--attention-backend",
-            type=str,
-            default=EngineArgs.attention_backend,
-            help="Attention backend to use. If not specified, will be selected "
-            "automatically. Example options: FLASH_ATTN, XFORMERS, FLASHINFER, "
-            "FLASHMLA, etc.",
+            "--attention-backend", **attention_kwargs["backend"]
         )
 
         # Structured outputs arguments
