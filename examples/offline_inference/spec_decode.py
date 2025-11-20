@@ -91,7 +91,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "none"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -164,6 +164,8 @@ def main(args):
             "method": "mtp",
             "num_speculative_tokens": args.num_spec_tokens,
         }
+    elif args.method == "none":
+        speculative_config = None
     else:
         raise ValueError(f"unknown method: {args.method}")
 
@@ -280,7 +282,7 @@ def main(args):
     print("-" * 50)
     print(json.dumps(output_dict, indent=2))
     print("-" * 50)
-    
+
     output_file = Path("output.json")
     output_file.write_text(json.dumps(output_dict, indent=2))
     print(f"output saved to {output_file}")
