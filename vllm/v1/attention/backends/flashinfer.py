@@ -25,11 +25,11 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import get_pcp_group, get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -54,11 +54,12 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     KVCacheLayoutType,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
+    PrefillContextParallelMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -165,17 +166,29 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
-class BatchDCPPrefillWrapper:
+class BatchCPPrefillWrapper:
     def __init__(
         self,
+        dcp_world_size,
+        pcp_world_size,
         workspace_buffer: torch.Tensor | None = None,
     ):
+        self.dcp_world_size = dcp_world_size
+        self.pcp_world_size = pcp_world_size
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
-        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, get_kv_cache_layout()
-        )
+        if self.pcp_world_size > 1:
+            self._new_tokens_head = BatchPrefillWithRaggedKVCacheWrapper(
+                workspace_buffer, get_kv_cache_layout()
+            )
+            self._new_tokens_tail = BatchPrefillWithRaggedKVCacheWrapper(
+                workspace_buffer, get_kv_cache_layout()
+            )
+        else:
+            self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
+                workspace_buffer, get_kv_cache_layout()
+            )
 
     def plan(
         self,
@@ -186,7 +199,6 @@ class BatchDCPPrefillWrapper:
         prefill_start: int,
         page_size: int,
         num_qo_heads: int,
-        dcp_world_size: int,
         num_kv_heads: int,
         head_dim: int,
         sm_scale: float,
@@ -196,39 +208,126 @@ class BatchDCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
+        pcp_metadata: PrefillContextParallelMetadata | None,
     ):
         """Plan the prefill operation with given parameters."""
+        common_args = [
+            num_kv_heads,
+            head_dim,
+        ]
+        common_kwargs = {
+            "sm_scale": sm_scale,
+            "window_left": window_left,
+            "logits_soft_cap": logits_soft_cap,
+            "q_data_type": q_data_type,
+            "kv_data_type": kv_cache_dtype,
+        }
         self._context.plan(
             qo_indptr_cpu,
             paged_kv_indptr_cpu,
             paged_kv_indices,
             paged_kv_last_page_len_cpu[prefill_start:],
-            num_qo_heads * dcp_world_size,
-            num_kv_heads,
-            head_dim,
+            num_qo_heads * self.dcp_world_size,
+            *common_args,
             page_size,
             causal=False,  # This is context run
-            sm_scale=sm_scale,
-            window_left=window_left,
-            logits_soft_cap=logits_soft_cap,
-            q_data_type=q_data_type,
-            kv_data_type=kv_cache_dtype,
             fixed_split_size=prefill_fixed_split_size,
             disable_split_kv=disable_split_kv,
+            **common_kwargs,
         )
-        self._new_tokens.plan(
-            qo_indptr=qo_indptr_cpu,
-            kv_indptr=qo_indptr_cpu,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim_qk=head_dim,
-            head_dim_vo=head_dim,
-            causal=True,  # This is newtokens run
-            sm_scale=sm_scale,
-            window_left=window_left,
-            logits_soft_cap=logits_soft_cap,
-            q_data_type=q_data_type,
+        if self.pcp_world_size > 1:
+            assert pcp_metadata is not None
+            qo_indptr_cpu = pcp_metadata.q_head_start_loc
+            kv_for_head_indptr = pcp_metadata.kv_for_head_indptr
+            kv_for_tail_indptr = pcp_metadata.kv_for_tail_indptr
+            self._new_tokens_head.plan(
+                qo_indptr_cpu,
+                kv_for_head_indptr,
+                num_qo_heads,
+                *common_args,
+                causal=True,
+                **common_kwargs,
+            )
+            self._new_tokens_tail.plan(
+                qo_indptr_cpu,
+                kv_for_tail_indptr,
+                num_qo_heads,
+                *common_args,
+                causal=True,
+                **common_kwargs,
+            )
+        else:
+            self._new_tokens.plan(
+                qo_indptr_cpu,
+                qo_indptr_cpu,
+                num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim_qk=head_dim,
+                head_dim_vo=head_dim,
+                causal=True,  # This is newtokens run
+                **common_kwargs,
+            )
+    
+    def _attention_with_head_and_tail(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        metadata: PrefillContextParallelMetadata,
+        return_lse: bool = False,
+    ):
+        """
+        For prompt with tokens [T0, T1, T2, T3], the query on PCP0 is [Q0, Q3]
+        and we all-gather full K as [K0, K1, K2, K3].
+        There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is 
+        [Q3]x[K0, K1, K2, K3].
+        """
+        q_head_indices = metadata.q_head_indices
+        q_tail_indices = metadata.q_tail_indices
+        kv_for_head_indices = metadata.kv_for_head_indices
+        kv_for_tail_indices = metadata.kv_for_tail_indices
+        q_full_indices = metadata.q_full_indices
+
+        q_head = torch.index_select(query, 0, q_head_indices)
+        q_tail = torch.index_select(query, 0, q_tail_indices)
+        k_head = torch.index_select(key, 0, kv_for_head_indices)
+        v_head = torch.index_select(value, 0, kv_for_head_indices)
+        k_tail = torch.index_select(key, 0, kv_for_tail_indices)
+        v_tail = torch.index_select(value, 0, kv_for_tail_indices)
+
+        output_head = self._new_tokens_head.run(
+            q_head,
+            k_head,
+            v_head,
+            return_lse=return_lse,
         )
+        output_tail = self._new_tokens_tail.run(
+            q_tail,
+            k_tail,
+            v_tail,
+            return_lse=return_lse,
+        )
+        if return_lse:
+            output_head, lse_head = output_head
+            output_tail, lse_tail = output_tail
+            output = torch.index_select(
+                torch.cat([output_head, output_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            lse = torch.index_select(
+                torch.cat([lse_head, lse_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            return output, lse
+        else:
+            output = torch.index_select(
+                torch.cat([output_head, output_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            return output
 
     def run(
         self,
@@ -238,37 +337,48 @@ class BatchDCPPrefillWrapper:
         key: torch.Tensor,
         value: torch.Tensor,
         out: torch.Tensor,
+        pcp_metadata: PrefillContextParallelMetadata | None,
     ):
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
-        )
-        output_context_tmp, lse_context_tmp = self._context.run(
-            prefill_query_across_dcp,
-            kv_cache_permute,
-            k_scale=layer._k_scale_float,
-            v_scale=layer._v_scale_float,
-            return_lse=True,
-        )
-        output_context, lse_context = cp_lse_ag_out_rs(
-            output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
-        )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        if self.pcp_world_size > 1:
+            assert pcp_metadata is not None
+            out[:], lse_query = self._attention_with_head_and_tail(
+                prefill_query,
+                key,
+                value,
+                pcp_metadata,
+                return_lse=True,
+            )
+        else:
+            prefill_query_across_dcp = get_dcp_group().all_gather(
+                prefill_query.contiguous(), dim=1
+            )
+            output_context_tmp, lse_context_tmp = self._context.run(
+                prefill_query_across_dcp,
+                kv_cache_permute,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                return_lse=True,
+            )
+            output_context, lse_context = cp_lse_ag_out_rs(
+                output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
+            )
+            lse_context = lse_context.transpose(0, 1).contiguous()
 
-        output_query, lse_query = self._new_tokens.run(
-            prefill_query,
-            key,
-            value,
-            return_lse=True,
-        )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+            output_query, lse_query = self._new_tokens.run(
+                prefill_query,
+                key,
+                value,
+                return_lse=True,
+            )
+            lse_query = lse_query.transpose(0, 1).contiguous()
 
-        merge_attn_states(
-            out,
-            output_context,
-            lse_context,
-            output_query,
-            lse_query,
-        )
+            merge_attn_states(
+                out,
+                output_context,
+                lse_context,
+                output_query,
+                lse_query,
+            )
         return out
 
 
@@ -394,13 +504,16 @@ class FlashInferMetadata:
     use_cascade: bool
 
     prefill_wrapper: (
-        BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
+        BatchPrefillWithPagedKVCacheWrapper | BatchCPPrefillWrapper | None
     ) = None
     decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
 
     qo_indptr_gpu: torch.Tensor | None = None
     paged_kv_indptr_gpu: torch.Tensor | None = None
+
+    # For context parallel
+    pcp_metadata: PrefillContextParallelMetadata | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -418,7 +531,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.model_config = vllm_config.model_config
         self._workspace_buffer = None
         self._prefill_wrapper: (
-            BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
+            BatchPrefillWithPagedKVCacheWrapper | BatchCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
@@ -458,20 +571,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
 
         try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            # PCP might not be initialized in testing
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+
+        try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            self.dcp_kv_cache_interleave_size = (
-                vllm_config.parallel_config.dcp_kv_cache_interleave_size
-            )
+            self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-            self.dcp_kv_cache_interleave_size = 1
+            self.cp_kv_cache_interleave_size = 1
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
 
         self.num_qo_heads = (
             self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
-            * self.dcp_world_size
         )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
@@ -587,11 +707,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(
         self,
-    ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
+    ) -> BatchPrefillWithPagedKVCacheWrapper | BatchCPPrefillWrapper:
         if self._prefill_wrapper is None:
-            if self.dcp_world_size > 1:
-                self._prefill_wrapper = BatchDCPPrefillWrapper(
-                    workspace_buffer=self._get_workspace_buffer(),
+            if self.total_cp_world_size > 1:
+                self._prefill_wrapper = BatchCPPrefillWrapper(
+                    self.dcp_world_size,
+                    self.pcp_world_size,
+                    self._get_workspace_buffer(),
                 )
             else:
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
@@ -667,7 +789,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         block_table_tensor = common_attn_metadata.block_table_tensor
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
 
-        if self.dcp_world_size > 1:
+        if self.total_cp_world_size > 1:
             if num_prefills > 0:
                 qo_indptr_prefill_cpu = (
                     qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
@@ -679,11 +801,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
                 )
 
-            seq_lens_cpu = get_dcp_local_seq_lens(
+            seq_lens_cpu = get_cp_local_seq_lens(
                 seq_lens_cpu,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.total_cp_world_size,
+                self.total_cp_rank,
+                self.cp_kv_cache_interleave_size,
             )
 
         seq_lens_np = seq_lens_cpu.numpy()
@@ -766,7 +888,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_spec=uses_spec_reorder,
         )
         decode_use_trtllm = (
-            self.use_trtllm_decode_attention and self.dcp_world_size <= 1
+            self.use_trtllm_decode_attention and self.total_cp_world_size <= 1
         )
 
         if not (prefill_use_trtllm and decode_use_trtllm):
@@ -810,6 +932,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
+            pcp_metadata=common_attn_metadata.pcp_metadata,
         )
 
         paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
@@ -863,9 +986,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.max_q_len_prefill = int(query_lens_prefill.max().item())
 
                 if not attn_metadata.prefill_use_trtllm:
-                    if self.dcp_world_size > 1:
+                    if self.total_cp_world_size > 1:
                         assert isinstance(
-                            attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper
+                            attn_metadata.prefill_wrapper, BatchCPPrefillWrapper
                         )
                         attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu=qo_indptr_cpu,
@@ -875,7 +998,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             prefill_start=prefill_start,
                             page_size=self.page_size,
                             num_qo_heads=self.num_qo_heads,
-                            dcp_world_size=self.dcp_world_size,
                             num_kv_heads=self.num_kv_heads,
                             head_dim=self.head_dim,
                             sm_scale=self.sm_scale,
@@ -885,6 +1007,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             kv_cache_dtype=self.kv_cache_dtype,
                             prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
+                            pcp_metadata=common_attn_metadata.pcp_metadata if self.pcp_world_size > 1 else None,
                         )
                     else:
                         assert isinstance(
@@ -978,6 +1101,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
+            return False
+        if self.pcp_world_size > 1:
             return False
         # TODO: Cascade attention doesn't work, disable it for now
         # return use_cascade_attention(*args, **kwargs)
@@ -1150,6 +1275,27 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        if (self.pcp_world_size > 1):
+            assert attn_metadata.pcp_metadata is not None
+            pcp_allgather_restore_idx = attn_metadata.pcp_metadata.allgather_restore_idx
+            assert pcp_allgather_restore_idx is not None
+            # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+            # ignores the padding from CUDA Graph. To be optimized for performance!
+            key_across_pcp = get_pcp_group().all_gather(
+                key[:num_actual_tokens].contiguous(), dim=0
+            )
+            value_across_pcp = get_pcp_group().all_gather(
+                value[:num_actual_tokens].contiguous(), dim=0
+            )
+            # Reorder kv after pcp allgather.
+            # Note that there are duplicate decoding tokens,
+            # but we only save the first one in kvcache.
+            key = torch.index_select(
+                key_across_pcp, 0, pcp_allgather_restore_idx
+            )
+            value = torch.index_select(
+                value_across_pcp, 0, pcp_allgather_restore_idx
+            )
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -1179,8 +1325,8 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens]
-        value = value[:num_actual_tokens]
+        key = key[:num_actual_tokens*self.pcp_world_size]
+        value = value[:num_actual_tokens*self.pcp_world_size]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1207,28 +1353,33 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
-                if self.dcp_world_size > 1:
-                    assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    assert prefill_wrapper._context._window_left == self.window_left
-                    assert prefill_wrapper._context._logits_soft_cap == (
-                        self.logits_soft_cap or 0.0
-                    )
-                    assert prefill_wrapper._context._sm_scale == self.scale
-                    assert not prefill_wrapper._context._causal
-                    assert prefill_wrapper._new_tokens._window_left == self.window_left
-                    assert prefill_wrapper._new_tokens._logits_soft_cap == (
-                        self.logits_soft_cap or 0.0
-                    )
-                    assert prefill_wrapper._new_tokens._sm_scale == self.scale
-                    assert prefill_wrapper._new_tokens._causal
+                if self.total_cp_world_size > 1:
+                    assert isinstance(prefill_wrapper, BatchCPPrefillWrapper)
+                    expected_logits_soft_cap = self.logits_soft_cap or 0.0
+                    
+                    wrappers_to_check = [(prefill_wrapper._context, False)]
+                    if self.pcp_world_size > 1:
+                        wrappers_to_check.extend([
+                            (prefill_wrapper._new_tokens_head, True),
+                            (prefill_wrapper._new_tokens_tail, True)
+                        ])
+                    else:
+                        wrappers_to_check.append((prefill_wrapper._new_tokens, True))
+                    
+                    for wrapper, expected_causal in wrappers_to_check:
+                        assert wrapper._window_left == self.window_left
+                        assert wrapper._logits_soft_cap == expected_logits_soft_cap
+                        assert wrapper._sm_scale == self.scale
+                        assert wrapper._causal == expected_causal
 
                     prefill_wrapper.run(
                         layer,
                         prefill_query,
                         kv_cache_permute,
-                        key[num_decode_tokens:],
-                        value[num_decode_tokens:],
+                        key[num_decode_tokens * self.pcp_world_size:],
+                        value[num_decode_tokens * self.pcp_world_size:],
                         out=output[num_decode_tokens:],
+                        pcp_metadata=attn_metadata.pcp_metadata if self.pcp_world_size > 1 else None,
                     )
                 else:
                     assert isinstance(
@@ -1323,28 +1474,31 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
 
-                if self.dcp_world_size > 1:
+                if self.total_cp_world_size > 1:
                     decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                        decode_query.contiguous(), dim=1
                     )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
-                    )
-                    decode_wrapper.run(
+                    out, lse = decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output_tmp,
-                        lse=lse,
                         return_lse=True,
                     )
-                    output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                        output_tmp, lse, get_dcp_group()
-                    )
+                    if self.dcp_world_size > 1:
+                        out, lse = cp_lse_ag_out_rs(
+                            out, lse, get_dcp_group(),
+                            return_lse=True,
+                        )
+                    else:
+                        output[:num_decode_tokens] = out
+                    
+                    if self.pcp_world_size > 1:
+                        output[:num_decode_tokens] = cp_lse_ag_out_ar(
+                            out, lse, get_pcp_group()
+                        )
+                    else:
+                        output[:num_decode_tokens] = out
                 else:
                     decode_wrapper.run(
                         decode_query,
