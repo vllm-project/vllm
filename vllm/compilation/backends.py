@@ -4,11 +4,14 @@
 import ast
 import dataclasses
 import hashlib
+import json
+import operator
 import os
 import pprint
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -19,10 +22,12 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
-    resolve_defined_ops,
+    should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
+from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -33,6 +38,7 @@ from .compiler_interface import (
     EagerAdaptor,
     InductorAdaptor,
     InductorStandaloneAdaptor,
+    is_compile_cache_enabled,
 )
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
@@ -51,7 +57,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             and hasattr(torch._inductor, "standalone_compile")
         ):
             logger.debug("Using InductorStandaloneAdaptor")
-            return InductorStandaloneAdaptor()
+            return InductorStandaloneAdaptor(
+                compilation_config.compile_cache_save_format
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
@@ -95,10 +103,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = resolve_defined_ops(
+                with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
-                )
-                with inductor_partition_rule_context(inductor_partition_ops):
+                ):
                     yield
             else:
                 yield
@@ -238,7 +245,7 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
+        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
             self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
@@ -301,21 +308,29 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
+    graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
-    node_to_subgraph_id = {}
-    split_op_graphs = []
+    node_to_subgraph_id: dict[fx.Node, int] = {}
+    split_op_graphs: list[int] = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        # Match node.target against resolved_ops
-        # node.target can be OpOverloadPacket, need to check .default
-        if node.op == "call_function" and (
-            node.target in resolved_ops
-            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
-        ):
+
+        # Check if this is a getitem operation on a node from an earlier subgraph.
+        # If so, assign it to the same subgraph as its input to avoid passing entire
+        # tuple as input to submodules, which is against standalone_compile and
+        # AoTAutograd input requirement.
+        if node.op == "call_function" and node.target == operator.getitem:
+            # Assign this getitem to the same subgraph as its input
+            input_node = node.args[0]
+            if input_node.op != "placeholder":
+                assert input_node in node_to_subgraph_id
+                node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
+                continue
+
+        if should_split(node, splitting_ops):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
@@ -569,35 +584,47 @@ class VllmBackend:
     def __call__(
         self, graph: fx.GraphModule, example_inputs
     ) -> VllmSerializableFunction:
-        from .caching import _compute_code_hash, compilation_config_hash_factors
-
         vllm_config = self.vllm_config
+        # Minimal hashing here with existing utilities, reused below.
+
+        env_factors = envs.compile_factors()
+        env_hash = hash_factors(env_factors)
+        # Compute config/compiler/code hashes once and reuse
+        config_hash = vllm_config.compute_hash()
+        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+        forward_code_files = list(sorted(self.compilation_config.traced_files))
+
+        logger.debug(
+            "Traced files (to be considered for compilation cache):\n%s",
+            lazy(lambda: "\n".join(forward_code_files)),
+        )
+        hash_content = []
+        for filepath in forward_code_files:
+            hash_content.append(filepath)
+            if filepath == "<string>":
+                # This means the function was dynamically generated, with
+                # e.g. exec(). We can't actually check these.
+                continue
+            try:
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            except Exception:
+                logger.warning("Failed to read file %s", filepath)
+                continue
+        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        # Clear after consumption
+        self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-
-            factors = compilation_config_hash_factors(vllm_config)
-            # 2. factors come from the code files that are traced by Dynamo (
-            #    it mainly summarizes how the model is used in forward pass)
-            code_hash = _compute_code_hash(self.compilation_config.traced_files)
-            self.compilation_config.traced_files.clear()
-            factors.append(code_hash)
-
-            # 3. compiler hash
-            compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-            factors.append(compiler_hash)
-
-            # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(
-                str(factors).encode(), usedforsecurity=False
-            ).hexdigest()[:10]
-
+            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            # Use SHA-256 for cache key hashing to be consistent across
+            # compute_hash functions. Truncate for a short cache dir name.
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
             cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
-                hash_key,
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
             self.compilation_config.cache_dir = cache_dir
 
@@ -610,7 +637,10 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
+        # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
+        disable_cache = not is_compile_cache_enabled(
+            self.compilation_config.inductor_compile_config
+        )
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
@@ -624,6 +654,50 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
         )
+
+        # Reuses existing cache key
+
+        logger.debug(
+            "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
+            env_hash,
+            config_hash,
+            compiler_hash,
+            code_hash,
+            local_cache_dir,
+        )
+
+        # Persist and log only hash-relevant factors together.
+        try:
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                lazy(partial(pprint.pformat, env_factors, width=120)),
+                config_hash,
+            )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            if not os.path.exists(meta_path):
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {
+                            "env": env_factors,  # raw factors used for env_hash
+                            "config_hash": config_hash,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                        },
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
+        except Exception:
+            # Best-effort only; metadata write failures are non-fatal.
+            logger.warning(
+                (
+                    "Could not write compile cache metadata at %s; continuing without "
+                    "metadata. Compiled cache remains valid; diagnostics may be "
+                    "limited."
+                ),
+                local_cache_dir,
+                exc_info=True,
+            )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
@@ -649,8 +723,7 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        resolved_split_ops = resolve_defined_ops(fx_split_ops)
-        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 

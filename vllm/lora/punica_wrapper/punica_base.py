@@ -456,6 +456,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         block_size: int,
         num_experts: int,
         max_loras: int,
+        adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -478,8 +479,12 @@ class PunicaWrapperBase(PunicaWrapperABC):
         num_tokens_post_padded: torch.Tensor,
         max_lora_rank: int,
         top_k_num: int,
-        config,
+        shrink_config,
+        expand_config,
+        adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
+        fully_sharded: bool = False,
+        offset: int = 0,
     ):
         """
         Performs a fused forward computation for LoRA of

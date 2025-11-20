@@ -12,6 +12,7 @@ from compressed_tensors.quantization import ActivationOrdering, QuantizationStra
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -34,7 +35,11 @@ from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    BatchedMarlinExperts,
+    MarlinExperts,
+    fused_marlin_moe,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
@@ -97,9 +102,6 @@ __all__ = [
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
-    def __init_(self, moe: FusedMoEConfig):
-        super().__init__(moe)
-
     @staticmethod
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
@@ -378,11 +380,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (layer.w2_input_global_scale), requires_grad=False
         )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin:
             return None
         elif not self.allow_flashinfer:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
@@ -462,12 +467,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # flashinfer cutlass, cutlass fp4 or fused_experts but not marlin.
-        #
         if self.use_marlin:
-            assert self.fused_experts is None
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -486,24 +486,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 workspace=layer.workspace,
-            )
-
-        elif self.fused_experts is not None:
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight
-            ), "Flashinfer CUTLASS Fused MoE not applicable!"
-
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
         # FlashInfer fused experts path
@@ -605,11 +587,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled,
-        )
 
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # cutlass path
         self.is_fp8_w8a8_sm100 = quant_config._is_fp8_w8a8_sm100(
@@ -852,12 +831,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                shuffle_weights,
-            )
-
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
@@ -918,11 +893,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     layer.w2_weight_scale
                 )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or self.rocm_aiter_moe_enabled:
             return None
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -995,10 +973,18 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
+                allow_deep_gemm=(
+                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+                ),
             )
         else:
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
-            return TritonOrDeepGemmExperts(self.moe_quant_config, allow_deep_gemm=True)
+            return TritonOrDeepGemmExperts(
+                self.moe_quant_config,
+                allow_deep_gemm=(
+                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+                ),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1043,9 +1029,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsW8A8Fp8MoEMethod` yet."
-            )
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            assert isinstance(layer, FusedMoE)
 
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
@@ -1061,18 +1048,18 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
         per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # cutlass fp8 or fused_experts but not marlin or rocm.
-        #
         if self.use_marlin:
             assert activation == "silu", f"{activation} not supported for Marlin MoE."
-            assert self.fused_experts is None
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1098,7 +1085,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
             assert per_act_token == per_channel_quant
             assert self.moe_quant_config is not None
-            assert self.fused_experts is None
             return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1109,18 +1095,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
-            )
-
-        elif self.fused_experts is not None:
-            return self.fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=None if self.disable_expert_map else expert_map,
             )
 
         # cutlass path
@@ -1186,6 +1160,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
             )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
 
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
@@ -1318,8 +1296,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW8A8Int8MoEMethod` yet."
@@ -1386,6 +1362,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 f"{WNA16_SUPPORTED_BITS}",
             )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.use_marlin = True
 
     def create_weights(
         self,
@@ -1611,7 +1588,51 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return None
+        if self.num_bits != 4:
+            return None
+        return int4_w4a16_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_zp=None,
+            w2_zp=None,
+            block_shape=[0, self.group_size],
+        )
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        layer: torch.nn.Module,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        assert self.num_bits == 4, "only supporting w4"
+        layer.w13_weight = layer.w13_weight_packed
+        layer.w2_weight = layer.w2_weight_packed
+        assert all([w is not None for w in [layer.w13_weight, layer.w2_weight]])
+        assert self.moe_quant_config is not None
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            return BatchedMarlinExperts(
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                quant_config=self.moe_quant_config,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
+                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+            )
+        else:
+            return MarlinExperts(
+                quant_config=self.moe_quant_config,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
+                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+            )
 
     def apply(
         self,
@@ -1636,8 +1657,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsWNA16MarlinMoEMethod` yet."
@@ -1901,12 +1920,21 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsWNA16MoEMethod` yet."
-            )
+            if expert_load_view is None:
+                raise ValueError("enable_eplb=True requiere expert_load_view != None")
+            if logical_to_physical_map is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_to_physical_map != None"
+                )
+            if logical_replica_count is None:
+                raise ValueError(
+                    "enable_eplb=True requiere logical_replica_count != None"
+                )
+            if not isinstance(layer, FusedMoE):
+                raise TypeError(
+                    "EPLB is only supported when `layer` is a instance of FusedMoE."
+                )
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -1923,6 +1951,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=getattr(layer, "num_fused_shared_experts", 0),
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         return fused_experts(
@@ -1938,6 +1972,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):

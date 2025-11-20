@@ -68,9 +68,10 @@ class GCDebugger:
             # Before GC started, record GC start time
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
-            self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation), self.config.top_objects
-            )
+            if (top_objects := self.config.top_objects) > 0:
+                self.gc_top_collected_objects = _compute_top_gc_collected_objects(
+                    gc.get_objects(generation), top_objects
+                )
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
@@ -87,6 +88,21 @@ class GCDebugger:
                     else ""
                 ),
             )
+
+
+def freeze_gc_heap() -> None:
+    """
+    Freeze all objects tracked by the garbage collector. It should be invoked
+    after server init / warmup, to reduce GC overhead from static objects
+    during serving time.
+    """
+    # Ensure all static objects are pushed down to the oldest generation for
+    # freeze
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+    # Freeze all GC tracked objects
+    gc.freeze()
 
 
 def maybe_attach_gc_debug_callback() -> None:
