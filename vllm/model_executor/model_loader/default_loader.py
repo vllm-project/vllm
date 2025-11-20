@@ -279,7 +279,7 @@ class DefaultModelLoader(BaseModelLoader):
             if (
                 hasattr(quant_config, "is_checkpoint_torchao_serialized")
                 and quant_config.is_checkpoint_torchao_serialized
-                and torchao_version_at_least("0.14.0")
+                and torchao_version_at_least("0.15.0")
             ):
                 self.load_config.safetensors_load_strategy = "torchao"
 

@@ -136,7 +136,7 @@ class BaiChuanAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         position_embedding: str,
-        rope_theta: float = 10000,
+        rope_parameters: dict,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -150,7 +150,6 @@ class BaiChuanAttention(nn.Module):
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = hidden_size // self.total_num_heads
         self.position_embedding = position_embedding
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         # pylint: disable=invalid-name
@@ -192,7 +191,7 @@ class BaiChuanAttention(nn.Module):
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=self.max_position_embeddings,
-                base=self.rope_theta,
+                rope_parameters=rope_parameters,
             )
             self.scaling = self.head_dim**-0.5
             self.attn = Attention(
@@ -229,13 +228,12 @@ class BaiChuanDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = BaiChuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
-            rope_theta=rope_theta,
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,

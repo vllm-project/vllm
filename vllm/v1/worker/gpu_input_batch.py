@@ -87,7 +87,7 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
-        dcp_kv_cache_interleave_size: int = 1,
+        cp_kv_cache_interleave_size: int = 1,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -141,7 +141,7 @@ class InputBatch:
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
             num_speculative_tokens=num_speculative_tokens,
-            dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 
         # Sampling-related.
@@ -251,7 +251,7 @@ class InputBatch:
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
-        self.spec_token_ids: list[list[int] | None] = []
+        self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -313,7 +313,7 @@ class InputBatch:
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
-            self.spec_token_ids[req_index] = []
+            self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
 
@@ -462,7 +462,7 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
-        self.spec_token_ids[req_index] = None
+        self.spec_token_ids[req_index].clear()
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -654,9 +654,15 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            spec_token_ids = self.spec_token_ids[last_req_index]
-            self.spec_token_ids[empty_index] = spec_token_ids
-            self.spec_token_ids[last_req_index] = None
+            if last_req_index != empty_index:
+                (
+                    self.spec_token_ids[last_req_index],
+                    self.spec_token_ids[empty_index],
+                ) = (
+                    self.spec_token_ids[empty_index],
+                    self.spec_token_ids[last_req_index],
+                )
+                self.spec_token_ids[last_req_index].clear()
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
