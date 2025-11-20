@@ -14,23 +14,33 @@ template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
 __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,           // [..., hidden_size]
     const scalar_t* __restrict__ input,   // [..., hidden_size]
-    const int64_t input_stride_inner,     // input.stride(-2)
-    const int64_t input_stride_outer,     // input.stride(-3)
-    const int64_t input_shape_inner,      // input.size(-2)
+    const int64_t input_stride_d2,        // input.stride(-2)
+    const int64_t input_stride_d3,        // input.stride(-3)
+    const int64_t input_stride_d4,        // input.stride(-4)
+    const int64_t input_shape_d2,         // input.size(-2)
+    const int64_t input_shape_d3,         // input.size(-3)
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
   const scalar_t* input_row;
   if constexpr (NUM_DIMS == 2) {
-    // 2D: for layernorm normal case [batch_size, hidden]
-    input_row = input + blockIdx.x * input_stride_inner;
+    // 2D for layernorm normal case [batch_size, hidden]
+    input_row = input + blockIdx.x * input_stride_d2;
   } else if constexpr (NUM_DIMS == 3) {
-    // 3D for q/k nrom [batch_size, num_heads, head_size]
-    int batch_idx = blockIdx.x / input_shape_inner;
-    int head_idx = blockIdx.x % input_shape_inner;
+    // 3D for q/k norm [batch_size, num_heads, head_size]
+    int batch_idx = blockIdx.x / input_shape_d2;
+    int head_idx = blockIdx.x % input_shape_d2;
     input_row =
-        input + batch_idx * input_stride_outer + head_idx * input_stride_inner;
+        input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+  } else if constexpr (NUM_DIMS == 4) {
+    // 4D for [batch, seq, head, head_dim], used in transformers model_impl qk norm
+    int batch_idx = blockIdx.x / (input_shape_d3 * input_shape_d2);
+    int remaining = blockIdx.x % (input_shape_d3 * input_shape_d2);
+    int seq_idx = remaining / input_shape_d2;
+    int head_idx = remaining % input_shape_d2;
+    input_row = input + batch_idx * input_stride_d4 +
+                seq_idx * input_stride_d3 + head_idx * input_stride_d2;
   }
 
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
@@ -176,6 +186,9 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
               double epsilon) {
   TORCH_CHECK(out.is_contiguous());
+  if (input.stride(-1) != 1) {
+    input = input.contiguous();
+  }
   TORCH_CHECK(input.stride(-1) == 1);
   TORCH_CHECK(weight.is_contiguous());
 
@@ -183,16 +196,18 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
 
   int num_tokens = input.numel() / hidden_size;
   int num_dims = input.dim();
-  int64_t input_stride_inner = input.stride(-2);
-  int64_t input_shape_inner = (num_dims == 3) ? input.size(-2) : 0;
-  int64_t input_stride_outer = (num_dims == 3) ? input.stride(-3) : 0;
+  int64_t input_stride_d2 = input.stride(-2);
+  int64_t input_stride_d3 = (num_dims >= 3) ? input.stride(-3) : 0;
+  int64_t input_stride_d4 = (num_dims >= 4) ? input.stride(-4) : 0;
+  int64_t input_shape_d2 = (num_dims >= 3) ? input.size(-2) : 0;
+  int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_RANK23(num_dims, [&] {
+  VLLM_DISPATCH_RANK234(num_dims, [&] {
     VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
       const int calculated_vec_size =
           std::gcd(16 / sizeof(scalar_t), hidden_size);
@@ -203,8 +218,9 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
         vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank>
             <<<grid, block, 0, stream>>>(
                 out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                input_stride_inner, input_stride_outer, input_shape_inner,
-                weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+                input_stride_d2, input_stride_d3, input_stride_d4,
+                input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
+                epsilon, num_tokens, hidden_size);
       });
     });
   });
