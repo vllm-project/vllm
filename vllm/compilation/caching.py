@@ -10,7 +10,9 @@ from unittest.mock import patch
 import torch
 from torch.utils import _pytree as pytree
 
-from vllm.config import get_current_vllm_config
+import vllm.envs as envs
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 
 try:
@@ -131,6 +133,24 @@ class VllmSerializableFunction(SerializableCallable):
         Used for depyf debugging.
         """
         return "VllmSerializableFunction"
+
+
+def compute_env_and_config_hashes(
+    vllm_config: VllmConfig, env_factors: dict[str, object] | None = None
+) -> tuple[str, str]:
+    """
+    Return the hashed environment factors and vLLM config hash.
+
+    Both AOT and JIT cache paths rely on this helper to ensure their cache keys
+    stay in sync. When ``env_factors`` is omitted the helper will gather them
+    via ``envs.compile_factors()``.
+    """
+
+    if env_factors is None:
+        env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
+    config_hash = vllm_config.compute_hash()
+    return env_hash, config_hash
 
 
 def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:

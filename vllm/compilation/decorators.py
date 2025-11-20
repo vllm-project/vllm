@@ -24,12 +24,12 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
-from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import supports_dynamo
 
+from .caching import compute_env_and_config_hashes
 from .monitor import start_monitoring_torch_compile
 
 logger = init_logger(__name__)
@@ -355,9 +355,7 @@ def _support_torch_compile(
             """
 
             # Keep AOT cache key in sync with JIT: env factors + config hash + model.
-            env_factors = envs.compile_factors()
-            env_hash = hash_factors(env_factors)
-            config_hash = self.vllm_config.compute_hash()
+            env_hash, config_hash = compute_env_and_config_hashes(self.vllm_config)
             factors: list[str] = [env_hash, config_hash]
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
