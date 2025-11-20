@@ -324,7 +324,6 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -350,6 +349,9 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        # Initialize in initialize_kv_cache_tensors
+        self.cross_layers_kv_cache: torch.Tensor | None = None
+        self.cross_layers_attn_backend: type[AttentionBackend] | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -426,7 +428,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -892,7 +894,8 @@ class GPUModelRunner(
             # conform to the schema. This can result in
             # scheduler_output.scheduled_spec_decode_tokens being empty,
             # even when speculative decoding is enabled.
-            self.input_batch.spec_token_ids[req_index] = spec_token_ids
+            self.input_batch.spec_token_ids[req_index].clear()
+            self.input_batch.spec_token_ids[req_index].extend(spec_token_ids)
 
             # there are no draft tokens with async scheduling,
             # we clear the spec_decoding info in scheduler_output and
@@ -1435,7 +1438,7 @@ class GPUModelRunner(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.dcp_kv_cache_interleave_size,
+                self.parallel_config.cp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
@@ -1451,9 +1454,12 @@ class GPUModelRunner(
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs
         ]
-        dcp_local_seq_lens = (
-            self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
-        )
+
+        dcp_local_seq_lens, dcp_local_seq_lens_cpu = None, None
+        if self.dcp_world_size > 1:
+            dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs]
+            dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs]
+
         spec_decode_common_attn_metadata = None
 
         if for_cudagraph_capture:
@@ -1521,6 +1527,7 @@ class GPUModelRunner(
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
                 dcp_local_seq_lens=dcp_local_seq_lens,
+                dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2347,24 +2354,6 @@ class GPUModelRunner(
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-
-            # Generate custom attention masks for models that require them.
-            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
-            # Check mm_features (mm_embeds is empty during decode).
-            has_mm_features = any(
-                req_state.mm_features for req_state in self.requests.values()
-            )
-            if (
-                self.uses_custom_attention_masks
-                and has_mm_features
-                and hasattr(self.model, "generate_attention_masks")
-            ):
-                mask_kwargs = self.model.generate_attention_masks(
-                    self.input_ids.gpu[:num_scheduled_tokens],
-                    self.positions.gpu[:num_scheduled_tokens],
-                    mask_dtype=self.model.dtype,
-                )
-                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -4944,12 +4933,30 @@ class GPUModelRunner(
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(
-            kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
-        )
+
+        # Try creating KV caches optimized for kv-connector transfers
+        cache_dtype = self.cache_config.cache_dtype
+        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+            kv_caches, cross_layers_kv_cache, attn_backend = (
+                self.allocate_uniform_kv_caches(
+                    kv_cache_config,
+                    self.attn_groups,
+                    cache_dtype,
+                    self.device,
+                    kernel_block_sizes,
+                )
+            )
+            self.cross_layers_kv_cache = cross_layers_kv_cache
+            self.cross_layers_attn_backend = attn_backend
+        else:
+            # Fallback to the general case
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(
+                kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -5031,7 +5038,13 @@ class GPUModelRunner(
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
-            kv_transfer_group.register_kv_caches(kv_caches)
+            if self.cross_layers_kv_cache is not None:
+                assert self.cross_layers_attn_backend is not None
+                kv_transfer_group.register_cross_layers_kv_cache(
+                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
+                )
+            else:
+                kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         if self.dcp_world_size > 1:
