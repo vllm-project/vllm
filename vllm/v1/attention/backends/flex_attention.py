@@ -318,7 +318,7 @@ class FlexAttentionMetadata:
     kv_block_size: int = 16
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
-    mm_prefix_range: list[tuple[int, int]] | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
 
     def _convert_physical_to_logical(
         self,
@@ -441,6 +441,8 @@ class FlexAttentionMetadata:
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
 
+        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+
         def prefix_lm_mask_mod(
             b: torch.Tensor,
             h: torch.Tensor,
@@ -448,10 +450,12 @@ class FlexAttentionMetadata:
             kv_idx: torch.Tensor,
         ):
             mask = torch.zeros_like(q_idx, dtype=torch.bool)
-            for start, end in self.mm_prefix_range or []:
-                doc_mask_q = (q_idx >= start) & (q_idx <= end)
-                doc_mask_kv = (kv_idx >= start) & (kv_idx <= end)
-                mask = mask | (doc_mask_q & doc_mask_kv)
+            for req, doc_range_lst in (self.mm_prefix_range or {}).items():
+                req_mask = request_lookup[q_idx] == req
+                for start, end in doc_range_lst:
+                    doc_mask_q = (q_idx >= start) & (q_idx <= end)
+                    doc_mask_kv = (kv_idx >= start) & (kv_idx <= end)
+                    mask = mask | (req_mask & doc_mask_q & doc_mask_kv)
             return mask
 
         def final_mask_mod(
@@ -723,7 +727,7 @@ class FlexAttentionImpl(AttentionImpl):
     sliding_window: int | None
     alibi_slopes: torch.Tensor | None
     logits_soft_cap: float | None
-    mm_prefix_range: list[tuple[int, int]] | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
 
     def __init__(
         self,

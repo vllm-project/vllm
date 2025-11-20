@@ -1591,20 +1591,24 @@ class GPUModelRunner(
                         attn_metadata[layer_name] = attn_metadata_i
 
         if self.is_prefix_lm:
-            image_doc_ranges = []
+            req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
+                image_doc_ranges = []
                 req_state = self.requests[req_id]
                 for mm_feature in req_state.mm_features:
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     image_doc_ranges.extend(img_doc_range)
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                req_doc_ranges[req_idx] = image_doc_ranges
+
             if isinstance(attn_metadata, list):
                 for ub_metadata in attn_metadata:
                     for _metadata in ub_metadata.values():
-                        _metadata.mm_prefix_range = image_doc_ranges
+                        _metadata.mm_prefix_range = req_doc_ranges
             else:
                 for _metadata in attn_metadata.values():
-                    _metadata.mm_prefix_range = image_doc_ranges
+                    _metadata.mm_prefix_range = req_doc_ranges
 
         return attn_metadata, spec_decode_common_attn_metadata
 
