@@ -221,6 +221,10 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
+def is_forward_context_available() -> bool:
+    return _forward_context is not None
+
+
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
