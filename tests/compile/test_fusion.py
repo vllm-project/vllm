@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import vllm.plugins
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
@@ -216,6 +216,8 @@ def test_fusion_rmsnorm_quant(
     enable_quant_fp8_custom_op,
     cuda_force_torch,
 ):
+    if model_class is TestAiterRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
+        pytest.skip("AITER is not supported on this GPU.")
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
