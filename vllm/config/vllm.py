@@ -481,6 +481,14 @@ class VllmConfig:
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                # prefill context parallel do not support full cudagraphs
+                elif self.parallel_config.prefill_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Prefill context parallel (PCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 elif self.model_config is not None:
                     if self.model_config.pooler_config is not None:
                         logger.warning_once(
@@ -610,22 +618,34 @@ class VllmConfig:
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
             assert (
-                self.parallel_config.dcp_kv_cache_interleave_size
+                self.parallel_config.cp_kv_cache_interleave_size
                 <= self.cache_config.block_size
                 and self.cache_config.block_size
-                % self.parallel_config.dcp_kv_cache_interleave_size
+                % self.parallel_config.cp_kv_cache_interleave_size
                 == 0
             ), (
                 f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by dcp_kv_cache_interleave_size "
-                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
         assert (
-            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            self.parallel_config.cp_kv_cache_interleave_size == 1
             or self.speculative_config is None
-        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
+        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:

@@ -777,6 +777,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         cp_local_seq_lens = common_attn_metadata.cp_local_seq_lens
+        cp_local_seq_lens_cpu = common_attn_metadata.cp_local_seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -1000,6 +1001,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
+            dcp_tot_seq_lens_device = None
+            if self.dcp_world_size > 1:
+                dcp_tot_seq_lens_device = seq_lens[:num_decodes]
+                seq_lens_cpu = dcp_local_seq_lens_cpu
+                seq_lens = dcp_local_seq_lens
+
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
@@ -1345,8 +1352,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 get_current_vllm_config()
             )
         )
-        self.dcp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(

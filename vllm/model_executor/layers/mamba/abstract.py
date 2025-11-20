@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
@@ -39,11 +40,6 @@ class MambaBase(AttentionLayerBase):
         pass
 
     @abstractmethod
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        """Get the attention backend class for this Mamba layer."""
-        pass
-
-    @abstractmethod
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
@@ -69,3 +65,7 @@ class MambaBase(AttentionLayerBase):
                 else 0
             ),
         )
+
+    def get_attn_backend(self) -> type["AttentionBackend"]:
+        """Get the attention backend class for this Mamba layer."""
+        return get_mamba_attn_backend(self.mamba_type)

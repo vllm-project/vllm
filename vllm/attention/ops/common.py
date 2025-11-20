@@ -173,7 +173,7 @@ def _cp_lse_common(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
-    ctx: CPTritonContext = None,
+    ctx: CPTritonContext | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -194,6 +194,8 @@ def _cp_lse_common(
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
     out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
+    # remove out.is_contiguous check 
+    # Ref: https://github.com/vllm-project/vllm/pull/25414
     return out, lse
 
 
@@ -201,7 +203,7 @@ def cp_lse_ag_out_rs(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
-    ctx: CPTritonContext = None,
+    ctx: CPTritonContext | None = None,
     return_lse: bool = False,
 ):
     """
@@ -223,7 +225,8 @@ def cp_lse_ag_out_ar(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
-    ctx: CPTritonContext = None,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -231,6 +234,9 @@ def cp_lse_ag_out_ar(
     """
     out, lse = _cp_lse_common(cp_attn_out, cp_attn_lse, cp_group, ctx=ctx)
     out = cp_group.all_reduce(out)
+
+    if return_lse:
+        return out, lse
     return out
 
 

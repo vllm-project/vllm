@@ -373,6 +373,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
         self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         # TRT LLM not supported with all2all yet.
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
@@ -384,7 +385,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -1179,7 +1180,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 " for ModelOptNvFp4FusedMoE."
             )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.use_marlin or (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
@@ -1196,7 +1200,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -1464,7 +1468,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if self.allow_flashinfer:
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        ):
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2
             )
@@ -1699,7 +1706,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
-                routed_scaling_factor=None,
+                routed_scaling_factor=1.0,
                 tile_tokens_dim=None,
                 routing_method_type=routing_method_type,
                 do_finalize=True,
@@ -1742,17 +1749,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-        ):
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                flashinfer_cutlass_moe_fp4,
+        elif self.allow_flashinfer:
+            assert self.flashinfer_moe_backend in (
+                FlashinferMoeBackend.CUTLASS,
+                FlashinferMoeBackend.CUTEDSL,
             )
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+                from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                    flashinfer_cutlass_moe_fp4,
+                )
+
+                flashinfer_fn_moe_fp4 = flashinfer_cutlass_moe_fp4
+            else:
+                from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (  # noqa: E501
+                    flashinfer_cutedsl_moe_fp4,
+                )
+
+                flashinfer_fn_moe_fp4 = flashinfer_cutedsl_moe_fp4
 
             assert self.moe_quant_config is not None
-
-            return flashinfer_cutlass_moe_fp4(
+            return flashinfer_fn_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,

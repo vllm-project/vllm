@@ -365,11 +365,18 @@ def should_use_deepgemm_for_fp8_linear(
 ):
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
+
+    # Verify DeepGEMM N/K dims requirements
+    # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
+    # test inside kernels/quatization/test_block_fp8.py
+    N_MULTIPLE = 64
+    K_MULTIPLE = 128
+
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight.shape[0] % 128 == 0
-        and weight.shape[1] % 128 == 0
+        and weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
     )
 
 

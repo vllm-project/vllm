@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -204,14 +205,14 @@ class Worker(WorkerBase):
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
-            visible_device_count = (
-                torch.cuda.device_count() if torch.cuda.is_available() else 0
-            )
-            assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must be "
-                f"less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
+                visible_device_count = (
+                    torch.cuda.device_count() if torch.cuda.is_available() else 0
+                )
+                assert self.parallel_config.local_world_size <= visible_device_count, (
+                    f"local_world_size ({self.parallel_config.local_world_size}) must "
+                    f"be less than or equal to the number of visible devices "
+                    f"({visible_device_count})."
+                )
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -733,6 +734,7 @@ class Worker(WorkerBase):
                 module.global_num_experts = module.moe_config.num_experts
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
                     tp_size_=get_tp_group().world_size,
+                    pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
                     vllm_parallel_config=parallel_config,
                 )
@@ -886,6 +888,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
+        parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
 
