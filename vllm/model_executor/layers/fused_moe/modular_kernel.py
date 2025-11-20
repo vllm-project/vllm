@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     count_expert_num_tokens,
     disable_inplace,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -1115,7 +1116,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         that handles DBO, async and shared expert overlap.
         """
 
-        def run_shared_experts() -> torch.Tensor | None:
+        def maybe_run_shared_experts() -> torch.Tensor | None:
             if self.shared_experts is None:
                 return None
 
@@ -1143,7 +1144,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            shared_output = run_shared_experts()
+            shared_output = maybe_run_shared_experts()
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1154,7 +1155,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
 
-            shared_output = run_shared_experts()
+            shared_output = maybe_run_shared_experts()
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1195,7 +1196,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             and use_shared_experts_stream
             and self.shared_experts_stream is not None
             and hidden_states.is_cuda
-            and torch.cuda.is_available()
+            and current_platform.is_cuda()
         ):
             torch.cuda.current_stream().wait_stream(self.shared_experts_stream)
 
