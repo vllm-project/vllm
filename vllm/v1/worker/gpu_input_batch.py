@@ -46,6 +46,9 @@ class CachedRequestState:
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
+    # Used when both async_scheduling and spec_decode are enabled.
+    prev_num_draft_len: int = 0
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -84,6 +87,7 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -137,6 +141,7 @@ class InputBatch:
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
             num_speculative_tokens=num_speculative_tokens,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 
         # Sampling-related.
@@ -246,7 +251,7 @@ class InputBatch:
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
-        self.spec_token_ids: list[list[int] | None] = []
+        self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -260,7 +265,7 @@ class InputBatch:
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
-        self.async_copy_ready_event: torch.cuda.Event | None = None
+        self.async_copy_ready_event: torch.Event | None = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -308,7 +313,7 @@ class InputBatch:
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
-            self.spec_token_ids[req_index] = []
+            self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
 
@@ -457,7 +462,7 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
-        self.spec_token_ids[req_index] = None
+        self.spec_token_ids[req_index].clear()
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -649,9 +654,15 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            spec_token_ids = self.spec_token_ids[last_req_index]
-            self.spec_token_ids[empty_index] = spec_token_ids
-            self.spec_token_ids[last_req_index] = None
+            if last_req_index != empty_index:
+                (
+                    self.spec_token_ids[last_req_index],
+                    self.spec_token_ids[empty_index],
+                ) = (
+                    self.spec_token_ids[empty_index],
+                    self.spec_token_ids[last_req_index],
+                )
+                self.spec_token_ids[last_req_index].clear()
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
@@ -859,22 +870,24 @@ class InputBatch:
         return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
         Returns:
-            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
-               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
+            1. prompt_lora_mapping: A tuple of size np.sum(num_sampled_tokens)
+               where, prompt_lora_mapping[i] is the LoRA id to use for the ith
+               sampled token.
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
                where, token_lora_mapping[i] is the LoRA id to use for ith token.
             3. lora_requests: Set of relevant LoRA requests.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping)
+        prompt_lora_mapping = tuple(req_lora_mapping.repeat(num_sampled_tokens))
         token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
+
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values()
         )
@@ -884,7 +897,7 @@ class InputBatch:
     def set_async_sampled_token_ids(
         self,
         sampled_token_ids_cpu: torch.Tensor,
-        async_copy_ready_event: torch.cuda.Event,
+        async_copy_ready_event: torch.Event,
     ) -> None:
         """
         In async scheduling case, store ref to sampled_token_ids_cpu

@@ -82,7 +82,8 @@ enable_hf_transfer()
 
 class DisabledTqdm(tqdm):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs, disable=True)
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
 
 
 def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
@@ -594,6 +595,9 @@ def safetensors_weights_iterator(
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
+    state_dict = {}
+    leftover_state_dict: dict[str, torch.Tensor] = {}
+
     for st_file in tqdm(
         hf_weights_files,
         desc=loading_desc,
@@ -605,9 +609,11 @@ def safetensors_weights_iterator(
                 state_dict = load(f.read())
             yield from state_dict.items()
         elif safetensors_load_strategy == "torchao":
-            if not torchao_version_at_least("0.14.0"):
+            # we can't load flattened torchao tensor subclasses directly into the model
+            # instead we reconstruct the subclasses here before returning
+            if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
-                    "Please use torchao version >= 0.14.0 \
+                    "Please use torchao version >= 0.15.0 \
                         to load torchao safetensors checkpoint"
                 )
             from torchao.prototype.safetensors.safetensors_support import (
@@ -615,12 +621,20 @@ def safetensors_weights_iterator(
             )
 
             with safe_open(st_file, framework="pt") as f:
-                state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
+
+                # update with leftover tensor data from previous iteration, if any
+                state_dict.update(leftover_state_dict)
                 metadata = f.metadata()
-                updated_state_dict = unflatten_tensor_state_dict(state_dict, metadata)
-            yield from updated_state_dict.items()
+                # due to sharded checkpoints, we are not guaranteed that we have all
+                # tensor subclass data on one file
+                # state_dict has the leftover data from this step and we wait for
+                # missing information to be provided in a future iteration
+                unflattened_state_dict, leftover_state_dict = (
+                    unflatten_tensor_state_dict(state_dict, metadata)
+                )
+            yield from unflattened_state_dict.items()
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
@@ -835,7 +849,11 @@ def gguf_quant_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors
+    them to torch tensors.
+    Be careful of the order of yielding weight types and weights data,
+    we have to yield all weight types first before yielding any weights.
+    Otherwise it would cause issue when loading weights with for packed
+    layer with different quant types.
     """
 
     reader = gguf.GGUFReader(gguf_file)
@@ -845,7 +863,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -855,7 +873,7 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
