@@ -8,7 +8,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
 
-from ...utils import check_answers, spawn_new_process_for_each_test, prep_prompts
+from ...utils import check_answers, prep_prompts, spawn_new_process_for_each_test
 
 # global seed
 SEED = 42
