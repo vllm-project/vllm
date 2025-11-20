@@ -27,9 +27,6 @@ def test_classify_models(
         max_model_len=512,
         dtype=dtype,
         enable_prefix_caching=True,
-        # `enable_chunked_prefill`: Set to `False` instead of `None` in VllmRunner
-        # But how is this related to enable_prefix_caching?
-        enable_chunked_prefill=True,
     ) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert cache_config.enable_prefix_caching
