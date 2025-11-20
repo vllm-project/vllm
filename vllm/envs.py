@@ -769,6 +769,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
     # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB": lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
+    "VLLM_ENABLE_MM_PROCESSOR_STATS": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MM_PROCESSOR_STATS", "0"))
+    ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
