@@ -13,7 +13,6 @@ from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormFp8GroupQuantFusionPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -241,6 +240,10 @@ def test_fusion_rmsnorm_quant(
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
         if model_class is TestAiterRmsnormGroupFp8QuantModel:
+            from vllm.compilation.rocm_aiter_fusion import (
+                RocmAiterRMSNormFp8GroupQuantFusionPass,
+            )
+
             fusion_pass = RocmAiterRMSNormFp8GroupQuantFusionPass(vllm_config)
         else:
             fusion_pass = RMSNormQuantFusionPass(vllm_config)

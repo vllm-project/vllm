@@ -17,7 +17,6 @@ from vllm.compilation.activation_quant_fusion import (
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.rocm_aiter_fusion import RocmAiterSiluMulFp8GroupQuantFusionPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -220,6 +219,10 @@ def test_fusion_silu_and_mul_quant(
     with set_current_vllm_config(config):
         fusion_pass = ActivationQuantFusionPass(config)
         if model_class == TestAiterSiluMulGroupFp8QuantModel:
+            from vllm.compilation.rocm_aiter_fusion import (
+                RocmAiterSiluMulFp8GroupQuantFusionPass,
+            )
+
             fusion_pass = RocmAiterSiluMulFp8GroupQuantFusionPass(config)
 
         passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
