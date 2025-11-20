@@ -489,6 +489,8 @@ class OpenAIServingResponses(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except Exception as e:
             return self.create_error_response(str(e))
 
@@ -585,57 +587,51 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        try:
-            input_messages = None
-            output_messages = None
-            if self.use_harmony:
-                assert isinstance(context, HarmonyContext)
-                output = self._make_response_output_items_with_harmony(context)
-                if request.enable_response_messages:
-                    input_messages = context.messages[: context.num_init_messages]
-                    output_messages = context.messages[context.num_init_messages :]
-                num_tool_output_tokens = context.num_tool_output_tokens
-                if len(output) > 0:
-                    if context.finish_reason == "length":
-                        status = "incomplete"
-                    elif context.finish_reason == "abort":
-                        status = "cancelled"
-                    elif context.finish_reason == "error":
-                        logger.error(
-                            "Request %s failed with internal error during generation",
-                            request.request_id,
-                        )
-                        raise GenerationError("Internal server error")
-                else:
+        input_messages = None
+        output_messages = None
+        if self.use_harmony:
+            assert isinstance(context, HarmonyContext)
+            output = self._make_response_output_items_with_harmony(context)
+            if request.enable_response_messages:
+                input_messages = context.messages[: context.num_init_messages]
+                output_messages = context.messages[context.num_init_messages :]
+            num_tool_output_tokens = context.num_tool_output_tokens
+            if len(output) > 0:
+                if context.finish_reason == "length":
                     status = "incomplete"
-            else:
-                assert isinstance(context, SimpleContext)
-                final_res = context.last_output
-                assert final_res is not None
-                assert len(final_res.outputs) == 1
-                final_output = final_res.outputs[0]
-
-                # finish_reason='error' indicates retryable internal error
-                self._handle_error_finish_reason(
-                    final_output.finish_reason, request.request_id
-                )
-
-                output = self._make_response_output_items(
-                    request, final_output, tokenizer
-                )
-
-                # TODO: context for non-gptoss models doesn't use messages
-                # so we can't get them out yet
-                if request.enable_response_messages:
-                    raise NotImplementedError(
-                        "enable_response_messages is currently only "
-                        "supported for gpt-oss"
+                elif context.finish_reason == "abort":
+                    status = "cancelled"
+                elif context.finish_reason == "error":
+                    logger.error(
+                        "Request %s failed with internal error during generation",
+                        request.request_id,
                     )
-                # Calculate usage.
-                assert final_res.prompt_token_ids is not None
-                num_tool_output_tokens = 0
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
+                    raise GenerationError("Internal server error")
+            else:
+                status = "incomplete"
+        else:
+            assert isinstance(context, SimpleContext)
+            final_res = context.last_output
+            assert final_res is not None
+            assert len(final_res.outputs) == 1
+            final_output = final_res.outputs[0]
+
+            # finish_reason='error' indicates retryable internal error
+            self._handle_error_finish_reason(
+                final_output.finish_reason, request.request_id
+            )
+
+            output = self._make_response_output_items(request, final_output, tokenizer)
+
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently only supported for gpt-oss"
+                )
+            # Calculate usage.
+            assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
 
         assert isinstance(context, (SimpleContext, HarmonyContext))
         num_prompt_tokens = context.num_prompt_tokens
