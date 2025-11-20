@@ -1908,7 +1908,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.backend not in ["openai-chat"]:
+            backend = getattr(args, "backend", "openai-chat")
+            if args.dataset_name == "random-mm" and backend not in ["openai-chat"]:
                 raise ValueError(
                     "Multi-modal content (images) is only supported on "
                     "'openai-chat' backend."
