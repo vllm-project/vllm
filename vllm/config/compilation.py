@@ -524,13 +524,11 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "static_forward_context",
-            "pass_config",  # handled separately below
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
-        factors["pass_config"] = self.pass_config.compute_hash()
         return hash_factors(factors)
 
     def __repr__(self) -> str:

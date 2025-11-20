@@ -215,6 +215,12 @@ def normalize_value(x):
     if hasattr(x, "uuid") and callable(getattr(x, "uuid", None)):
         return x.uuid()
 
+    # Allow nested configs (e.g. PassConfig) to provide their
+    # own stable fingerprint via compute_hash().
+    compute_hash_fn = getattr(x, "compute_hash", None)
+    if callable(compute_hash_fn):
+        return compute_hash_fn()
+
     if callable(x):
         raise TypeError("normalize_value: function or callable instance unsupported")
 
