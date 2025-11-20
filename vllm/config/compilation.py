@@ -949,13 +949,12 @@ class CompilationConfig:
         )
 
         if len(rounded_sizes) == 0:
-            logger.warning(
+            raise ValueError(
                 "No valid cudagraph sizes after rounding to multiple of "
                 " num_speculative_tokens + 1 (%d); please adjust num_speculative_tokens"
                 " or max_cudagraph_capture_size (or cudagraph_capture_sizes)",
                 multiple_of,
             )
-            return
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
