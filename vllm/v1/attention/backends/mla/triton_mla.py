@@ -29,10 +29,7 @@ logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
@@ -158,11 +155,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             or layer._v_scale.item() != 1.0
         ):
             raise NotImplementedError(
-                """
-                FP8 Triton MLA with q,k,v scales
-                {layer._q_scale},{layer._k_scale},{layer._v_scale}
-                not yet supported. Only values of 1.0 supported.
-            """
+                "FP8 Triton MLA with q,k,v scales != 1.0 not yet supported.",
             )
 
         if type(q) is tuple:
