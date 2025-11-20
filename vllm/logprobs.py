@@ -193,7 +193,9 @@ def append_logprobs_for_next_position(
     # Accept either a single sampled-token rank (legacy path) or
     # a full sequence of ranks (e.g., prompt logprobs already provide
     # per-token ranks). When provided, enforce 1:1 with token_ids.
-    if isinstance(rank, (list, tuple)):
+    if not isinstance(rank, int):
+        if isinstance(rank, str):
+            raise TypeError("rank cannot be a string")
         ranks = list(rank)
         if len(ranks) != len(token_ids):
             raise ValueError(

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import pytest
+
 from vllm.logprobs import (
     FlatLogprobs,
     Logprob,
@@ -267,7 +269,7 @@ def test_flat_logprobs_empty_slice() -> None:
 def test_append_logprobs_rank_length_mismatch() -> None:
     """Test that ValueError is raised when rank length doesn't match token_ids"""
     logprobs = create_sample_logprobs(flat_logprobs=True)
-    try:
+    with pytest.raises(ValueError, match=r"Expected 2 ranks.*got 1"):
         append_logprobs_for_next_position(
             logprobs,
             token_ids=[10, 11],
@@ -276,7 +278,17 @@ def test_append_logprobs_rank_length_mismatch() -> None:
             rank=[7],
             num_logprobs=2,
         )
-        assert False, "Expected ValueError but no exception was raised"
-    except ValueError as e:
-        assert "Expected 2 ranks" in str(e)
-        assert "got 1" in str(e)
+
+
+def test_append_logprobs_rank_string_rejected() -> None:
+    """Test that TypeError is raised when rank is a string"""
+    logprobs = create_sample_logprobs(flat_logprobs=True)
+    with pytest.raises(TypeError, match="rank cannot be a string"):
+        append_logprobs_for_next_position(
+            logprobs,
+            token_ids=[10, 11],
+            logprobs=[0.5, 0.6],
+            decoded_tokens=["10", "11"],
+            rank="12",
+            num_logprobs=2,
+        )
