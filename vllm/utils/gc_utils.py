@@ -68,9 +68,10 @@ class GCDebugger:
             # Before GC started, record GC start time
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
-            self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation), self.config.top_objects
-            )
+            if (top_objects := self.config.top_objects) > 0:
+                self.gc_top_collected_objects = _compute_top_gc_collected_objects(
+                    gc.get_objects(generation), top_objects
+                )
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
