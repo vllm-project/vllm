@@ -24,6 +24,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -204,7 +205,7 @@ class KeyeVisionEmbeddings(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -346,6 +347,13 @@ def apply_rotary_pos_emb_flashatt(
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
     elif current_platform.is_rocm():
         from flash_attn.ops.triton.rotary import apply_rotary as apply_rotary_emb
+    else:
+        # For other platforms, use PyTorch fallback
+        from vllm.model_executor.layers.rotary_embedding.common import (
+            apply_rotary_emb_torch,
+        )
+
+        apply_rotary_emb = partial(apply_rotary_emb_torch, is_neox_style=True)
 
     q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
     k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
@@ -1477,9 +1485,7 @@ class BaseKeyeModule(nn.Module):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None

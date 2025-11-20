@@ -22,6 +22,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -39,8 +40,8 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention
 from vllm.model_executor.models.qwen2_vl import (
+    Qwen2VisionAttention,
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
@@ -328,7 +329,7 @@ class DotsVisionAttention(nn.Module):
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
         x, _ = self.qkv(x)
-        q, k, v = Qwen2_5_VisionAttention.split_qkv(self, x)
+        q, k, v = Qwen2VisionAttention.split_qkv(self, x)
         bs = q.shape[1]
         # [S,B,H,D] -> [B,S,H,D]
         q = q.permute(1, 0, 2, 3).contiguous()
@@ -471,7 +472,7 @@ class DotsPatchEmbed(nn.Module):
         self.temporal_patch_size = config.temporal_patch_size
         self.embed_dim = config.embed_dim
         self.config = config
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             config.num_channels,
             config.embed_dim,
             kernel_size=(config.patch_size, config.patch_size),
@@ -780,6 +781,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             architectures=["Qwen2ForCausalLM"],
         )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> DotsOCRImageInputs | None:
@@ -840,7 +845,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -858,8 +863,8 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
+            vision_embeddings = self.embed_multimodal(**kwargs)
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 vision_embeddings,
                 is_multimodal=input_ids == self.config.image_token_id,

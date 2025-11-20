@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
-import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
@@ -20,12 +19,14 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -44,7 +45,6 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ModelRunnerOutput,
@@ -188,6 +188,7 @@ class Worker(WorkerBase):
                 and self.parallel_config.distributed_executor_backend
                 not in ["ray", "external_launcher"]
                 and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
@@ -204,7 +205,14 @@ class Worker(WorkerBase):
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
-
+                visible_device_count = (
+                    torch.cuda.device_count() if torch.cuda.is_available() else 0
+                )
+                assert self.parallel_config.local_world_size <= visible_device_count, (
+                    f"local_world_size ({self.parallel_config.local_world_size}) must "
+                    f"be less than or equal to the number of visible devices "
+                    f"({visible_device_count})."
+                )
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -572,18 +580,7 @@ class Worker(WorkerBase):
             all_gather_tensors=all_gather_tensors,
         )
 
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
@@ -595,14 +592,19 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
-            # only print profiler results on rank 0
-            if (
-                isinstance(self.profiler, torch.profiler.profile)
-                and self.local_rank == 0
-            ):
-                print(
-                    self.profiler.key_averages().table(sort_by="self_cuda_time_total")
-                )
+            if isinstance(self.profiler, torch.profiler.profile):
+                rank = self.local_rank
+                profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+                sort_key = "self_cuda_time_total"
+                table = self.profiler.key_averages().table(sort_by=sort_key)
+
+                with open(profiler_out_file, "w") as f:
+                    print(table, file=f)
+
+                # only print profiler results on rank 0
+                if rank == 0:
+                    print(table)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
@@ -732,6 +734,7 @@ class Worker(WorkerBase):
                 module.global_num_experts = module.moe_config.num_experts
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
                     tp_size_=get_tp_group().world_size,
+                    pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
                     vllm_parallel_config=parallel_config,
                 )
@@ -885,5 +888,10 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
+        parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+    # Init ec connector here before KV caches caches init
+    # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+    ensure_ec_transfer_initialized(vllm_config)

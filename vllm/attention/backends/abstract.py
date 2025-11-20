@@ -119,14 +119,12 @@ class AttentionBackend(ABC):
             return True
 
         for supported_size in cls.supported_kernel_block_sizes:
-            is_multiple_of = (
-                isinstance(supported_size, MultipleOf)
-                and block_size % supported_size.base == 0
-            )
-            is_int_equal = (
-                isinstance(supported_size, int) and block_size == supported_size
-            )
-            if is_multiple_of or is_int_equal:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
                 return True
         return False
 
@@ -141,6 +139,17 @@ class AttentionBackend(ABC):
     @classmethod
     def is_sparse(cls) -> bool:
         return False
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """Check if backend supports a given attention type.
+
+        By default, only supports decoder attention.
+        Backends should override this to support other attention types.
+        """
+        from vllm.attention import AttentionType
+
+        return attn_type == AttentionType.DECODER
 
     @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
@@ -171,6 +180,7 @@ class AttentionBackend(ABC):
         has_sink: bool,
         use_sparse: bool,
         device_capability: "DeviceCapability",
+        attn_type: str,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -195,6 +205,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("non-sparse not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
+        if not cls.supports_attn_type(attn_type):
+            invalid_reasons.append(f"attention type {attn_type} not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -252,6 +264,12 @@ class AttentionImpl(ABC, Generic[T]):
     dcp_world_size: int
     dcp_rank: int
 
+    pcp_world_size: int
+    pcp_rank: int
+
+    total_cp_world_size: int
+    total_cp_rank: int
+
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
@@ -264,6 +282,17 @@ class AttentionImpl(ABC, Generic[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )

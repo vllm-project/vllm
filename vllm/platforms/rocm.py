@@ -185,6 +185,9 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
     ]
+    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
+    if not on_gfx9():
+        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def get_vit_attn_backend(
@@ -213,22 +216,16 @@ class RocmPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
-
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
-            )
 
         if use_mla:
             if selected_backend is None:
@@ -237,7 +234,6 @@ class RocmPlatform(Platform):
                     if rocm_aiter_ops.is_mla_enabled() or block_size == 1
                     else AttentionBackendEnum.TRITON_MLA
                 )
-
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend.")
@@ -249,6 +245,9 @@ class RocmPlatform(Platform):
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
                 logger.info("Using AITER MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
+                logger.info("Using AITER TRITON MLA backend.")
+                return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
 
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"
@@ -332,6 +331,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
@@ -339,9 +339,7 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
 
-        use_aiter_rms_norm = (
-            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        )
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -430,10 +428,6 @@ class RocmPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
-
-    @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
     def is_navi(cls) -> bool:
