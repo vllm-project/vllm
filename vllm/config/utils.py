@@ -310,8 +310,6 @@ class Range:
 
     def __contains__(self, size: int) -> bool:
         # Inclusive of start, inclusive of end
-        if self.is_single_size():
-            return size == self.start
         return self.start <= size <= self.end
 
     def __eq__(self, other: object) -> bool:

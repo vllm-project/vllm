@@ -92,7 +92,7 @@ class PiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
-    def fakify_args(self, args: list[Any]) -> list[Any]:
+    def _fakify_args(self, args: list[Any]) -> list[Any]:
         # We need to pass fake example_inputs, otherwise torch.compile
         # will fakify the example_inputs potentially causing some non dynamic
         # dimension to be be duck shaped to other existing shapes that have hints
@@ -121,7 +121,7 @@ class PiecewiseBackend:
             # args are real arguments
             # fakify for range, real args for concrete size
             args = (
-                self.fakify_args(args)
+                self._fakify_args(args)
                 if not range_entry.compile_range.is_single_size()
                 else args
             )
@@ -135,28 +135,25 @@ class PiecewiseBackend:
                 num_graphs=self.total_piecewise_compiles,
             )
 
-            # finished compilations for all required shapes
             self.check_for_ending_compilation()
 
-    def __call__(self, *args) -> Any:
-        runtime_shape = args[self.sym_shape_indices[0]]
-
+    def _find_range_for_shape(self, runtime_shape: int) -> Range | None:
         # First we try to find the range entry for the concrete compile size
         # If not found, we search for the range entry
         # that contains the runtime shape.
-        range_found = False
         if runtime_shape in self.compile_sizes:
-            range_entry = self.range_entries[
-                Range(start=runtime_shape, end=runtime_shape)
-            ]
-            range_found = True
+            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
         else:
             for range in self.compile_ranges:
                 if runtime_shape in range:
-                    range_entry = self.range_entries[range]
-                    range_found = True
-                    break
-        assert range_found, (
+                    return self.range_entries[range]
+        return None
+
+    def __call__(self, *args) -> Any:
+        runtime_shape = args[self.sym_shape_indices[0]]
+        range_entry = self._find_range_for_shape(runtime_shape)
+
+        assert range_entry is not None, (
             f"Shape out of considered range: {runtime_shape} "
             "[1, max_num_batched_tokens]"
         )

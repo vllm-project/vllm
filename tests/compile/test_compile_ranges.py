@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 from torch import fx as fx
 from torch import nn
@@ -47,7 +49,7 @@ def run_model(vllm_config: VllmConfig, model: nn.Module, batch_sizes: list[int])
             model(torch.randn(batch_size, MLP_SIZE))
 
 
-class PostGradPassManagerCheckRanges(InductorPass):
+class PostGradRangeChecker(InductorPass):
     def __init__(self, ranges: list[Range]):
         self.ranges = ranges
         self.num_calls = 0
@@ -60,15 +62,12 @@ class PostGradPassManagerCheckRanges(InductorPass):
         self.num_calls += 1
 
     def uuid(self) -> str:
-        state = {
-            "ranges": [str(range) for range in self.ranges],
-            "current_compile_range": str(get_pass_context().compile_range),
-        }
+        state: dict[str, Any] = {}
         return InductorPass.hash_dict(state)
 
 
 def test_compile_ranges():
-    post_grad_pass_manager = PostGradPassManagerCheckRanges(
+    post_grad_pass_manager = PostGradRangeChecker(
         [
             Range(start=1, end=8),
             Range(start=16, end=16),
@@ -129,7 +128,7 @@ def test_inductor_cache_compile_ranges(monkeypatch):
     # To force multiple compilations, we disable the compile cache
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
-    post_grad_pass_manager = PostGradPassManagerCheckRanges(
+    post_grad_pass_manager = PostGradRangeChecker(
         ranges=[
             Range(start=1, end=8),
             Range(start=9, end=8192),
@@ -160,6 +159,7 @@ def test_inductor_cache_compile_ranges(monkeypatch):
         batch_sizes = [1, 16]
         run_model(vllm_config_1, model1, batch_sizes)
         # Could be 0 or 2, depending on the cache
+        # pytorch issue https://github.com/pytorch/pytorch/issues/168239
         num_call_initially = post_grad_pass_manager.num_calls
         assert num_call_initially in [0, 2]
 
@@ -169,5 +169,6 @@ def test_inductor_cache_compile_ranges(monkeypatch):
         model2 = TestModel(vllm_config=vllm_config_2, prefix="").eval()
         batch_sizes = [1, 16]
         run_model(vllm_config_2, model2, batch_sizes)
-        # Check that cache is used
+        # Check that cache is used, so the number of calls
+        # should be the same as initially
         assert post_grad_pass_manager.num_calls == num_call_initially
