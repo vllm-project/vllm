@@ -462,7 +462,10 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.use_marlin:
+        if self.use_marlin or (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
             return None
         elif not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize(routing_tables)
