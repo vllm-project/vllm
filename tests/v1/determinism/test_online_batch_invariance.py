@@ -16,7 +16,8 @@ import sys
 from typing import Any
 
 import openai
-from utils import _random_prompt, skip_unsupported
+import pytest
+from utils import BACKENDS, _random_prompt, resolve_model_name, skip_unsupported
 
 from tests.utils import RemoteOpenAIServer
 
@@ -133,9 +134,14 @@ def _compare_bs1_vs_bsn_single_process(
 
 
 @skip_unsupported
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
+    backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+    # Override backend for this test (and the RemoteOpenAIServer child process).
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
+    model_name = resolve_model_name(backend)
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
     sp_kwargs: dict[str, Any] = {
