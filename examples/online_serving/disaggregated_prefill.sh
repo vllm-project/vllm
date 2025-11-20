@@ -53,7 +53,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL_NAME \
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"8100"}}' &
 
 # decoding instance, which is the KV consumer
 CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL_NAME \
@@ -62,25 +62,27 @@ CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL_NAME \
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_connector_extra_config":{"proxy_ip":"0.0.0.0","proxy_port":"30001","http_port":"8200"}}' &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100
 wait_for_server 8200
 
-# launch a proxy server that opens the service at port 8000
+# launch P2P NCCL proxy server that opens HTTP service at port 10001
+# and listens for ZMQ service discovery at port 30001
 # the workflow of this proxy:
-# - send the request to prefill vLLM instance (port 8100), change max_tokens 
-#   to 1
-# - after the prefill vLLM finishes prefill, send the request to decode vLLM 
-#   instance
+# - prefill and decode instances register via ZMQ heartbeats (port 30001)
+# - proxy receives client requests (port 10001)
+# - proxy generates request IDs with embedded prefill/decode ZMQ addresses
+# - proxy sends request to prefill instance (max_tokens=1)
+# - proxy sends request to decode instance (original max_tokens)
 # NOTE: the usage of this API is subject to change --- in the future we will 
 # introduce "vllm connect" to connect between prefill and decode instances
-python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+python3 ../../examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_proxy_p2p_nccl_xpyd.py &
 sleep 1
 
-# serve two example requests
-output1=$(curl -X POST -s http://localhost:8000/v1/completions \
+# serve two example requests (proxy listens on port 10001)
+output1=$(curl -X POST -s http://localhost:10001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "'"$MODEL_NAME"'",
@@ -89,7 +91,7 @@ output1=$(curl -X POST -s http://localhost:8000/v1/completions \
 "temperature": 0
 }')
 
-output2=$(curl -X POST -s http://localhost:8000/v1/completions \
+output2=$(curl -X POST -s http://localhost:10001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "'"$MODEL_NAME"'",

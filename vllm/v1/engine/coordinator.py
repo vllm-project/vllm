@@ -14,7 +14,10 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import (
+    get_engine_client_zmq_addr_with_socket,
+    shutdown,
+)
 
 logger = init_logger(__name__)
 
@@ -66,13 +69,17 @@ class DPCoordinator:
         # Assume coordinator is colocated with front-end procs when not in
         # either external or hybrid DP LB mode.
         local_only = not (external_lb or hybrid_lb)
-        front_publish_address = get_engine_client_zmq_addr(
-            local_only=local_only, host=host
+        front_publish_address, front_held_socket = (
+            get_engine_client_zmq_addr_with_socket(local_only=local_only, host=host)
         )
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+        back_publish_address, back_publish_held_socket = (
+            get_engine_client_zmq_addr_with_socket(local_only_eng, host)
+        )
+        back_output_address, back_output_held_socket = (
+            get_engine_client_zmq_addr_with_socket(local_only_eng, host)
+        )
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
@@ -87,6 +94,15 @@ class DPCoordinator:
             daemon=True,
         )
         self.proc.start()
+
+        # Close held sockets after subprocess has started and will bind
+        # The subprocess binds immediately upon entry to process_input_socket
+        if front_held_socket is not None:
+            front_held_socket.close()
+        if back_publish_held_socket is not None:
+            back_publish_held_socket.close()
+        if back_output_held_socket is not None:
+            back_output_held_socket.close()
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
