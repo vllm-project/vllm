@@ -3340,6 +3340,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_id
                     ].slot_mapping.gpu[:num_tokens],
                     causal=True,
+                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                    if self.dcp_world_size > 1
+                    else None,
                     encoder_seq_lens=encoder_seq_lens,
                 )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
