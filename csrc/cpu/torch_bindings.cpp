@@ -172,7 +172,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
     defined(__powerpc64__)
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -208,15 +207,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()",
-      {stride_tag});
+      "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()",
-      {stride_tag});
+      "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
 #endif
