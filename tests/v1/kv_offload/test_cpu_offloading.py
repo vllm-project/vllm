@@ -12,8 +12,9 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
+from vllm.platforms import current_platform
 
-CPU_BLOCK_SIZES = [16, 48]
+CPU_BLOCK_SIZES = [64] if current_platform.is_xpu() else [16, 48]
 
 
 class MockSubscriber:

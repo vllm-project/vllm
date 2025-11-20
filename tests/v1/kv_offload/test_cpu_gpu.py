@@ -9,11 +9,17 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
+
+if current_platform.is_xpu():
+    from vllm.v1.kv_offload.worker.cpu_xpu import (
+        CpuXpuOffloadingHandler as CpuGpuOffloadingHandler,
+    )
+else:
+    from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
 
 BACKENDS_TO_TEST = [FlashAttentionBackend]
 
-if not current_platform.is_rocm():
+if not current_platform.is_rocm() and not current_platform.is_xpu():
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     BACKENDS_TO_TEST.append(FlashInferBackend)
@@ -31,7 +37,7 @@ NUM_HEADS = [8]
 NUM_LAYERS = [4]
 DTYPES = [torch.bfloat16]
 SEEDS = [0]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = [f"{current_platform.device_type}:0"]
 NUM_MAPPINGS = [3]
 
 
@@ -82,6 +88,7 @@ def test_transfer(
 
     # create handler
     cpu_block_size = gpu_blocks_per_cpu_block * gpu_block_size
+
     handler = CpuGpuOffloadingHandler(
         attn_backends=attn_backends,
         gpu_block_size=gpu_block_size,
