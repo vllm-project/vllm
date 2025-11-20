@@ -177,7 +177,6 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(input.stride(-1) == 1);
-  TORCH_CHECK(input.dim() == 2 || input.dim() == 3);
   TORCH_CHECK(weight.is_contiguous());
 
   int hidden_size = input.size(-1);
@@ -227,7 +226,6 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         double epsilon) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
-  TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(residual.is_contiguous());
   TORCH_CHECK(weight.is_contiguous());
   int hidden_size = input.size(-1);
