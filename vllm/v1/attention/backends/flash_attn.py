@@ -45,7 +45,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -384,7 +384,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
 
-            dcp_context_kv_lens_cpu = get_dcp_local_seq_lens(
+            dcp_context_kv_lens_cpu = get_cp_local_seq_lens(
                 dcp_context_kv_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,

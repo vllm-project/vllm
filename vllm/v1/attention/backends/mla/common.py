@@ -225,7 +225,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -832,7 +832,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
 
                 if self.dcp_world_size > 1:
-                    local_context_lens_allranks = get_dcp_local_seq_lens(
+                    local_context_lens_allranks = get_cp_local_seq_lens(
                         context_lens_cpu,
                         self.dcp_world_size,
                         None,
