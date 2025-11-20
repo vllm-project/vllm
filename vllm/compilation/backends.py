@@ -64,7 +64,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         return EagerAdaptor()
     else:
         logger.debug("Using custom backend: %s", compilation_config.backend)
-        compiler = resolve_obj_by_qualname(compilation_config.backend)()
+        compiler = resolve_obj_by_qualname(current_platform.get_compile_backend())()
         assert isinstance(compiler, CompilerInterface)
         return compiler
 

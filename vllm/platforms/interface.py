@@ -191,6 +191,13 @@ class Platform:
         return "vllm.compilation.pass_manager.PostGradPassManager"
 
     @classmethod
+    def get_compile_backend(cls) -> str:
+        """
+        Get the custom compile backend for current platform.
+        """
+        return ""
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
