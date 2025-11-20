@@ -446,6 +446,8 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
+    is_profiling_enabled: bool = False
+    """Whether to enable profiling"""
 
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None

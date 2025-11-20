@@ -67,7 +67,7 @@ class LoRAConfig:
     """LoRA alpha."""
     training_target_modules: List[str] | None = None
     """Target modules for LoRA training."""
-    enable_lora_training: bool = False
+    enable_lora_training: Optional[bool] = False
     """Enable LoRA training."""
     scheduler_type: str = "cosine"
     """Scheduler type for LoRA training."""

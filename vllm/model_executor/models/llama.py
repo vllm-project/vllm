@@ -28,6 +28,7 @@ from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
+import nvtx
 from torch import nn
 from transformers import LlamaConfig
 
@@ -333,9 +334,13 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         is_lora_training: bool = False,
+        is_profiling_enabled: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if is_lora_training:
             return self.forward_training(positions, hidden_states, residual)
+
+        if is_profiling_enabled:
+            nvtx.push_range("LlamaDecoderLayer.input_layernorm")
 
         # Self Attention
         if residual is None:
@@ -344,13 +349,31 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LlamaDecoderLayer.self_attn")
+
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LlamaDecoderLayer.post_attention_layernorm")
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LlamaDecoderLayer.mlp")
+
         hidden_states = self.mlp(hidden_states)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+
         return hidden_states, residual
 
 
@@ -414,6 +437,7 @@ class LlamaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         is_lora_training: bool = False,
+        is_profiling_enabled: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
         if get_pp_group().is_first_rank:
@@ -432,7 +456,16 @@ class LlamaModel(nn.Module):
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual, is_lora_training=is_lora_training)
+
+            if is_profiling_enabled:
+                nvtx.push_range(f"LlamaModel.layer_{idx}")
+
+            hidden_states, residual = layer(positions, hidden_states, residual,
+                                            is_lora_training=is_lora_training,
+                                            is_profiling_enabled=is_profiling_enabled)
+
+            if is_profiling_enabled:
+                nvtx.pop_range()
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -440,7 +473,14 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
+        if is_profiling_enabled:
+            nvtx.push_range("LlamaModel.norm")
+
         ret = self.norm(hidden_states, residual, is_training=is_lora_training)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+
         if isinstance(ret, tuple):
             hidden_states, _ = ret
         else:
@@ -629,9 +669,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         is_lora_training: bool = False,
+        is_profiling_enabled: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds, is_lora_training=is_lora_training)
+                                  inputs_embeds, is_lora_training=is_lora_training,
+                                  is_profiling_enabled=is_profiling_enabled)
         return model_output
 
     def compute_logits(

@@ -2248,6 +2248,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ) = self._preprocess(scheduler_output, intermediate_tensors,
                                  ubatch_slices, num_tokens_after_padding)
 
+            if self.vllm_config.model_config.is_profiling_enabled:
+                model_kwargs["is_profiling_enabled"] = True
+
             if ubatch_slices is not None:
                 num_input_tokens = num_input_tokens // 2
 

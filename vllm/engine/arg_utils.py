@@ -387,6 +387,7 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
+    is_profiling_enabled: bool = False
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -1041,6 +1042,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             io_processor_plugin=self.io_processor_plugin,
+            is_profiling_enabled=self.is_profiling_enabled,
         )
 
     def validate_tensorizer_args(self):
