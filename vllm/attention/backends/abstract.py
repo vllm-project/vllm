@@ -119,14 +119,12 @@ class AttentionBackend(ABC):
             return True
 
         for supported_size in cls.supported_kernel_block_sizes:
-            is_multiple_of = (
-                isinstance(supported_size, MultipleOf)
-                and block_size % supported_size.base == 0
-            )
-            is_int_equal = (
-                isinstance(supported_size, int) and block_size == supported_size
-            )
-            if is_multiple_of or is_int_equal:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
                 return True
         return False
 
