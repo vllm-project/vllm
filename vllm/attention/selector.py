@@ -38,16 +38,6 @@ def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
     return None if backend_name is None else AttentionBackendEnum[backend_name]
 
 
-# Global state allows a particular choice of backend
-# to be forced, overriding the logic which auto-selects
-# a backend based on system & workload configuration
-# (default behavior if this variable is None)
-#
-# NOTE: The global forced backend mechanism has been removed.
-# To override the attention backend, modify vllm_config.attention_config.backend
-# using get_current_vllm_config().attention_config.backend = "BACKEND_NAME"
-
-
 def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
