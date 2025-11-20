@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -1689,7 +1690,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _batch_mm_kwargs_from_scheduler(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+    ) -> tuple[
+        list[MultiModalKwargsItem],
+        list[tuple[str, PlaceholderRange]],
+        list[str],
+    ]:
         """Batch multimodal kwargs from scheduled encoder inputs.
 
         Args:
@@ -1697,17 +1702,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs.
 
         Returns:
-            A tuple of (mm_kwargs, req_ids_pos) where:
+            A tuple of (mm_kwargs, mm_hashes_pos, req_ids) where:
             - mm_kwargs: List of multimodal kwargs items to be batched
             - mm_hashes_pos: List of (mm_hash, position_info) tuples
+            - req_ids: List of request IDs for each encoder input
         """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
-            return [], []
+            return [], [], []
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # list of tuple (mm_hash, position_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        # list of request IDs for each encoder input
+        req_ids = list[str]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
@@ -1716,13 +1724,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_hash = mm_feature.identifier
                 mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+                req_ids.append(req_id)
 
-        return mm_kwargs, mm_hashes_pos
+        return mm_kwargs, mm_hashes_pos, req_ids
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         # Batch the multi-modal inputs using the helper method.
-        mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
-            scheduler_output
+        mm_kwargs, mm_hashes_pos, encoder_req_ids = (
+            self._batch_mm_kwargs_from_scheduler(scheduler_output)
         )
 
         if not mm_kwargs:
@@ -1739,16 +1748,62 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         encoder_outputs = []
 
         if self.lora_config and self.supports_mm_lora:
-            mm_tokens = [
-                self.info.get_num_mm_encoder_tokens(pos_info.length)
-                for _, pos_info in mm_hashes_pos
-            ]
-            num_scheduled_tokens = np.array(mm_tokens, dtype=np.int32)
-            self.set_active_loras(
-                self.input_batch,
-                num_scheduled_tokens,
-                is_mm_input=True,
+            # Build LoRA mappings independently for encoder inputs
+            # (encoder batch structure is different from main batch)
+            prompt_lora_mapping = []
+            token_lora_mapping = []
+            lora_requests = set()
+
+            for req_id, (_, pos_info) in zip(encoder_req_ids, mm_hashes_pos):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                lora_id = int(self.input_batch.request_lora_mapping[req_idx])
+
+                num_tokens = self.info.get_num_mm_encoder_tokens(pos_info.length)
+                prompt_lora_mapping.append(lora_id)
+                token_lora_mapping.extend([lora_id] * num_tokens)
+
+                if lora_id > 0:
+                    lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
+                    if lora_request is not None:
+                        lora_requests.add(lora_request)
+
+            lora_mapping = LoRAMapping(
+                tuple(token_lora_mapping),
+                tuple(prompt_lora_mapping),
+                is_prefill=True,
+                type=LoRAMappingType.TOWER,
             )
+            self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+            if hasattr(self.info, "get_num_mm_connector_tokens"):
+                num_post_op_tokens = []
+                for _, pos_info in mm_hashes_pos:
+                    mm_token_count = self.info.get_num_mm_encoder_tokens(
+                        pos_info.length
+                    )
+                    post_op_count = self.info.get_num_mm_connector_tokens(
+                        mm_token_count
+                    )
+                    num_post_op_tokens.append(post_op_count)
+
+                lora_ids = np.array(
+                    self.lora_manager._adapter_manager._last_mapping.prompt_mapping,
+                    dtype=np.int32,
+                )
+                post_op_counts_np = np.array(num_post_op_tokens, dtype=np.int32)
+                new_token_indices = lora_ids.repeat(post_op_counts_np)
+
+                connector_mapping = LoRAMapping(
+                    index_mapping=tuple(new_token_indices.tolist()),
+                    prompt_mapping=self.lora_manager._adapter_manager._last_mapping.prompt_mapping,
+                    is_prefill=self.lora_manager._adapter_manager._last_mapping.is_prefill,
+                    type=LoRAMappingType.CONNECTOR,
+                )
+
+                self.lora_manager.set_active_adapters(
+                    lora_requests,
+                    connector_mapping,
+                )
 
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
             mm_kwargs,
@@ -1898,7 +1953,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         inputs and formats them for the encoder-decoder model forward pass.
         """
         # Batch the multi-modal inputs using the helper method.
-        mm_kwargs, _ = self._batch_mm_kwargs_from_scheduler(scheduler_output)
+        mm_kwargs, _, _ = self._batch_mm_kwargs_from_scheduler(scheduler_output)
 
         if not mm_kwargs:
             return {}

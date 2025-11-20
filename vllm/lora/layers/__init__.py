@@ -17,7 +17,7 @@ from vllm.lora.layers.row_parallel_linear import (
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
 )
-from vllm.lora.layers.utils import LoRAMapping
+from vllm.lora.layers.utils import LoRAMapping, LoRAMappingType
 from vllm.lora.layers.vocal_parallel_embedding import VocabParallelEmbeddingWithLoRA
 
 __all__ = [
@@ -36,4 +36,5 @@ __all__ = [
     "RowParallelLinearWithShardedLoRA",
     "ReplicatedLinearWithLoRA",
     "LoRAMapping",
+    "LoRAMappingType",
 ]

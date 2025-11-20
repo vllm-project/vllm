@@ -79,7 +79,6 @@ class Qwen2VLTester:
         lora_request = LoRARequest(str(lora_id), lora_id, self.config.lora_path)
         outputs = self.llm.generate(inputs, sampling_params, lora_request=lora_request)
         generated_texts = [output.outputs[0].text.strip() for output in outputs]
-
         # Validate outputs
         for generated, expected in zip(generated_texts, expected_outputs):
             assert expected.startswith(generated), (
@@ -128,6 +127,22 @@ TEST_IMAGES = [
 EXPECTED_OUTPUTS = [
     "A red stop sign stands prominently in the foreground, with a traditional Chinese gate and a black SUV in the background, illustrating a blend of modern and cultural elements.",  # noqa: E501
     "A majestic skyscraper stands tall, partially obscured by a vibrant canopy of cherry blossoms, against a clear blue sky.",  # noqa: E501
+]
+
+EXPECTED_OUTPUTS_LANGUAGE = [
+    "A stop sign is shown in an Asian city, with buildings and a car in the "
+    "background.",
+    "The Tokyo Skytree can be seen behind the pink blossoms of the cherry trees.",
+]
+
+EXPECTED_OUTPUTS_VISION = [
+    "A stop sign in front of oriental buildings.",
+    "A tree with pink flowers in front of it and a blue sky behind the flowers.",
+]
+
+EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
+    "A stop sign is located on the street of a Chinese neighborhood.",
+    "A closeup shot of the Tokyo Skytree with pink flowers in the foreground.",
 ]
 
 # NOTE - beam search .text contains the whole text
@@ -190,3 +205,64 @@ def test_qwen25vl_lora(qwen25vl_lora_files):
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
         tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
+
+
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="Qwen2-VL dependency xformers incompatible with ROCm",
+)
+def test_qwen2vl_language_lora(qwen2vl_language_lora_files):
+    """
+    Test language-only LoRA adapter.
+    """
+    config = TestConfig(
+        model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_language_lora_files
+    )
+    tester = Qwen2VLTester(config)
+    for lora_id in [1, 2]:
+        tester.run_test(
+            TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS_LANGUAGE, lora_id=lora_id
+        )
+
+
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="Qwen2-VL dependency xformers incompatible with ROCm",
+)
+def test_qwen2vl_vision_lora(qwen2vl_vision_tower_connector_lora_files):
+    """
+    Test vision tower + connector LoRA adapter.
+    """
+    config = TestConfig(
+        model_path=QWEN2VL_MODEL_PATH,
+        lora_path=qwen2vl_vision_tower_connector_lora_files,
+    )
+    tester = Qwen2VLTester(config)
+    for lora_id in [1, 2]:
+        tester.run_test(
+            TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS_VISION, lora_id=lora_id
+        )
+
+
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="Qwen2-VL dependency xformers incompatible with ROCm",
+)
+def test_qwen2vl_vision_no_connector_lora(
+    qwen2vl_vision_tower_lora_files,
+):
+    """
+    Test vision tower only LoRA adapter.
+
+    """
+    config = TestConfig(
+        model_path=QWEN2VL_MODEL_PATH,
+        lora_path=qwen2vl_vision_tower_lora_files,
+    )
+    tester = Qwen2VLTester(config)
+    for lora_id in [1, 2]:
+        tester.run_test(
+            TEST_IMAGES,
+            expected_outputs=EXPECTED_OUTPUTS_VISION_NO_CONNECTOR,
+            lora_id=lora_id,
+        )
