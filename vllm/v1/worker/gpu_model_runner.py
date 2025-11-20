@@ -3852,6 +3852,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_descriptor,
                     ubatch_slices=ubatch_slices,
                 ),
+                self.maybe_get_kv_connector_dummy_run_output(),
             ):
                 outputs = self.model(
                     input_ids=input_ids,
