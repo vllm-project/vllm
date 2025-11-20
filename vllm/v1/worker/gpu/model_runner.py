@@ -543,6 +543,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         idx_mapping_np = input_batch.idx_mapping_np
         computed_prefill = self.req_states.num_computed_prefill_tokens
+        # TODO(woosuk): Simplify this.
         computed_prefill[idx_mapping_np] = np.minimum(
             computed_prefill[idx_mapping_np] + input_batch.num_scheduled_tokens,
             self.req_states.prefill_len.np[idx_mapping_np],
