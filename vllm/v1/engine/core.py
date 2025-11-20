@@ -206,6 +206,8 @@ class EngineCore:
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -644,9 +646,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
