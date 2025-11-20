@@ -516,6 +516,7 @@ class MoriAll2AllManager(All2AllManagerBase):
         max_num_tokens_per_dp_rank: int,
         num_local_experts: int,
         num_experts_per_token: int,
+        gpu_per_node: int,
     ):
         import mori  # type: ignore[import-not-found]
 
@@ -547,6 +548,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             block_num=block_num,
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
+            gpu_per_node=gpu_per_node,
         )
 
     def _make_handle(self, **kwargs):

@@ -698,6 +698,7 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
+    local_ep_size: int  # number of local ep parallel groups
 
     @property
     def use_all2all_kernels(self):
@@ -839,6 +840,7 @@ class FusedMoEParallelConfig:
                 ep_rank=0,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
+                local_ep_size=1,
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -857,6 +859,7 @@ class FusedMoEParallelConfig:
             ep_rank=ep_rank,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
+            local_ep_size=vllm_parallel_config.data_parallel_size_local * tp_size_,
         )
 
 

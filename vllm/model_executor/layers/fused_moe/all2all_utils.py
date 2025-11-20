@@ -185,6 +185,7 @@ def maybe_make_prepare_finalize(
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
             num_experts_per_token=moe.experts_per_token,
+            gpu_per_node=moe.moe_parallel_config.local_ep_size,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
