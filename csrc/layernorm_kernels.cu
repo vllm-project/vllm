@@ -34,7 +34,7 @@ __global__ void rms_norm_kernel(
     input_row =
         input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
   } else if constexpr (NUM_DIMS == 4) {
-    // 4D for [batch, seq, head, head_dim], used in transformers model_impl qk norm
+    // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
     int batch_idx = blockIdx.x / (input_shape_d3 * input_shape_d2);
     int remaining = blockIdx.x % (input_shape_d3 * input_shape_d2);
     int seq_idx = remaining / input_shape_d2;
