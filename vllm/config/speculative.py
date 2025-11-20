@@ -634,16 +634,6 @@ class SpeculativeConfig:
 
         return self
 
-    @property
-    def num_lookahead_slots(self) -> int:
-        """The number of additional slots the scheduler should allocate per
-        step, in addition to the slots allocated for each known token.
-
-        This is equal to the number of speculative tokens, as each speculative
-        token must be scored.
-        """
-        return self.num_speculative_tokens
-
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 

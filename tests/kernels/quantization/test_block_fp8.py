@@ -22,6 +22,7 @@ from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     per_block_cast_to_fp8,
+    should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -157,16 +158,18 @@ def test_w8a8_block_fp8_cutlass_matmul():
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
-    # only aligned sizes
-    if M % 4 != 0 or K % 128 != 0 or N % 64 != 0:
-        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
-
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max = fp8_info.max
 
     A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
     B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+
+    # only aligned sizes are supported by deepgemm
+    if not should_use_deepgemm_for_fp8_linear(
+        output_dtype=out_dtype, weight=B_fp32, supports_deep_gemm=True
+    ):
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
     A_fp8, As_fp8 = per_token_group_quant_fp8(A_fp32, block_size[1])
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
