@@ -1028,8 +1028,11 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    and torch.equal(
-                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    and torch.allclose(
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
+                        rtol=1e-5,
+                        atol=1e-7,
                     )
                 ):
                     share_embeddings = True

@@ -23,7 +23,6 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -127,17 +126,11 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # if PP disabled then draft will share embed with target
-                if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         for name in params_dict:
-            # if PP disabled then draft will share embed with target
-            if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                continue
             assert name in loaded_params, f"{name} is not loaded!"
         return loaded_params
 
