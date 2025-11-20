@@ -293,15 +293,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
-            try:
-                for final_res in final_res_batch_checked:
-                    for output in final_res.outputs:
-                        self._handle_error_finish_reason(
-                            output.finish_reason, request_id
-                        )
-            except GenerationError as e:
-                return self._convert_generation_error_to_response(e)
-
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
                 request,
@@ -313,6 +304,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -533,6 +526,10 @@ class OpenAIServingCompletion(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
+        for final_res in final_res_batch:
+            for output in final_res.outputs:
+                self._handle_error_finish_reason(output.finish_reason, request_id)
+
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0

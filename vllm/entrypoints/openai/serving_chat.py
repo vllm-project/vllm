@@ -377,6 +377,8 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -1319,14 +1321,6 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        # Check for error finish reason and return 500 error
-        # finish_reason='error' indicates a retryable request-level internal error
-        try:
-            for output in final_res.outputs:
-                self._handle_error_finish_reason(output.finish_reason, request_id)
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
@@ -1335,6 +1329,9 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            # check for error finish reason and raise GenerationError
+            # finish_reason='error' indicates a retryable request-level internal error
+            self._handle_error_finish_reason(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
