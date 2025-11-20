@@ -80,9 +80,6 @@ def _cached_get_attn_backend(
     use_sparse: bool = False,
     attn_type: str | None = None,
 ) -> type[AttentionBackend]:
-    # Check whether a particular choice of backend was
-    # previously forced.
-    # Check the config (which may come from CLI arg, env var, or runtime override)
     from vllm.config import get_current_vllm_config
 
     selected_backend = None
