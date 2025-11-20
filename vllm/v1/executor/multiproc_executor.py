@@ -117,7 +117,7 @@ class MultiprocExecutor(Executor):
             pp_size = self.parallel_config.pipeline_parallel_size
             pcp_size = self.parallel_config.prefill_context_parallel_size
         else:
-            # Jax handles TP with SPMD, world_size = pp_size.
+            # Jax handles TP, PCP with SPMD, world_size = pp_size.
             self.world_size = self.parallel_config.pipeline_parallel_size
             self.local_world_size = self.world_size
             tp_size = 1
@@ -208,7 +208,7 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
-        
+
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
             # set up jax transfer connection.
@@ -218,7 +218,6 @@ class MultiprocExecutor(Executor):
                         "initialize_pp_transfer_connect", unique_reply_rank=rank
                     )
 
-            self.start_worker_monitor()
             success = True
         finally:
             if not success:
