@@ -12,7 +12,8 @@ try:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
-
+from icecream import install
+install()
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
@@ -46,7 +47,7 @@ def get_custom_mm_prompts(num_prompts):
     return [[{"role": "user", "content": prompt}] for prompt in prompts[:num_prompts]]
 
 
-def run_mtbench_multiturn(llm, sampling_params, num_prompts):
+def run_mtbench_multiturn(llm, sampling_params, num_prompts, max_num_seqs):
     from datasets import load_dataset
     from tqdm import tqdm
     ds = load_dataset("philschmid/mt-bench", split="train")
@@ -61,6 +62,7 @@ def run_mtbench_multiturn(llm, sampling_params, num_prompts):
     )
 
     outputs = []
+    assert max_num_seqs == 1, "only works for max_num_seqs==1 right now"
     total_samples = min(sum([len(data["turns"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
     print(f'Running on {total_samples} samples.')
 
@@ -95,7 +97,8 @@ def parse_args():
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
-    parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument("--max-model-len", type=int, default=8192)
+    parser.add_argument("--max-num-seqs", type=int, default=1)
     parser.add_argument("--temp", type=float, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
@@ -174,6 +177,8 @@ def main(args):
         max_model_len=args.max_model_len,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        seed=args.seed,
+        max_num_seqs=args.max_num_seqs,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
@@ -181,10 +186,10 @@ def main(args):
         # warmup run
         print('Warmup start')
         for _ in range(3):
-            run_mtbench_multiturn(llm, sampling_params, 1)
+            run_mtbench_multiturn(llm, sampling_params, 1, 1)
         # actually run everything
         print('Warmup end\nStart the actual run')
-        outputs = run_mtbench_multiturn(llm, sampling_params, args.num_prompts)
+        outputs = run_mtbench_multiturn(llm, sampling_params, args.num_prompts, args.max_num_seqs)
     elif not args.custom_mm_prompts:
         outputs = llm.generate(
             [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
@@ -195,11 +200,14 @@ def main(args):
 
     # print the generated text
     if args.print_output:
-        for output in outputs:
-            print("-" * 50)
-            print(f"prompt: {output.prompt}")
-            print(f"generated text: {output.outputs[0].text}")
-            print("-" * 50)
+        for i, output in enumerate(outputs):
+            prompt = tokenizer.decode(output.prompt_token_ids)
+            print("*" * 80)
+            print(f"Output {i}:")
+            print(f"---Finish reason---\n{output.outputs[0].finish_reason}")
+            print(f"---Prompt ({len(output.prompt_token_ids)} tokens)---\n{prompt}")
+            print(f"---Generated Text ({len(output.outputs[0].token_ids)} tokens)---\n{output.outputs[0].text}")
+            print("*" * 80 + '\n')
 
     try:
         metrics = llm.get_metrics()
