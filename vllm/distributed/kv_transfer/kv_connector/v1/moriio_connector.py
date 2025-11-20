@@ -210,7 +210,6 @@ class MoRIIOConfig:
     local_ip: str
     local_kv_port: int
     proxy_ip: str
-    proxy_port: int
     local_ping_port: int
     proxy_ping_port: int
     http_port: int
@@ -245,7 +244,6 @@ class MoRIIOConfig:
             local_ip=get_ip(),
             local_kv_port=base_kv_port + port_offset,
             proxy_ip=extra_config["proxy_ip"],
-            proxy_port=int(extra_config["proxy_port"]),
             local_ping_port=base_ping_port + port_offset,
             proxy_ping_port=int(extra_config["proxy_ping_port"]),
             http_port=int(extra_config["http_port"]),
@@ -843,6 +841,8 @@ class MoRIIOConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role)
         assert vllm_config.kv_transfer_config is not None
         # assert vllm_config.kv_transfer_config.engine_id is not None
+        self._set_port_defaults(vllm_config)
+
         self.engine_id = (
             str(get_ip())
             + ":"
@@ -868,6 +868,22 @@ class MoRIIOConnector(KVConnectorBase_V1):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def _set_port_defaults(self, vllm_config: VllmConfig):
+        kv_transfer_config = vllm_config.kv_transfer_config
+        extra_config = kv_transfer_config.kv_connector_extra_config
+
+        if "handshake_port" not in extra_config or not extra_config["handshake_port"]:
+            extra_config["handshake_port"] = "6301"
+
+        if "notify_port" not in extra_config or not extra_config["notify_port"]:
+            extra_config["notify_port"] = "61005"
+
+        if "local_ping_port" not in extra_config or not extra_config["local_ping_port"]:
+            extra_config["local_ping_port"] = "7583"
+
+        if not kv_transfer_config.kv_port:
+            kv_transfer_config.kv_port = "7305"
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -1287,7 +1303,6 @@ class MoRIIOConnectorWorker:
         self.local_ip = self.moriio_config.local_ip
         self.local_kv_port = self.moriio_config.local_kv_port
         self.proxy_ip = self.moriio_config.proxy_ip
-        self.proxy_port = self.moriio_config.proxy_port
         self.local_ping_port = self.moriio_config.local_ping_port
         self.proxy_ping_port = self.moriio_config.proxy_ping_port
         self.http_port = self.moriio_config.http_port
@@ -1352,7 +1367,7 @@ class MoRIIOConnectorWorker:
             f"Initializing MoRIIO Engine ,engine = {self.moriio_engine},role = {'producer' if self.is_producer else 'consumer'}"
         )
         logger.debug(
-            f"{self.local_ip = },{self._rank = },{self._local_rank = },{self.local_kv_port = },{self.proxy_ip = },{self.proxy_port = },{self.local_ping_port = },{self.proxy_ping_port = }"
+            f"{self.local_ip = },{self._rank = },{self._local_rank = },{self.local_kv_port = },{self.proxy_ip = },{self.local_ping_port = },{self.proxy_ping_port = }"
         )
         # Agent.
         self.moriio_wrapper = MoRIIOWrapper(tp_rank=self.tp_rank, dp_rank=self.dp_rank)
