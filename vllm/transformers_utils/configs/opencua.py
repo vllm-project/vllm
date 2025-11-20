@@ -44,4 +44,3 @@ class OpenCUAConfig(PretrainedConfig):
             self.video_token_id = media_placeholder_token_id
         if not hasattr(self, "vision_start_token_id"):
             self.vision_start_token_id = 151661
-

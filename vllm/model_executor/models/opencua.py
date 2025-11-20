@@ -14,6 +14,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
+from transformers.models.qwen2_vl import (
+    Qwen2VLImageProcessor,
+    Qwen2VLProcessor,
+    Qwen2VLVideoProcessor,
+)
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
@@ -33,19 +38,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-
-from .qwen2_vl import (
-    Qwen2VLMultiModalDataParser,
-    Qwen2VLProcessingInfo,
-    _create_qwen2vl_field_factory,
-)
-from .qwen2_vl import Qwen2VLDummyInputsBuilder
-from transformers.models.qwen2_vl import (
-    Qwen2VLImageProcessor,
-    Qwen2VLProcessor,
-    Qwen2VLVideoProcessor,
-)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
@@ -55,13 +49,19 @@ from .interfaces import (
     SupportsQuant,
 )
 from .qwen2_5_vl import (
+    Qwen2_5_VisionTransformer,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
-    Qwen2_5_VisionTransformer,
+)
+from .qwen2_vl import (
+    Qwen2VLDummyInputsBuilder,
+    Qwen2VLMultiModalDataParser,
+    Qwen2VLProcessingInfo,
+    _create_qwen2vl_field_factory,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -100,6 +100,7 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
         if head_dim % 32 != 0:
             from vllm.attention.layer import check_upstream_fa_availability
             from vllm.platforms import current_platform
+
             if current_platform.is_cuda() and check_upstream_fa_availability(
                 torch.get_default_dtype()
             ):
@@ -159,7 +160,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
         if attribute_name == "tokenizer":
             return
         return super().check_argument_for_proper_class(attribute_name, arg)
-    
+
     def __init__(
         self,
         vision_config: dict,
@@ -169,7 +170,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
         image_processor = Qwen2VLImageProcessor(**vision_config)
         video_processor = Qwen2VLVideoProcessor(**vision_config)
         chat_template = kwargs.pop("chat_template", None)
-        
+
         super().__init__(
             image_processor=image_processor,
             tokenizer=tokenizer,
@@ -177,10 +178,10 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             chat_template=chat_template,
             **kwargs,
         )
-        
+
         self.image_token = "<|image_pad|>"
         self.video_token = "<|video_pad|>"
-    
+
     def __call__(
         self,
         text=None,
@@ -195,23 +196,27 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             text_inputs = self.tokenizer(text, **kwargs)
         else:
             text_inputs = {}
-        
+
         image_inputs = {}
         if images is not None:
             if not isinstance(images, list):
                 images = [images]
             if len(images) > 0:
-                image_inputs = self.image_processor(images, return_tensors=return_tensors or "pt")
-        
+                image_inputs = self.image_processor(
+                    images, return_tensors=return_tensors or "pt"
+                )
+
         video_inputs = {}
         if videos is not None:
             if not isinstance(videos, list):
                 videos = [videos]
             if len(videos) > 0:
-                video_inputs = self.video_processor(videos, return_tensors=return_tensors or "pt")
-        
+                video_inputs = self.video_processor(
+                    videos, return_tensors=return_tensors or "pt"
+                )
+
         combined_inputs = {**text_inputs, **image_inputs, **video_inputs}
-        
+
         return BatchFeature(combined_inputs, tensor_type=return_tensors)
 
 
@@ -245,15 +250,14 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         media_placeholder_str = "<|media_placeholder|>"
         media_placeholder_token_id = vocab.get(
             media_placeholder_str,
-            getattr(hf_config, "media_placeholder_token_id", 151664)
+            getattr(hf_config, "media_placeholder_token_id", 151664),
         )
-        
+
         video_token_str = getattr(hf_processor, "video_token", "<|video_pad|>")
         video_token_id = vocab.get(
-            video_token_str,
-            getattr(hf_config, "video_token_id", 151656)
+            video_token_str, getattr(hf_config, "video_token_id", 151656)
         )
-        
+
         placeholder = {
             "image": media_placeholder_token_id,
             "video": video_token_id,
@@ -283,10 +287,10 @@ class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
-        
+
         image_token = "<|media_placeholder|>"
         video_token = "<|video_pad|>"
-        
+
         return image_token * num_images + video_token * num_videos
 
 
@@ -439,7 +443,7 @@ class OpenCUAForConditionalGeneration(
 
         if self.visual is None:
             raise ValueError("Visual encoder is not initialized")
-        
+
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
@@ -468,7 +472,7 @@ class OpenCUAForConditionalGeneration(
 
         if self.visual is None:
             raise ValueError("Visual encoder is not initialized")
-        
+
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
@@ -568,4 +572,3 @@ class OpenCUAForConditionalGeneration(
             connector="visual.merger.",
             tower_model="visual.",
         )
-
