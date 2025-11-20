@@ -1144,7 +1144,7 @@ class MoRIIOConnectorScheduler:
             if get_role() == ROLE.CONSUMER:
                 for new_req in scheduler_output.scheduled_new_reqs:
                     red_id = new_req.req_id
-                    local_block_ids = list(new_req.block_ids)
+                    local_block_ids = list(new_req.block_ids)[0]
                     assert new_req.sampling_params is not None, (
                         f"sampling_params is None for req {new_req.req_id}"
                     )
@@ -1174,9 +1174,7 @@ class MoRIIOConnectorScheduler:
                         block_ids = new_block_ids[0]
 
                         req, existing_blocks = self._reqs_need_pending_save[req_id]
-                        updated_blocks = list(existing_blocks) + (
-                            [block_ids] if isinstance(block_ids, int) else block_ids
-                        )
+                        updated_blocks = list(existing_blocks) + (block_ids)
                         self._reqs_need_pending_save[req_id] = (req, updated_blocks)
                         if (
                             len(self._reqs_need_pending_save[req_id][1])
