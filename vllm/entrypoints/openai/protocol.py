@@ -377,7 +377,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -764,7 +764,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -1252,7 +1252,7 @@ class CompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
