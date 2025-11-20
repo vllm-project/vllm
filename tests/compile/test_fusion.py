@@ -218,6 +218,7 @@ def test_fusion_rmsnorm_quant(
 ):
     if model_class is TestAiterRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
