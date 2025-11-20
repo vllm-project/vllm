@@ -32,7 +32,6 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
-    uses_custom_attention_masks,
     uses_mrope,
 )
 from vllm.transformers_utils.gguf_utils import (
@@ -1624,10 +1623,6 @@ class ModelConfig:
     @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
-
-    @property
-    def uses_custom_attention_masks(self) -> bool:
-        return uses_custom_attention_masks(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
