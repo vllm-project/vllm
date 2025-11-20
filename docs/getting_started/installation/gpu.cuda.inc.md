@@ -158,7 +158,7 @@ uv pip install -e .
 
 ##### Use an existing PyTorch installation
 
-There are scenarios where the PyTorch dependency cannot be easily installed with uv, for example, when building vLLM with non-default PyTorch builds (like nightly or a custom build).
+There are scenarios where the PyTorch dependency cannot be easily installed with `uv`, for example, when building vLLM with non-default PyTorch builds (like nightly or a custom build).
 
 To build vLLM using an existing PyTorch installation:
 
