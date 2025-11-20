@@ -53,6 +53,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.protocol import (
+    AbortRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ClassificationRequest,
@@ -595,6 +596,12 @@ async def cancel_responses(response_id: str, raw_request: Request):
             content=response.model_dump(), status_code=response.error.code
         )
     return JSONResponse(content=response.model_dump())
+
+
+@router.post("/abort_request", dependencies=[Depends(validate_json_request)])
+async def abort_request(request: AbortRequest, raw_request: Request):
+    await engine_client(raw_request).abort(request.request_id)
+    return Response(status_code=200)
 
 
 @router.post(
