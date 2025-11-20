@@ -6,7 +6,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
@@ -49,7 +49,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
-    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -1591,6 +1590,22 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
+        if self.is_prefix_lm:
+            image_doc_ranges = []
+            for req_id in self.input_batch.req_ids:
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    image_doc_ranges.extend(img_doc_range)
+            if isinstance(attn_metadata, list):
+                for ub_metadata in attn_metadata:
+                    for _metadata in ub_metadata.values():
+                        _metadata.mm_prefix_range = image_doc_ranges
+            else:
+                for _metadata in attn_metadata.values():
+                    _metadata.mm_prefix_range = image_doc_ranges
+
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _compute_cascade_attn_prefix_lens(
@@ -2396,18 +2411,6 @@ class GPUModelRunner(
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
-        if self.is_prefix_lm:
-            image_doc_ranges = []
-            for req_id in self.input_batch.req_ids:
-                req_state = self.requests[req_id]
-                for mm_feature in req_state.mm_features:
-                    pos_info = mm_feature.mm_position
-                    img_doc_range = pos_info.extract_embeds_range()
-                    image_doc_ranges.extend(img_doc_range)
-            attn_metadata_group = get_forward_context().attn_metadata
-            for attn_metadata in attn_metadata_group.values():
-                attn_metadata.mm_prefix_range = image_doc_ranges
-
         if is_first_rank:
             intermediate_tensors = None
         else:
@@ -2765,14 +2768,6 @@ class GPUModelRunner(
                         scheduler_output.total_num_scheduled_tokens
                     )
 
-                preprocess_ctx = (
-                    nullcontext()
-                    if not self.is_prefix_lm
-                    else set_forward_context(
-                        attn_metadata=attn_metadata, vllm_config=self.vllm_config
-                    )
-                )
-            with preprocess_ctx:
                 (
                     input_ids,
                     inputs_embeds,
