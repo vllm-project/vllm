@@ -18,6 +18,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+)
+from vllm.model_executor.model_loader.online_quantization import (
+    support_quantized_model_reload_from_hp_weights,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -313,6 +319,7 @@ class AutoWeightsLoader:
                 )
                 raise ValueError(msg)
 
+    @support_quantized_model_reload_from_hp_weights
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -713,6 +720,30 @@ def maybe_prefix(prefix: str, name: str) -> str:
         The string "prefix.name" if prefix was non-empty, otherwise just "name".
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+def get_draft_quant_config(
+    vllm_config: VllmConfig,
+) -> QuantizationConfig | None:
+    """Get quantization config for Draft models.
+
+    Draft models should use their own quantization config instead of the verifier/target
+    model's config. This helper retrieves the draft model's quantization config.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The draft model's config if available, None otherwise.
+    """
+    draft_model_config = vllm_config.speculative_config.draft_model_config
+    draft_load_config = vllm_config.load_config
+
+    return (
+        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+        if draft_model_config
+        else None
+    )
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
