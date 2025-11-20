@@ -701,8 +701,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
-        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
-        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        load_format="auto",
+        config_format="auto",
     )
 
     sampling_params = SamplingParams(

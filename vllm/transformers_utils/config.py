@@ -363,9 +363,20 @@ def list_filtered_repo_files(
     repo_type: str | None = None,
     token: str | bool | None = None,
 ) -> list[str]:
-    all_files = list_repo_files(
-        repo_id=model_name_or_path, revision=revision, token=token, repo_type=repo_type
-    )
+    try:
+        all_files = list_repo_files(
+            repo_id=model_name_or_path,
+            revision=revision,
+            token=token,
+            repo_type=repo_type,
+        )
+    except Exception:
+        logger.error(
+            "Error retrieving file list. Please ensure your `model_name_or_path`"
+            "`repo_type`, `token` and `revision` arguments are correctly set. "
+            "Returning an empty list."
+        )
+        return []
 
     file_list = []
     # Filter patterns on filenames
