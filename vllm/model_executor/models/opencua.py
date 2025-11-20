@@ -8,7 +8,6 @@
 """Inference-only OpenCUA-7B model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from typing import Any
 
 import torch
@@ -53,9 +52,6 @@ from .qwen2_5_vl import (
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
-    Qwen2_5_VLVideoEmbeddingInputs,
-    Qwen2_5_VLVideoInputs,
-    Qwen2_5_VLVideoPixelInputs,
 )
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
@@ -179,14 +175,12 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             **kwargs,
         )
 
-        self.image_token = "<|image_pad|>"
-        self.video_token = "<|video_pad|>"
+        self.image_token = "<|media_placeholder|>"
 
     def __call__(
         self,
         text=None,
         images=None,
-        videos=None,
         return_tensors=None,
         **kwargs,
     ):
@@ -206,16 +200,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
                     images, return_tensors=return_tensors or "pt"
                 )
 
-        video_inputs = {}
-        if videos is not None:
-            if not isinstance(videos, list):
-                videos = [videos]
-            if len(videos) > 0:
-                video_inputs = self.video_processor(
-                    videos, return_tensors=return_tensors or "pt"
-                )
-
-        combined_inputs = {**text_inputs, **image_inputs, **video_inputs}
+        combined_inputs = {**text_inputs, **image_inputs}
 
         return BatchFeature(combined_inputs, tensor_type=return_tensors)
 
@@ -247,51 +232,38 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
         vocab = tokenizer.get_vocab()
         hf_config = self.info.get_hf_config()
 
-        media_placeholder_str = "<|media_placeholder|>"
-        media_placeholder_token_id = vocab.get(
-            media_placeholder_str,
+        image_token_str = getattr(hf_processor, "image_token", "<|media_placeholder|>")
+        image_token_id = vocab.get(
+            image_token_str,
             getattr(hf_config, "media_placeholder_token_id", 151664),
         )
 
-        video_token_str = getattr(hf_processor, "video_token", "<|video_pad|>")
-        video_token_id = vocab.get(
-            video_token_str, getattr(hf_config, "video_token_id", 151656)
-        )
-
-        placeholder = {
-            "image": media_placeholder_token_id,
-            "video": video_token_id,
-        }
-
         merge_length = image_processor.merge_size**2
 
-        def get_replacement_opencua(item_idx: int, modality: str):
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
+        def get_replacement_opencua(item_idx: int):
+            out_item = out_mm_kwargs["image"][item_idx]
+            grid_thw = out_item["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
-            return [placeholder[modality]] * num_tokens
+            return [image_token_id] * num_tokens
 
         return [
             PromptReplacement(
-                modality=modality,
-                target=[placeholder[modality]],
-                replacement=partial(get_replacement_opencua, modality=modality),
+                modality="image",
+                target=[image_token_id],
+                replacement=get_replacement_opencua,
             )
-            for modality in ("image", "video")
         ]
 
 
 class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
 
         image_token = "<|media_placeholder|>"
-        video_token = "<|video_pad|>"
 
-        return image_token * num_images + video_token * num_videos
+        return image_token * num_images
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -308,7 +280,7 @@ class OpenCUAForConditionalGeneration(
     SupportsEagle3,
 ):
     merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
+    multimodal_cpu_fields = {"image_grid_thw"}
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -326,14 +298,12 @@ class OpenCUAForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
-            return "<|image_pad|>"
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|media_placeholder|>"
-        if modality.startswith("video"):
-            return "<|video_pad|>"
-        raise ValueError("Only image or video modality is supported")
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -347,9 +317,7 @@ class OpenCUAForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
 
-        if multimodal_config.get_limit_per_prompt(
-            "image"
-        ) or multimodal_config.get_limit_per_prompt("video"):
+        if multimodal_config.get_limit_per_prompt("image"):
             attn_backend_override = (
                 multimodal_config.mm_encoder_attn_backend
                 if multimodal_config is not None
@@ -376,6 +344,9 @@ class OpenCUAForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
@@ -408,30 +379,6 @@ class OpenCUAForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-    def _parse_and_validate_video_input(
-        self, **kwargs: object
-    ) -> Qwen2_5_VLVideoInputs | None:
-        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
-        video_embeds = kwargs.pop("video_embeds", None)
-        video_grid_thw = kwargs.pop("video_grid_thw", None)
-
-        if pixel_values_videos is None and video_embeds is None:
-            return None
-
-        if pixel_values_videos is not None:
-            return Qwen2_5_VLVideoPixelInputs(
-                type="pixel_values_videos",
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
-            )
-
-        if video_embeds is not None:
-            return Qwen2_5_VLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-            )
-
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
@@ -461,79 +408,28 @@ class OpenCUAForConditionalGeneration(
         image_embeds_split = image_embeds.split(sizes)
         return image_embeds_split
 
-    def _process_video_input(
-        self, video_input: Qwen2_5_VLVideoInputs
-    ) -> tuple[torch.Tensor, ...]:
-        grid_thw = video_input["video_grid_thw"]
-        if grid_thw is None:
-            raise ValueError("video_grid_thw is required for video input")
-        assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
-
-        if self.visual is None:
-            raise ValueError("Visual encoder is not initialized")
-
-        if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
-        else:
-            pixel_values_videos = video_input["pixel_values_videos"]
-            with set_forward_context(None, self.vllm_config):
-                if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual,
-                        pixel_values_videos,
-                        grid_thw_list,
-                        rope_type="rope_3d",
-                    )
-                else:
-                    video_embeds = self.visual(
-                        pixel_values_videos, grid_thw=grid_thw_list
-                    )
-
-        merge_size = self.visual.spatial_merge_size
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return video_embeds.split(sizes)
-
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
 
         for input_key in kwargs:
-            if (
-                input_key in ("pixel_values", "image_embeds")
-                and "image" not in mm_input_by_modality
-            ):
+            if input_key in ("pixel_values", "image_embeds"):
                 mm_input_by_modality["image"] = self._parse_and_validate_image_input(
                     **kwargs
                 )
-            if (
-                input_key in ("pixel_values_videos", "video_embeds")
-                and "video" not in mm_input_by_modality
-            ):
-                mm_input_by_modality["video"] = self._parse_and_validate_video_input(
-                    **kwargs
-                )
+                break
         return mm_input_by_modality
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
 
-        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        if "image" in mm_input_by_modality:
+            image_input = mm_input_by_modality["image"]
+            image_embeddings = self._process_image_input(image_input)
+            return tuple(image_embeddings)
 
-        # Sort modalities to ensure a deterministic processing order.
-        for modality in sorted(mm_input_by_modality.keys()):
-            multimodal_input = mm_input_by_modality[modality]
-            if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += tuple(image_embeddings)
-            elif modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += tuple(video_embeddings)
-        return multimodal_embeddings
-            if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += tuple(video_embeddings)
-        return multimodal_embeddings
+        return []
 
     def forward(
         self,
