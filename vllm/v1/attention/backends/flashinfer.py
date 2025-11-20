@@ -379,11 +379,6 @@ class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
-    """
-    The stateful, pre-planned FlashInfer wrapper.
-    This will be a `BatchDCPPrefillWrapper` if DCP is used, 
-    otherwise `BatchPrefillWithPagedKVCacheWrapper`.
-    """
 
 
 @dataclass
@@ -391,108 +386,58 @@ class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
     wrapper: BatchDecodeWithPagedKVCacheWrapper
-    """
-    The stateful, pre-planned FlashInfer wrapper for decode.
-    This wrapper's `plan` is called via `fast_plan_decode` in the builder.
-    """
 
 
 @dataclass
 class TRTLLMPrefill:
-    """Metadata for the TRTLLM-accelerated prefill pathway."""
+    """Metadata for the TRTLLM prefill pathway."""
 
     block_tables: torch.Tensor
     """
-    The slice of the block table tensor corresponding *only* to prefill 
-    requests.
+    The slice of the block table tensor corresponding *only* to prefill requests.
     Shape: [num_prefills, max_num_blocks_per_seq]
     """
 
     seq_lens: torch.Tensor
     """
-    The slice of the sequence lengths tensor corresponding *only* to prefill 
-    requests.
+    The slice of the sequence lengths tensor corresponding *only* to prefill requests.
     Shape: [num_prefills]
     """
 
     cum_seq_lens_q: torch.Tensor
-    """
-    The GPU-side query index pointer (indptr) for prefills. 
-    Only created if this pathway is used.
-    Shape: [num_prefills + 1]
-    """
-
     cum_seq_lens_kv: torch.Tensor
-    """
-    The GPU-side paged KV index pointer (indptr) for prefills.
-    Only created if this pathway is used.
-    Shape: [num_prefills + 1]
-    """
 
     max_q_len: int
     """
     The maximum query length *among prefill requests*. 
     """
 
-    max_kv_len: int
-    """
-    The maximum sequence length (context length) for KV. 
-    This is `max_seq_len` from the build step.
-    """
-
-    window_left: int
-    """The sliding window size (e.g., self.sliding_window[0])."""
-
-    needs_fp8_dequant: bool
-    """
-    Flag to trigger the `trtllm_prefill_attn_kvfp8_dequant` kernel.
-    This is True if Q is non-FP8 (e.g., BF16) but the KV cache is FP8.
-    """
+    max_seq_len: int
+    """The maximum sequence length (context length) for KV."""
 
 
 @dataclass
 class TRTLLMDecode:
-    """Metadata for the TRTLLM-accelerated decode pathway."""
+    """Metadata for the TRTLLM decode pathway."""
 
     block_tables: torch.Tensor
     """
-    The slice of the block table tensor corresponding *only* to decode 
-    tokens.
-    Shape: [num_decode_tokens, max_num_blocks_per_seq]
+    The slice of the block table tensor corresponding *only* to decode requests.
+    Shape: [num_decodes, max_num_blocks_per_seq]
     """
 
     seq_lens: torch.Tensor
     """
-    The slice of the sequence lengths tensor corresponding *only* to decode 
-    tokens.
-    Shape: [num_decode_tokens]
+    The slice of the sequence lengths tensor corresponding *only* to decode requests.
+    Shape: [num_decodes]
     """
 
     max_seq_len: int
     """The maximum sequence length (context length) for KV."""
 
-    window_left: int
-    """The sliding window size (e.g., self.sliding_window[0])."""
-
-    q_len_per_req: int
-    """
-    The number of query tokens per request (e.g., 1 for standard decode,
-    >1 for speculative decoding). Pre-calculated in the build step.
-    """
-
 
 @dataclass
 class FlashInferMetadata:
-    """
-    Refactored metadata container for FlashInfer attention.
-
-    This structure holds common metadata and then delegates pathway-specific
-    metadata to one of the sub-dataclasses (FIPrefill, FIDecode,
-    TRTLLMPrefill, TRTLLMDecode).
-    """
-
-    # --- Common Metadata (Used by all paths) ---
-
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
 
@@ -500,24 +445,11 @@ class FlashInferMetadata:
     """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
 
     q_data_type: torch.dtype
-    """
-    The expected data type of the query tensor (can be model dtype or
-    a quantized type like fp8).
-    """
-
-    # --- Batch Split Information ---
 
     num_decodes: int
-    """Number of decode requests."""
-
     num_decode_tokens: int
-    """Total number of tokens associated with decode requests."""
-
     num_prefills: int
-    """Number of prefill requests."""
-
     num_prefill_tokens: int
-    """Total number of tokens associated with prefill requests."""
 
     prefill: FIPrefill | TRTLLMPrefill | None
     """
@@ -531,19 +463,15 @@ class FlashInferMetadata:
     Will be `None` if `num_decode_tokens == 0`.
     """
 
-    # --- Special Case: Cascade Attention (Native FI only) ---
+    # --- Special Case: Cascade Attention ---
 
     use_cascade: bool
     """
     If True, the entire batch is a cascade attention call, and the
-    `prefill` and `decode` fields will be None.
+    `prefill` and `decode` fields will both be None.
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
-    """
-    The stateful, planned wrapper for cascade attention.
-    Only set if `use_cascade` is True.
-    """
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -1040,13 +968,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     cum_seq_lens_q=qo_indptr_prefill_gpu,
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
-                    max_kv_len=max_seq_len,
-                    window_left=self.window_left,
-                    needs_fp8_dequant=(
-                        self.q_data_type != self.kv_cache_dtype
-                        and self.kv_cache_dtype
-                        in (torch.float8_e4m3fn, torch.float8_e5m2)
-                    ),
+                    max_seq_len=max_seq_len,
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper()
@@ -1114,8 +1036,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],
                     max_seq_len=max_seq_len,
-                    window_left=self.window_left,
-                    q_len_per_req=num_decode_tokens // num_decodes,
                 )
             else:
                 pure_decode = num_prefills == 0
@@ -1505,7 +1425,7 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=mock_block_table,
                     seq_lens=seq_lens_prefill,
                     max_q_len=attn_metadata.prefill.max_q_len,
-                    max_kv_len=attn_metadata.prefill.max_kv_len,
+                    max_kv_len=attn_metadata.prefill.max_seq_len,
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
