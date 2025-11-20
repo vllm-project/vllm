@@ -135,11 +135,15 @@ class VllmSerializableFunction(SerializableCallable):
         return "VllmSerializableFunction"
 
 
-def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
+def compilation_config_hash_factors(
+    vllm_config: VllmConfig, env_factors: dict[str, object] | None = None
+) -> list[str]:
     factors = []
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
+    if env_factors is None:
+        env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
     factors.append(env_hash)
 
     # 1. factors come from the vllm_config (it mainly summarizes how the

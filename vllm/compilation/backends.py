@@ -591,7 +591,9 @@ class VllmBackend:
         # Minimal hashing here with existing utilities, reused below.
 
         env_factors = envs.compile_factors()
-        env_hash, config_hash = compilation_config_hash_factors(vllm_config)
+        env_hash, config_hash = compilation_config_hash_factors(
+            vllm_config, env_factors=env_factors
+        )
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         traced_files = set(self.compilation_config.traced_files)
         forward_code_files = list(sorted(traced_files))
