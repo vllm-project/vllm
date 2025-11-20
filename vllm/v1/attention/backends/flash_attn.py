@@ -119,8 +119,8 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -265,8 +265,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        self.dcp_kv_cache_interleave_size = (
-            self.parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
         )
 
         self.use_full_cuda_graph = (
@@ -388,7 +388,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 dcp_context_kv_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
