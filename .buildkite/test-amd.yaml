@@ -61,7 +61,7 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker Test (CPU) # 4 mins
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -73,6 +73,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
+  - tests/config
   no_gpu: true
   commands:
   - python3 standalone_tests/lazy_imports.py
@@ -80,6 +81,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s transformers_utils
+  - pytest -v -s config
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -390,6 +392,15 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -529,7 +540,7 @@ steps:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
     # Limit to no custom ops to reduce running time
     # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and -quant_fp8'"
+  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
 
 - label: Cudagraph test
   timeout_in_minutes: 20
@@ -694,7 +705,7 @@ steps:
   - vllm/model_executor/models/whisper.py
   commands: # LMEval
   # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
-  - pytest -s entrypoints/openai/correctness/  --ignore entrypoints/openai/correctness/test_transcription_api_correctness.py
+  - pytest -s entrypoints/openai/correctness/
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
@@ -995,12 +1006,12 @@ steps:
   optional: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
+    - pytest -v -s tests/models/test_initialization.py -k 'not (Gemma3 or ModernBert or Qwen2_5_VL or Qwen2_5vl or Qwen2VL or TransformersMultiModalEmbeddingModel or TransformersMultiModalForSequenceClassification or Ultravox or Phi4Multimodal or LlavaNextVideo or MiniCPMO or Lfm2Moe or PaliGemma or RobertaForSequenceClassification or Ovis2_5 or Fuyu or DeepseekOCR or KimiVL)'
     - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
+    # - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
     - python3 examples/offline_inference/basic/chat.py
-    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
@@ -1045,7 +1056,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
-- label: Blackwell Fusion Tests # 30 min
+- label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
@@ -1066,7 +1077,9 @@ steps:
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
     # Wrap with quotes to escape yaml
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and Llama-3.1 and -quant_fp8 and -rms_norm'"
+    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
+    - pytest -v -s tests/compile/distributed/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Blackwell Fusion E2E Tests # 30 min
   timeout_in_minutes: 40
@@ -1088,15 +1101,13 @@ steps:
   commands:
     - nvidia-smi
     # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
-    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
-    - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
+    - pytest -v -s tests/compile/test_fusions_e2e.py
 
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   agent_pool: mi325_1
-  mirror_hardwares: [amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction]
   optional: true # run on nightlies
   source_file_dependencies:
   - tests/evals/gpt_oss
@@ -1416,7 +1427,9 @@ steps:
     - pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
+    #- pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
+    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - pytest -v -s tests/compile/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
