@@ -84,8 +84,10 @@ class EagleProposer:
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
-        self.use_cuda_graph = False
+        # for optionally pruning the draft model vocabulary
+        self.pruned_vocab = None
 
+        self.use_cuda_graph = False
         compilation_config = self.vllm_config.compilation_config
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             cudagraph_mode = compilation_config.cudagraph_mode
@@ -323,6 +325,8 @@ class EagleProposer:
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
             draft_token_ids = logits.argmax(dim=-1)
+            if self.pruned_vocab is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
@@ -352,6 +356,8 @@ class EagleProposer:
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+        if self.pruned_vocab is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -679,6 +685,8 @@ class EagleProposer:
             draft_token_ids = torch.topk(logits, num_children, dim=-1).indices.view(
                 batch_size, -1
             )
+        if self.pruned_vocab is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
@@ -817,6 +825,8 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children, dim=-1).indices.view(
                     batch_size, -1
                 )
+            if self.pruned_vocab is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
             draft_token_ids_list.append(draft_token_ids)
 
             # Update the # drafts counters for the next tree level.
@@ -1063,6 +1073,13 @@ class EagleProposer:
                 "The draft model's vocab embedding will be loaded separately"
                 " from the target model."
             )
+
+        # Prune the draft model vocabulary
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            vocab_freq_path = self.vllm_config.speculative_config.draft_vocab_frequency_path
+            keep_threshold = self.vllm_config.speculative_config.draft_vocab_frequency_keep_threshold
+            vocab_freq = load_vocab_freq(vocab_freq_path)
+
 
         # share lm_head with the target model if needed
         share_lm_head = False

@@ -147,6 +147,14 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
+    # Pruned draft model vocabulary configuration
+    draft_vocab_frequency_path: str | None = None
+    """The path to the scores used to prune the draft model vocabulary.
+    Can be the token frequencies or something else."""
+    draft_vocab_frequency_keep_threshold: float | None = None
+    """If `None`, do not prune the vocabulary. Otherwise must be in (0, 1)
+    and keep the threshold% most frequent tokens."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
