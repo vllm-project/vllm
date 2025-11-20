@@ -1065,7 +1065,13 @@ class OpenAIServingChat(OpenAIServing):
                     #   get the next token without streaming a chunk
                     if delta_message is None:
                         if output.finish_reason is None:
-                            continue
+                            # NOTE: If return_token_ids is enabled, we still need to
+                            # send a chunk with token_ids even if delta_message is None
+                            # to ensure all tokens are included in the response
+                            if request.return_token_ids:
+                                delta_message = DeltaMessage(content="")
+                            else:
+                                continue
                         else:
                             delta_message = DeltaMessage()
 
