@@ -443,6 +443,18 @@ class InputProcessor:
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
+        import vllm.envs as envs
+
+        if envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+            from vllm.multimodal.processing import (
+                clear_mm_processor_timing_stats,
+                store_mm_processor_timing_stats,
+            )
+
+            stats = clear_mm_processor_timing_stats()
+            if stats is not None:
+                store_mm_processor_timing_stats(request_id, stats)
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
