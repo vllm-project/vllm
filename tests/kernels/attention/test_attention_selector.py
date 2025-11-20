@@ -79,9 +79,10 @@ def test_env(
     block_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    is_rocm = current_platform.is_rocm()
-    if (device == "hip" and not is_rocm) or (device == "cuda" and is_rocm):
-        pytest.skip("Test only on correct platform")
+    if device == "hip" and not current_platform.is_rocm():
+        pytest.skip("HIP tests require a ROCm platform to run.")
+    elif device == "cuda" and not current_platform.is_cuda():
+        pytest.skip("CUDA tests require a CUDA platform to run.")
     """Test attention backend selection with valid device-backend pairs."""
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, name)
