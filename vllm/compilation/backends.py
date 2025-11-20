@@ -54,6 +54,7 @@ logger = init_logger(__name__)
 # in **vit** piecewise compilation.
 _is_last_graph_in_vit_sequence: bool = True
 
+
 @contextmanager
 def set_is_last_graph_in_sequence(is_last: bool):
     """Context manager to indicate if the current graph being compiled
@@ -67,9 +68,11 @@ def set_is_last_graph_in_sequence(is_last: bool):
     finally:
         _is_last_graph_in_vit_sequence = original_value
 
+
 # A global flag to indicate if the current graph being compiled
 # is the first one in a sequence of graphs (e.g., a sequence of blocks).
 _is_first_graph_in_vit_sequence: bool = True
+
 
 @contextmanager
 def set_is_first_graph_in_sequence(is_first: bool):
@@ -119,6 +122,7 @@ def make_copy_and_call(
         return callable_fn(*list_args)
 
     return copy_and_call
+
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:

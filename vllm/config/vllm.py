@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import copy
 import getpass
 import json
@@ -15,7 +16,6 @@ from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args
-import bisect
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -1395,14 +1395,18 @@ class VllmConfig:
             # determine the vit_cudagraph_capture_sizes
             if self.compilation_config.vit_cudagraph_capture_sizes is not None:
                 # de-duplicate the sizes provided by the config
-                dedup_sizes = list(set(self.compilation_config.vit_cudagraph_capture_sizes))
+                dedup_sizes = list(
+                    set(self.compilation_config.vit_cudagraph_capture_sizes)
+                )
                 vit_cudagraph_capture_sizes = dedup_sizes
                 # sort to make sure the sizes are in ascending order
                 vit_cudagraph_capture_sizes.sort()
             else:
                 max_vit_cudagraph_capture_size = 5120
                 vit_cudagraph_capture_sizes = [
-                    i for i in [16, 32, 64, 128, 256] if i <= max_vit_cudagraph_capture_size
+                    i
+                    for i in [16, 32, 64, 128, 256]
+                    if i <= max_vit_cudagraph_capture_size
                 ]
                 if max_vit_cudagraph_capture_size >= 1024:
                     # Step size 64 for small batch sizes, up to 2048(not included)
@@ -1414,7 +1418,9 @@ class VllmConfig:
                     vit_cudagraph_capture_sizes += list(
                         range(2048, max_vit_cudagraph_capture_size + 1, 128)
                     )
-            self.compilation_config.vit_cudagraph_capture_sizes = vit_cudagraph_capture_sizes
+            self.compilation_config.vit_cudagraph_capture_sizes = (
+                vit_cudagraph_capture_sizes
+            )
         else:
             # no cudagraph in use
             self.compilation_config.vit_cudagraph_capture_sizes = []

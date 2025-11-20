@@ -644,12 +644,18 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self._persistent_hidden_states_buffer: torch.Tensor | None = None
         self._persistent_rotary_pos_emb_buffer: torch.Tensor | None = None
         if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
-            max_compile_size = vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
+            max_compile_size = (
+                vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
+            )
             self._persistent_hidden_states_buffer = torch.empty(
-                (max_compile_size, self.patch_embed.proj.input_size), device=self.device, dtype=self.dtype
+                (max_compile_size, self.patch_embed.proj.input_size),
+                device=self.device,
+                dtype=self.dtype,
             )
             self._persistent_rotary_pos_emb_buffer = torch.empty(
-                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.float32
+                (max_compile_size, head_dim // 2),
+                device=self.device,
+                dtype=torch.float32,
             )
 
     @property
@@ -796,14 +802,21 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: list = []
 
         fwd_ctx = get_forward_context()
-        if self._persistent_hidden_states_buffer is not None and \
-            fwd_ctx and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+        if (
+            self._persistent_hidden_states_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
             hidden_states = self._persistent_hidden_states_buffer[:seq_len]
             hidden_states.copy_(x, non_blocking=True)
         else:
             hidden_states = x.to(device=self.device, dtype=self.dtype)
 
-        from vllm.compilation.backends import set_is_first_graph_in_sequence, set_is_last_graph_in_sequence
+        from vllm.compilation.backends import (
+            set_is_first_graph_in_sequence,
+            set_is_last_graph_in_sequence,
+        )
+
         with set_is_first_graph_in_sequence(True), set_is_last_graph_in_sequence(False):
             hidden_states = self.patch_embed(hidden_states)
 
@@ -859,9 +872,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
             device=self.device, non_blocking=True
         )
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-        if self._persistent_rotary_pos_emb_buffer is not None and \
-            fwd_ctx and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
-            rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(rotary_pos_emb)
+        if (
+            self._persistent_rotary_pos_emb_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
+            rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(
+                rotary_pos_emb
+            )
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
@@ -875,15 +893,22 @@ class Qwen2_5_VisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(1)
 
-        if self._persistent_hidden_states_buffer is not None and \
-            fwd_ctx and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+        if (
+            self._persistent_hidden_states_buffer is not None
+            and fwd_ctx
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
             # The above operations will produce temporary new tensors.
-            # That is not friendly to cudagraphs, so we need to copy them back to the persistent buffer
+            # That is not friendly to cudagraphs,
+            # so we need to copy them back to the persistent buffer
             original_hidden_states = original_hidden_states.view(hidden_states.shape)
             original_hidden_states.copy_(hidden_states)
             hidden_states = original_hidden_states
 
-        with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(False):
+        with (
+            set_is_first_graph_in_sequence(False),
+            set_is_last_graph_in_sequence(False),
+        ):
             for layer_num, blk in enumerate(self.blocks):
                 if layer_num in self.fullatt_block_indexes:
                     cu_seqlens_now = cu_seqlens
@@ -1245,7 +1270,10 @@ class Qwen2_5_VLForConditionalGeneration(
                 with set_forward_context(None, self.vllm_config):
                     if self.use_data_parallel:
                         return run_dp_sharded_mrope_vision_model(
-                            self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                            self.visual,
+                            pixel_values,
+                            grid_thw_list,
+                            rope_type="rope_3d",
                         )
                     else:
                         image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
