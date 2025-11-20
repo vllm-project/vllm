@@ -19,10 +19,8 @@ from transformers.models.qwen2_vl import (
     Qwen2VLVideoProcessor,
 )
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -42,7 +40,9 @@ from .interfaces import (
     MultiModalEmbeddings,
 )
 from .qwen2_5_vl import (
-    Qwen2_5_VisionTransformer,
+    Qwen2_5_VisionTransformer as OpenCUAVisionTransformer,
+)
+from .qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
@@ -63,28 +63,6 @@ from .utils import (
 from .vision import (
     run_dp_sharded_mrope_vision_model,
 )
-
-
-class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
-    """Vision Transformer for OpenCUA with upstream flash attention enabled."""
-
-    def __init__(
-        self,
-        vision_config: Any,
-        norm_eps: float = 1e-6,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
-    ) -> None:
-        super().__init__(
-            vision_config=vision_config,
-            norm_eps=norm_eps,
-            quant_config=quant_config,
-            prefix=prefix,
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
-        )
 
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
