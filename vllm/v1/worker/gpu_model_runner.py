@@ -218,9 +218,16 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         del self._logprobs_tensors
         del self._sampled_token_ids
 
-        valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
+        if max_gen_len == 1:
+            valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        else:
+            valid_sampled_token_ids = RejectionSampler.parse_output(
+                self.sampled_token_ids_cpu,
+                self.vocab_size,
+            )
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = []
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
