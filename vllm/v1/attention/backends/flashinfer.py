@@ -1188,8 +1188,9 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens]
-        value = value[:num_actual_tokens]
+        if key is not None and value is not None:
+            key = key[:num_actual_tokens]
+            value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1230,6 +1231,8 @@ class FlashInferImpl(AttentionImpl):
                     )
                     assert prefill_wrapper._new_tokens._sm_scale == self.scale
                     assert prefill_wrapper._new_tokens._causal
+                    assert key is not None
+                    assert value is not None
 
                     prefill_wrapper.run(
                         layer,
