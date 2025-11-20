@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
-from typing import Any
 
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
@@ -58,19 +56,11 @@ class AttentionConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = [
-            self.backend,
-            self.flash_attn_version,
-            self.v1_use_prefill_decode_attention,
-            self.flash_attn_max_num_splits_for_cuda_graph,
-            self.use_cudnn_prefill,
-            self.use_trtllm_ragged_deepseek_prefill,
-            self.use_trtllm_attention,
-            self.disable_flashinfer_prefill,
-            self.flashinfer_disable_q_quantization,
-        ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        ignored_factors: list[str] = []
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         from vllm import envs
