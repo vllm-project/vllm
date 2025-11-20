@@ -800,7 +800,7 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
             assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
 
             # Check layer 10 MoE (should be unquantized + ignored)
-            layer_unquantized = model.model.layers[10].mlp.experts
+            layer_unquantized = model.model.layers[3].mlp.experts
             assert isinstance(layer_unquantized, FusedMoE)
             assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
 
