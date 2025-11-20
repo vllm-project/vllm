@@ -244,7 +244,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         o = torch.zeros(
-            B, self.num_heads, self.kv_lora_rank, dtype=attn_metadata.decode.attn_out_dtype, device=q.device
+            B,
+            self.num_heads,
+            self.kv_lora_rank,
+            dtype=attn_metadata.decode.attn_out_dtype,
+            device=q.device,
         )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
