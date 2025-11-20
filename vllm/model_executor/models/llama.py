@@ -340,7 +340,7 @@ class LlamaDecoderLayer(nn.Module):
             return self.forward_training(positions, hidden_states, residual)
 
         if is_profiling_enabled:
-            nvtx.push_range("LlamaDecoderLayer.input_layernorm")
+            nvtx.push_range("LaAL::LlamaDecoderLayer.input_layernorm")
 
         # Self Attention
         if residual is None:
@@ -352,14 +352,14 @@ class LlamaDecoderLayer(nn.Module):
 
         if is_profiling_enabled:
             nvtx.pop_range()
-            nvtx.push_range("LlamaDecoderLayer.self_attn")
+            nvtx.push_range("LaAL::LlamaDecoderLayer.self_attn")
 
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states)
 
         if is_profiling_enabled:
             nvtx.pop_range()
-            nvtx.push_range("LlamaDecoderLayer.post_attention_layernorm")
+            nvtx.push_range("LaAL::LlamaDecoderLayer.post_attention_layernorm")
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -367,7 +367,7 @@ class LlamaDecoderLayer(nn.Module):
 
         if is_profiling_enabled:
             nvtx.pop_range()
-            nvtx.push_range("LlamaDecoderLayer.mlp")
+            nvtx.push_range("LaAL::LlamaDecoderLayer.mlp")
 
         hidden_states = self.mlp(hidden_states)
 
@@ -474,7 +474,7 @@ class LlamaModel(nn.Module):
             })
 
         if is_profiling_enabled:
-            nvtx.push_range("LlamaModel.norm")
+            nvtx.push_range("LaAL::LlamaModel.norm")
 
         ret = self.norm(hidden_states, residual, is_training=is_lora_training)
 
