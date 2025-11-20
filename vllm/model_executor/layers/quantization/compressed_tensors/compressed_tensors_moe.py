@@ -52,9 +52,9 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
+    prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
-    prepare_static_weights_for_trtllm_fp4_moe,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -318,8 +318,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
-
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # From packed to weight
         layer.w13_weight = torch.nn.Parameter(
@@ -365,7 +363,11 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
-            w13_input_global_scale = layer.w13_input_global_scale.min().to(torch.float32).expand(layer.num_experts)
+            w13_input_global_scale = (
+                layer.w13_input_global_scale.min()
+                .to(torch.float32)
+                .expand(layer.num_experts)
+            )
         else:
             w13_input_global_scale = layer.w13_input_global_scale.min(dim=1).values.to(
                 torch.float32

@@ -15,7 +15,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
@@ -39,9 +38,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
+    prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
-    prepare_static_weights_for_trtllm_fp4_moe,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -1340,16 +1339,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # GEMM 1 processing
         gemm1_weight = layer.w13_weight.data
         gemm1_weight_scale = layer.w13_weight_scale.data
 
-        if (
-            self.allow_flashinfer
-            and (self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM)
+        if self.allow_flashinfer and (
+            self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
                 gemm1_weight, gemm1_weight_scale, dim=-2
