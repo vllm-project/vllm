@@ -63,6 +63,63 @@ class VideoLoader:
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
+    @staticmethod
+    def _read_frames(
+        cap,
+        frame_indices: set[int],
+        num_expected_frames: int,
+        max_frame_idx: int,
+    ) -> tuple[npt.NDArray, int, list[int]]:
+        import cv2
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((num_expected_frames, height, width, 3), dtype=np.uint8)
+
+        i = 0
+        valid_frame_indices = []
+        for idx in range(max_frame_idx + 1):
+            ok = cap.grab()
+            if not ok:
+                # Frame is broken/unreadable, log warning
+                if idx in frame_indices:
+                    logger.warning(
+                        "Failed to grab frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+                continue
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    valid_frame_indices.append(idx)
+                    i += 1
+                else:
+                    # retrieve() failed even though grab() succeeded
+                    logger.warning(
+                        "Failed to retrieve frame %d during video loading. "
+                        "This frame will be skipped.",
+                        idx,
+                    )
+
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < num_expected_frames:
+            logger.warning(
+                "Video loading completed with %d broken/unreadable frames. "
+                "Expected %d frames but only loaded %d frames.",
+                num_expected_frames - valid_num_frames,
+                num_expected_frames,
+                valid_num_frames,
+            )
+
+        assert i == valid_num_frames, (
+            f"Expected reading {valid_num_frames} frames, "
+            f"but only loaded {i} frames from video."
+        )
+
+        return frames[:valid_num_frames], valid_num_frames, valid_frame_indices
+
 
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
@@ -120,24 +177,10 @@ class OpenCVVideoBackend(VideoLoader):
             )
             frame_idx = uniform_sampled_frames.tolist()
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
-
-        i = 0
-        for idx in range(max(frame_idx) + 1):
-            ok = cap.grab()
-            if not ok:
-                break
-            if idx in frame_idx:
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
-
-        assert i == num_frames_to_sample, (
-            f"Expected reading {num_frames_to_sample} frames, "
-            f"but only loaded {i} frames from video."
+        # Convert to set for O(1) lookup performance
+        frame_idx_set = set(frame_idx)
+        frames, valid_num_frames, valid_frame_indices = cls._read_frames(
+            cap, frame_idx_set, num_frames_to_sample, max(frame_idx)
         )
 
         # Use transformers transformers.video_utils.VideoMetadata format
@@ -148,10 +191,10 @@ class OpenCVVideoBackend(VideoLoader):
             "fps": original_fps,
             "duration": duration,
             "video_backend": "opencv",
-            "frames_indices": list(frame_idx),
+            "frames_indices": valid_frame_indices,
             # extra field used to control hf processor's video
             # sampling behavior
-            "do_sample_frames": num_frames_to_sample == total_frames_num,
+            "do_sample_frames": valid_num_frames == total_frames_num,
         }
 
         return frames, metadata
@@ -185,10 +228,10 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
-        frame_indices: range | list[int]
+        frame_indices_list: list[int]
         if duration <= max_duration:
             n = int(math.floor(duration * fps))
-            frame_indices = sorted(
+            frame_indices_list = sorted(
                 {
                     min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
                     for i in range(n)
@@ -197,34 +240,23 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         else:
             num_samples = int(max_duration * fps)
             if num_samples >= total_frames_num:
-                frame_indices = range(total_frames_num)
+                frame_indices_list = list(range(total_frames_num))
             else:
                 target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
-                frame_indices = sorted(
+                frame_indices_list = sorted(
                     {
                         min(max_frame_idx, int(math.ceil(t * original_fps)))
                         for t in target_seconds
                     }
                 )
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
-
-        i = 0
-        for idx in range(total_frames_num):
-            ok = cap.grab()
-            if not ok:
-                break
-            if idx in frame_indices:
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
-
-        assert i == len(frame_indices), (
-            f"Expected reading {len(frame_indices)} frames, "
-            f"but only loaded {i} frames from video."
+        # Convert to set for O(1) lookup performance
+        frame_indices_set = set(frame_indices_list)
+        frames, valid_num_frames, valid_frame_indices = cls._read_frames(
+            cap,
+            frame_indices_set,
+            len(frame_indices_list),
+            total_frames_num - 1,
         )
 
         # Use transformers transformers.video_utils.VideoMetadata format
@@ -233,7 +265,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             "fps": original_fps,
             "duration": duration,
             "video_backend": "opencv_dynamic",
-            "frames_indices": list(frame_indices),
+            "frames_indices": valid_frame_indices,
             "do_sample_frames": False,
         }
 
