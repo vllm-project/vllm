@@ -393,43 +393,43 @@ def test_embeddings_with_zero_weights(
         lora_embedding.create_lora_weights(max_loras, lora_config)
         return embedding, lora_embedding
 
-    for i in range(NUM_RANDOM_SEEDS):
-        set_random_seed(i)
+    # Only run a single random seed as the behavior LoRA layers
+    # should be equivalent to just adding zeros to the base layer.
+    id_to_index = get_random_id_to_index(num_loras, max_loras)
+    embedding, lora_embedding = create_random_embedding_layer()
+    lora_embedding.set_mapping(punica_wrapper)
 
-        id_to_index = get_random_id_to_index(num_loras, max_loras)
-        embedding, lora_embedding = create_random_embedding_layer()
-        lora_embedding.set_mapping(punica_wrapper)
-        # Don't populate - stacked tensors are originally 0 anyway
-        lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_embedding,
-            layer_weights=embedding.weight.T,
-            use_zero_lora_b=use_zero_lora_a,
-            use_zero_lora_a=use_zero_lora_b,
-        )
+    # Explicitly set lora_a and/or lora_b to zero
+    lora_dict, _ = populate_loras(
+        id_to_index,
+        layer=lora_embedding,
+        layer_weights=embedding.weight.T,
+        use_zero_lora_b=use_zero_lora_a,
+        use_zero_lora_a=use_zero_lora_b,
+    )
 
-        inputs, index_mapping, prompt_mapping = create_random_inputs(
-            active_lora_ids=list(lora_dict.keys()),
-            num_inputs=num_loras * 3,
-            input_size=(200,),
-            input_range=(1, vocab_size),
-            device=device,
-        )
-        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-            lora_config.lora_extra_vocab_size,
-        )
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=list(lora_dict.keys()),
+        num_inputs=num_loras * 3,
+        input_size=(200,),
+        input_range=(1, vocab_size),
+        device=device,
+    )
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+    punica_wrapper.update_metadata(
+        lora_mapping,
+        id_to_index,
+        max_loras,
+        vocab_size,
+        lora_config.lora_extra_vocab_size,
+    )
 
-        cat_inputs = torch.cat(inputs)
-        lora_result = lora_embedding(cat_inputs)
-        base_layer_result = lora_embedding.base_layer.forward(cat_inputs)
+    cat_inputs = torch.cat(inputs)
+    lora_result = lora_embedding(cat_inputs)
+    base_layer_result = lora_embedding.base_layer.forward(cat_inputs)
 
-        rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result, base_layer_result, rtol=rtol, atol=atol)
+    rtol, atol = TOLERANCES[lora_result.dtype]
+    torch.testing.assert_close(lora_result, base_layer_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
