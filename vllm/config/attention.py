@@ -19,9 +19,6 @@ class AttentionConfig:
     """Attention backend to use. If None, will be selected automatically.
     Example options: FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
 
-    use_triton_flash_attn: bool = True
-    """Whether to use triton flash attention."""
-
     flash_attn_version: int | None = None
     """Force vllm to use a specific flash-attention version (2 or 3).
     Only valid when using the flash-attention backend."""
@@ -29,9 +26,6 @@ class AttentionConfig:
     v1_use_prefill_decode_attention: bool = False
     """Use separate prefill and decode kernels for V1 attention instead of
     the unified triton kernel."""
-
-    use_aiter_unified_attention: bool = False
-    """Use AITER triton unified attention for V1 attention."""
 
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
@@ -66,15 +60,54 @@ class AttentionConfig:
         """
         factors: list[Any] = [
             self.backend,
-            self.use_triton_flash_attn,
             self.flash_attn_version,
             self.v1_use_prefill_decode_attention,
-            self.use_aiter_unified_attention,
             self.flash_attn_max_num_splits_for_cuda_graph,
             self.use_cudnn_prefill,
+            self.use_trtllm_ragged_deepseek_prefill,
             self.use_trtllm_attention,
             self.disable_flashinfer_prefill,
             self.flashinfer_disable_q_quantization,
         ]
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    def __post_init__(self) -> None:
+        from vllm import envs
+
+        # Apply environment variable overrides only if explicitly set
+        # Backend env var fallback
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and self.backend is None:
+            self.backend = envs.VLLM_ATTENTION_BACKEND
+
+        if envs.is_set("VLLM_FLASH_ATTN_VERSION"):
+            self.flash_attn_version = envs.VLLM_FLASH_ATTN_VERSION
+
+        if envs.is_set("VLLM_V1_USE_PREFILL_DECODE_ATTENTION"):
+            self.v1_use_prefill_decode_attention = (
+                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            )
+
+        if envs.is_set("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH"):
+            self.flash_attn_max_num_splits_for_cuda_graph = (
+                envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            )
+
+        if envs.is_set("VLLM_USE_CUDNN_PREFILL"):
+            self.use_cudnn_prefill = envs.VLLM_USE_CUDNN_PREFILL
+
+        if envs.is_set("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL"):
+            self.use_trtllm_ragged_deepseek_prefill = (
+                envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+            )
+
+        if envs.is_set("VLLM_USE_TRTLLM_ATTENTION"):
+            self.use_trtllm_attention = envs.VLLM_USE_TRTLLM_ATTENTION
+
+        if envs.is_set("VLLM_DISABLE_FLASHINFER_PREFILL"):
+            self.disable_flashinfer_prefill = envs.VLLM_DISABLE_FLASHINFER_PREFILL
+
+        if envs.is_set("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION"):
+            self.flashinfer_disable_q_quantization = (
+                envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+            )

@@ -1351,12 +1351,11 @@ class EngineArgs:
 
         This method reads from environment variables to maintain backward
         compatibility with existing deployments. All attention-related
-        environment variables are respected:
+        environment variables are respected and applied in
+        AttentionConfig.__post_init__:
         - VLLM_ATTENTION_BACKEND (deprecated, use --attention-backend CLI arg)
-        - VLLM_USE_TRITON_FLASH_ATTN
         - VLLM_FLASH_ATTN_VERSION
         - VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-        - VLLM_USE_AITER_UNIFIED_ATTENTION
         - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
         - VLLM_USE_CUDNN_PREFILL
         - VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
@@ -1378,19 +1377,7 @@ class EngineArgs:
         if backend is None:
             backend = envs.VLLM_ATTENTION_BACKEND
 
-        return AttentionConfig(
-            backend=backend,
-            use_triton_flash_attn=envs.VLLM_USE_TRITON_FLASH_ATTN,
-            flash_attn_version=envs.VLLM_FLASH_ATTN_VERSION,
-            v1_use_prefill_decode_attention=envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION,
-            use_aiter_unified_attention=envs.VLLM_USE_AITER_UNIFIED_ATTENTION,
-            flash_attn_max_num_splits_for_cuda_graph=envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH,
-            use_cudnn_prefill=envs.VLLM_USE_CUDNN_PREFILL,
-            use_trtllm_ragged_deepseek_prefill=envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL,
-            use_trtllm_attention=envs.VLLM_USE_TRTLLM_ATTENTION,
-            disable_flashinfer_prefill=envs.VLLM_DISABLE_FLASHINFER_PREFILL,
-            flashinfer_disable_q_quantization=envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION,
-        )
+        return AttentionConfig(backend=backend)
 
     def create_engine_config(
         self,
