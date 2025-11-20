@@ -49,7 +49,7 @@ class AttentionBackend(ABC):
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -145,7 +145,7 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        supported_kernel_block_sizes = cls.get_supported_kernel_block_size()
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
             return True
 

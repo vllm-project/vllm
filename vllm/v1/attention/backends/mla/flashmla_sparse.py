@@ -58,7 +58,7 @@ class FlashMLASparseBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "fp8_ds_mla"]
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [64]
 
     @staticmethod

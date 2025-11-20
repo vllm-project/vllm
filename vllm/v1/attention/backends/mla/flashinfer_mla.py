@@ -42,7 +42,7 @@ class FlashInferMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
