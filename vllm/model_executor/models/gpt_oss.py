@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.distributed as dist
@@ -304,6 +305,18 @@ class GptOssModel(nn.Module):
         if len(aux_hidden_states) > 0:
             return x, aux_hidden_states
         return x
+    
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, weight scales, activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        from vllm.debug import ForkedPdb; ForkedPdb().set_trace()
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts,
+            num_redundant_experts=0,
+        )
 
     def _load_weights_mxfp4(
         self,
@@ -492,6 +505,280 @@ class GptOssModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+    def _load_weights_quark(
+        self,
+        ep_rank_start: int,
+        ep_rank_end: int,
+        heads_per_rank: int,
+        head_start: int,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        stacked_params_mapping: list[tuple[str, ...]],
+    ) -> set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        mxfp4_block = 32
+        use_ep = self.parallel_config.enable_expert_parallel
+        if use_ep:
+            pass  # TODO: error
+
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        intermediate_size = self.config.intermediate_size
+        per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
+        # Calculate common slicing bounds for current rank
+        tp_rank_start = tp_rank * per_rank_intermediate_size
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
+        expert_params_mapping = self.get_expert_mapping()
+        for name, loaded_weight in weights:
+            if "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                param = params_dict[name]
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
+
+            # mapping to convert individual experts input_scale into fused_moe.
+            elif "input_scale" in name:  # w2 w13 input_scale
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                param = params_dict[name]
+
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            elif ".w13_weight_scale" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                # Handle MLP gate and up projection weights scale
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[
+                        2 * tp_rank_start : 2 * tp_rank_end, ...
+                    ]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_weight_scale" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[
+                        ..., tp_rank_start // mxfp4_block : tp_rank_end // mxfp4_block
+                    ]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            # mapping to convert weight and bias of individual
+            # experts gate_up_proj  into fused_moe.
+            elif ".w13_weight" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+
+                # Extract gate and up projection parts
+                # since the weight is shuffled, we can slice directly
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[
+                        2 * tp_rank_start : 2 * tp_rank_end, ...
+                    ]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_weight" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[
+                        ..., tp_rank_start // 2 : tp_rank_end // 2
+                    ]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            elif ".w13_bias" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[2 * tp_rank_start : 2 * tp_rank_end]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_bias" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                # Handle MLP down projection bias
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                if use_ep:
+                    loaded_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    # (only load on rank 0 to avoid duplication)
+                    if tp_rank != 0:
+                        loaded_weight.zero_()
+                weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
+
+                loaded_params.add(name)
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                # Skip non-stacked layers and experts (experts handled below).
+                if weight_name not in name:
+                    continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if ("mlp.experts." in name) and name not in params_dict:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or not
+                    # here since otherwise we may skip experts with other
+                    # available replicas.
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        name = name_mapped
+                        break
+                else:
+                    if is_expert_weight:
+                        # We've checked that this is an expert weight
+                        # However it's not mapped locally to this rank
+                        # So we simply skip it
+                        continue
+
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        return loaded_params
+
     def _load_weights_other(
         self,
         ep_rank_end: int,
@@ -639,6 +926,15 @@ class GptOssModel(nn.Module):
                 weights,
                 stacked_params_mapping,
             )
+        elif quant_method == "quark":
+            return self._load_weights_quark(
+                ep_rank_end,
+                ep_rank_start,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
         else:
             return self._load_weights_other(
                 ep_rank_start,
@@ -678,7 +974,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
             ".down_proj.weight": ".w2_weight",
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
-            ".down_proj.input_scale": ".w2_input_scale"
+            ".down_proj.input_scale": ".w2_input_scale",
         },
     )
 
@@ -727,17 +1023,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, weight scales, activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts,
-            num_redundant_experts=0,
-        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
