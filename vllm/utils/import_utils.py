@@ -449,6 +449,11 @@ def has_arctic_inference() -> bool:
     return _has_module("arctic_inference")
 
 
+def has_aiter() -> bool:
+    """Whether the optional `aiter` package is available."""
+    return _has_module("aiter")
+
+
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")

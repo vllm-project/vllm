@@ -8,19 +8,13 @@ import torch
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
-
-
-def is_aiter_found() -> bool:
-    from importlib.util import find_spec
-
-    return find_spec("aiter") is not None
-
+from vllm.utils.import_utils import has_aiter
 
 # `find_spec` is not torch.compile compatible.
 # In cases where aiter availability might have
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
-IS_AITER_FOUND = is_aiter_found()
+IS_AITER_FOUND = has_aiter()
 
 
 def if_aiter_supported(func: Callable) -> Callable:
