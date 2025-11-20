@@ -21,7 +21,6 @@ echo "VERL_REPO=${VERL_REPO}"
 echo "VERL_BRANCH=${VERL_BRANCH}"
 echo "VERL_DIR=${VERL_DIR}"
 echo "TARGET_DIR=${TARGET_DIR}"
-echo "SFT_OUTPUT=${SFT_OUTPUT}"
 echo "MODEL_ID=${MODEL_ID}"
 echo "MODEL_DIR=${MODEL_DIR}"
 echo "train_epochs=${train_epochs}"
@@ -82,16 +81,17 @@ python3 -m verl.trainer.main_ppo \
  trainer.total_epochs="${train_epochs}" 
 echo "===== End PPO Training ====="
 echo "===== Model Restoration ====="
+# steps_per_epoch = 7473 samples(GSM8K: ~7473 samples) / 256 global batch size ≈ 29
 step=$((29 * train_epochs))
 merge_LOCAL_DIR="${TARGET_DIR}/checkpoints/verl_examples/gsm8k/global_step_${step}/actor"
 merge_TARGET_DIR="${TARGET_DIR}/checkpoints/verl_examples/gsm8k/global_step_${step}/actor_hf"
 
-python VERL_DIR/scripts/legacy_model_merger.py merge \
+python "${VERL_DIR}/scripts/legacy_model_merger.py" merge \
   --backend fsdp \
   --local_dir "${merge_LOCAL_DIR}" \
   --target_dir "${merge_TARGET_DIR}"
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 lm_eval --model hf \
+CUDA_VISIBLE_DEVICES=0,1,2,3 lm_eval --model hf \
   --model_args pretrained="${merge_TARGET_DIR}",trust_remote_code=True \
   --tasks gsm8k \
   --batch_size auto \
