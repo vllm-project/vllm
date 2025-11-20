@@ -17,7 +17,7 @@ from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
     model="microsoft/DialoGPT-medium",
-    optimization_level=OptimizationLevel.O0
+    optimization_level=0
 )
 ```
 
@@ -36,7 +36,7 @@ from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
     model="microsoft/DialoGPT-medium",
-    optimization_level=OptimizationLevel.O1
+    optimization_level=1
 )
 ```
 
@@ -55,7 +55,7 @@ from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
     model="microsoft/DialoGPT-medium",
-    optimization_level=OptimizationLevel.O2  # This is the default
+    optimization_level=2  # This is the default
 )
 ```
 
