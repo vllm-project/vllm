@@ -526,11 +526,9 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "static_forward_context",
-            "pass_config",  # handled separately below
         }
 
         factors = get_compile_factors(self, ignored_factors)
-        factors["pass_config"] = self.pass_config.compile_factors()
         if return_factors:
             return factors or None
         return hash_factors(factors)
