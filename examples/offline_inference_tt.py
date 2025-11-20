@@ -210,7 +210,7 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
 
             image_inputs, video_inputs = process_vision_info(prompt)
             assert video_inputs is None, "Video inputs not supported yet"
-            image_inputs = image_inputs[0] if image_inputs else None
+            image_inputs = image_inputs if image_inputs else None
         elif "gemma-3" in model:
             image_inputs = [
                 ctnt["image"]

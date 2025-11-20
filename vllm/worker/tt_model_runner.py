@@ -166,6 +166,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         self.cached_step_outputs: List[torch.Tensor] = [
         ]  # Only used for multi-step execution
 
+        # Detect if the model has "mrope" rope_scaling type.
+        # mrope requires keeping "rope_deltas" between prefill/decode phases.
         self.request_specific_rope = bool(self.model_config.uses_mrope)
         if self.model_config.is_encoder_decoder or self.request_specific_rope:
             assert (
@@ -176,12 +178,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             # seq_id -> cached_req_data
             self.cached_req_data: Dict[int, Dict[str, Any]] = {}
             self.previous_seq_ids: Set[int] = set()
-
-        # Detect if the model has "mrope" rope_scaling type.
-        # mrope requires keep "rope_deltas" between prompt and decoding phases.
-        if self.model_config.uses_mrope:
-            assert ("TTModelRunner does not currently support models with "
-                    "mrope rope_scaling")
 
         vocab_size = self.model_config.get_vocab_size()
         self.logits_processor = LogitsProcessor(vocab_size,
