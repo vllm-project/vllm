@@ -188,6 +188,9 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
+    a1q_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -215,6 +218,9 @@ def rocm_aiter_fused_experts(
         )
         assert topk_weights.shape[-1] == 1, (
             "Only support topk=1 when `apply_router_weight_on_input` is True"
+        )
+        assert num_local_tokens is None, (
+            "AITER tkw1 kernel does not support `num_local_tokens`"
         )
 
         return rocm_aiter_ops.asm_moe_tkw1(
@@ -272,9 +278,11 @@ def rocm_aiter_fused_experts(
             activation_method=activation_method,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
+            a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
             a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input,
+            num_local_tokens=num_local_tokens,
+            output_dtype=output_dtype,
         )
 
 
