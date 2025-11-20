@@ -89,7 +89,10 @@ class OpenCUAVisionTransformer(Qwen2_5_VisionTransformer):
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(None)
+        return self.ctx.get_hf_config()
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
 
     def get_hf_processor(self, **kwargs: object):
         """Load OpenCUA processor."""
