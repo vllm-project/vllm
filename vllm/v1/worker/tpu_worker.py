@@ -327,14 +327,11 @@ class TPUWorker:
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
         parallel_config = vllm_config.parallel_config
-        init_method = (
-            distributed_init_method if distributed_init_method is not None else "env://"
-        )
         init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
-            distributed_init_method=init_method,
+            distributed_init_method=distributed_init_method or "env://",
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(

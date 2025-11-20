@@ -188,7 +188,6 @@ class XPUWorker(Worker):
         )
 
         # Set random seed.
-        assert self.model_config.seed is not None
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
