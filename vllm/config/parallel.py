@@ -60,6 +60,10 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+    use_async: bool = False
+    """
+    Whether to use non-blocking EPLB.
+    """
 
 
 @config
