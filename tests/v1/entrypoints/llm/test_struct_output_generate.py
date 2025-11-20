@@ -47,10 +47,34 @@ EAGLE_SPEC_CONFIG = {
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "mistralai/Ministral-8B-Instruct-2410",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
