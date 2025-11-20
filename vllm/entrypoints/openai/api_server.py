@@ -288,7 +288,6 @@ def mount_metrics(app: FastAPI):
             "/ping",
             "/version",
             "/server_info",
-            "/mm-processor-stats",
         ],
         registry=registry,
     ).add().instrument(app).expose(app, response_class=PrometheusResponse)
@@ -393,56 +392,6 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
-
-
-@router.get("/mm-processor-stats")
-async def get_mm_processor_stats(
-    request: Request, request_id: str | None = Query(None)
-):
-    """
-    Get multimodal processor timing statistics.
-
-    Args:
-        request_id: Optional request ID to get stats for a specific request.
-                   If not provided, returns all available stats.
-
-    Returns:
-        JSON response with timing statistics.
-    """
-    from vllm.multimodal.processing import (
-        get_mm_processor_timing_stats_by_request_id,
-    )
-
-    import vllm.envs as envs
-
-    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
-        return JSONResponse(
-            content={
-                "error": "MM processor stats collection is not enabled. "
-                "Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
-            },
-            status_code=400,
-        )
-
-    if request_id:
-        stats = get_mm_processor_timing_stats_by_request_id(request_id)
-        if stats is None:
-            return JSONResponse(
-                content={"error": f"Stats not found for request_id: {request_id}"},
-                status_code=404,
-            )
-        return JSONResponse(content={"request_id": request_id, "stats": stats.to_dict()})
-
-    # Return all available stats (for debugging/development)
-    # In production, you might want to limit this or require authentication
-    from vllm.multimodal.processing import _timing_stats_registry, _timing_stats_registry_lock
-
-    with _timing_stats_registry_lock:
-        all_stats = {
-            rid: stats.to_dict()
-            for rid, stats in _timing_stats_registry.items()
-        }
-    return JSONResponse(content={"stats": all_stats})
 
 
 @router.post("/pause")

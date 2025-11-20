@@ -104,6 +104,59 @@ class MultiModalProcessorTimingStats:
         }
 
 
+def _record_mm_processor_timing(
+    stage: str, duration_seconds: float, engine_idx: int = 0
+):
+    """Record multimodal processor timing to Prometheus histogram.
+
+    Args:
+        stage: One of "hf_processor", "hashing", "cache_lookup", "prompt_update"
+        duration_seconds: Duration in seconds
+        engine_idx: Engine index (defaults to 0)
+    """
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return
+
+    try:
+        from prometheus_client import REGISTRY
+
+        # Find the histogram metric in the registry
+        metric_name = "vllm:mm_processor_time_seconds"
+        for collector in list(REGISTRY._collector_to_names.keys()):
+            if hasattr(collector, "_name") and collector._name == metric_name:
+                # The collector is the Histogram object
+                # We need to get the labeled instance
+                # Try to get model_name from existing samples
+                model_name = ""
+                try:
+                    samples = list(collector.collect())
+                    if samples:
+                        # Get model_name from first sample
+                        for sample in samples[0].samples:
+                            if "model_name" in sample.labels:
+                                model_name = sample.labels["model_name"]
+                                break
+                except Exception:
+                    pass
+
+                # Get the labeled histogram instance
+                try:
+                    labeled_hist = collector.labels(
+                        model_name=model_name or "unknown",
+                        engine=str(engine_idx),
+                        stage=stage,
+                    )
+                    labeled_hist.observe(duration_seconds)
+                    return
+                except Exception:
+                    # If labels() fails, the histogram might not be initialized yet
+                    pass
+    except Exception:
+        # Silently fail if metrics aren't available
+        # This allows the code to work even if Prometheus isn't set up
+        pass
+
+
 # Thread-local storage for timing stats
 _timing_stats_local = threading.local()
 
@@ -204,6 +257,9 @@ def _timed_operation(stage_name: str):
             stats.cache_lookup_time += elapsed
         elif stage_name == "prompt_update":
             stats.prompt_update_time += elapsed
+
+        # Also record to Prometheus histogram
+        _record_mm_processor_timing(stage_name, elapsed)
 
 
 PromptSeq: TypeAlias = str | list[int]

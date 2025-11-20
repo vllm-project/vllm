@@ -74,17 +74,128 @@ class MultimodalProcessorBenchmarkMetrics:
     """Per-stage timing stats: mean, median, std, percentiles for each stage."""
 
 
+def _parse_prometheus_histogram(metrics_text: str, metric_name: str, stage: str) -> dict[str, float]:
+    """
+    Parse Prometheus histogram from /metrics endpoint text.
+    
+    Returns a dict with 'count', 'sum', and bucket values.
+    """
+    import re
+    
+    # Map stage names to Prometheus label values
+    stage_map = {
+        "hf_processor": "hf_processor",
+        "hashing": "hashing",
+        "cache_lookup": "cache_lookup",
+        "prompt_update": "prompt_update",
+    }
+    prometheus_stage = stage_map.get(stage, stage)
+    
+    result = {"count": 0.0, "sum": 0.0, "buckets": {}}
+    
+    # Pattern to match histogram bucket lines: metric_name_bucket{labels} value
+    bucket_pattern = re.compile(
+        rf"{re.escape(metric_name)}_bucket\{{[^}}]*stage="{re.escape(prometheus_stage)}"[^}}]*\}}\s+([\d\.e\+\-]+)"
+    )
+    count_pattern = re.compile(
+        rf"{re.escape(metric_name)}_count\{{[^}}]*stage="{re.escape(prometheus_stage)}"[^}}]*\}}\s+([\d\.e\+\-]+)"
+    )
+    sum_pattern = re.compile(
+        rf"{re.escape(metric_name)}_sum\{{[^}}]*stage="{re.escape(prometheus_stage)}"[^}}]*\}}\s+([\d\.e\+\-]+)"
+    )
+    
+    # Also match bucket lines with le label
+    bucket_with_le_pattern = re.compile(
+        rf"{re.escape(metric_name)}_bucket\{{[^}}]*stage="{re.escape(prometheus_stage)}"[^}}]*le="([^"]+)"[^}}]*\}}\s+([\d\.e\+\-]+)"
+    )
+    
+    for line in metrics_text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        
+        # Match bucket with le label
+        match = bucket_with_le_pattern.search(line)
+        if match:
+            le_value = match.group(1)
+            bucket_count = float(match.group(2))
+            result["buckets"][le_value] = bucket_count
+            continue
+        
+        # Match count
+        match = count_pattern.search(line)
+        if match:
+            result["count"] = float(match.group(1))
+            continue
+        
+        # Match sum
+        match = sum_pattern.search(line)
+        if match:
+            result["sum"] = float(match.group(1))
+            continue
+    
+    return result
+
+
+def _calculate_percentile_from_histogram(histogram: dict[str, float], percentile: float) -> float:
+    """
+    Calculate a percentile from a Prometheus histogram.
+    
+    Uses linear interpolation between buckets.
+    """
+    count = histogram.get("count", 0.0)
+    if count == 0:
+        return 0.0
+    
+    target_count = count * (percentile / 100.0)
+    buckets = histogram.get("buckets", {})
+    
+    # Sort buckets by le value (convert +Inf to a large number)
+    sorted_buckets = []
+    for le_str, bucket_count in buckets.items():
+        if le_str == "+Inf":
+            le_value = float("inf")
+        else:
+            try:
+                le_value = float(le_str)
+            except ValueError:
+                continue
+        sorted_buckets.append((le_value, bucket_count))
+    
+    sorted_buckets.sort(key=lambda x: x[0])
+    
+    # Find the bucket containing the target count
+    cumulative = 0.0
+    for i, (le_value, bucket_count) in enumerate(sorted_buckets):
+        cumulative = bucket_count
+        if cumulative >= target_count:
+            if i == 0:
+                return le_value
+            # Linear interpolation
+            prev_le, prev_count = sorted_buckets[i - 1]
+            if cumulative == prev_count:
+                return le_value
+            # Interpolate between prev_le and le_value
+            ratio = (target_count - prev_count) / (cumulative - prev_count)
+            return prev_le + (le_value - prev_le) * ratio
+    
+    # If we didn't find it, return the max bucket
+    if sorted_buckets:
+        return sorted_buckets[-1][0]
+    return 0.0
+
+
 async def collect_mm_processor_stats(
     outputs: list[RequestFuncOutput],
     base_url: str,
     session: Any,
     input_requests: list[SampleRequest],
-) -> dict[str, list[float]]:
+) -> tuple[dict[str, list[float]], dict[str, dict[str, float]]]:
     """
-    Collect multimodal processor timing stats by querying the stats endpoint.
+    Collect multimodal processor timing stats by querying the /metrics endpoint.
 
-    This queries the /mm-processor-stats endpoint for each request to retrieve
-    timing statistics.
+    This queries the Prometheus /metrics endpoint and parses histogram data
+    for multimodal processor timing.
     """
     import aiohttp
 
@@ -96,75 +207,108 @@ async def collect_mm_processor_stats(
         "total_time": [],
     }
 
-    # Create a mapping from request_id to request for lookup
-    request_id_to_request = {
-        req.request_id: req for req in input_requests if req.request_id
-    }
+    # Query /metrics endpoint
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as resp:
+            if resp.status != 200:
+                return stats_by_stage
+            metrics_text = await resp.text()
+    except Exception:
+        # If metrics endpoint is unavailable, return empty stats
+        return stats_by_stage
 
-    # Query stats endpoint for each request
-    stats_url = f"{base_url}/mm-processor-stats"
-    for i, output in enumerate(outputs):
-        # Get request_id from the corresponding input request
-        if i < len(input_requests):
-            request_id = input_requests[i].request_id
-            if request_id:
-                try:
-                    async with session.get(
-                        stats_url, params={"request_id": request_id}
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if "stats" in data:
-                                stats_dict = data["stats"]
-                                stats_by_stage["hf_processor_time"].append(
-                                    stats_dict.get("hf_processor_time", 0.0)
-                                )
-                                stats_by_stage["hashing_time"].append(
-                                    stats_dict.get("hashing_time", 0.0)
-                                )
-                                stats_by_stage["cache_lookup_time"].append(
-                                    stats_dict.get("cache_lookup_time", 0.0)
-                                )
-                                stats_by_stage["prompt_update_time"].append(
-                                    stats_dict.get("prompt_update_time", 0.0)
-                                )
-                                stats_by_stage["total_time"].append(
-                                    stats_dict.get("total_time", 0.0)
-                                )
-                except Exception as e:
-                    # If stats endpoint is unavailable, continue without stats
-                    # This allows the benchmark to run even if stats collection fails
-                    pass
-
-    return stats_by_stage
+    # Parse histograms for each stage
+    metric_name = "vllm:mm_processor_time_seconds"
+    stages = ["hf_processor", "hashing", "cache_lookup", "prompt_update"]
+    histograms = {}
+    
+    for stage in stages:
+        histogram = _parse_prometheus_histogram(metrics_text, metric_name, stage)
+        count = histogram.get("count", 0.0)
+        
+        if count > 0:
+            stage_key = f"{stage}_time" if stage != "hf_processor" else "hf_processor_time"
+            histograms[stage_key] = histogram
+    
+    # Return histograms dict for percentile calculation
+    # The stats_by_stage dict is kept for compatibility but won't be used
+    # when histograms are available
+    return stats_by_stage, histograms if histograms else {}
 
 
 def calculate_mm_processor_metrics(
     stats_by_stage: dict[str, list[float]],
     selected_percentiles: list[float],
+    histograms: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Calculate aggregate metrics for each processor stage."""
+    """
+    Calculate aggregate metrics for each processor stage.
+    
+    If histograms are provided, calculates percentiles from histogram buckets.
+    Otherwise, calculates from individual observations.
+    """
     metrics = {}
-    for stage_name, times in stats_by_stage.items():
-        if not times:
-            metrics[stage_name] = {
-                "mean": 0.0,
-                "median": 0.0,
-                "std": 0.0,
-                **{f"p{p}": 0.0 for p in selected_percentiles},
-            }
-            continue
-
-        times_ms = [t * 1000 for t in times]  # Convert to milliseconds
-        metrics[stage_name] = {
-            "mean": float(np.mean(times_ms)),
-            "median": float(np.median(times_ms)),
-            "std": float(np.std(times_ms)),
-            **{
-                f"p{p}": float(np.percentile(times_ms, p))
+    
+    if histograms:
+        # Calculate metrics from Prometheus histograms
+        for stage_name, histogram in histograms.items():
+            count = histogram.get("count", 0.0)
+            sum_value = histogram.get("sum", 0.0)
+            
+            if count == 0:
+                metrics[stage_name] = {
+                    "mean": 0.0,
+                    "median": 0.0,
+                    "std": 0.0,
+                    **{f"p{p}": 0.0 for p in selected_percentiles},
+                }
+                continue
+            
+            mean = (sum_value / count) * 1000  # Convert to milliseconds
+            median = _calculate_percentile_from_histogram(histogram, 50.0) * 1000
+            
+            # Calculate percentiles from histogram
+            percentile_values = {
+                f"p{p}": _calculate_percentile_from_histogram(histogram, p) * 1000
                 for p in selected_percentiles
-            },
-        }
+            }
+            
+            # Estimate std from histogram (rough approximation)
+            # For now, use a simple approximation based on percentiles
+            p75 = _calculate_percentile_from_histogram(histogram, 75.0) * 1000
+            p25 = _calculate_percentile_from_histogram(histogram, 25.0) * 1000
+            std_approx = (p75 - p25) / 1.35  # IQR-based std approximation
+            
+            metrics[stage_name] = {
+                "mean": mean,
+                "median": median,
+                "std": std_approx,
+                **percentile_values,
+            }
+    else:
+        # Calculate from individual observations
+        for stage_name, times in stats_by_stage.items():
+            if not times:
+                metrics[stage_name] = {
+                    "mean": 0.0,
+                    "median": 0.0,
+                    "std": 0.0,
+                    **{f"p{p}": 0.0 for p in selected_percentiles},
+                }
+                continue
+
+            times_ms = [t * 1000 for t in times]  # Convert to milliseconds
+            metrics[stage_name] = {
+                "mean": float(np.mean(times_ms)),
+                "median": float(np.median(times_ms)),
+                "std": float(np.std(times_ms)),
+                **{
+                    f"p{p}": float(np.percentile(times_ms, p))
+                    for p in selected_percentiles
+                },
+            }
+    
     return metrics
 
 
@@ -245,14 +389,14 @@ async def benchmark_multimodal_processor(
             ready_check_timeout_sec=ready_check_timeout_sec,
         )
 
-        # Collect MM processor stats by querying the stats endpoint
+        # Collect MM processor stats by querying the /metrics endpoint
         outputs = benchmark_result.get("outputs", [])
-        mm_stats_by_stage = await collect_mm_processor_stats(
+        mm_stats_by_stage, histograms = await collect_mm_processor_stats(
             outputs, base_url, session, input_requests
         )
 
         mm_processor_metrics = calculate_mm_processor_metrics(
-            mm_stats_by_stage, selected_percentiles
+            mm_stats_by_stage, selected_percentiles, histograms=histograms
         )
 
         # Merge MM processor metrics into benchmark result

@@ -16,7 +16,13 @@ The benchmark requires that the vLLM server is started with multimodal processor
 VLLM_ENABLE_MM_PROCESSOR_STATS=1 vllm serve <model> [options]
 ```
 
-The benchmark queries the `/mm-processor-stats` endpoint to retrieve timing statistics for each request. This endpoint is accessible without authentication (similar to `/health` and `/metrics`).
+The benchmark queries the `/metrics` endpoint (Prometheus format) to retrieve timing statistics. The multimodal processor timing is exposed as histograms with the metric name `vllm:mm_processor_time_seconds`, labeled by stage:
+- `stage="hf_processor"` - HuggingFace processor calls
+- `stage="hashing"` - Multimodal item hashing
+- `stage="cache_lookup"` - Cache lookups and merges
+- `stage="prompt_update"` - Prompt updates and placeholder finding
+
+The benchmark parses these histograms to calculate percentiles and aggregate statistics.
 
 ## Usage
 
