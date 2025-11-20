@@ -326,7 +326,7 @@ class OpenCUAForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
-
+            return "<|image_pad|>"
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
