@@ -1146,6 +1146,7 @@ class Scheduler(SchedulerInterface):
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
+                        events=request.take_events(),
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     )
