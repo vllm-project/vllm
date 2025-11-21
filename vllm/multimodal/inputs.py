@@ -175,12 +175,16 @@ class PlaceholderRange:
         return int(self.is_embed.sum().item())
 
     def extract_embeds_range(self) -> list[tuple[int, int]]:
-        """Extract the start and end indices of the embedded region.
+        """Extract the start and end indices of the embedded region in prompt.
+
+        For example, given `PlaceholderRange(offset=2, length=5)` and
+        `is_embed = [False, True, False, True, True]`, the output is
+        `[(1 + offset, 1 + offset), (3 + offset, 4 + offset)]`.
 
         Returns:
-            A tuple `(start, end)` representing the start (inclusive)
-            and end (exclusive) indices of the embedded region.
-            Returns `None` if `is_embed` is `None`.
+            A tuple `(start, end)` representing the start and end
+            indices (inclusive) of the embedded region.
+            Returns full placeholder range if `is_embed` is `None`.
         """
         if self.is_embed is None:
             return [(self.offset, self.offset + self.length)]
