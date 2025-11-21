@@ -19,18 +19,29 @@ class AsyncOutput(AsyncModelRunnerOutput):
         sampler_output: SamplerOutput,
         num_sampled_tokens: torch.Tensor,
         copy_stream: torch.cuda.Stream,
+        copy_event: torch.cuda.Event,
     ):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
+        self.num_sampled_tokens = num_sampled_tokens
         self.copy_stream = copy_stream
-        self.copy_event = torch.cuda.Event()
+        self.copy_event = copy_event
 
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(self.copy_stream):
             self.copy_stream.wait_stream(default_stream)
 
-            # NOTE(woosuk): We should keep the CPU tensors unfreed
-            # until the copy completes.
+            # NOTE(woosuk): We must ensure that CPU tensors are not freed
+            # before the device-to-host copy is fully completed. For instance,
+            # operations like
+            # self.sampled_token_np = ...to("cpu", non_blocking=True).numpy()
+            # are unsafe because the underlying CPU tensor can be prematurely freed and
+            # reused by other tensors before the asynchronous copy finishes, potentially
+            # causing race conditions. To prevent this, we delay freeing by holding
+            # references until the copy event signals completion.
+            # Likewise, we also need to keep the reference to the GPU tensors.
+            # This is done by keeping the reference to sampler_output and
+            # model_runner_output.
             self.sampled_token_ids = sampler_output.sampled_token_ids.to(
                 "cpu", non_blocking=True
             )

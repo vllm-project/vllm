@@ -122,6 +122,7 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -184,6 +185,7 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
+            pcp_world_size=self.pcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
@@ -474,9 +476,9 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
-                # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                # after async KV recvs are completed.
                 else:
+                    # KVTransfer: WAITING reqs have num_computed_tokens > 0
+                    # after async KV recvs are completed.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
@@ -485,12 +487,12 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
 
-                # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
+                    # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                # Number of tokens to be scheduled.
                 else:
+                    # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
@@ -1027,8 +1029,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids: list[int] = (
-                sampled_token_ids[req_index].tolist() if sampled_token_ids else []
+            generated_token_ids = (
+                sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
             scheduled_spec_token_ids = (

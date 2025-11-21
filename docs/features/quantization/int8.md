@@ -87,7 +87,7 @@ Now, apply the quantization algorithms:
 ??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import GPTQModifier
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 

@@ -92,18 +92,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
+        self.output_copy_event = torch.cuda.Event()
         if self.use_async_scheduling:
             self.input_prep_event = torch.cuda.Event()
             self.structured_outputs_event = torch.cuda.Event()
         else:
             self.input_prep_event = None
             self.structured_outputs_event = None
-
-        self.cudagraph_manager = CudaGraphManager(
-            vllm_config=self.vllm_config,
-            device=self.device,
-        )
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -121,6 +116,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             device=self.device,
             pin_memory=self.pin_memory,
+        )
+        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # CUDA graphs.
+        self.cudagraph_manager = CudaGraphManager(
+            vllm_config=self.vllm_config,
+            device=self.device,
         )
 
     def get_supported_tasks(self) -> tuple[str]:
@@ -670,9 +672,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_size is not None:
                 # Use full CUDA graph.
                 return CUDAGraphMode.FULL, cudagraph_size, None
-            else:
-                # Fall back to eager mode.
-                return CUDAGraphMode.NONE, total_num_scheduled_tokens, None
+            # Fall back to eager mode.
+            # TODO(woosuk): Support piecewise CUDA graphs.
+            return CUDAGraphMode.NONE, total_num_scheduled_tokens, None
 
         # Consider DP padding and CUDA graph.
         if total_num_scheduled_tokens == 0:
