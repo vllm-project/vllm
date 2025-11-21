@@ -25,8 +25,8 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2 or 3).
     Only valid when using the flash-attention backend."""
 
-    v1_use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for V1 attention instead of
+    use_prefill_decode_attention: bool = False
+    """Use separate prefill and decode kernels for attention instead of
     the unified triton kernel."""
 
     flash_attn_max_num_splits_for_cuda_graph: int = 32
@@ -87,7 +87,7 @@ class AttentionConfig:
         self._set_from_env_if_set("backend", "VLLM_ATTENTION_BACKEND")
         self._set_from_env_if_set("flash_attn_version", "VLLM_FLASH_ATTN_VERSION")
         self._set_from_env_if_set(
-            "v1_use_prefill_decode_attention", "VLLM_V1_USE_PREFILL_DECODE_ATTENTION"
+            "use_prefill_decode_attention", "VLLM_V1_USE_PREFILL_DECODE_ATTENTION"
         )
         self._set_from_env_if_set(
             "flash_attn_max_num_splits_for_cuda_graph",

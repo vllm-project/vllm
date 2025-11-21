@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
@@ -276,7 +277,7 @@ class RocmPlatform(Platform):
             logger.info("Using Aiter Unified Attention backend.")
             return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
         if (
-            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            get_current_vllm_config().attention_config.use_prefill_decode_attention
             or selected_backend == AttentionBackendEnum.ROCM_ATTN
         ):
             # rocm specific backend, with aiter and/or
