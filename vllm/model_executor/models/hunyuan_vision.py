@@ -28,7 +28,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
 
-import math
 import einops
 import torch
 import torch.nn as nn
@@ -396,361 +395,104 @@ class HunYuanVisionPatchEmbed(nn.Module):
 
         self.config = config
         self.embed_dim = config.hidden_size
-
-        self.image_size = config.max_image_size
         self.patch_size = config.patch_size
-        self.max_seq_len = config.max_vit_seq_len
-        self.adaptor_patch_size = config.adaptor_patch_size
-
-        add_patchemb_bias = False
-        if 'add_patchemb_bias' in config.__dict__:
-            add_patchemb_bias = config.add_patchemb_bias
+        self.num_channels = config.num_channels
+        self.spatial_merge_size = config.spatial_merge_size
+        self.interpolate_mode = config.interpolate_mode
 
         self.patch_embedding = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
             stride=self.patch_size,
-            bias=add_patchemb_bias,
+            bias=True,
         )
 
-        self.anyres_vit_max_image_size = config.anyres_vit_max_image_size
-        self.num_patches = (self.anyres_vit_max_image_size // self.patch_size) ** 2
+        self.max_num_patches = (config.max_image_size // self.patch_size) ** 2
 
-        self.skip_cls_token = True
-
-        self.interpolate_mode = "bicubic"
-        if 'interpolate_mode' in config.__dict__:
-            self.interpolate_mode = config.interpolate_mode
-
-        if not self.config.use_normalize_pool and not self.config.use_fusion_block:
-            self.num_positions = self.num_patches + 1
-        else:
-            self.num_positions = self.num_patches
-        self.position_edge = int(math.sqrt(self.num_positions))
-        self.register_buffer("position_ids", torch.arange(self.num_positions).expand((1, -1)))
+        self.num_positions = self.max_num_patches + 1
+        self.position_edge = int(self.num_positions ** 0.5)
+        # first token is cls token, skip it
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
-
-        remove_prenorm = False
-        if 'remove_prenorm' in config.__dict__:
-            remove_prenorm = config.remove_prenorm
-        if remove_prenorm:
-            self.pre_layernorm = None
-        else:
-            self.pre_layernorm = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
         self.patch_pos_embed = None
 
-    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
-        """
-        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher
-        resolution images.
-
-        Source:
-        https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174
-        """
-        num_patches = embeddings.shape[1]
-        position_embeddings = self.position_embedding(self.position_ids)
-
-        if not self.config.use_normalize_pool and not self.config.use_fusion_block:
-            patch_pos_embed = position_embeddings[:, 1:]
-            num_positions = position_embeddings.shape[1] - 1
-        else:
-            patch_pos_embed = position_embeddings[:, :]
-            num_positions = position_embeddings.shape[1]
-
-        if num_patches == num_positions and height == width:
-             return patch_pos_embed
-        # class_pos_embed = position_embeddings[:, 0]
-        dim = embeddings.shape[-1]
-        h0 = height // self.patch_size
-        w0 = width // self.patch_size
-
-        patch_pos_embed = patch_pos_embed.reshape(1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim)
-        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
-        raw_type = patch_pos_embed.dtype
-        if not self.config.use_normalize_pool and not self.config.use_fusion_block:
-            # we add a small number to avoid floating point error in the interpolation
-            # see discussion at https://github.com/facebookresearch/dino/issues/8
-            h0, w0 = h0 + 0.1, w0 + 0.1
-            patch_pos_embed = nn.functional.interpolate(
-                patch_pos_embed.float(),
-                scale_factor=(h0 / math.sqrt(num_positions), w0 / math.sqrt(num_positions)),
-                mode=self.interpolate_mode,
-                align_corners=False,
-            )
-        else:
-            patch_pos_embed = nn.functional.interpolate(
-                patch_pos_embed,
-                (h0, w0),
-                mode=self.interpolate_mode,
-                align_corners=False,
-            )
-        patch_pos_embed = patch_pos_embed.to(raw_type)
-        assert int(h0) == patch_pos_embed.shape[-2] and int(w0) == patch_pos_embed.shape[-1]
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return patch_pos_embed
-
-    def forward_old(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        if pixel_values.ndim == 3:
-            pixel_values = pixel_values[None]
-        batch_size, num_channels, height, width = pixel_values.shape
-        patch_embeds = self.patch_embedding(pixel_values)  # shape = [*, width, grid, grid]
-        b, c, h, w = patch_embeds.shape
-        # (b, hw, c)
-        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
-        embeddings = patch_embeds + self.interpolate_pos_encoding(patch_embeds, height, width)
-
-        if self.pre_layernorm is not None:
-            embeddings = self.pre_layernorm(embeddings)
-
-        return embeddings
-
     def forward(self, pixel_values: torch.Tensor, grid_thw: list[list[int]]) -> torch.Tensor:
-        if pixel_values.ndim == 2:
-            seq_len = pixel_values.size(0)
-            pixel_values = pixel_values.reshape(seq_len, 3, self.patch_size, self.patch_size)
+        num_patches = pixel_values.size(0)
+        pixel_values = pixel_values.reshape(num_patches, self.num_channels, self.patch_size, self.patch_size)
 
         patch_embeds = self.patch_embedding(pixel_values)
         patch_embeds = patch_embeds.squeeze(-1).squeeze(-1).unsqueeze(0)
 
         if self.patch_pos_embed is None:
             patch_pos_shape = (1, self.position_edge, self.position_edge, self.embed_dim)
-            if not self.config.use_normalize_pool and not self.config.use_fusion_block:
-                self.patch_pos_embed = self.position_embedding.weight[1:,:].reshape(patch_pos_shape).permute(0, 3, 1, 2).float()
-            else:
-                self.patch_pos_embed = self.position_embedding.weight.reshape(patch_pos_shape).permute(0, 3, 1, 2)
+            self.patch_pos_embed = self.position_embedding.weight[1:,:].reshape(patch_pos_shape).permute(0, 3, 1, 2).float()
 
         patch_pos_embed_list = []
         for grid in grid_thw:
             _, h0, w0 = grid
-            if not self.config.use_normalize_pool and not self.config.use_fusion_block:
-                # we add a small number to avoid floating point error in the interpolation
-                # see discussion at https://github.com/facebookresearch/dino/issues/8
-                h0, w0 = h0 + 0.1, w0 + 0.1
-                patch_pos_embed = nn.functional.interpolate(
-                    self.patch_pos_embed,
-                    scale_factor=(h0 / self.position_edge, w0 / self.position_edge),
-                    mode=self.interpolate_mode,
-                    align_corners=False,
-                )
-            else:
-                patch_pos_embed = nn.functional.interpolate(
-                    self.patch_pos_embed,
-                    (h0, w0),
-                    mode=self.interpolate_mode,
-                    align_corners=False,
-                )
+            # we add a small number to avoid floating point error in the interpolation
+            # see discussion at https://github.com/facebookresearch/dino/issues/8
+            h0, w0 = h0 + 0.1, w0 + 0.1
+            patch_pos_embed = nn.functional.interpolate(
+                self.patch_pos_embed,
+                scale_factor=(h0 / self.position_edge, w0 / self.position_edge),
+                mode=self.interpolate_mode,
+                align_corners=False,
+            )
+
             patch_pos_embed = patch_pos_embed.reshape(self.embed_dim, -1).transpose(0,1).unsqueeze(0).to(patch_embeds.dtype)
             patch_pos_embed_list.append(patch_pos_embed)
 
         patch_pos_embed = torch.cat(patch_pos_embed_list, dim=1)
         embeddings = patch_embeds + patch_pos_embed
 
-        if self.pre_layernorm is not None:
-            embeddings = self.pre_layernorm(embeddings)
-
         return embeddings
 
 
 class HunYuanVisionPatchMerger(nn.Module):
-    def __init__(self, in_channels, out_channels, twoview=False, poolmlp=True, anyres_pooling_size=2,
-                    learnable_mlp_pooling_size=0, cat_extra_token=False,
-                    use_layernorm=False, layernorm_eps=1e-5, use_normalize_pool=False,
-                    perceive_pre_norm=True, perceive_post_norm=True, prefix=''):
+    def __init__(self, in_channels, out_channels, spatial_merge_size=2,
+                 rms_norm_eps=1e-5, prefix=''):
         super().__init__()
-        self.anyres_pooling_size = anyres_pooling_size
-        self.learnable_mlp_pooling_size = learnable_mlp_pooling_size
-        self.cat_extra_token = cat_extra_token
-        self.use_layernorm = use_layernorm
-        self.perceive_pre_norm = perceive_pre_norm
-        self.perceive_post_norm = perceive_post_norm
-        embed_std = 1 / math.sqrt(out_channels)
+        self.spatial_merge_size = spatial_merge_size
+        embed_std = out_channels ** -0.5
 
-        if use_normalize_pool:
-            self.pre_proj = nn.Linear(in_channels, out_channels)
-            self.proj = nn.Sequential(
-                nn.Linear(2*out_channels, out_channels),
-                nn.GELU(),
-                nn.Linear(out_channels, out_channels)
-            )
-            self.post_proj = nn.Linear(out_channels, out_channels)
-            self.image_newline = nn.Parameter(
-                torch.randn(out_channels) * embed_std
-            )
-        elif poolmlp:
-            if self.learnable_mlp_pooling_size > 0:
-                in_channels *= self.learnable_mlp_pooling_size ** 2
-            self.proj = nn.Sequential(
-                nn.Linear(in_channels, out_channels),
-                nn.GELU()
-            )
-            self.vit_linear_encoder = nn.Linear(out_channels, out_channels)
-            self.image_newline = nn.Parameter(
-                torch.randn(out_channels) * embed_std
-            )
-        else:
-            self.proj = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels * 2, kernel_size=self.anyres_pooling_size, stride=self.anyres_pooling_size),
-                nn.GELU(),
-                nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=1),
-            )
-            self.mlp = nn.Linear(in_channels * 4, out_channels)
-            self.image_newline = nn.Parameter(
-                torch.randn(in_channels * 4) * embed_std
-            )
-
-        self.use_normalize_pool = use_normalize_pool
-        self.poolmlp = poolmlp
-        self.image_begin = nn.Parameter(
-            torch.randn(out_channels) * embed_std
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels * 2, kernel_size=spatial_merge_size, stride=spatial_merge_size),
+            nn.GELU(),
+            nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=1),
         )
-        self.image_end = nn.Parameter(
-            torch.randn(out_channels) * embed_std
-        )
+        self.mlp = nn.Linear(in_channels * 4, out_channels)
 
-        if twoview:
-            self.image_sep = nn.Parameter(
-                torch.randn(out_channels) * embed_std
-            )
+        self.image_newline = nn.Parameter(torch.randn(in_channels * 4) * embed_std)
+        self.image_begin = nn.Parameter(torch.randn(out_channels) * embed_std)
+        self.image_end = nn.Parameter(torch.randn(out_channels) * embed_std)
+        self.image_sep = nn.Parameter(torch.randn(out_channels) * embed_std)
 
-        if self.use_layernorm and self.perceive_pre_norm:
-            if self.use_normalize_pool:
-                self.before_rms = nn.LayerNorm(in_channels, eps=layernorm_eps)
-            else:
-                self.before_rms = RMSNorm(in_channels, eps=layernorm_eps)
-        if self.use_layernorm and self.perceive_post_norm:
-            if self.use_normalize_pool:
-                self.after_rms = nn.LayerNorm(out_channels, eps=layernorm_eps)
-            else:
-                self.after_rms = RMSNorm(out_channels, eps=layernorm_eps)
+        self.before_rms = RMSNorm(in_channels, eps=rms_norm_eps)
+        self.after_rms = RMSNorm(out_channels, eps=rms_norm_eps)
 
-    def forward(self, x, size=(16,16), x2=None, size2=(16, 16), data_mode=0):
-        if self.use_layernorm and self.perceive_pre_norm:
-            x = self.before_rms(x)
+    def forward(self, x, size=(16,16)):
+        x = self.before_rms(x)
 
         h, w = size
         dtype = x.dtype
-        if not self.use_normalize_pool:
-            x = x.permute(0, 2, 1).reshape(x.shape[0], -1, h, w)
-        else:
-            x = x.reshape(x.shape[0], h, w, -1)
+        x = x.permute(0, 2, 1).reshape(x.shape[0], -1, h, w)
 
-        if self.use_normalize_pool:
-            x = self.pre_proj(x)
-            x = x.reshape(x.shape[0], h//2, 2, w//2, 2, -1).permute(0,1,3,2,4,5).reshape(x.shape[0], h//2, w//2, 4, -1)
-            x_new = x.mean(-2, keepdim=True).expand(-1, -1, -1, 4, -1)
-            x_cat = torch.cat([x, x_new], dim=-1)
-            x_scores = self.proj(x_cat)
-            x_scores = F.softmax(x_scores, dim=-2)
-            x_pool = (x * x_scores).sum(dim=-2)
-            x = self.post_proj(F.gelu(x_pool))
-            b, h, w, c = x.shape
-            x = torch.cat([
-                x,
-                self.image_newline.reshape(1, 1, 1, c).expand(b, h, 1, c).to(dtype)
-            ], dim=2)
-            x = x.reshape(b, -1, c)
-        elif self.poolmlp:
-            if self.learnable_mlp_pooling_size <= 0:
-                x = F.avg_pool2d(x, self.anyres_pooling_size)
-                x = self.proj(x.permute(0, 2, 3, 1)) # b, h, w, c
-            else:
-                x = x.permute(0, 2, 3, 1)   # b, h, w, c
-                x = x.reshape(x.shape[0], h // self.learnable_mlp_pooling_size, self.learnable_mlp_pooling_size,
-                                    w // self.learnable_mlp_pooling_size, self.learnable_mlp_pooling_size, -1)
-                x = x.permute(0, 1, 3, 2, 4, 5).reshape(x.shape[0], h // self.learnable_mlp_pooling_size, w // self.learnable_mlp_pooling_size, -1)
-                x = self.proj(x)
-            x = self.vit_linear_encoder(x)
-            b, h, w, c = x.shape
-            x = torch.cat([
-                x,
-                self.image_newline.reshape(1, 1, 1, c).expand(b, h, 1, c).to(dtype)
-            ], dim=2)
-            x = x.reshape(b, -1, c)
-        else:
-            x = self.proj(x) #b,c,h,w
-            # video_temporal_compress
-            if data_mode in [2, 3]:
-                compress_size = 4
-                b = x.shape[0]
-                b_up = (b+compress_size-1) // compress_size * compress_size
-                if b_up > b:
-                    x_pad = x[-1:].expand(b_up-b, -1, -1, -1)
-                    x = torch.cat([x, x_pad], dim=0)
-                x = x.permute(1,0,2,3)
-                x = F.avg_pool3d(x, kernel_size=(compress_size,1,1), stride=(compress_size,1,1))
-                x = x.permute(1,0,2,3)
+        x = self.proj(x) #b,c,h,w
+        b, c, h, w = x.shape
+        x = torch.cat([
+            x,
+            self.image_newline.reshape(1, c, 1, 1).expand(b, c, h, 1).to(dtype)
+        ], dim=-1)
+        x = x.reshape(b, c, -1).permute(0, 2, 1)
+        x = self.mlp(x)
 
-            # video_spatial_compress
-            if data_mode in [1, 3]:
-                x = F.avg_pool2d(x, kernel_size=2, stride=2)
+        begin = self.image_begin.reshape(1, 1, -1).expand(b, 1, x.shape[-1]).to(dtype)
+        end = self.image_end.reshape(1, 1, -1).expand(b, 1, x.shape[-1]).to(dtype)
+        x = torch.cat([begin, x, end], dim=1)
 
-            b, c, h, w = x.shape
-            x = torch.cat([
-                x,
-                self.image_newline.reshape(1, c, 1, 1).expand(b, c, h, 1).to(dtype)
-            ], dim=-1)
-            x = x.reshape(b, c, -1).permute(0, 2, 1)
-            x = self.mlp(x)
-
-        if x2 is not None:
-            if self.use_layernorm and self.perceive_pre_norm:
-                x2 = self.before_rms(x2)
-
-            h2, w2 = size2
-            if not self.use_normalize_pool:
-                x2 = x2.permute(0, 2, 1).reshape(x2.shape[0], -1, h2, w2)
-            else:
-                x2 = x2.reshape(x2.shape[0], h2, w2, -1)
-
-            if self.use_normalize_pool:
-                x2 = self.pre_proj(x2)
-                x2 = x2.reshape(x2.shape[0], h2//2, 2, w2//2, 2, -1).permute(0,1,3,2,4,5).reshape(x2.shape[0], h2//2, w2//2, 4, -1)
-                x2_new = x2.mean(-2, keepdim=True).expand(-1, -1, -1, 4, -1)
-                x2_cat = torch.cat([x2, x2_new], dim=-1)
-                x2_scores = self.proj(x2_cat)
-                x2_scores = F.softmax(x2_scores, dim=-2)
-                x2_pool = (x2 * x2_scores).sum(dim=-2)
-                x2 = self.post_proj(F.gelu(x2_pool))
-                b2, h2, w2, c2 = x2.shape
-                x2 = torch.cat([
-                    x2,
-                    self.image_newline.reshape(1, 1, 1, c2).expand(b2, h2, 1, c2).to(dtype)
-                ], dim=2)
-                x2 = x2.reshape(b2, -1, c2)
-            elif self.poolmlp:
-                x2 = F.avg_pool2d(x2, 2)
-                x2 = self.proj(x2.permute(0, 2, 3, 1)) # b, h, w, c
-                x2 = self.vit_linear_encoder(x2)
-                b2, h2, w2, c2 = x2.shape
-                x2 = torch.cat([
-                    x2,
-                    self.image_newline.reshape(1, 1, 1, c2).expand(b2, h2, 1, c2).to(dtype)
-                ], dim=2)
-                x2 = x2.reshape(b2, -1, c2)
-            else:
-                x2 = self.proj(x2)
-                b2, c2, h2, w2 = x2.shape
-                x2 = torch.cat([
-                    x2,
-                    self.image_newline.reshape(1, c2, 1, 1).expand(b2, c2, h2, 1).to(dtype)
-                ], dim=-1)
-                x2 = x2.reshape(b2, c2, -1).permute(0, 2, 1) #b,n,c
-                x2 = self.mlp(x2)
-
-            sep = self.image_sep.reshape(1, 1, -1).expand(b2, 1, x2.shape[-1]).to(dtype)
-            x = torch.cat([x, sep, x2], dim=1)
-
-        if self.cat_extra_token:
-            begin = self.image_begin.reshape(1, 1, -1).expand(b, 1, x.shape[-1]).to(dtype)
-            end = self.image_end.reshape(1, 1, -1).expand(b, 1, x.shape[-1]).to(dtype)
-            x = torch.cat([begin, x, end], dim=1)
-
-        if self.use_layernorm and self.perceive_post_norm:
-            x = self.after_rms(x)
-
-        return x
+        return self.after_rms(x)
 
 
 class HunYuanVisionTransformer(nn.Module):
@@ -768,14 +510,14 @@ class HunYuanVisionTransformer(nn.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_attention_heads
         head_dim = self.hidden_size // self.num_heads
-        self.spatial_merge_size = vision_config.adaptor_patch_size
+        self.spatial_merge_size = vision_config.spatial_merge_size
 
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("HunYuanVisionPatchEmbed"):
             self.embeddings = HunYuanVisionPatchEmbed(vision_config)
 
-        norm_layer = partial(nn.LayerNorm, eps=vision_config.layer_norm_eps)
+        norm_layer = partial(nn.LayerNorm, eps=vision_config.rms_norm_eps)
         use_upstream_fa = True
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
@@ -825,16 +567,8 @@ class HunYuanVisionTransformer(nn.Module):
             self.perceive = HunYuanVisionPatchMerger(
                 vision_config.hidden_size,
                 vision_config.out_hidden_size,
-                vision_config.two_view,
-                anyres_pooling_size=vision_config.adaptor_patch_size,
-                poolmlp=vision_config.poolmlp,
-                learnable_mlp_pooling_size=vision_config.learnable_mlp_pooling_size,
-                cat_extra_token=vision_config.cat_extra_token,
-                use_layernorm=vision_config.use_layernorm,
-                layernorm_eps=vision_config.layer_norm_eps,
-                use_normalize_pool=vision_config.use_normalize_pool,
-                perceive_pre_norm=vision_config.perceive_pre_norm,
-                perceive_post_norm=vision_config.perceive_post_norm,
+                spatial_merge_size=vision_config.spatial_merge_size,
+                rms_norm_eps=vision_config.rms_norm_eps,
                 prefix=f"{prefix}.perceive",
             )
 
@@ -1010,14 +744,13 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
-        merge_size = vision_config.adaptor_patch_size
-        temporal_patch_size = vision_config.temporal_patch_size
+        spatial_merge_size = vision_config.spatial_merge_size
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
-                factor=patch_size * merge_size,
+                factor=patch_size * spatial_merge_size,
                 min_pixels=image_processor.min_pixels,
                 max_pixels=image_processor.max_pixels,
             )
@@ -1029,14 +762,12 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
                 width=image_width,
                 height=image_height)
 
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
-
-        grid_t = max(padded_num_frames // temporal_patch_size, 1)
+        grid_t = 1
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
-        num_patches = grid_t * grid_h * grid_w
-        num_vision_tokens = num_patches // (merge_size**2)
+        num_vision_tokens = grid_t * grid_h // spatial_merge_size * \
+                (grid_w // spatial_merge_size + 1) + 2
 
         return preprocessed_size, num_vision_tokens
 
@@ -1056,15 +787,14 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
+            image_width=512,
+            image_height=8192,
             image_processor=None,
         )
         return max_image_size
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
-
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
@@ -1206,21 +936,21 @@ class HunYuanVLForConditionalGeneration(
         hf_config = self.config
         image_token_id = hf_config.image_token_id
         image_start_token_id = hf_config.image_start_token_id
-        spatial_merge_size = hf_config.vision_config.adaptor_patch_size
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
         xd_num = len(hf_config.rope_scaling["xdrope_section"])
 
         input_tokens_tensor = torch.tensor(input_tokens)
         image_start_indices = torch.argwhere(
             input_tokens_tensor == image_start_token_id
         ).squeeze(1)
-        image_tokens = input_tokens_tensor[image_start_indices + 1]
-        image_nums = (image_tokens == image_token_id).sum()
-        llm_pos_ids_list: list = []
 
-        st = 0
-        offset = 0
-        for image_index  in range(image_nums):
-            pos = image_start_indices[image_index] + 1
+        p_index = torch.arange(len(input_tokens_tensor))
+        w_index = torch.arange(len(input_tokens_tensor))
+        h_index = torch.arange(len(input_tokens_tensor))
+        t_index = torch.arange(len(input_tokens_tensor))
+        for image_index  in range(len(image_start_indices)):
+            # +1 : first image_token, +2: for xdrope positions
+            pos = image_start_indices[image_index] + 2
             t, h, w = image_grid_thw[image_index]
             llm_grid_t, llm_grid_h, llm_grid_w = (
                 t,
@@ -1228,11 +958,8 @@ class HunYuanVLForConditionalGeneration(
                 w // spatial_merge_size,
             )
 
-            token_num = (llm_grid_w + 1) * llm_grid_h + 2
-            p_index = torch.arange(st, pos + token_num) + offset
-
-            w_index_list = [torch.arange(st, pos + 1) + offset]
-            w_index_list.append(
+            token_num = (llm_grid_w + 1) * llm_grid_h
+            w_index[pos: pos + token_num].copy_(
                 (
                     torch.arange(0, llm_grid_w + 1)
                     .reshape(1, -1)
@@ -1240,11 +967,7 @@ class HunYuanVLForConditionalGeneration(
                     .reshape(-1)
                 )
             )
-            w_index_list.append(torch.tensor([pos + token_num - 1]).long())
-            w_index = torch.cat(w_index_list)
-
-            h_index_list = [torch.arange(st, pos + 1) + offset]
-            h_index_list.append(
+            h_index[pos: pos + token_num].copy_(
                 (
                     torch.arange(0, llm_grid_h)
                     .reshape(-1, 1)
@@ -1252,34 +975,12 @@ class HunYuanVLForConditionalGeneration(
                     .reshape(-1)
                 )
             )
-            h_index_list.append(torch.tensor([pos + token_num - 1]).long())
-            h_index = torch.cat(h_index_list)
+            h_index[pos: pos + token_num] = 0
 
-            t_index_list = [torch.arange(st, pos + 1) + offset]
-            t_index_list.append(torch.tensor([0] * (token_num - 2)))
-            t_index_list.append(torch.tensor([pos + token_num - 1]).long())
-            t_index = torch.cat(t_index_list)
-
-            st = pos + 1
-            offset += token_num - 1
-            if xd_num == 4:
-                llm_pos_ids_list.append(
-                    torch.stack([p_index, w_index, h_index, t_index])
-                )
-            elif xd_num == 3:
-                llm_pos_ids_list.append(
-                    torch.stack([w_index, h_index, t_index])
-                )
-
-        if st < len(input_tokens):
-            llm_pos_ids_list.append(
-                (
-                    torch.arange(st, len(input_tokens)).view(1, -1)
-                    .expand(xd_num, -1)
-                ) + offset
-            )
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(xd_num, -1)
+        if xd_num == 4:
+            llm_positions = torch.stack([p_index, w_index, h_index, t_index])
+        elif xd_num == 3:
+            llm_positions = torch.stack([w_index, h_index, t_index])
 
         return llm_positions
 
@@ -1333,6 +1034,8 @@ class HunYuanVLForConditionalGeneration(
             return None
 
         # TODO: refine
+        if isinstance(pixel_values, list):
+            pixel_values = torch.cat(pixel_values, dim=0)
         if len(pixel_values.shape) == 3:
             last_dim = pixel_values.shape[-1]
             pixel_values = pixel_values.reshape(-1, last_dim)
@@ -1420,9 +1123,9 @@ class HunYuanVLForConditionalGeneration(
                 batch.
             positions: Flattened (concatenated) position ids corresponding to a
                 batch.
-                **NOTE**: If mrope/xdrope is enabled (default setting for 
-                Qwen2.5-VL / HunYuanVL opensource models), the shape will be 
-                `(3/xd, seq_len)`, otherwise it will be `(seq_len,).
+                **NOTE**: If xdrope is enabled (default setting for
+                HunYuanVL opensource models), the shape will be
+                `(xd, seq_len)`, otherwise it will be `(seq_len,).
             pixel_values: Pixel values to be fed to a model.
                 `None` if no images are passed.
         """
