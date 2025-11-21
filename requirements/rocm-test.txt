@@ -72,3 +72,4 @@ num2words==0.5.14
     # via lm-eval
 pqdm==0.2.0
     # via lm-eval
+terratorch==1.1.1

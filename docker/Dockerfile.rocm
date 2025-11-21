@@ -1,6 +1,5 @@
 # default base image
 ARG REMOTE_VLLM="0"
-ARG REMOTE_TERRATORCH="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 
@@ -68,37 +67,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 
 # -----------------------
-# terratorch fetch stages
-FROM base AS fetch_terratorch_0
-ONBUILD COPY ./terratorch terratorch/
-
-FROM base AS fetch_terratorch_1
-ARG TERRATORCH_REPO="https://github.com/IBM/terratorch.git"
-ARG TERRATORCH_BRANCH="main"
-ONBUILD RUN git clone ${TERRATORCH_REPO} \
-	    && cd terratorch \
-	    && git fetch -v --prune -- origin ${TERRATORCH_BRANCH} \
-	    && git checkout FETCH_HEAD \
-        && if [ ${TERRATORCH_REPO} != "https://github.com/IBM/terratorch.git" ] ; then \
-               git remote add upstream "https://github.com/IBM/terratorch.git" \
-               && git fetch upstream ; fi
-
-FROM fetch_terratorch_${REMOTE_TERRATORCH} AS fetch_terratorch
-
-# -----------------------
-# terratorch build stages
-FROM fetch_terratorch AS build_terratorch
-# Build terratorch
-RUN cd terratorch \
-    && python3 setup.py clean --all  \
-    && python3 setup.py bdist_wheel --dist-dir=dist
-
-FROM scratch AS export_terratorch
-ARG COMMON_WORKDIR
-COPY --from=build_terratorch ${COMMON_WORKDIR}/terratorch/dist/*.whl /
-COPY --from=build_terratorch ${COMMON_WORKDIR}/terratorch/examples /terratorch_examples
-
-# -----------------------
 # Test vLLM image
 FROM base AS test
 
@@ -160,12 +128,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
-# Install terratorch using uv
-RUN --mount=type=bind,from=export_terratorch,src=/,target=/install \
-    --mount=type=cache,target=/root/.cache/uv \
-    cd /install \
-    && uv pip install --system *.whl
-
 # Copy in the v1 package
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
@@ -175,7 +137,6 @@ ARG COMMON_WORKDIR
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
-COPY --from=export_terratorch /terratorch_examples ${COMMON_WORKDIR}/terratorch/examples
 
 ENV TOKENIZERS_PARALLELISM=false
 
