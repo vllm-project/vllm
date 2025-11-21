@@ -96,12 +96,8 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compile_factors(self, vllm_config: VllmConfig) -> tuple[dict[str, object], str]:
-        raw_factors = self.compiler.compile_factors(vllm_config) or {}
-        hash_str = hashlib.md5(
-            str(raw_factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return raw_factors, hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+        return self.compiler.compile_factors(vllm_config) or {}
 
     @contextmanager
     def compile_context(self, runtime_shape: int | None = None):
@@ -600,9 +596,8 @@ class VllmBackend:
             env_factors,
             config_factors,
         ) = compute_env_and_config_hashes(vllm_config)
-        compiler_factors, compiler_hash = self.compiler_manager.compile_factors(
-            vllm_config
-        )
+        compiler_factors = self.compiler_manager.compile_factors(vllm_config)
+        compiler_hash = hash_factors(compiler_factors)
         traced_files = set(self.compilation_config.traced_files)
         forward_code_files = list(sorted(traced_files))
 
@@ -635,10 +630,15 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            all_factors = {
+                "env": env_factors,
+                "config": config_factors,
+                "code": {"files": code_factors},
+                "compiler": compiler_factors,
+            }
             # Use SHA-256 for cache key hashing to be consistent across
             # compile_factors functions. Truncate for a short cache dir name.
-            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
+            hash_key = hash_factors(all_factors)[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
