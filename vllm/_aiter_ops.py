@@ -255,7 +255,6 @@ def _rocm_aiter_grouped_topk_impl(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-    is_softmax = scoring_func == "softmax"
     from aiter import grouped_topk
 
     grouped_topk(
@@ -265,7 +264,7 @@ def _rocm_aiter_grouped_topk_impl(
         num_expert_group,
         topk_group,
         need_renorm,
-        is_softmax,
+        scoring_func,
         routed_scaling_factor,
     )
 
@@ -280,7 +279,7 @@ def _rocm_aiter_grouped_topk_fake(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-    pass
+    return
 
 
 def _rocm_aiter_mla_decode_fwd_impl(
