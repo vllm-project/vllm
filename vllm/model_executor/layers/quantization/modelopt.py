@@ -15,6 +15,7 @@ from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
@@ -715,9 +716,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"
             )
+            assert layer.routing_method_type == RoutingMethodType.Llama4, (
+                "FusedMoE flashinfer kernels are only supported for Llama4"
+            )
+
             assert not layer.renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
-                layer=layer,  # TODO: fixme
                 hidden_states=x,
                 router_logits=router_logits,
                 routing_bias=layer.e_score_correction_bias,
@@ -726,6 +730,15 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 num_expert_group=layer.num_expert_group,
                 topk_group=layer.topk_group,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                w13_weight=layer.w13_weight,
+                w13_input_scale=layer.w13_input_scale,
+                w2_weight=layer.w2_weight,
+                output1_scales_scalar=layer.output1_scales_scalar,
+                output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+                output2_scales_scalar=layer.output2_scales_scalar,
+                local_num_experts=layer.local_num_experts,
+                ep_rank=layer.ep_rank,
+                intermediate_size_per_partition=layer.intermediate_size_per_partition,
             )
 
         # Expert selection
@@ -739,11 +752,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
                 f"but got {layer.activation}"
             )
+            assert self.moe_quant_config is not None
             return flashinfer_cutlass_moe_fp8(
                 x,
-                layer,  # TODO: fixme
                 topk_weights,
                 topk_ids,
+                layer.w13_weight,
+                layer.w2_weight,
+                self.moe_quant_config,
                 inplace=False,  # self.allow_inplace()
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
