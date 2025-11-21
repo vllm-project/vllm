@@ -28,18 +28,18 @@ MISTRAL_FORMAT_ARGS = [
 
 
 @pytest.fixture(scope="module", autouse=True)
-def rocm_flex_attention():
+def rocm_aiter_fa_attention():
     """
-    Sets VLLM_ATTENTION_BACKEND=FLEX_ATTENTION for ROCm
-    for the duration of this test module. For now the only
-    attention backend that supports cross attention on ROCm
-    is FLEX_ATTENTION.
+    Sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
+    for the duration of this test module. #28376 introduces
+    support for encoder_decoder attention tested on
+    WhisperForConditionalGeneration architecture.
     """
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
         old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
         yield
         if old_backend is None:
             del os.environ["VLLM_ATTENTION_BACKEND"]
