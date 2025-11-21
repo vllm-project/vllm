@@ -70,17 +70,12 @@ class CudagraphDispatcher:
         uniform_decode_query_len = self.uniform_decode_query_len
         num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
 
-        if uniform_decode:
+        if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
             num_reqs = num_tokens_padded // uniform_decode_query_len
             assert num_tokens_padded % uniform_decode_query_len == 0
             assert num_reqs <= max_num_seqs
-            return BatchDescriptor(
-                num_tokens=num_tokens_padded,
-                num_reqs=num_reqs,
-                uniform=uniform_decode,
-                has_lora=has_lora,
-            )
-        num_reqs = min(num_tokens_padded, max_num_seqs)
+        else:
+            num_reqs = min(num_tokens_padded, max_num_seqs)
 
         return BatchDescriptor(
             num_tokens=num_tokens_padded,
@@ -168,24 +163,24 @@ class CudagraphDispatcher:
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
-        batch_descriptor = self._create_padded_batch_descriptor(
+        batch_desc = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora
         )
-        relaxed_batch_descriptor = batch_descriptor.relax_for_mixed_batch_cudagraphs()
+        relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
         if not use_cascade_attn:
             # check if key exists for full cudagraph
-            if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, batch_descriptor
+            if batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, batch_desc
 
             # otherwise, check if the relaxed key exists
-            if relaxed_batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, relaxed_batch_descriptor
+            if relaxed_batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, relaxed_batch_desc
 
         # also check if the relaxed key exists for more "general"
         # piecewise cudagraph
-        if relaxed_batch_descriptor in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, relaxed_batch_descriptor
+        if relaxed_batch_desc in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+            return CUDAGraphMode.PIECEWISE, relaxed_batch_desc
 
         # finally, just return no cudagraphs and a trivial batch descriptor
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
