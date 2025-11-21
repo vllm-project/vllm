@@ -195,7 +195,7 @@ class Platform:
         """
         Get the custom compile backend for current platform.
         """
-        raise NotImplementedError
+        return cls.simple_compile_backend
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
