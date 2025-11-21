@@ -37,10 +37,7 @@ for BACK in "${BACKENDS[@]}"; do
   vllm serve "$MODEL" \
     --enforce-eager \
     --enable-eplb \
-    --eplb-config '{"window_size":10, \
-                    "step_interval":100, \
-                    "num_redundant_experts":0, \
-                    "log_balancedness":true}' \
+    --eplb-config '{"window_size":10, "step_interval":100, "num_redundant_experts":0, "log_balancedness":true}' \
     --tensor-parallel-size 2 \
     --data-parallel-size 2 \
     --enable-expert-parallel \
