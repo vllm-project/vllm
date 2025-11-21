@@ -321,7 +321,7 @@ class Range:
         return hash((self.start, self.end))
 
     def __str__(self) -> str:
-        return f"[{self.start}, {self.end}]"
+        return f"({self.start}, {self.end})"
 
     def __repr__(self) -> str:
         return self.__str__()
