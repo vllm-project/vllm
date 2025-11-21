@@ -135,6 +135,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -366,10 +367,16 @@ class GPUModelRunner(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
+                NgramProposer
+                | NgramProposerGPU
+                | SuffixDecodingProposer
+                | EagleProposer
+                | MedusaProposer
             )
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "ngram_gpu":
+                self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -959,6 +966,146 @@ class GPUModelRunner(
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
+    def _update_ngram_gpu_tensors(self, scheduler_output: "SchedulerOutput") -> None:
+        """Incrementally update token_ids_gpu_tensor and num_tokens_no_spec_gpu
+        for ngram GPU proposer to avoid redundant CPU-GPU transfers.
+
+        This follows a similar pattern to _prepare_input_ids for efficient
+        batch updates when requests change between iterations.
+        """
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        curr_req_id_to_index = self.input_batch.req_id_to_index
+
+        # If no previous batch or batch is empty, initialize all from scratch
+        if prev_req_id_to_index is None or not curr_req_id_to_index:
+            if curr_req_id_to_index:
+                # Initialize all token_ids from requests
+                for req_id, idx in curr_req_id_to_index.items():
+                    req_state = self.requests[req_id]
+                    # Get prompt_token_ids + output_token_ids
+                    prompt_token_ids = (
+                        req_state.prompt_token_ids
+                        if req_state.prompt_token_ids is not None
+                        else []
+                    )
+                    all_token_ids = prompt_token_ids + req_state.output_token_ids
+                    num_tokens = len(all_token_ids)
+                    # Copy to GPU tensor
+                    self.input_batch.token_ids_gpu_tensor[idx, :num_tokens].copy_(
+                        torch.tensor(
+                            all_token_ids, dtype=torch.int32, device=self.device
+                        ),
+                        non_blocking=True,
+                    )
+                    self.input_batch.num_tokens_no_spec_gpu[idx] = num_tokens
+            return
+
+        # Case 1: Batch hasn't changed at all (same req_ids and same indices)
+        if prev_req_id_to_index == curr_req_id_to_index:
+            return
+
+        # Case 2, 3 & 4: Batch has changed - analyze the changes
+        common_req_indices = []
+        prev_indices = []
+        new_req_indices = []
+        indices_match = True
+
+        for req_id, curr_idx in curr_req_id_to_index.items():
+            if req_id in prev_req_id_to_index:
+                prev_idx = prev_req_id_to_index[req_id]
+                common_req_indices.append(curr_idx)
+                prev_indices.append(prev_idx)
+                indices_match &= prev_idx == curr_idx
+            else:
+                new_req_indices.append((req_id, curr_idx))
+
+        # Case 2: Only common requests (subset or same set), may need reordering or clearing
+        if not new_req_indices:
+            # If indices haven't changed and it's the exact same set, already handled by Case 1
+            # So here we either have reordering or a subset (some requests finished)
+            if not indices_match or len(common_req_indices) < len(prev_req_id_to_index):
+                # Need to reorder or clear finished requests
+                curr_indices_tensor = torch.tensor(
+                    common_req_indices, dtype=torch.long, device=self.device
+                )
+                prev_indices_tensor = torch.tensor(
+                    prev_indices, dtype=torch.long, device=self.device
+                )
+
+                # Create temporary tensors for scatter operation (zeros will clear unused positions)
+                temp_token_ids = torch.zeros_like(self.input_batch.token_ids_gpu_tensor)
+                temp_num_tokens = torch.zeros_like(
+                    self.input_batch.num_tokens_no_spec_gpu
+                )
+
+                # Scatter token_ids - copy entire rows (already up-to-date from prepare_next_token_ids_padded)
+                temp_token_ids[curr_indices_tensor] = (
+                    self.input_batch.token_ids_gpu_tensor[prev_indices_tensor]
+                )
+                temp_num_tokens[curr_indices_tensor] = (
+                    self.input_batch.num_tokens_no_spec_gpu[prev_indices_tensor]
+                )
+
+                # Update in-place
+                self.input_batch.token_ids_gpu_tensor.copy_(
+                    temp_token_ids, non_blocking=True
+                )
+                self.input_batch.num_tokens_no_spec_gpu.copy_(
+                    temp_num_tokens, non_blocking=True
+                )
+            return
+
+        # Case 3: Has new requests (or preempted requests that are resuming)
+        if new_req_indices:
+            # First handle common requests with scatter if any
+            if common_req_indices:
+                curr_indices_tensor = torch.tensor(
+                    common_req_indices, dtype=torch.long, device=self.device
+                )
+                prev_indices_tensor = torch.tensor(
+                    prev_indices, dtype=torch.long, device=self.device
+                )
+
+                # Create temporary tensors for vectorized update
+                temp_token_ids = torch.zeros_like(self.input_batch.token_ids_gpu_tensor)
+                temp_num_tokens = torch.zeros_like(
+                    self.input_batch.num_tokens_no_spec_gpu
+                )
+
+                # Scatter existing requests to new positions
+                temp_token_ids[curr_indices_tensor] = (
+                    self.input_batch.token_ids_gpu_tensor[prev_indices_tensor]
+                )
+                temp_num_tokens[curr_indices_tensor] = (
+                    self.input_batch.num_tokens_no_spec_gpu[prev_indices_tensor]
+                )
+
+                # Copy back to persistent tensors
+                self.input_batch.token_ids_gpu_tensor.copy_(
+                    temp_token_ids, non_blocking=True
+                )
+                self.input_batch.num_tokens_no_spec_gpu.copy_(
+                    temp_num_tokens, non_blocking=True
+                )
+
+            # Then handle new requests
+            for req_id, curr_idx in new_req_indices:
+                req_state = self.requests[req_id]
+                # Get prompt_token_ids + output_token_ids
+                prompt_token_ids = (
+                    req_state.prompt_token_ids
+                    if req_state.prompt_token_ids is not None
+                    else []
+                )
+                all_token_ids = prompt_token_ids + req_state.output_token_ids
+                num_tokens = len(all_token_ids)
+                # Copy to GPU tensor with non-blocking
+                self.input_batch.token_ids_gpu_tensor[curr_idx, :num_tokens].copy_(
+                    torch.tensor(all_token_ids, dtype=torch.int32, device=self.device),
+                    non_blocking=True,
+                )
+                self.input_batch.num_tokens_no_spec_gpu[curr_idx] = num_tokens
+
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         assert supports_mrope(model), "M-RoPE support is not implemented."
@@ -1344,6 +1491,10 @@ class GPUModelRunner(
             total_num_scheduled_tokens,
             cu_num_tokens,
         )
+
+        # For ngram GPU proposer: update token_ids and num_tokens incrementally
+        if self.speculative_config and self.speculative_config.method == "ngram_gpu":
+            self._update_ngram_gpu_tensors(scheduler_output)
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2950,6 +3101,11 @@ class GPUModelRunner(
             and spec_config.use_eagle()
             and not spec_config.disable_padded_drafter_batch
         )
+        use_padded_batch_for_ngram = (
+            self.speculative_config
+            and self.speculative_config.method == "ngram_gpu"
+            and not self.speculative_config.disable_padded_drafter_batch
+        )
         effective_drafter_max_model_len = self.max_model_len
         if effective_drafter_max_model_len is None:
             effective_drafter_max_model_len = self.model_config.max_model_len
@@ -2989,6 +3145,27 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
+        if use_padded_batch_for_ngram:
+            sampled_token_ids = sampler_output.sampled_token_ids
+            if input_fits_in_drafter:
+                # Fast path: GPU-only operation when input fits in drafter
+                propose_draft_token_ids(sampled_token_ids)
+            elif self.valid_sampled_token_count_event is not None:
+                # Slow path: prepare tokens with async transfer
+                next_token_ids, valid_sampled_tokens_count, _ = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        spec_decode_common_attn_metadata,
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                )
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
+                )
+
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
@@ -3009,7 +3186,7 @@ class GPUModelRunner(
 
         if (
             self.speculative_config
-            and not use_padded_batch_for_eagle
+            and not (use_padded_batch_for_eagle or use_padded_batch_for_ngram)
             and input_fits_in_drafter
         ):
             # ngram and other speculative decoding methods use the sampled
@@ -3114,15 +3291,93 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-        if spec_config.method == "ngram":
-            assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, NgramProposer)
+        if self.speculative_config.method == "ngram":
+            # TODO:(patchy) NGram GPU proposal
+            if isinstance(self.drafter, NgramProposer):
+                assert isinstance(sampled_token_ids, list), (
+                    "sampled_token_ids should be a python list whenngram is used."
+                )
+                draft_token_ids = self.drafter.propose(
+                    sampled_token_ids,
+                    self.input_batch.req_ids,
+                    self.input_batch.num_tokens_no_spec,
+                    self.input_batch.token_ids_cpu,
+                    self.input_batch.spec_decode_unsupported_reqs,
+                )
+        elif self.speculative_config.method == "ngram_gpu":
+            # GPU-accelerated ngram proposer
+            assert isinstance(self.drafter, NgramProposerGPU)
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor for ngram_gpu"
+            )
+            next_token_ids, valid_sampled_tokens_count, valid_sampled_token_ids_gpu = (
+                self.drafter.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+            batch_size = next_token_ids.shape[0]
+            max_new_tokens = valid_sampled_token_ids_gpu.shape[1]  # num_spec_tokens + 1
+
+            current_lens = self.input_batch.num_tokens_no_spec_gpu[:batch_size]
+            offsets = torch.arange(max_new_tokens, device=self.device)
+
+            write_positions = current_lens.unsqueeze(1) + offsets.unsqueeze(0)
+            valid_write_mask = offsets.unsqueeze(
+                0
+            ) < valid_sampled_tokens_count.unsqueeze(1)
+            combined_mask = valid_write_mask & (valid_sampled_token_ids_gpu != -1)
+
+            token_ids_slice = self.input_batch.token_ids_gpu_tensor[:batch_size]
+            write_positions_long = write_positions.long()
+            existing_values = token_ids_slice.gather(1, write_positions_long)
+
+            tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_slice.dtype)
+            tokens_to_scatter = torch.where(
+                combined_mask,
+                tokens_cast,
+                existing_values,
+            )
+            token_ids_slice.scatter_(1, write_positions_long, tokens_to_scatter)
+
+            self.input_batch.num_tokens_no_spec_gpu[:batch_size] += (
+                valid_sampled_tokens_count
+            )
+
+            sampled_flags = valid_sampled_tokens_count > 0
+            valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+
+            if self.input_batch.spec_decode_unsupported_reqs:
+                unsupported_ids = torch.tensor(
+                    list(self.input_batch.spec_decode_unsupported_reqs),
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+                batch_req_ids = torch.tensor(
+                    self.input_batch.req_ids[:batch_size],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+                is_unsupported = (
+                    batch_req_ids.unsqueeze(1) == unsupported_ids.unsqueeze(0)
+                ).any(dim=1)
+                valid_mask = valid_mask & ~is_unsupported
+
             draft_token_ids = self.drafter.propose(
-                sampled_token_ids,
-                self.input_batch.req_ids,
-                self.input_batch.num_tokens_no_spec,
-                self.input_batch.token_ids_cpu,
-                self.input_batch.spec_decode_unsupported_reqs,
+                self.input_batch.num_tokens_no_spec_gpu[:batch_size],
+                self.input_batch.token_ids_gpu_tensor[:batch_size],
+                sampled_flags,
+                valid_mask,
             )
         elif spec_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)
