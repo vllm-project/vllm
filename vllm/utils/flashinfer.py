@@ -269,7 +269,7 @@ def supports_trtllm_attention() -> bool:
 
 def force_use_trtllm_attention() -> bool | None:
     """
-    Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
+    Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
@@ -302,7 +302,7 @@ def use_trtllm_attention(
     """Return `True` if TRTLLM attention is used."""
     force_use_trtllm = force_use_trtllm_attention()
 
-    # Environment variable is set to 0 - respect it
+    # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
@@ -319,7 +319,7 @@ def use_trtllm_attention(
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported on this platform, "
-                "but VLLM_USE_TRTLLM_ATTENTION is set to 1"
+                "but --attention-config.use_trtllm_attention is set to 1"
             )
         return False
 
@@ -328,7 +328,8 @@ def use_trtllm_attention(
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported for this combination of "
-                "query and key heads, but VLLM_USE_TRTLLM_ATTENTION is set to 1"
+                "query and key heads, but --attention-config.use_trtllm_attention is "
+                "set to 1"
             )
         return False
 
@@ -349,7 +350,7 @@ def use_trtllm_attention(
         return True
 
     if force_use_trtllm is None:
-        # Environment variable not set - use auto-detection
+        # CLI argument not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
@@ -362,8 +363,10 @@ def use_trtllm_attention(
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
-    # Environment variable is set to 1 - respect it
-    logger.info_once("Using TRTLLM attention (VLLM_USE_TRTLLM_ATTENTION is set to 1)")
+    # CLI argument is set to 1 - respect it
+    logger.info_once(
+        "Using TRTLLM attention (--attention-config.use_trtllm_attention is set to 1)"
+    )
     return True
 
 

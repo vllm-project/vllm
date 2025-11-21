@@ -462,9 +462,12 @@ def use_cudnn_prefill() -> bool:
 
 def use_trtllm_ragged_deepseek_prefill() -> bool:
     """Check if TRT-LLM ragged DeepSeek prefill should be used."""
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
         flashinfer_available
-        and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability(100)
     )
 
