@@ -465,7 +465,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (
