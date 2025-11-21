@@ -11,7 +11,7 @@ import vllm.config.model as config_model
 from vllm.compilation.backends import VllmBackend
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig, update_config
 from vllm.config.load import LoadConfig
-from vllm.config.utils import get_field
+from vllm.config.utils import BoolWithReason, get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -556,96 +556,144 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_result"),
+    ("model_id", "expected_result", "expected_attn_type"),
     [
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
             config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            "decoder",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            "decoder",
         ),
         (
             "BAAI/bge-base-en",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
         ),
         (
             "intfloat/e5-small",
-            config_model.POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_only",
         ),
         # generate models
-        ("Qwen/Qwen3-0.6B", config_model.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL),
+        (
+            "Qwen/Qwen3-0.6B",
+            config_model.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
+            "decoder",
+        ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             config_model.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
+            "decoder",
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             config_model.ENCODER_DECODER_NOT_SUPPORT_CHUNKED_PREFILL,
+            "encoder_decoder",
         ),
     ],
 )
 def test_is_chunked_prefill_supported(
-    model_id: str, expected_result: config_model.BoolWithReason
+    model_id: str, expected_result: BoolWithReason, expected_attn_type: str
 ):
     model_config = ModelConfig(model_id)
+    assert model_config.attn_type == expected_attn_type
     assert model_config.is_chunked_prefill_supported == expected_result
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_result"),
+    ("model_id", "expected_result", "expected_attn_type"),
     [
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
             config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            "decoder",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            "decoder",
         ),
         (
             "BAAI/bge-base-en",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
         ),
         (
             "intfloat/e5-small",
-            config_model.POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_only",
         ),
         # generate models
-        ("Qwen/Qwen3-0.6B", config_model.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING),
+        (
+            "Qwen/Qwen3-0.6B",
+            config_model.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING,
+            "decoder",
+        ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             config_model.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+            "decoder",
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             config_model.ENCODER_DECODER_NOT_SUPPORT_PREFIX_CACHING,
+            "encoder_decoder",
         ),
     ],
 )
 def test_is_prefix_caching_supported(
-    model_id: str, expected_result: config_model.BoolWithReason
+    model_id: str, expected_result: BoolWithReason, expected_attn_type: str
 ):
     model_config = ModelConfig(model_id)
+    assert model_config.attn_type == expected_attn_type
     assert model_config.is_prefix_caching_supported == expected_result

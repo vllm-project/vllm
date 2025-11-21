@@ -49,7 +49,7 @@ from .interfaces import (
 from .interfaces_base import (
     get_default_pooling_type,
     is_pooling_model,
-    is_text_generation_model,
+    is_text_generation_model, get_attn_type,
 )
 
 logger = init_logger(__name__)
@@ -498,6 +498,7 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
+    attn_type: str
     default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
@@ -519,6 +520,7 @@ class _ModelInfo:
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
             default_pooling_type=get_default_pooling_type(model),
+            attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(

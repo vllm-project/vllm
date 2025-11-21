@@ -58,7 +58,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type
 from .utils import AutoWeightsLoader, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
@@ -980,7 +980,7 @@ class SiglipTextEmbeddings(nn.Module):
 
 
 # Assume EOS token corresponds to CLS token in text model
-@default_pooling_type("CLS")
+@attn_type("encoder_only")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
     info=SiglipProcessingInfo,

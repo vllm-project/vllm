@@ -212,3 +212,17 @@ def default_pooling_type(pooling_type: str):
 
 def get_default_pooling_type(model: type[object] | object) -> str:
     return getattr(model, "default_pooling_type", "LAST")
+
+
+def attn_type(attn_type: str):
+    """Decorator to set `VllmModelForPooling.attn_type`."""
+
+    def func(model: _T) -> _T:
+        model.attn_type = attn_type  # type: ignore
+        return model
+
+    return func
+
+
+def get_attn_type(model: type[object] | object) -> str:
+    return getattr(model, "attn_type", "decoder")

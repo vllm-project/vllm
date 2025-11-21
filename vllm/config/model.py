@@ -17,7 +17,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import BoolWithReason, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.transformers_utils.config import (
@@ -101,22 +101,6 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "pooling": ["embed", "classify", "reward"],
     "draft": [],
 }
-
-
-class BoolWithReason:
-    def __init__(self, value: bool, reason: str):
-        self.value = value
-        self.reason = reason
-
-    def __bool__(self):
-        return self.value
-
-    def __repr__(self):
-        return f"value={self.value} reason={self.reason}"
-
-    def raise_if_false(self):
-        if not self.value:
-            raise ValueError(self.reason)
 
 
 @config
@@ -1781,46 +1765,64 @@ class ModelConfig:
         return max_model_len
 
     @property
-    def is_chunked_prefill_supported(self) -> BoolWithReason:
+    def attn_type(self) -> str:
         if self.pooler_config is not None:
-            pooling_type = self.pooler_config.pooling_type.lower()
-            if pooling_type == "all":
-                return POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
-            elif pooling_type == "mean":
-                return POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
-            elif pooling_type == "cls":
-                return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
-            else:  # pooling_type == "last"
+            pooling_type = self._model_info.default_pooling_type.lower()
+            if pooling_type == "cls":
+                return "encoder_only"
+            else:
                 is_causal = getattr(self.hf_config, "is_causal", True)
-                if is_causal:
-                    return POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
-                else:
-                    return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                return "encoder_only" if not is_causal else self._model_info.attn_type
         elif self.is_encoder_decoder:
+            return "encoder_decoder"
+        else:
+            return "decoder"
+
+    @property
+    def is_chunked_prefill_supported(self) -> BoolWithReason:
+        if self.is_encoder_decoder:
             return ENCODER_DECODER_NOT_SUPPORT_CHUNKED_PREFILL
+        elif self.pooler_config is not None:
+            # for pooling models
+            if self.attn_type == "encoder_only":
+                # for encoder_only models (bidirectional attn)
+                return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+            else:
+                # for decoder models (causal attn)
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type == "all":
+                    return POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
+                elif pooling_type == "mean":
+                    return (
+                        POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                    )
+                else:  # pooling_type == "last"
+                    return POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
         else:
             return GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
 
     @property
     def is_prefix_caching_supported(self):
-        if self.runner_type == "pooling":
-            pooling_type = self.pooler_config.pooling_type.lower()
-            if pooling_type == "all":
-                return POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING
-            elif pooling_type == "mean":
-                return POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING
-            elif pooling_type == "cls":
-                return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
-            else:  # pooling_type == "last"
-                is_causal = getattr(self.hf_config, "is_causal", True)
-                if is_causal:
-                    return POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING
-                else:
-                    return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
-        elif self.is_encoder_decoder:
+        if self.is_encoder_decoder:
             return ENCODER_DECODER_NOT_SUPPORT_PREFIX_CACHING
         elif self.is_hybrid:
             return HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
+        elif self.pooler_config is not None:
+            # for pooling models
+            if self.attn_type == "encoder_only":
+                # for encoder_only models (bidirectional attn)
+                return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
+            else:
+                # for decoder models (causal attn)
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type == "all":
+                    return POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING
+                elif pooling_type == "mean":
+                    return (
+                        POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING
+                    )
+                else:  # pooling_type == "last"
+                    return POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING
         else:
             return GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
 
