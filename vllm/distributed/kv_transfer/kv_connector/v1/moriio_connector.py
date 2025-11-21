@@ -1014,7 +1014,7 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
 
         # For chunked prefill, we perform layer-wise access within the final chunk.
-        # TODO: Perform access at the end of each chunk.
+        # TODO: Perform transfer at end chunk.
         self._reqs_need_pending_save: dict[ReqId, tuple[Request, list[int]]] = {}
 
         if self.is_producer:
@@ -1461,9 +1461,6 @@ class MoRIIOConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
-        # List of block window sizes for each layer for local attention
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
         self.built_session = False
@@ -1775,8 +1772,6 @@ class MoRIIOConnectorWorker:
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
 
-        # TODO: handle failure state of future in the
-        # callback, we want to fail the request in this case.
         def request_ready(_f: Future[Any], entry=(req_id, meta)):
             logger.info("MoRIIO handshake done for request %s", req_id)
             self._ready_requests.put(entry)
@@ -1998,8 +1993,7 @@ class MoRIIOConnectorWorker:
 
             meta.remote_engine_id = remote_engine_id
 
-            # TODO: mz get_remote_engine_id() for engine_id mapping.
-            dp0_remote_engine_id = f"{remote_engine_id}_dp0"
+            self.get_engine_name_with_dp(remote_engine_id, 0)
             if dp0_remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
