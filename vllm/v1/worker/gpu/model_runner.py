@@ -830,6 +830,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled_tokens,
             copy_stream=self.output_copy_stream,
+            copy_event=self.output_copy_event,
         )
         if self.use_async_scheduling:
             return async_output
