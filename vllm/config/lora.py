@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import 
-Result, config, normalize_value
+from vllm.config.utils import HashResult, config, normalize_value
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:

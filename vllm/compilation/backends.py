@@ -25,14 +25,16 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .caching import VllmSerializableFunction
+from .caching import (
+    VllmSerializableFunction,
+    compute_env_and_config_hashes,
+)
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -591,15 +593,17 @@ class VllmBackend:
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
 
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
-        # Compute config/compiler/code hashes once and reuse
-        config_factors = vllm_config.compile_factors() or {}
-        config_hash = hash_factors(config_factors)
+        (
+            env_hash,
+            config_hash,
+            env_factors,
+            config_factors,
+        ) = compute_env_and_config_hashes(vllm_config)
         compiler_factors, compiler_hash = self.compiler_manager.compile_factors(
             vllm_config
         )
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        traced_files = set(self.compilation_config.traced_files)
+        forward_code_files = list(sorted(traced_files))
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",

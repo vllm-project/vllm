@@ -135,18 +135,20 @@ class VllmSerializableFunction(SerializableCallable):
         return "VllmSerializableFunction"
 
 
-def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
-    factors = []
-    # 0. factors come from the env, for example, The values of
-    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
-    factors.append(env_hash)
+def compute_env_and_config_hashes(
+    vllm_config: VllmConfig,
+) -> tuple[str, str, dict[str, object], dict[str, object]]:
+    """
+    Return the hashed environment factors, config hash, and raw factors.
+    Both AOT and JIT cache paths rely on this helper to ensure their cache keys
+    stay in sync.
+    """
 
-    # 1. factors come from the vllm_config (it mainly summarizes how the
-    #    model is created)
-    config_hash = vllm_config.compile_factors()
-    factors.append(config_hash)
-    return factors
+    env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
+    config_factors = vllm_config.compile_factors() or {}
+    config_hash = hash_factors(config_factors)
+    return env_hash, config_hash, env_factors, config_factors
 
 
 def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
