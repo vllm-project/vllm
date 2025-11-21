@@ -267,14 +267,6 @@ def supports_trtllm_attention() -> bool:
     return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
 
-@functools.cache
-def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
-    """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
-    if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
-    return env_value
-
-
 def force_use_trtllm_attention() -> bool | None:
     """
     Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
@@ -284,9 +276,7 @@ def force_use_trtllm_attention() -> bool | None:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return _force_use_trtllm_attention(
-        vllm_config.attention_config.use_trtllm_attention
-    )
+    return vllm_config.attention_config.use_trtllm_attention
 
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
