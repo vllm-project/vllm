@@ -398,8 +398,8 @@ def test_embeddings_with_zero_weights(
         id_to_index,
         layer=lora_embedding,
         layer_weights=embedding.weight.T,
-        use_zero_lora_b=use_zero_lora_a,
-        use_zero_lora_a=use_zero_lora_b,
+        use_zero_lora_a=use_zero_lora_a,
+        use_zero_lora_b=use_zero_lora_b,
     )
 
     inputs, index_mapping, prompt_mapping = create_random_inputs(
