@@ -1,21 +1,11 @@
 #!/usr/bin/env bash
 set -ex
 
-# prepare workspace directory
-WORKSPACE=$1
-if [ -z "$WORKSPACE" ]; then
-    export WORKSPACE=$(pwd)/ep_kernels_workspace
-fi
-
-if [ ! -d "$WORKSPACE" ]; then
-    mkdir -p $WORKSPACE
-fi
-
-# configurable pip command (default: pip3)
 PIP_CMD=${PIP_CMD:-pip3}
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"c336faf"}
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
+WORKSPACE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -36,8 +26,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            if [ -z "$WORKSPACE" ]; then
+            if [[ -z "$WORKSPACE" ]]; then
                 WORKSPACE=$1
+            else
+                echo "Error: Unexpected argument '$1'" >&2
+                exit 1
             fi
             shift
             ;;
@@ -45,7 +38,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$WORKSPACE" ]; then
-    export WORKSPACE=$(pwd)/ep_kernels_workspace
+    WORKSPACE=$(pwd)/ep_kernels_workspace
+fi
+export WORKSPACE
+
+if [ ! -d "$WORKSPACE" ]; then
+    mkdir -p "$WORKSPACE"
 fi
 $PIP_CMD install cmake torch ninja
 
