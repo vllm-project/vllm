@@ -3,8 +3,10 @@
 
 import os
 
-# Disable DeepGEMM for this benchmark to use CUTLASS
+# Disable DeepGEMM for this benchmark
 os.environ["VLLM_USE_DEEP_GEMM"] = "0"
+# Enable FlashInfer FP8 linear (will be used when provider="flashinfer-block-fp8")
+os.environ["VLLM_USE_FLASHINFER_FP8_LINEAR"] = "1"
 
 import torch
 
@@ -94,6 +96,15 @@ plot_title = "BF16 vs W8A8 Block FP8 GEMMs"
 if CUTLASS_BLOCK_FP8_SUPPORTED:
     available_providers.append("w8a8-block-fp8-cutlass")
 
+# Check if FlashInfer block GEMM is available
+try:
+    from vllm.utils.flashinfer import has_flashinfer_block_gemm
+
+    if has_flashinfer_block_gemm():
+        available_providers.append("flashinfer-block-fp8")
+except ImportError:
+    pass
+
 
 @vllm_triton.testing.perf_report(
     vllm_triton.testing.Benchmark(
@@ -133,6 +144,14 @@ def benchmark_tflops(batch_size, provider, N, K, block_size=(128, 128)):
         )
         ms, min_ms, max_ms = vllm_triton.testing.do_bench_cudagraph(
             lambda: run_w8a8_cutlass(), quantiles=quantiles
+        )
+    elif provider == "flashinfer-block-fp8":
+        # Use the same W8A8 setup as other providers for fair comparison
+        run_w8a8_flashinfer = build_w8a8_block_fp8_runner(
+            M, N, K, block_size, device, use_cutlass=False
+        )
+        ms, min_ms, max_ms = vllm_triton.testing.do_bench_cudagraph(
+            lambda: run_w8a8_flashinfer(), quantiles=quantiles
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
