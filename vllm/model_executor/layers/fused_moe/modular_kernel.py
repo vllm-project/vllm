@@ -11,7 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -807,7 +807,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         # "mk.FusedMoEModularKernel.Standard" formats where this is only bounded
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
-        is_profile_run = get_forward_context().attn_metadata is None
+        is_profile_run = (
+            is_forward_context_available()
+            and get_forward_context().attn_metadata is None
+        )
         if is_profile_run and self.fused_experts.supports_chunking():
             parallel_config = get_current_vllm_config().parallel_config
             is_dp_ep = (
