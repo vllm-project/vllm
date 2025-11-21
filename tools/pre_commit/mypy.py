@@ -38,6 +38,7 @@ FILES = [
     "vllm/usage",
     "vllm/v1/core",
     "vllm/v1/engine",
+    "vllm/v1/worker",
 ]
 
 # After fixing errors resulting from changing follow_imports
@@ -62,7 +63,6 @@ SEPARATE_GROUPS = [
     "vllm/v1/sample",
     "vllm/v1/spec_decode",
     "vllm/v1/structured_output",
-    "vllm/v1/worker",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import Any
 
 import torch
 import torch.distributed
@@ -37,6 +38,7 @@ class XPUWorker(Worker):
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
@@ -148,7 +150,12 @@ class XPUWorker(Worker):
         return int(available_kv_cache_memory)
 
     def init_device(self):
-        if self.device_config.device.type == "xpu" and current_platform.is_xpu():
+        device = self.device_config.device
+        if (
+            isinstance(device, torch.device)
+            and device.type == "xpu"
+            and current_platform.is_xpu()
+        ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
