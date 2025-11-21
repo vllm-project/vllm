@@ -288,7 +288,8 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         ):
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
-                "SM100 and later, using CUTLASS backend instead"
+                "SM100 and later, using CUTLASS backend instead",
+                scope="local"
             )
             return FlashinferMoeBackend.CUTLASS
         return backend_map[flashinfer_moe_backend]
