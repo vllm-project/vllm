@@ -342,6 +342,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
         )
+        # hash_block_size: is the block size for computing block hashes.
+        # The actual block size usually equals hash_block_size, but in cases where
+        # different KV cache groups have different block sizes, the actual block size
+        # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0
@@ -436,9 +440,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
         # First, find the longest cache hit for full attention.
-        if self.full_attention_spec.block_size == self.hash_block_size:
+        if self.full_attention_spec.block_size == self.hash_block_size:  # Common case.
             full_attention_block_hashes: BlockHashList = block_hashes
         else:
+            # block_size is a multiple of hash_block_size. This happens when different
+            # KV cache groups have different block sizes. In this case, we need to
+            # recalculate block_hashes at the granularity of block_size, using the
+            # original block_hashes (at the granularity of hash_block_size).
             full_attention_block_hashes = BlockHashListWithBlockSize(
                 block_hashes, self.hash_block_size, self.full_attention_spec.block_size
             )
@@ -449,15 +457,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             block_pool=self.block_pool,
             kv_cache_spec=self.full_attention_spec,
             use_eagle=self.use_eagle,
-            alignment=self.lcm_block_size,
+            alignment_tokens=self.lcm_block_size,
         )
         hit_length = len(hit_blocks_full_attn[0]) * self.full_attention_block_size
 
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
-        if self.other_spec.block_size == self.hash_block_size:
+        if self.other_spec.block_size == self.hash_block_size:  # Common case.
             other_block_hashes: BlockHashList = block_hashes
         else:
+            # Similar to the full attention case, here we need to recalculate
+            # block_hashes at the granularity of block_size, using the original
+            # block_hashes (at the granularity of hash_block_size).
             other_block_hashes = BlockHashListWithBlockSize(
                 block_hashes, self.hash_block_size, self.other_spec.block_size
             )
@@ -468,7 +479,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             block_pool=self.block_pool,
             kv_cache_spec=self.other_spec,
             use_eagle=self.use_eagle,
-            alignment=self.lcm_block_size,
+            alignment_tokens=self.lcm_block_size,
         )
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
 

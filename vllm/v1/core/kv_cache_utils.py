@@ -1399,10 +1399,33 @@ def get_kv_cache_configs(
 
 class BlockHashListWithBlockSize:
     """
-    Convert the block hashes under hash_block_size to another target_block_size.
-    Only support scaling up the block size by an integer factor now. Implemented
-    by concatenating the block hashes under hash_block_size to form that of
-    target_block_size.
+    Convert block-hash granularity from `hash_block_size` to `target_block_size`.
+    Used when KV cache groups have different block sizes: `hash_block_size`
+    is the size used to compute the original `block_hashes`; `target_block_size`
+    is the group's actual block size.
+
+    Currently, only scaling up by an integer factor is supported (i.e.,
+    `target_block_size` is a multiple of `hash_block_size`). Conversion is
+    performed lazily on access for efficiency, by concatenating consecutive
+    hashes at `hash_block_size` to form each hash at `target_block_size`.
+
+    Example (`hash_block_size` = 16, `target_block_size` = 32):
+    concatenating two 16-size hashes yields one 32-size hash:
+
+    Block hashes with block_size 16:
+    | Token Range | 0-15 | 16-31 | 32-47 | 48-63 |
+    |-------------|------|-------|-------|-------|
+    | Hash        | A    | B     | C     | D     |
+
+    Block hashes with block_size 32:
+    | Token Range | 0-31 | 32-63 |
+    |-------------|------|-------|
+    | Hash        | AB   | CD    |
+
+    Args:
+        block_hashes: Block hashes to convert, computed at `hash_block_size`.
+        hash_block_size: Block size at which `block_hashes` were computed.
+        target_block_size: Desired block size; must be a multiple of `hash_block_size`.
     """
 
     def __init__(
