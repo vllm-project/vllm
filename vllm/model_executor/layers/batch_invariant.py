@@ -852,5 +852,6 @@ def init_batch_invariance():
         enable_batch_invariant_mode()
 
         # Disable TF32 for batch invariance - it causes non-deterministic rounding
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.backends.cudnn.conv.fp32_precision = "ieee"
+        torch.backends.cudnn.rnn.fp32_precision = "ieee"
