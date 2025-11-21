@@ -278,7 +278,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.decode.paged_kv_indptr,
             attn_metadata.decode.paged_kv_indices,
             attn_metadata.decode.paged_kv_last_page_len,
-            num_kv_split_indptr=attn_metadata.decode.num_kv_splits_indptr,
+            num_kv_splits_indptr=attn_metadata.decode.num_kv_splits_indptr,
         )
 
         return o, None
