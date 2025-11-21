@@ -177,27 +177,27 @@ def sanity_check_mm_encoder_outputs(
 ) -> None:
     """
     Perform sanity checks for the result of
-    [`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`][].
+    [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
         f"or a single 3D tensor, but got {type(mm_embeddings)} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert len(mm_embeddings) == expected_num_items, (
         "Expected number of multimodal embeddings to match number of "
         f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert all(e.ndim == 2 for e in mm_embeddings), (
         "Expected multimodal embeddings to be a sequence of 2D tensors, "
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
 
@@ -280,7 +280,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
-    num_attn_module: int | None = 1,
+    num_attn_module: int = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -362,5 +362,7 @@ def is_residual_scattered_for_sp(
         or vllm_config.compilation_config.use_inductor_graph_partition
     ):
         return True
-
-    return num_input_tokens in vllm_config.compilation_config.compile_sizes
+    compile_sizes = vllm_config.compilation_config.compile_sizes
+    if compile_sizes is None:
+        return False
+    return num_input_tokens in compile_sizes

@@ -4,10 +4,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 import torch
 from torch import nn
@@ -467,11 +463,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
     def mamba_type(self) -> str:
         return "mamba2"
 
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
-
-        return Mamba2AttentionBackend
-
 
 def plamo2_mamba_mixer(
     hidden_states: torch.Tensor,
@@ -576,10 +567,6 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
-        self.rope_scaling = (
-            config.rope_scaling if hasattr(config, "rope_scaling") else None
-        )
         max_position = config.max_position_embeddings
         if hasattr(vllm_config.model_config, "max_model_len") and isinstance(
             vllm_config.model_config.max_model_len, int
@@ -590,8 +577,7 @@ class Plamo2AttentionMixer(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.q_norm = RMSNorm(config.hidden_size_per_head, eps=config.rms_norm_eps)
         self.q_norm.weight = torch.nn.Parameter(
@@ -762,7 +748,7 @@ class Plamo2Model(torch.nn.Module):
         self.layers = Plamo2Decoder(vllm_config=vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -776,7 +762,7 @@ class Plamo2Model(torch.nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -839,8 +825,8 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
