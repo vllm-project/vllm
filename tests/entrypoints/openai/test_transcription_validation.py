@@ -4,7 +4,6 @@
 # imports for structured outputs tests
 import io
 import json
-import os
 
 import librosa
 import numpy as np
@@ -25,28 +24,6 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def rocm_aiter_fa_attention():
-    """
-    Sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
-    for the duration of this test module. #28376 introduces
-    support for encoder_decoder attention tested on
-    WhisperForConditionalGeneration architecture.
-    """
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
-        os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
-        yield
-        if old_backend is None:
-            del os.environ["VLLM_ATTENTION_BACKEND"]
-        else:
-            os.environ["VLLM_ATTENTION_BACKEND"] = old_backend
-    else:
-        yield
 
 
 @pytest.fixture(scope="module")

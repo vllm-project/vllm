@@ -5,7 +5,6 @@ import io
 
 # imports for structured outputs tests
 import json
-import os
 
 import httpx
 import librosa
@@ -17,26 +16,6 @@ import soundfile as sf
 from ...utils import RemoteOpenAIServer
 
 SERVER_ARGS = ["--enforce-eager"]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def rocm_aiter_fa_attention():
-    """
-    Sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
-    for the duration of this test module.
-    """
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
-        os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
-        yield
-        if old_backend is None:
-            del os.environ["VLLM_ATTENTION_BACKEND"]
-        else:
-            os.environ["VLLM_ATTENTION_BACKEND"] = old_backend
-    else:
-        yield
 
 
 @pytest.fixture(
