@@ -1389,10 +1389,10 @@ class GPUModelRunner(
     def _build_attention_metadata(
         self,
         num_tokens: int,
-        num_tokens_padded: int,
         num_reqs: int,
-        num_reqs_padded: int,
         max_query_len: int,
+        num_tokens_padded: int | None = None,
+        num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
@@ -1403,6 +1403,9 @@ class GPUModelRunner(
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
+        num_tokens_padded = num_tokens_padded or num_tokens
+        num_reqs_padded = num_reqs_padded or num_reqs
+
         logits_indices_padded = None
         num_logits_indices = None
         if logits_indices is not None:
@@ -2758,15 +2761,14 @@ class GPUModelRunner(
                 )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                pad_attention = cudagraph_mode == CUDAGraphMode.FULL
-                attn_metadata, spec_decode_common_attn_metadata = (
+                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
                         num_tokens=num_tokens_unpadded,
-                        num_tokens_padded=num_tokens_padded
-                        if pad_attention
-                        else num_tokens_unpadded,
+                        num_tokens_padded=num_tokens_padded if pad_attn else None,
                         num_reqs=num_reqs,
-                        num_reqs_padded=num_reqs_padded if pad_attention else num_reqs,
+                        num_reqs_padded=num_reqs_padded if pad_attn else None,
                         max_query_len=max_num_scheduled_tokens,
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
@@ -3792,9 +3794,7 @@ class GPUModelRunner(
 
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
-                num_tokens_padded=num_tokens_padded,
                 num_reqs=num_reqs_padded,
-                num_reqs_padded=num_reqs_padded,
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices,
                 for_cudagraph_capture=True,
