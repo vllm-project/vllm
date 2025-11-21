@@ -251,10 +251,6 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # To support TP_ratio, HOST KV might be initiated with HND
-            # while XPU device KV is with NHD
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
@@ -267,8 +263,4 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # XPU device KV is with NHD while HOST KV
-            # might be initiated with HND for TP_ratio support
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
