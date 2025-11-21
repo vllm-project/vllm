@@ -63,8 +63,9 @@ class TpuPlatform(Platform):
         kv_cache_dtype: str | None,
         block_size: int,
         use_mla: bool,
-        has_sink,
-        use_sparse,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum

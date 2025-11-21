@@ -164,6 +164,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return False
 
@@ -206,6 +210,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -218,6 +223,10 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
+        if use_mm_prefix != cls.supports_mm_prefix():
+            invalid_reasons.append(
+                "partial multimodal token full attention not supported"
+            )
         if use_mla != cls.is_mla():
             if use_mla:
                 invalid_reasons.append("MLA not supported")

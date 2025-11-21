@@ -93,6 +93,11 @@ class FlexAttentionBackend(AttentionBackend):
 
         return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
 
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        """FlexAttention supports full attention for image tokens."""
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
