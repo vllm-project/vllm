@@ -432,7 +432,7 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
-        
+
         BLOCK_M = attn_metadata.BLOCK_M
         BLOCK_Q = attn_metadata.BLOCK_Q
         num_q_blocks = attn_metadata.num_q_blocks
