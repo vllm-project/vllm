@@ -24,9 +24,6 @@ mkdir -p nvshmem_src
 wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.4.5/source/nvshmem_src_cuda12-all-all-3.4.5.tar.gz
 tar -xvzf nvshmem_src_cuda12-all-all-3.4.5.tar.gz -C nvshmem_src --strip-components=1
 pushd nvshmem_src
-wget https://github.com/deepseek-ai/DeepEP/raw/main/third-party/nvshmem.patch
-git init
-git apply -vvv nvshmem.patch
 
 # assume CUDA_HOME is set correctly
 if [ -z "$CUDA_HOME" ]; then
