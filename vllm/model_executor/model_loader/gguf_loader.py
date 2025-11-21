@@ -54,7 +54,8 @@ class GGUFModelLoader(BaseModelLoader):
             return f"{model_config.model}:{model_config.gguf_quant_type}"
         return model_config.model
 
-    def _prepare_weights(self, model_name_or_path: str):
+    def _prepare_weights(self, model_config: ModelConfig):
+        model_name_or_path = self._get_model_path_for_download(model_config)
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
         # for raw HTTPS link
@@ -69,7 +70,7 @@ class GGUFModelLoader(BaseModelLoader):
         # repo_id:quant_type
         elif "/" in model_name_or_path and ":" in model_name_or_path:
             repo_id, quant_type = model_name_or_path.rsplit(":", 1)
-            return self.download_gguf(repo_id, quant_type)
+            return self.download_gguf(repo_id, quant_type, model_config.revision)
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
@@ -77,8 +78,9 @@ class GGUFModelLoader(BaseModelLoader):
             "or <repo_id>:<quant_type>)"
         )
 
-    @staticmethod
-    def download_gguf(repo_id: str, quant_type: str) -> str:
+    def download_gguf(
+        self, repo_id: str, quant_type: str, revision: str | None = None
+    ) -> str:
         # Lazy import to avoid hard dependency
         import glob
 
@@ -102,10 +104,10 @@ class GGUFModelLoader(BaseModelLoader):
         # Use download_weights_from_hf which handles caching and downloading
         folder = download_weights_from_hf(
             model_name_or_path=repo_id,
-            cache_dir=None,
+            cache_dir=self.load_config.download_dir,
             allow_patterns=allow_patterns,
-            revision=None,
-            ignore_patterns=None,
+            revision=revision,
+            ignore_patterns=self.load_config.ignore_patterns,
         )
 
         # Find the downloaded file(s) in the folder
@@ -363,12 +365,10 @@ class GGUFModelLoader(BaseModelLoader):
         yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
-        model_path = self._get_model_path_for_download(model_config)
-        self._prepare_weights(model_path)
+        self._prepare_weights(model_config)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        model_path = self._get_model_path_for_download(model_config)
-        local_model_path = self._prepare_weights(model_path)
+        local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         model.load_weights(
             self._get_weights_iterator(model_config, local_model_path, gguf_weights_map)
@@ -378,8 +378,7 @@ class GGUFModelLoader(BaseModelLoader):
         self, vllm_config: VllmConfig, model_config: ModelConfig
     ) -> nn.Module:
         device_config = vllm_config.device_config
-        model_path = self._get_model_path_for_download(model_config)
-        local_model_path = self._prepare_weights(model_path)
+        local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
         if "lm_head.weight" in get_gguf_extra_tensor_names(
