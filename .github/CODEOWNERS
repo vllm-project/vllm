@@ -35,6 +35,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/offloading @ApostaC
 
+# Model runner V2
+/vllm/v1/worker/gpu @WoosukKwon
+
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
 /tests/distributed/test_multi_node_assignment.py @youkaichao
@@ -57,7 +60,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
 
-# Transformers backend
+# Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
 /tests/models/test_transformers.py @hmellor
 

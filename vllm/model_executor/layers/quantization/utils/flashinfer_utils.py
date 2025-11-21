@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -24,6 +25,7 @@ logger = init_logger(__name__)
 class FlashinferMoeBackend(Enum):
     TENSORRT_LLM = "TensorRT-LLM"
     CUTLASS = "CUTLASS"
+    CUTEDSL = "CUTEDSL"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
@@ -190,17 +192,22 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig | None,
+    moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    return create_flashinfer_prepare_finalize(use_dp)
+    # Propagate block-scale flag so prepare/finalize can skip act quantization
+    # and inform the kernel to consume per-block weight scales.
+    return create_flashinfer_prepare_finalize(
+        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+    )
 
 
 def select_cutlass_fp8_gemm_impl(
     moe: FusedMoEConfig | None,
     quant_config: FusedMoEQuantConfig,
     out_dtype: torch.dtype | None = None,
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -212,12 +219,14 @@ def select_cutlass_fp8_gemm_impl(
             ep_size=moe.moe_parallel_config.ep_size,
             tp_rank=moe.moe_parallel_config.tp_rank,
             tp_size=moe.moe_parallel_config.tp_size,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         )
 
     assert out_dtype is not None, "If moe config is None, out_dtype must be passed"
     return FlashInferExperts(
         out_dtype=out_dtype,
         quant_config=quant_config,
+        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
     )
 
 
@@ -231,14 +240,22 @@ def flashinfer_cutlass_moe_fp8(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
+    use_deepseek_fp8_block_scale: bool = False,
+    moe: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
     assert quant_config is not None
 
+    # Construct modular kernel with block-scale support when requested.
     fused_experts = mk.FusedMoEModularKernel(
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize(moe=None),
+        build_flashinfer_fp8_cutlass_moe_prepare_finalize(
+            moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+        ),
         select_cutlass_fp8_gemm_impl(
-            moe=None, quant_config=quant_config, out_dtype=hidden_states.dtype
+            moe=moe,
+            quant_config=quant_config,
+            out_dtype=hidden_states.dtype,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         ),
     )
 
@@ -257,20 +274,28 @@ def flashinfer_cutlass_moe_fp8(
 
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
-    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend == "throughput":
-        return FlashinferMoeBackend.CUTLASS
-    elif flashinfer_moe_backend == "latency":
-        return FlashinferMoeBackend.TENSORRT_LLM
+    backend_map = {
+        "throughput": FlashinferMoeBackend.CUTLASS,
+        "latency": FlashinferMoeBackend.TENSORRT_LLM,
+        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
+    }
 
-    allowed_backends = ["throughput", "latency"]
+    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    if flashinfer_moe_backend in backend_map:
+        return backend_map[flashinfer_moe_backend]
+    elif current_platform.is_device_capability(90):
+        return FlashinferMoeBackend.CUTLASS
+
     raise ValueError(
-        f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
-        f" expected one of {allowed_backends}"
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
+        f"Expected one of {list(backend_map.keys())}."
     )
 
 
 def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
     # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (FlashinferMoeBackend.CUTLASS,)
+    backends_supporting_global_sf = (
+        FlashinferMoeBackend.CUTLASS,
+        FlashinferMoeBackend.TENSORRT_LLM,
+    )
     return backend in backends_supporting_global_sf
