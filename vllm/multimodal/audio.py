@@ -7,6 +7,8 @@ from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
+import pybase64
+import torch
 
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -116,3 +118,25 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             data = buffer.getvalue()
 
         return base64.b64encode(data).decode("utf-8")
+
+
+class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        buffer = BytesIO(data)
+        return torch.load(buffer, weights_only=True)
+
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
+
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        return torch.load(filepath, weights_only=True)
+
+    def encode_base64(self, media: torch.Tensor) -> str:
+        buffer = BytesIO()
+        torch.save(media, buffer)
+        buffer.seek(0)
+        binary_data = buffer.read()
+        return pybase64.b64encode(binary_data).decode("utf-8")

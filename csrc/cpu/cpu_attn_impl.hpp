@@ -1,7 +1,6 @@
 #ifndef CPU_ATTN_HPP
 #define CPU_ATTN_HPP
 
-#include <unistd.h>
 #include <type_traits>
 #include <cstddef>
 
@@ -12,6 +11,7 @@
 #include "cpu_types.hpp"
 #include "scratchpad_manager.h"
 #include "cpu_attn_macros.h"
+#include "utils.hpp"
 
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16 };

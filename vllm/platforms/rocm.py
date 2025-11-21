@@ -185,6 +185,9 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
     ]
+    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
+    if not on_gfx9():
+        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def get_vit_attn_backend(
@@ -222,7 +225,15 @@ class RocmPlatform(Platform):
         from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on ROCm.")
+            if kv_cache_dtype.startswith("fp8"):
+                raise ValueError(
+                    "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
+                )
+            assert block_size == 1, (
+                "Sparse MLA backend on ROCm only supports block size 1 for now."
+            )
+            logger.info_once("Using Sparse MLA backend on V1 engine.")
+            return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
         if use_mla:
             if selected_backend is None:
@@ -231,7 +242,6 @@ class RocmPlatform(Platform):
                     if rocm_aiter_ops.is_mla_enabled() or block_size == 1
                     else AttentionBackendEnum.TRITON_MLA
                 )
-
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend.")
@@ -243,6 +253,9 @@ class RocmPlatform(Platform):
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
                 logger.info("Using AITER MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
+                logger.info("Using AITER TRITON MLA backend.")
+                return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
 
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"

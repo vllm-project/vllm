@@ -280,7 +280,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
-    num_attn_module: int | None = 1,
+    num_attn_module: int = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -316,7 +316,7 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda() or current_platform.is_xpu():
+            if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 # We know that the GPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
@@ -362,5 +362,7 @@ def is_residual_scattered_for_sp(
         or vllm_config.compilation_config.use_inductor_graph_partition
     ):
         return True
-
-    return num_input_tokens in vllm_config.compilation_config.compile_sizes
+    compile_sizes = vllm_config.compilation_config.compile_sizes
+    if compile_sizes is None:
+        return False
+    return num_input_tokens in compile_sizes

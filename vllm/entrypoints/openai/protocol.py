@@ -565,7 +565,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
-    best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
@@ -889,7 +888,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1088,7 +1086,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
     prompt: list[int] | list[list[int]] | str | list[str] | None = None
-    best_of: int | None = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -1375,7 +1372,6 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,

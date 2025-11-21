@@ -115,16 +115,12 @@ class PhiAttention(nn.Module):
         )
         assert rotary_dim % 2 == 0
 
-        # pylint: disable=C0301
-        # Refer to:
-        # https://huggingface.co/microsoft/phi-1_5/blob/d212a789620c380ff32ca1d1ee9943a777360987/modeling_phi.py#L518
-        rope_theta = getattr(config, "rope_theta", 10000.0)
         max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
         self.rotary_emb = get_rope(
             self.head_size,
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
