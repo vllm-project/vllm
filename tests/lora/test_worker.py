@@ -20,11 +20,12 @@ from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker
 
+MODEL_PATH = "Qwen/Qwen3-0.6B"
 NUM_LORAS = 16
 
 
 @patch.dict(os.environ, {"RANK": "0"})
-def test_worker_apply_lora(sql_lora_files):
+def test_worker_apply_lora(qwen3_lora_files):
     def set_active_loras(worker: Worker, lora_requests: list[LoRARequest]):
         lora_mapping = LoRAMapping([], [])
 
@@ -34,9 +35,10 @@ def test_worker_apply_lora(sql_lora_files):
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(
-            "meta-llama/Llama-2-7b-hf",
+            MODEL_PATH,
             seed=0,
             dtype="float16",
+            max_model_len=127,
             enforce_eager=True,
         ),
         load_config=LoadConfig(
@@ -73,7 +75,7 @@ def test_worker_apply_lora(sql_lora_files):
     assert worker.list_loras() == set()
 
     lora_requests = [
-        LoRARequest(str(i + 1), i + 1, sql_lora_files) for i in range(NUM_LORAS)
+        LoRARequest(str(i + 1), i + 1, qwen3_lora_files) for i in range(NUM_LORAS)
     ]
 
     set_active_loras(worker, lora_requests)
