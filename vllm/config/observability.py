@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from packaging.version import parse
 from pydantic import field_validator, model_validator

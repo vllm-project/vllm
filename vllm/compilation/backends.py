@@ -93,9 +93,7 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compile_factors(
-        self, vllm_config: VllmConfig
-    ) -> tuple[dict[str, object], str]:
+    def compile_factors(self, vllm_config: VllmConfig) -> tuple[dict[str, object], str]:
         raw_factors = self.compiler.compile_factors(vllm_config) or {}
         hash_str = hashlib.md5(
             str(raw_factors).encode(), usedforsecurity=False
@@ -627,9 +625,7 @@ class VllmBackend:
             entry["content"] = content
             code_factors.append(entry)
             hash_content_parts.append(content)
-        code_hash = hashlib.sha256(
-            "\n".join(hash_content_parts).encode()
-        ).hexdigest()
+        code_hash = hashlib.sha256("\n".join(hash_content_parts).encode()).hexdigest()
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:

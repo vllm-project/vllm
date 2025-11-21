@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 from pydantic import ConfigDict, SkipValidation
