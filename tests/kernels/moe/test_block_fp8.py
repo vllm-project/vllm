@@ -31,6 +31,11 @@ dg_available = has_deep_gemm()
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
 
 vllm_config = VllmConfig()
 
@@ -136,8 +141,6 @@ def test_w8a8_block_fp8_fused_moe(
 ):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
-    if current_platform.is_fp8_fnuz():
-        pytest.skip("Test requires e4m3fn and platform does not support it.")
 
     torch.manual_seed(seed)
 
@@ -195,8 +198,6 @@ def test_w8a8_block_fp8_fused_moe(
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch):
     if topk > E:
         pytest.skip(f"Skipping test: topk={topk} > E={E}")
-    if current_platform.is_fp8_fnuz():
-        pytest.skip("Test requires e4m3fn and platform does not support it.")
 
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
