@@ -1923,14 +1923,16 @@ class GPUModelRunner(
 
         return mm_kwargs, mm_hashes_pos
 
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _execute_mm_encoder(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> list[torch.Tensor]:
         # Batch the multi-modal inputs using the helper method.
         mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
             scheduler_output
         )
 
         if not mm_kwargs:
-            return
+            return []
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -2006,6 +2008,8 @@ class GPUModelRunner(
             )
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
+
+        return encoder_outputs
 
     def _gather_mm_embeddings(
         self,
@@ -2094,38 +2098,6 @@ class GPUModelRunner(
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
-
-    def _extract_encoder_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> dict[str, torch.Tensor]:
-        """Extract encoder inputs for encoder-decoder models.
-
-        This method extracts multimodal input features from scheduled encoder
-        inputs and formats them for the encoder-decoder model forward pass.
-        """
-        # Batch the multi-modal inputs using the helper method.
-        mm_kwargs, _ = self._batch_mm_kwargs_from_scheduler(scheduler_output)
-
-        if not mm_kwargs:
-            return {}
-
-        # Group MM kwargs by modality and extract features
-        model = cast(SupportsMultiModal, self.model)
-        encoder_features = {}
-        for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-            mm_kwargs,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            merge_by_field_config=model.merge_by_field_config,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
-        ):
-            # Add the grouped features to encoder_features dict
-            # This allows the model to receive them as kwargs (e.g.,
-            # input_features=...)
-            encoder_features.update(mm_kwargs_group)
-
-        return encoder_features
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
@@ -2416,8 +2388,13 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder
             and scheduler_output.scheduled_encoder_inputs
         ):
-            encoder_inputs = self._extract_encoder_inputs(scheduler_output)
-            model_kwargs.update(encoder_inputs)
+            # Run the encoder, just like we do with other multimodal inputs.
+            # For an encoder-decoder model, our processing here is a bit
+            # simpler, because the outputs are just passed to the decoder.
+            # We are not doing any prompt replacement. We also will only
+            # ever have a single encoder input.
+            encoder_outputs = self._execute_mm_encoder(scheduler_output)
+            model_kwargs.update({"encoder_outputs": encoder_outputs})
 
         return (
             input_ids,
