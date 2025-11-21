@@ -82,8 +82,7 @@ DOCKER_BUILDKIT=1 docker build . \
 
 ## Building for Arm64/aarch64
 
-A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
-of PyTorch Nightly and should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
 
 !!! note
     Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
@@ -94,7 +93,6 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-    python3 use_existing_torch.py
     DOCKER_BUILDKIT=1 docker build . \
     --file docker/Dockerfile \
     --target vllm-openai \
@@ -102,7 +100,8 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg RUN_WHEEL_CHECK=false
     ```
 
 !!! note
