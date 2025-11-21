@@ -238,6 +238,24 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def warmup_model_metal(self):
+        """Call warmup_model_metal on the model.
+        
+        This is called via collective_rpc before the server starts accepting traffic.
+        It follows the same pattern as prefill_forward and decode_forward,
+        where self.model.warmup_model_metal() is called directly.
+        """
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        
+        logger.info("TTModelRunner: Calling self.model.warmup_model_metal()...")
+        
+
+        self.model.warmup_model_metal()
+
+        logger.info(f"warmup_model_metal completed successfully")
+
+        
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],

@@ -1816,6 +1816,8 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
+        await warmup_model(engine_client, vllm_config)
+
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
         shutdown_task = await serve_http(
@@ -1841,6 +1843,59 @@ async def run_server_worker(listen_address,
         await shutdown_task
     finally:
         sock.close()
+
+async def warmup_model(
+    engine_client: EngineClient,
+    vllm_config: VllmConfig,
+) -> None:
+    """Warmup the model by calling warmup_model_metal on the model.
+    
+    This runs after engine initialization but before the health endpoint
+    becomes accessible, ensuring data is cached in DRAM before production use.
+    
+    Calls self.model.warmup_model_metal() through the model_runner,
+    the same way prefill_forward and decode_forward are called.
+    """
+    logger.info("Starting model warmup - calling warmup_model_metal...")
+    
+    try:
+        # Check if this is AsyncLLMEngine (V0)
+        if hasattr(engine_client, 'engine'):
+            logger.info("Detected V0 AsyncLLMEngine")
+            engine = engine_client.engine
+            
+            # Call through model_runner -> model, same pattern as prefill_forward/decode_forward
+            # This calls: worker.model_runner.warmup_model_metal() 
+            # which should call: self.model.warmup_model_metal()
+            results = engine.model_executor.collective_rpc(
+                method="warmup_model_metal",
+                timeout=300.0  # 5 minute timeout for warmup
+            )
+            logger.info(f"warmup_model_metal completed on all workers: {results}")
+            
+        # Check if this is V1 AsyncLLM
+        elif hasattr(engine_client, 'engine_core'):
+            logger.info("Detected V1 AsyncLLM")
+            # For V1, call through the engine_core
+            results = await engine_client.collective_rpc(
+                method="warmup_model_metal",
+                timeout=300.0
+            )
+            logger.info(f"warmup_model_metal completed: {results}")
+            
+        else:
+            # Multiprocess engine client
+            logger.warning(
+                "Multiprocess engine detected. warmup_model_metal needs to be "
+                "called before engine process starts, or implemented as RPC call."
+            )
+    
+    except Exception as e:
+        logger.error(f"warmup_model_metal failed: {e}", exc_info=True)
+        # Don't raise - allow server to start even if warmup fails
+        logger.warning("Continuing with server startup despite warmup failure")
+    
+    logger.info("Model warmup completed.")
 
 
 if __name__ == "__main__":
