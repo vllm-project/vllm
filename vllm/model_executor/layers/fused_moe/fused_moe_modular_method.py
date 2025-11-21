@@ -66,6 +66,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return self.old_quant_method.allow_inplace
 
+    @property
+    def method_name(self) -> str:
+        return self.old_quant_method.method_name
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -105,18 +109,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # TODO: Only needed to get the proper name for the error.
-        if enable_eplb:
-            if self.supports_eplb:
-                assert expert_load_view is not None
-                assert logical_to_physical_map is not None
-                assert logical_replica_count is not None
-            else:
-                raise NotImplementedError(
-                    "EPLB is not supported for "
-                    f"{self.old_quant_method.__class__.__name__}."
-                )
-
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,

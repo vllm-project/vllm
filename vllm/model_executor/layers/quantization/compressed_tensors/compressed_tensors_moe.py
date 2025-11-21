@@ -1367,11 +1367,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsW8A8Int8MoEMethod` yet."
-            )
-
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids, _ = layer.select_experts(

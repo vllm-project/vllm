@@ -743,11 +743,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `GPTQMarlinMoEMethod` yet."
-            )
-
         assert activation == "silu", "Only SiLU activation is supported."
 
         topk_weights, topk_ids, _ = layer.select_experts(

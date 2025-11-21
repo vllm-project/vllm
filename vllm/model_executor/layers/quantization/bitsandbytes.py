@@ -522,6 +522,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
+        # TODO(bnell): Do these need to be called on the hot path?
         if self.quant_config.load_in_8bit:
             w13, w2 = self._apply_8bit_dequant(layer)
         else:

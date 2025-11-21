@@ -90,6 +90,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def allow_inplace(self) -> bool:
         return False
 
+    @property
+    def method_name(self) -> str:
+        return self.__class__.__name__
+
     @abstractmethod
     def apply(
         self,

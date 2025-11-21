@@ -1506,10 +1506,9 @@ class FusedMoE(CustomOp):
                     )
             else:
                 raise NotImplementedError(
-                    f"EPLB is not supported for {self.quant_method.__class__.__name__}."
+                    f"EPLB is not supported for {self.quant_method.method_name}."
                 )
 
-        # ?
         indices_type = self.quant_method.topk_indices_dtype
 
         # Check if we should use a routing simulation strategy
