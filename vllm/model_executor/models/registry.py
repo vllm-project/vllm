@@ -18,13 +18,12 @@ from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import torch.nn as nn
 import transformers
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttnTypeStr
 from vllm.config import (
     ModelConfig,
     iter_architecture_defaults,
@@ -32,8 +31,12 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
-from vllm.model_executor.layers.pooler import PoolingTypeStr
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttnTypeStr
+    from vllm.model_executor.layers.pooler import PoolingTypeStr
+
 
 from .interfaces import (
     has_inner_state,
