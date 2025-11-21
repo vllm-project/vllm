@@ -280,9 +280,6 @@ def _combine_sampled_and_draft_tokens_kernel(
     seq_lens_ptr,
     prefill_len_ptr,
     num_draft_tokens_ptr,
-    # draft_tokens_ptr,
-    # draft_tokens_stride,
-    # MAX_SPEC_LEN: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -303,16 +300,6 @@ def _combine_sampled_and_draft_tokens_kernel(
     num_tokens = num_draft_tokens + 1
     tl.store(input_ids_ptr + end - num_tokens, last_token_id)
 
-    # if num_draft_tokens == 0:
-    #     return
-
-    # block = tl.arange(0, MAX_SPEC_LEN)
-    # mask = block < num_draft_tokens
-    # draft_tokens = tl.load(
-    #     draft_tokens_ptr + req_state_idx * draft_tokens_stride + block, mask=mask
-    # )
-    # tl.store(input_ids_ptr + end - num_draft_tokens + block, draft_tokens, mask=mask)
-
 
 def combine_sampled_and_draft_tokens(
     input_ids: torch.Tensor,
@@ -321,8 +308,6 @@ def combine_sampled_and_draft_tokens(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     prefill_len: torch.Tensor,
-    # num_draft_tokens: torch.Tensor | None,
-    # draft_tokens: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = seq_lens.shape[0]
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
@@ -332,10 +317,6 @@ def combine_sampled_and_draft_tokens(
         query_start_loc,
         seq_lens,
         prefill_len,
-        None,  # num_draft_tokens,
-        # draft_tokens,
-        # draft_tokens.stride(0),
-        # MAX_SPEC_LEN=128,  # FIXME
     )
     return input_ids
 
