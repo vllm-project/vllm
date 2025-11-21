@@ -133,6 +133,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        w2_gemm_overlap_args,
     ):
         assert self.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
@@ -168,6 +169,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             masked_m=expert_num_tokens,
             workspace=workspace2,
             out=output,
+            w2_gemm_overlap_args=w2_gemm_overlap_args,
         )
 
 
@@ -195,6 +197,7 @@ def flashinfer_cutedsl_moe_masked(
     masked_m: torch.Tensor,
     workspace: torch.Tensor,
     out: torch.Tensor,
+    w2_gemm_overlap_args,
 ):
     """
     Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
@@ -320,6 +323,12 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale,
     )
 
+    # When using SBO, we record event here to indicate
+    # that the signal tensor and input to deepep ll combine
+    # are ready
+    if w2_gemm_overlap_args is not None:
+        w2_gemm_overlap_args.start_event.record()
+
     # Gemm2
     out = out.permute(1, 2, 0)  # requirement of kernel
     flashinfer_cutedsl_grouped_gemm_nt_masked(
@@ -333,6 +342,14 @@ def flashinfer_cutedsl_moe_masked(
         sf_vec_size=sf_vec_size,
         alpha=w2_alpha.view(1, 1, num_experts),
         alpha_dtype=get_cute_dtype(w2_alpha),
+        **(
+            dict(
+                sm_count=w2_gemm_overlap_args.num_sms,
+                dst_signals=w2_gemm_overlap_args.signal,
+            )
+            if w2_gemm_overlap_args is not None
+            else {}
+        ),
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
 
