@@ -3,7 +3,6 @@
 import random
 import uuid
 
-import numpy as np
 import pytest
 
 from vllm.config import VllmConfig
@@ -100,7 +99,8 @@ def _mock_execute_model(
         random.randint(*num_output_tokens_range) for _ in range(len(request_ids))
     ]
     sampled_token_ids = [
-        np.random.randint(0, 100, size=num_tokens) for num_tokens in num_output_tokens
+        [random.randint(0, 100) for _ in range(num_tokens)]
+        for num_tokens in num_output_tokens
     ]
 
     return ModelRunnerOutput(
@@ -196,8 +196,6 @@ def test_priority_scheduling_blast(
     num_blocks: int,
 ):
     random.seed(42)
-    np.random.seed(42)
-
     seen_request_prompt_length = dict[str, int]()
     seen_request_ids = set[str]()
     seen_mm_hashes = set[str]()
