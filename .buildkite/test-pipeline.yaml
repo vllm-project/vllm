@@ -550,6 +550,25 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  commands:
+    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/moe/test_deepgemm.py
+    - pytest -v -s kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
@@ -921,6 +940,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
 
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
@@ -930,6 +950,8 @@ steps:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/worker/
+  - vllm/v1/cudagraph_dispatcher.py
   - vllm/compilation/
   # can affect pattern matching
   - vllm/model_executor/layers/layernorm.py
