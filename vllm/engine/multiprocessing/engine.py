@@ -498,6 +498,19 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             disable_log_requests=disable_log_requests,
             ipc_path=ipc_path)
 
+        # Call warmup_model_metal before starting the engine loop
+        # This happens in the engine process, before accepting requests
+        try:
+            logger.info("Multiprocess engine: Running warmup_model_metal...")
+            results = engine.model_executor.collective_rpc(
+                "warmup_model_metal",
+                timeout=300.0
+            )
+            logger.info(f"Multiprocess engine: warmup_model_metal completed: {results}")
+        except Exception as e:
+            logger.warning(f"warmup_model_metal failed in multiprocess engine: {e}")
+            # Continue with engine startup even if warmup fails
+
         signal.signal(signal.SIGTERM, signal_handler)
 
         engine.start()

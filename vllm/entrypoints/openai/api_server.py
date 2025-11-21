@@ -1858,42 +1858,19 @@ async def warmup_model(
     """
     logger.info("Starting model warmup - calling warmup_model_metal...")
     
-    try:
-        # Check if this is AsyncLLMEngine (V0)
-        if hasattr(engine_client, 'engine'):
-            logger.info("Detected V0 AsyncLLMEngine")
-            engine = engine_client.engine
-            
-            # Call through model_runner -> model, same pattern as prefill_forward/decode_forward
-            # This calls: worker.model_runner.warmup_model_metal() 
-            # which should call: self.model.warmup_model_metal()
-            engine.model_executor.collective_rpc(
-                method="warmup_model_metal",
-                timeout=300.0  # 5 minute timeout for warmup
-            )
-            logger.info(f"warmup_model_metal completed on all workers")
-            
-        # Check if this is V1 AsyncLLM
-        elif hasattr(engine_client, 'engine_core'):
-            logger.info("Detected V1 AsyncLLM")
-            # For V1, call through the engine_core
-            results = await engine_client.collective_rpc(
-                method="warmup_model_metal",
-                timeout=300.0
-            )
-            logger.info(f"warmup_model_metal completed: {results}")
-            
-        else:
-            # Multiprocess engine client
-            logger.warning(
-                "Multiprocess engine detected. warmup_model_metal needs to be "
-                "called before engine process starts, or implemented as RPC call."
-            )
+    # Check if this is AsyncLLMEngine (V0)
+    logger.info("Detected V0 AsyncLLMEngine")
+    engine = engine_client.engine
     
-    except Exception as e:
-        logger.error(f"warmup_model_metal failed: {e}", exc_info=True)
-        # Don't raise - allow server to start even if warmup fails
-        logger.warning("Continuing with server startup despite warmup failure")
+    # Call through model_runner -> model, same pattern as prefill_forward/decode_forward
+    # This calls: worker.model_runner.warmup_model_metal() 
+    # which should call: self.model.warmup_model_metal()
+    engine.model_executor.collective_rpc(
+        method="warmup_model_metal",
+        timeout=300.0  # 5 minute timeout for warmup
+    )
+    logger.info("warmup_model_metal completed on all workers")
+            
     
     logger.info("Model warmup completed.")
 

@@ -195,15 +195,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def warmup_model_metal(self):
-        """Forward warmup call to the model_runner, which calls self.model.warmup_model_metal().
-        
-        This is called via collective_rpc before the server starts accepting traffic.
-        """
-        logger.info("TTWorker: Forwarding warmup_model_metal to model_runner...")
-        self.model_runner.warmup_model_metal()
-        logger.info("TTWorker: warmup_model_metal completed")
-
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the TT KV cache and
         swappable CPU KV cache.
