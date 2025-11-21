@@ -361,6 +361,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   str? maybe_schedule"
       ") -> ()",
       {stride_tag});
+  ops.def("cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
 #endif

@@ -1453,6 +1453,10 @@ def cutlass_w4a8_moe_mm(
     )
 
 
+def cutlass_encode_and_reorder_int4b_grouped(b_tensors: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
+
+
 if hasattr(torch.ops._C, "permute_cols"):
 
     @register_fake("_C::permute_cols")
