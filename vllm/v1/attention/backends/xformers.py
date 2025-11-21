@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
+import nvtx
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -134,11 +135,14 @@ class XFormersAttentionMetadata:
     num_prefills: int = 0
     num_decodes: int = 0
 
+    # Profiling flag
+    is_profiling_enabled: Optional[bool] = False
+
     # Biases for different attention types.
     attn_bias: Optional["AttentionBias"] = None
 
     # Training mode flag
-    is_training: bool = False
+    is_training: Optional[bool] = False
 
     # Training attention mask - dict with 'masks' (list of tensors) and 'seq_lens' (list of ints)
     training_attention_mask: Optional[dict] = None
@@ -230,7 +234,8 @@ class XFormersAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-        is_training: bool = False,
+        is_training: Optional[bool] = False,
+        is_profiling_enabled: Optional[bool] = False,
         training_attention_mask: Optional[dict] = None,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -276,6 +281,7 @@ class XFormersAttentionMetadataBuilder(
             slot_mapping=slot_mapping,
             attn_bias=bias,
             is_training=is_training,
+            is_profiling_enabled=is_profiling_enabled,
             training_attention_mask=training_attention_mask,
         )
 
@@ -351,16 +357,66 @@ class XFormersAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if attn_metadata is None:
+            # Profiling run.
+            return output
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        is_profiling_enabled = attn_metadata.is_profiling_enabled
+
+        if is_profiling_enabled:
+            tag = f"LaAL::XFormersAttentionImpl.forward_T{num_actual_tokens}_D{num_decode_tokens}_P{num_prefill_tokens}"
+            nvtx.push_range(tag)
+
+        output = self.forward_internal(
+            layer=layer,
+            query=query,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+
+        return output
+
+    def forward_internal(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: XFormersAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass with XFormers.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
         assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for XFormersAttentionImpl")
-
-        if attn_metadata is None:
-            # Profiling run.
-            return output
 
         # Dispatch to training-specific forward if in training mode
         if attn_metadata.is_training:

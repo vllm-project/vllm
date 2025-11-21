@@ -210,14 +210,39 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        is_lora_training: bool = False,
+        is_profiling_enabled: bool = False,
     ) -> torch.Tensor:
+        if is_profiling_enabled:
+            nvtx.push_range("LaAL::LlamaAttention.qkv_proj")
+
         qkv, _ = self.qkv_proj(hidden_states)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LaAL::LlamaAttention.rotary_emb")
+
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # The following is not needed for training in Transformers.
-        with torch.no_grad():
+        ctx = torch.no_grad() if not is_lora_training else nullcontext()
+        with ctx:
             q, k = self.rotary_emb(positions, q, k)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LAAL::LlamaAttention.attn")
+
         attn_output = self.attn(q, k, v)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+            nvtx.push_range("LAAL::LlamaAttention.o_proj")
+
         output, _ = self.o_proj(attn_output)
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
+
         return output
 
     def _init_rotary_emb(self, config: LlamaConfig,
@@ -318,7 +343,8 @@ class LlamaDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+                                       hidden_states=hidden_states,
+                                       is_lora_training=True)
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -355,7 +381,9 @@ class LlamaDecoderLayer(nn.Module):
             nvtx.push_range("LaAL::LlamaDecoderLayer.self_attn")
 
         hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+                                       hidden_states=hidden_states,
+                                       is_lora_training=False,
+                                       is_profiling_enabled=is_profiling_enabled)
 
         if is_profiling_enabled:
             nvtx.pop_range()
@@ -458,7 +486,7 @@ class LlamaModel(nn.Module):
                 aux_hidden_states.append(hidden_states + residual)
 
             if is_profiling_enabled:
-                nvtx.push_range(f"LlamaModel.layer_{idx}")
+                nvtx.push_range(f"LaAL::LlamaModel.layer_{idx}")
 
             hidden_states, residual = layer(positions, hidden_states, residual,
                                             is_lora_training=is_lora_training,

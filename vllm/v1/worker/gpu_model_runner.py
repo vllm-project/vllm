@@ -891,7 +891,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return encoder_seq_lens
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: "SchedulerOutput", is_profiling_enabled: bool = False
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
                Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
@@ -1200,6 +1200,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         gpu[:num_reqs],
                         num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
                     )
+
+                extra_attn_metadata_args['is_profiling_enabled'] = is_profiling_enabled
 
                 # Add is_training flag to metadata args for XFormers backend
                 if is_training_batch:
@@ -2230,7 +2232,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
                  max_query_len, ubatch_slices, num_tokens_after_padding
-                 ) = self._prepare_inputs(scheduler_output)
+                 ) = self._prepare_inputs(scheduler_output, is_profiling_enabled=self.vllm_config.model_config.is_profiling_enabled)
 
             finally:
                 if self.prepare_inputs_event is not None:
@@ -2421,7 +2423,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
                  max_query_len, ubatch_slices, num_tokens_after_padding
-                 ) = self._prepare_inputs(scheduler_output)
+                 ) = self._prepare_inputs(scheduler_output, is_profiling_enabled=False)
 
             finally:
                 if self.prepare_inputs_event is not None:
