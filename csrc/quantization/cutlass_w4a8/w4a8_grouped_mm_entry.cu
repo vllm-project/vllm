@@ -170,23 +170,21 @@ uint64_t seed = 2020;
     const torch::Tensor& group_scale_strides
   ) {
     // validation?
+    // TODO: cuda stream/guard
+    auto device = a_tensors.device();
+    auto device_id = device.index();
+    const at::cuda::OptionalCUDAGuard device_guard(device);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+
     int num_experts = static_cast<int>(expert_offsets.size(0));
     int n = static_cast<int>(b_tensors.size(1));
     int k = static_cast<int>(b_tensors.size(2)) * 8; // pack factor
 
-    // Options options;
-    // options.parse(0, nullptr);
-
-    // allocate(options);
-    // initialize(options);
-
     // get args ---------------------------------
     using Args = typename GemmShuffled::Arguments;
-    cutlass::KernelHardwareInfo hw_info;
-    // Change device_id to another value if you are running on a machine with multiple GPUs and wish
-    // to use a GPU other than that with device ID 0.
-    hw_info.device_id = 0;
-    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+    static const cutlass::KernelHardwareInfo hw_info{
+        device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+                      device_id)};
 
     Args arguments;
 
@@ -225,7 +223,6 @@ uint64_t seed = 2020;
     stride_S_local.reset(num_experts);
     stride_S_local.copy_from_host(stride_S_host_local.data());
 
-    auto device = a_tensors.device();
     auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(device);
     torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
@@ -259,21 +256,18 @@ uint64_t seed = 2020;
       hw_info
     };
 
-    GemmShuffled gemm;
-    // Using the arguments, query for extra workspace required for matrix multiplication computation
+    // Allocate workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
+    printf("workspace size: %d\n", workspace_size);
+    torch::Tensor workspace =
+        torch::empty(workspace_size,
+                     torch::TensorOptions().dtype(torch::kU8).device(device));
 
-    // Allocate workspace memory
-    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-
-    // Check if the problem size is supported or not
+    // Run GEMM
+    GemmShuffled gemm;
     CUTLASS_CHECK(gemm.can_implement(arguments));
-
-    // Initialize CUTLASS kernel with arguments and workspace pointer
-    CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
-
-    // Correctness / Warmup iteration
-    CUTLASS_CHECK(gemm.run());
+    CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
+    CUTLASS_CHECK(gemm.run(stream));
     print("grouped gemm done!\n");
   }
 
@@ -325,7 +319,7 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& b_tensors){
     auto stride_B_local = cutlass::make_cute_packed_stride(StrideB{}, {n, k, Int<1>{}});
     auto layout_B = make_layout(shape_B, stride_B_local);
     LayoutB_Reordered layout_B_reordered_local = tile_to_shape(LayoutAtomQuant{}, shape_B);
-    auto offset = i * n * k * cutlass::sizeof_bits<QuantType>::value / 8;
+    auto offset = i * n * k * cutlass::sizeof_bits<QuantType>::value / 8; // bytes/storage type
     cutlass::reorder_tensor(b_packed_ptr + offset, layout_B, layout_B_reordered_local);
   }
 
