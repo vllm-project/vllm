@@ -8,7 +8,6 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-import torch
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
@@ -666,7 +665,7 @@ class CompilationConfig:
             and "combo_kernels" not in self.inductor_compile_config
             and "benchmark_combo_kernel" not in self.inductor_compile_config
             # (fixme @boyuan) combo kernel does not support cpu yet.
-            and torch.cuda.is_available()
+            and not current_platform.is_cpu()
         ):
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
