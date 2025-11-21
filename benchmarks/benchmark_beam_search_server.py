@@ -25,6 +25,7 @@ import time
 
 import requests
 from openai import OpenAI
+from tqdm import tqdm
 
 
 def start_profile(base_url: str) -> bool:
@@ -60,31 +61,27 @@ def send_beam_search_request(
     temperature: float = 0.0,
 ) -> dict | None:
     """Send a beam search completion request."""
-    try:
-        start_time = time.perf_counter()
-        completion = client.completions.create(
-            model=model,
-            prompt=prompt,
-            n=beam_width,  # Beam width
-            max_tokens=max_tokens,
-            temperature=temperature,
-            extra_body={"use_beam_search": True},  # This triggers beam search
-        )
-        end_time = time.perf_counter()
+    start_time = time.perf_counter()
+    completion = client.completions.create(
+        model=model,
+        prompt=prompt,
+        n=beam_width,  # Beam width
+        max_tokens=max_tokens,
+        temperature=temperature,
+        extra_body={"use_beam_search": True},  # This triggers beam search
+    )
+    end_time = time.perf_counter()
 
-        latency = end_time - start_time
+    latency = end_time - start_time
 
-        # Convert completion object to dict-like structure for compatibility
-        num_choices = len(completion.choices) if completion.choices else 0
+    # Convert completion object to dict-like structure for compatibility
+    num_choices = len(completion.choices) if completion.choices else 0
 
-        return {
-            "latency": latency,
-            "result": completion,
-            "num_choices": num_choices,
-        }
-    except Exception as e:
-        print(f"✗ Request failed: {e}")
-        return None
+    return {
+        "latency": latency,
+        "result": completion,
+        "num_choices": num_choices,
+    }
 
 
 def generate_prompt(input_len: int, seed: int | None = None) -> str:
@@ -171,16 +168,13 @@ def main():
 
     args = parser.parse_args()
 
-    print("=" * 80)
     print("Beam Search Server Benchmark")
-    print("=" * 80)
     print(f"Server URL: {args.base_url}")
     print(f"Beam width (n): {args.beam_width}")
     print(f"Max tokens: {args.max_tokens}")
     print(f"Input length: ~{args.input_len} tokens")
     print(f"Number of requests: {args.num_requests}")
     print(f"Temperature: {args.temperature}")
-    print("=" * 80)
 
     # Initialize OpenAI client
     openai_api_base = f"{args.base_url}/v1"
@@ -235,32 +229,27 @@ def main():
             print("Warning: Could not start profiling. Continuing anyway...")
         time.sleep(1)  # Brief pause to ensure profiler is ready
 
-    # Send requests
     print(f"\nSending {args.num_requests} requests...")
     latencies = []
     successful_requests = 0
-
-    for i in range(args.num_requests):
+    for _ in tqdm(range(args.num_requests)):
         # Generate a unique random prompt for each request
         prompt = args.prompt or generate_prompt(args.input_len, seed=None)
-
-        print(f"\nRequest {i + 1}/{args.num_requests}...", end=" ", flush=True)
         result = send_beam_search_request(
-            client=client,
-            model=model_name,
-            prompt=prompt,
-            beam_width=args.beam_width,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
+            client,
+            model_name,
+            prompt,
+            args.beam_width,
+            args.max_tokens,
+            args.temperature,
         )
 
         if result:
             latency = result["latency"]
             latencies.append(latency)
             successful_requests += 1
-            print(f"✓ Latency: {latency:.4f}s ({latency * 1000:.2f}ms)")
         else:
-            print("✗ Failed")
+            print("✗ Failed request")
 
     # Stop profiling
     if args.profile:
@@ -271,9 +260,7 @@ def main():
     if latencies:
         import statistics
 
-        print("\n" + "=" * 80)
-        print("Benchmark Results")
-        print("=" * 80)
+        print("\nResults")
         print(f"Successful requests: {successful_requests}/{args.num_requests}")
         print(f"Average latency: {statistics.mean(latencies) * 1000:.2f}ms")
         print(f"Median latency: {statistics.median(latencies) * 1000:.2f}ms")
