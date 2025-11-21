@@ -368,7 +368,7 @@ class EngineArgs:
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: int | None = ModelConfig.seed
+    seed: int | None = 0
     max_model_len: int | None = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
     cudagraph_capture_sizes: list[int] | None = (
@@ -485,7 +485,6 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1027,9 +1026,6 @@ class EngineArgs:
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
-            "--lora-extra-vocab-size", **lora_kwargs["lora_extra_vocab_size"]
-        )
-        lora_group.add_argument(
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
@@ -1208,29 +1204,52 @@ class EngineArgs:
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
+        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
+        # doesn't affect the user process.
+        if self.seed is None:
+            logger.warning_once(
+                "`seed=None` is equivalent to `seed=0` in V1 Engine. "
+                "You will no longer be allowed to pass `None` in v0.13.",
+                scope="local",
+            )
+
+            self.seed = 0
+            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+                logger.warning(
+                    "The global random seed is set to %d. Since "
+                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                    "affect the random state of the Python process that "
+                    "launched vLLM.",
+                    self.seed,
+                )
+
         if self.disable_mm_preprocessor_cache:
-            logger.warning(
+            logger.warning_once(
                 "`--disable-mm-preprocessor-cache` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb 0` instead.",
+                scope="local",
             )
 
             self.mm_processor_cache_gb = 0
         elif envs.VLLM_MM_INPUT_CACHE_GIB != 4:
-            logger.warning(
+            logger.warning_once(
                 "VLLM_MM_INPUT_CACHE_GIB` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb %d` instead.",
                 envs.VLLM_MM_INPUT_CACHE_GIB,
+                scope="local",
             )
 
             self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
 
         if self.enable_multimodal_encoder_data_parallel:
-            logger.warning(
+            logger.warning_once(
                 "--enable-multimodal-encoder-data-parallel` is deprecated "
                 "and will be removed in v0.13. "
-                "Please use `--mm-encoder-tp-mode data` instead."
+                "Please use `--mm-encoder-tp-mode data` instead.",
+                scope="local",
             )
 
             self.mm_encoder_tp_mode = "data"
@@ -1696,7 +1715,6 @@ class EngineArgs:
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
-                lora_extra_vocab_size=self.lora_extra_vocab_size,
                 lora_dtype=self.lora_dtype,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0

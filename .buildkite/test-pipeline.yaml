@@ -346,6 +346,18 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: Batch Invariance Tests (H100) # 10min
+  timeout_in_minutes: 25
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
@@ -554,7 +566,6 @@ steps:
   timeout_in_minutes: 45
   gpu: h100
   num_gpus: 1
-  optional: true
   source_file_dependencies:
   - tools/install_deepgemm.sh
   - vllm/utils/deep_gemm.py
@@ -565,10 +576,10 @@ steps:
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   commands:
-    - pytest -v -s tests/kernels/quantization/test_block_fp8.py -k deep_gemm
-    - pytest -v -s tests/kernels/moe/test_deepgemm.py
-    - pytest -v -s tests/kernels/moe/test_batched_deepgemm.py
-    - pytest -v -s tests/kernels/attention/test_deepgemm_attention.py
+    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/moe/test_deepgemm.py
+    - pytest -v -s kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35

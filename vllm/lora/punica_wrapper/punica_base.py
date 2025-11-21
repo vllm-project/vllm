@@ -31,7 +31,6 @@ class PunicaWrapperABC(ABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ) -> None:
         """
@@ -172,8 +171,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
     ):
+        # NOTE We have remove lora extra vocab support for now. So we set
+        # extra_vocab_size alwayzs to 0, and extra_vocab_size will be removed.
+
+        extra_vocab_size = 0
         (
             base_indices,
             sampler_indices,
@@ -285,12 +287,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ):
-        self._update_base_metadata(
-            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
-        )
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         if mapping.is_prefill:
             # Update metadata required for prefill-related operators.
