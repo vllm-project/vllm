@@ -14,7 +14,6 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttnTypeStr
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -48,11 +47,13 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
+
 else:
     PretrainedConfig = Any
 
@@ -65,6 +66,7 @@ else:
     ParallelConfig = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
+    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
@@ -1782,30 +1784,28 @@ class ModelConfig:
     @property
     def is_chunked_prefill_supported(self) -> BoolWithReason:
         if self.is_encoder_decoder:
-            return ENCODER_DECODER_NOT_SUPPORT_CHUNKED_PREFILL
+            return ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL
         elif self.pooler_config is not None:
             # for pooling models
             if self.attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
-                return POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                return POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
             else:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    return POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
+                    return POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
                 elif pooling_type == "mean":
-                    return (
-                        POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
-                    )
+                    return POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
                 else:  # pooling_type == "last"
-                    return POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
+                    return POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
         else:
             return GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
 
     @property
-    def is_prefix_caching_supported(self):
+    def is_prefix_caching_supported(self) -> BoolWithReason:
         if self.is_encoder_decoder:
-            return ENCODER_DECODER_NOT_SUPPORT_PREFIX_CACHING
+            return ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
         elif self.is_hybrid:
             return HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
         elif self.pooler_config is not None:
