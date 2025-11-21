@@ -271,7 +271,8 @@ class Case:
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp):
     from triton_kernels.tensor_details import layout
-    if not hasattr(layout,'make_default_matmul_mxfp4_w_layout'):
+
+    if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
         pytest.skip("make_default_matmul_mxfp4_w_layout not available")
 
     M = num_token
