@@ -5,6 +5,7 @@ import io
 
 # imports for structured outputs tests
 import json
+import os
 
 import httpx
 import librosa
@@ -16,6 +17,32 @@ import soundfile as sf
 from ...utils import RemoteOpenAIServer
 
 SERVER_ARGS = ["--enforce-eager"]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def rocm_flex_attention():
+    """
+    Automatically sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
+    for the duration of this test module.
+    """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        # Store previous value to restore later (cleanup)
+        old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
+
+        # Set the specific backend required for audio models on ROCm
+        os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
+
+        yield
+
+        # Cleanup: Restore the environment to avoiding polluting other test files
+        if old_backend is None:
+            del os.environ["VLLM_ATTENTION_BACKEND"]
+        else:
+            os.environ["VLLM_ATTENTION_BACKEND"] = old_backend
+    else:
+        yield
 
 
 @pytest.fixture(
@@ -51,6 +78,11 @@ async def test_non_asr_model(foscolo):
 @pytest.mark.asyncio
 async def test_basic_audio_with_lora(mary_had_lamb):
     """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes on ROCm, we modify the max model length to 512.
+    # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
     # NOTE - careful to call this test before the module scoped server
     # fixture, otherwise it'll OOMkill the CI
     model_name = "ibm-granite/granite-speech-3.3-2b"
@@ -63,7 +95,7 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         "--lora-modules",
         f"{lora_model_name}={model_name}",
         "--max-model-len",
-        "2048",
+        "512" if current_platform.is_rocm() else "2048",
         "--max-num-seqs",
         "1",
     ]

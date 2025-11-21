@@ -4,6 +4,7 @@
 # imports for structured outputs tests
 import io
 import json
+import os
 
 import librosa
 import numpy as np
@@ -24,6 +25,32 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def rocm_flex_attention():
+    """
+    Automatically sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
+    for the duration of this test module.
+    """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        # Store previous value to restore later (cleanup)
+        old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
+
+        # Set the specific backend required for audio models on ROCm
+        os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
+
+        yield
+
+        # Cleanup: Restore the environment to avoiding polluting other test files
+        if old_backend is None:
+            del os.environ["VLLM_ATTENTION_BACKEND"]
+        else:
+            os.environ["VLLM_ATTENTION_BACKEND"] = old_backend
+    else:
+        yield
 
 
 @pytest.fixture(scope="module")

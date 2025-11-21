@@ -4,6 +4,11 @@
 # Test infrastructure
 tblib==3.1.0
 
+anyio==4.6.2.post1
+    # via
+    #   httpx
+    #   starlette
+
 # Audio processing dependencies
 audioread==3.0.1
     # via librosa
@@ -22,11 +27,12 @@ soundfile==0.13.1
 soxr==0.5.0.post1
     # via librosa
 librosa==0.10.2.post1
-    # via -r requirements/rocm-test.in
 
 # HTTP/async dependencies
 aiohttp==3.13.0
     # via gpt-oss
+pytest-asyncio==0.24.0
+    # via httpx
 
 # Retrieval and search
 bm25s==0.2.13
@@ -34,36 +40,35 @@ bm25s==0.2.13
 pystemmer==3.0.0
     # via mteb
 
-# Multi-modal processing
 blobfile==3.0.0
-    # via -r requirements/rocm-test.in (Multi-Modal Models Test)
+    # Multi-Modal Models Test
 decord==0.6.0
-    # via -r requirements/rocm-test.in (video processing, required by entrypoints/openai/test_video.py)
+    # video processing, required by entrypoints/openai/test_video.py
 
 # OpenAI compatibility and testing
 gpt-oss==0.0.8
-    # via -r requirements/rocm-test.in
+    # OpenAI compatibility tests
 schemathesis==3.39.15
-    # via -r requirements/rocm-test.in (OpenAI schema test)
+    # OpenAI schema test
 
 # Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
-    # via -r requirements/rocm-test.in (eval tests)
+    # eval tests
 mteb[bm25s]>=1.38.11, <2
-    # via -r requirements/rocm-test.in (mteb test)
+    # MTEB Benchmark Test
 sentence-transformers==3.4.1
-    # via -r requirements/rocm-test.in (required by entrypoints/openai/test_score.py)
+    # required by entrypoints/openai/test_score.py
 
 # Visualization and plotting
 matplotlib==3.10.3
-    # via -r requirements/rocm-test.in (Basic Models Test)
+    # Basic Models Test
 
 # Data processing
 multiprocess==0.70.16
-    # via -r requirements/rocm-test.in (Datasets and Evaluate Test)
+    # Datasets and Evaluate Test
 
 # Utilities
 num2words==0.5.14
-    # via -r requirements/rocm-test.in
+    # via lm-eval
 pqdm==0.2.0
-    # via -r requirements/rocm-test.in
+    # via lm-eval
