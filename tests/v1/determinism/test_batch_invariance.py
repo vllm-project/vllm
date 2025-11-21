@@ -190,6 +190,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
+        gpu_memory_utilization=0.9,
     )
 
     # Use more realistic prompts for better token generation
@@ -444,6 +445,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # CRITICAL: Disable batch invariance for this test
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
