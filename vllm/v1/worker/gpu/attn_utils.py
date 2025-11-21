@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
 )
@@ -35,7 +36,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
 ):
-    attn_backends: dict[str, AttentionBackend] = {}
+    attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_metadata_builders: list[AttentionMetadataBuilder] = []
     flashinfer_workspace: torch.Tensor | None = None
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
@@ -93,6 +94,7 @@ def _reshape_kv_cache(
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        assert isinstance(kv_cache_spec, AttentionSpec)
         for layer_name in kv_cache_group_spec.layer_names:
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0

@@ -7,6 +7,7 @@ import torch
 
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    LogprobsTensors,
     ModelRunnerOutput,
     SamplerOutput,
 )
@@ -46,7 +47,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 "cpu", non_blocking=True
             )
             if sampler_output.logprobs_tensors is not None:
-                self.logprobs_tensors = (
+                self.logprobs_tensors: LogprobsTensors | None = (
                     sampler_output.logprobs_tensors.to_cpu_nonblocking()
                 )
             else:
@@ -54,7 +55,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.prompt_logprobs_dict = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
-                    self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
+                    if v is not None:
+                        self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
             self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
