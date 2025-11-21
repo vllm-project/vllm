@@ -205,3 +205,244 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
+)
+@torch.inference_mode()
+def test_flashinfer_block_gemm_matmul(M, N, K, block_size, out_dtype, seed):
+    """
+    Test FlashInfer FP8 block-scale GEMM through W8A8BlockFp8LinearOp.
+
+    This tests the FP8 + FP8 → BF16 path (W8A8 full quantization).
+    Matches TensorRT-LLM's test_fp8_block_scale_gemm behavior.
+    """
+    import os
+
+    from vllm.utils.flashinfer import has_flashinfer_block_gemm
+
+    if not has_flashinfer_block_gemm():
+        pytest.skip(
+            "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
+        )
+
+    # Skip tests for dimensions that don't have pre-compiled kernels in FlashInfer
+    # These cause CUDA runtime errors
+    if K == 3884 or N == 7748:
+        pytest.skip(f"FlashInfer does not have pre-compiled kernels for K={K} or N={N}")
+
+    # Enable FlashInfer backend (required for W8A8BlockFp8LinearOp to use FlashInfer)
+    os.environ["VLLM_USE_FLASHINFER_FP8_LINEAR"] = "1"
+    # Reload envs module to pick up the env var change
+    import importlib
+
+    from vllm import envs
+
+    importlib.reload(envs)
+
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        W8A8BlockFp8LinearOp,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        GroupShape,
+    )
+
+    torch.manual_seed(seed)
+
+    # Create BF16 inputs (normalized like TRT-LLM)
+    A_bf16 = torch.randn(M, K, dtype=torch.bfloat16) / K
+    B_bf16 = torch.randn(N, K, dtype=torch.bfloat16) / K
+
+    # Quantize weight with per-block scales
+    B_fp8, Bs = per_block_cast_to_fp8(B_bf16, block_size=block_size)
+
+    # Create W8A8BlockFp8LinearOp to handle input quantization
+    block_n, block_k = block_size[0], block_size[1]
+    weight_group_shape = GroupShape(block_n, block_k)
+    act_quant_group_shape = GroupShape(1, block_k)  # Per-token quantization
+
+    linear_op = W8A8BlockFp8LinearOp(
+        weight_group_shape=weight_group_shape,
+        act_quant_group_shape=act_quant_group_shape,
+        cutlass_block_fp8_supported=False,  # Disable CUTLASS
+        use_aiter_and_is_supported=False,  # Disable AITER
+    )
+
+    # Verify FlashInfer backend is selected
+    assert linear_op.w8a8_blockscale_op == linear_op._run_flashinfer, (
+        "FlashInfer backend not selected! "
+        "Make sure VLLM_USE_FLASHINFER_FP8_LINEAR=1 is set before running tests."
+    )
+
+    # Compute reference: BF16 × BF16 matmul (before quantization)
+    ref_out = torch.matmul(A_bf16, B_bf16.T)
+
+    # Run W8A8 FlashInfer GEMM (input will be quantized internally)
+    out = linear_op.apply(
+        input=A_bf16,
+        weight=B_fp8,
+        weight_scale=Bs,
+        input_scale=None,  # Will quantize dynamically
+        bias=None,
+    )
+
+    # Compare results using TensorRT-LLM's calc_diff metric
+    # This measures normalized similarity: sim = 2*<x,y> / (||x||² + ||y||²)
+    out_fp64 = out.to(torch.float64)
+    ref_fp64 = ref_out.to(torch.float64)
+    denominator = (out_fp64 * out_fp64 + ref_fp64 * ref_fp64).sum()
+    sim = 2 * (out_fp64 * ref_fp64).sum() / denominator
+    diff = 1 - sim
+
+    # W8A8 threshold from TensorRT-LLM: diff < 0.001 (99.9% similarity)
+    assert diff < 0.001, (
+        f"Similarity difference {diff:.6f} exceeds threshold (similarity: {sim:.6f})"
+    )
+
+
+@pytest.mark.parametrize(
+    "M,N,K,block_size,seed",
+    [
+        (1, 1024, 4096, [128, 128], 0),
+        (32, 4096, 512, [128, 128], 0),
+        (128, 1024, 4096, [128, 128], 0),
+    ],
+)
+@pytest.mark.parametrize(
+    "input_dtype,weight_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),  # BF16 + BF16 (internal quantization)
+        (torch.bfloat16, torch.float8_e4m3fn),  # BF16 + FP8 (weight-only)
+        (torch.float8_e4m3fn, torch.float8_e4m3fn),  # FP8 + FP8 (W8A8)
+    ],
+)
+@torch.inference_mode()
+def test_flashinfer_block_gemm_dtypes(
+    M, N, K, block_size, input_dtype, weight_dtype, seed
+):
+    """
+    Test all three supported dtype combinations for FlashInfer FP8 block-scale GEMM.
+
+    Tests:
+    - BF16 + BF16 → BF16: Both inputs BF16, internal quantization
+    - BF16 + FP8 → BF16: Weight-only quantization
+    - FP8 + FP8 → BF16: W8A8 full quantization
+
+    This mirrors FlashInfer's own test_fp8_blockscale_gemm_dtypes and TRT-LLM's tests.
+    """
+    from vllm.utils.flashinfer import has_flashinfer_block_gemm
+
+    if not has_flashinfer_block_gemm():
+        pytest.skip(
+            "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
+        )
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_block_gemm import (
+        flashinfer_block_gemm,
+    )
+
+    # Add debug output to verify test execution
+    print(f"\n{'=' * 80}")
+    print(f"TEST: M={M}, N={N}, K={K} | Input: {input_dtype}, Weight: {weight_dtype}")
+    print(f"{'=' * 80}")
+
+    torch.manual_seed(seed)
+
+    # Create BF16 data for reference (same as FlashInfer tests)
+    input_bf16 = torch.randn(M, K, dtype=torch.bfloat16)
+    weight_bf16 = torch.randn(N, K, dtype=torch.bfloat16)
+
+    # Quantize input based on dtype
+    if input_dtype == torch.float8_e4m3fn:
+        input_tensor, input_scale = per_token_group_quant_fp8(input_bf16, block_size[1])
+    else:
+        input_tensor, input_scale = input_bf16, None
+
+    # Quantize weight based on dtype
+    if weight_dtype == torch.float8_e4m3fn:
+        weight_tensor, weight_scale = per_block_cast_to_fp8(
+            weight_bf16, block_size=block_size
+        )
+    else:
+        weight_tensor, weight_scale = weight_bf16, None
+
+    # Run FlashInfer FP8 block-scale GEMM
+    output = flashinfer_block_gemm(
+        input=input_tensor,
+        weight=weight_tensor,
+        scales_a=input_scale,
+        scales_b=weight_scale,
+        out_dtype=torch.bfloat16,
+    )
+
+    # Verify output properties
+    assert output.shape == (M, N), f"Expected shape {(M, N)}, got {output.shape}"
+    assert output.dtype == torch.bfloat16, f"Expected BF16 output, got {output.dtype}"
+
+    # Compute reference based on dtype combination
+    if input_dtype == torch.float8_e4m3fn and weight_dtype == torch.float8_e4m3fn:
+        # W8A8: Compare against dequantized FP8 reference (tests kernel correctness)
+        block_n, block_k = block_size[0], block_size[1]
+        k_tiles = (K + block_k - 1) // block_k
+        n_tiles = (N + block_n - 1) // block_n
+
+        input_dequant = torch.zeros_like(input_bf16)
+        for i in range(M):
+            for k_tile in range(k_tiles):
+                start, end = k_tile * block_k, min((k_tile + 1) * block_k, K)
+                input_dequant[i, start:end] = (
+                    input_tensor[i, start:end].to(torch.bfloat16)
+                    * input_scale[i, k_tile]
+                )
+
+        weight_dequant = torch.zeros_like(weight_bf16)
+        for j in range(N):
+            for k_tile in range(k_tiles):
+                start, end = k_tile * block_k, min((k_tile + 1) * block_k, K)
+                weight_dequant[j, start:end] = (
+                    weight_tensor[j, start:end].to(torch.bfloat16)
+                    * weight_scale[j // block_n, k_tile]
+                )
+
+        reference = torch.matmul(input_dequant, weight_dequant.T)
+
+        # W8A8: Use TRT-LLM's calc_diff metric with strict threshold
+        out_fp64 = output.to(torch.float64)
+        ref_fp64 = reference.to(torch.float64)
+        denominator = (out_fp64 * out_fp64 + ref_fp64 * ref_fp64).sum()
+        sim = 2 * (out_fp64 * ref_fp64).sum() / denominator
+        diff = 1 - sim
+
+        # W8A8 achieves very high accuracy: diff < 0.001 (99.9% similarity)
+        assert diff < 0.001, (
+            f"W8A8 similarity difference {diff:.6f} too high (expected < 0.001, similarity: {sim:.6f})"
+        )
+    else:
+        # BF16+BF16 or BF16+FP8: Compare against original BF16 reference
+        reference = torch.matmul(input_bf16, weight_bf16.T)
+
+        out_fp64 = output.to(torch.float64)
+        ref_fp64 = reference.to(torch.float64)
+        denominator = (out_fp64 * out_fp64 + ref_fp64 * ref_fp64).sum()
+        sim = 2 * (out_fp64 * ref_fp64).sum() / denominator
+        diff = 1 - sim
+
+        if input_dtype == torch.bfloat16 and weight_dtype == torch.bfloat16:
+            # BF16+BF16: Highest accuracy (internal quantization)
+            threshold = 0.001
+            threshold_desc = "0.1%"
+        elif input_dtype == torch.bfloat16 and weight_dtype == torch.float8_e4m3fn:
+            # BF16+FP8: Weight-only quantization, higher error
+            threshold = 0.01
+            threshold_desc = "1%"
+        else:
+            # Other combinations
+            threshold = 0.01
+            threshold_desc = "1%"
+
+        assert diff < threshold, (
+            f"Similarity difference {diff:.6f} too high for "
+            f"{input_dtype} + {weight_dtype} (expected < {threshold_desc}, similarity: {sim:.6f})"
+        )

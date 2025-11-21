@@ -35,6 +35,7 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
     transform_sf_into_required_layout,
 )
+from vllm.utils.flashinfer import has_flashinfer_block_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -409,6 +410,37 @@ class W8A8BlockFp8LinearOp:
             input_2d.dtype,
         )
 
+    def _run_flashinfer(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Run FlashInfer FP8 block-scale GEMM.
+
+        This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
+        and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
+        """
+        from vllm.model_executor.layers.quantization.utils.flashinfer_block_gemm import (
+            flashinfer_block_gemm,
+        )
+
+        # Quantize input dynamically if not pre-quantized (same as CUTLASS)
+        assert input_scale is None
+        assert self.input_quant_op is not None
+        q_input, input_scale = self.input_quant_op(input_2d)
+
+        # Now call FlashInfer with FP8 input + FP8 weight (W8A8)
+        return flashinfer_block_gemm(
+            input=q_input,  # FP8 quantized input
+            weight=weight,  # FP8 weight
+            scales_a=input_scale,  # Input scales (computed dynamically)
+            scales_b=weight_scale,  # Weight scales
+            out_dtype=input_2d.dtype,
+        )
+
     def _dispatch_w8a8_blockscale_op(
         self,
         use_cutlass: bool,
@@ -425,6 +457,22 @@ class W8A8BlockFp8LinearOp:
         ],
         QuantFP8 | None,
     ]:
+        # Prefer FlashInfer on SM90+ if available (Hopper optimized)
+        if (
+            has_flashinfer_block_gemm()
+            and envs.VLLM_USE_FLASHINFER_FP8_LINEAR
+            and not use_aiter_and_is_supported
+        ):
+            logger.info_once("Using FlashInfer FP8 block-scale GEMM for linear layers")
+            return self._run_flashinfer, (
+                QuantFP8(
+                    False,
+                    self.act_quant_group_shape,
+                    column_major_scales=False,
+                    use_ue8m0=False,
+                )
+            )
+
         if use_cutlass:
             return self._run_cutlass, (
                 QuantFP8(

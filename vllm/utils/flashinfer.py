@@ -540,6 +540,29 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+@functools.cache
+def has_flashinfer_block_gemm() -> bool:
+    """Return `True` if FlashInfer FP8 block-scale GEMM is available."""
+    if not has_flashinfer():
+        return False
+    if not current_platform.is_cuda():
+        return False
+    # Only SM90+ (Hopper) supports this kernel
+    if not current_platform.is_device_capability(90):
+        return False
+
+    try:
+        import flashinfer
+
+        # Check if the module has the required binding
+        return hasattr(flashinfer, "Fp8BlockScaleGemmRunner")
+    except (ImportError, AttributeError):
+        logger.debug_once(
+            "FlashInfer block-scale GEMM not available: module or binding not found"
+        )
+        return False
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -562,4 +585,5 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "has_flashinfer_block_gemm",
 ]
