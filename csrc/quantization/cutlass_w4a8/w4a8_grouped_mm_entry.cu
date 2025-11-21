@@ -236,23 +236,37 @@ uint64_t seed = 2020;
     run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
                             a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs, a_tensors, b_tensors,
                             out_tensors, a_scales, b_scales, b_group_scales, b_group_size);
+    
+    // construct args
+    using Args = typename GemmShuffled::Arguments;
+    using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
+    using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
 
-    // torch problem sizes
-    ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
-      static_cast<ProblemShape::UnderlyingProblemShape*>(
-          problem_sizes_torch.data_ptr());
-    arguments = Args {
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {num_experts, problem_sizes_as_shapes, nullptr},
-      {
+    // SwapAB so B operands come first
+    MainloopArguments mainloop_arguments{
         static_cast<const QuantType**>(b_ptrs.data_ptr()), layout_B_reordered_local.get(),
         static_cast<const MmaType**>(a_ptrs.data_ptr()), static_cast<StrideA*>(a_strides.data_ptr()),
         static_cast<const cutlass::Array<ElementScale, 8> **>(b_group_scales_ptrs.data_ptr()),
         stride_S_local.get(),
-        // static_cast<StrideS*>(group_scale_strides.data_ptr()), // this leads to illegal memory access
-        static_cast<int>(b_group_size)},
-      {fusion_args, nullptr, static_cast<StrideC*>(c_strides.data_ptr()), // epilogue should be good
-        static_cast<ElementD**>(out_ptrs.data_ptr()), static_cast<StrideC*>(c_strides.data_ptr())},
+        static_cast<int>(b_group_size)
+    };
+
+    EpilogueArguments epilogue_arguments {
+      fusion_args,
+      nullptr, static_cast<StrideC*>(c_strides.data_ptr()), // epilogue should be good
+      static_cast<ElementD**>(out_ptrs.data_ptr()), static_cast<StrideC*>(c_strides.data_ptr())
+    };
+
+    ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
+      static_cast<ProblemShape::UnderlyingProblemShape*>(
+          problem_sizes_torch.data_ptr());
+    ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
+
+    arguments = Args {
+      cutlass::gemm::GemmUniversalMode::kGrouped,
+      prob_shape,
+      mainloop_arguments,
+      epilogue_arguments,
       hw_info
     };
 
