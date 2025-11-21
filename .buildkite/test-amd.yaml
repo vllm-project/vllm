@@ -889,7 +889,7 @@ steps:
 
 - label: Language Models Test (MTEB)
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
