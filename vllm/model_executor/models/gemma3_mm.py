@@ -644,6 +644,97 @@ class Gemma3ForConditionalGeneration(
 
         return hidden_states
 
+    def generate_attention_masks(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        mask_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        """Generate custom attention masks for Gemma3 GGUF multimodal inputs.
+
+        This is called by V1 engine's gpu_model_runner during preprocessing
+        to generate attention masks that allow bidirectional attention between
+        image tokens while maintaining causal attention for text.
+
+        NOTE: This method is ONLY called for GGUF models due to the guard in
+        gpu_model_runner.py. HF models handle attention masks internally.
+
+        Args:
+            input_ids: Input token IDs
+            positions: Position IDs
+            mask_dtype: Data type for the attention mask tensors
+
+        Returns:
+            Dictionary containing:
+            - has_images: Always True (method is only called for multimodal)
+            - seq_lens: List of sequence lengths
+            - global_attn_masks: Global causal masks with bidirectional image attention
+            - local_attn_masks: Local sliding window masks (if applicable)
+        """
+        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
+        # This is a HACK. Fix this.
+        start_indices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_indices)
+        seq_lens = []
+        for i in range(num_seqs):
+            start_idx = start_indices[i].item()
+            end_idx = (
+                start_indices[i + 1].item() if i < num_seqs - 1 else len(input_ids)
+            )
+            seq_lens.append(end_idx - start_idx)
+
+        global_attn_masks = []
+        local_attn_masks = []
+        start_idx = 0
+        for seq_idx, seq_len in enumerate(seq_lens):
+            end_idx = start_idx + seq_len
+            input_token_ids = input_ids[start_idx:end_idx]
+
+            # Find image token positions
+            img_pos = input_token_ids == self.config.image_token_index
+
+            start_idx = end_idx
+
+            # Create a global causal mask
+            global_attn_mask = torch.empty(
+                1,
+                1,
+                seq_len,
+                seq_len,
+                dtype=mask_dtype,
+                device=input_ids.device,
+            )
+            global_attn_mask.fill_(float("-inf"))
+            # Fill the lower triangle with 0 (causal attention)
+            global_attn_mask = global_attn_mask.triu(diagonal=1)
+
+            # Enable bidirectional attention between image tokens
+            # Use advanced indexing for better performance
+            img_indices = torch.where(img_pos)[0]
+            global_attn_mask[:, :, img_indices[:, None], img_indices] = 0
+            global_attn_masks.append(global_attn_mask)
+
+            # GGUF compatibility: config might be Gemma3TextConfig directly
+            text_config = getattr(self.config, "text_config", self.config)
+            sliding_window = text_config.sliding_window
+            if sliding_window is not None:
+                # Create a mask for tokens outside the sliding window
+                outside_window_mask = torch.ones_like(
+                    global_attn_mask, dtype=torch.bool
+                ).tril(diagonal=-sliding_window)
+
+                # Start with the global mask and apply the sliding window constraint
+                local_attn_mask = global_attn_mask.clone()
+                local_attn_mask[outside_window_mask] = float("-inf")
+                local_attn_masks.append(local_attn_mask)
+
+        return {
+            "has_images": True,
+            "seq_lens": seq_lens,
+            "global_attn_masks": global_attn_masks,
+            "local_attn_masks": local_attn_masks,
+        }
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
