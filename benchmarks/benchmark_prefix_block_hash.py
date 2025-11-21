@@ -5,7 +5,7 @@
 Simple benchmark to compare prefix-cache block hashing algorithms.
 
 Example:
-    python benchmarks/hash_perf_demo.py --num-blocks 20000 --block-size 32
+    python benchmark_prefix_block_hash.py --num-blocks 20000 --block-size 32
 """
 
 from __future__ import annotations
