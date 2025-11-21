@@ -231,6 +231,12 @@ class SamplingParams(
     set to an integer k, will use only the last k tokens from the prompt
     (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    skip_clone: bool = False
+    """Internal flag indicating that this SamplingParams instance is safe to
+    reuse without cloning. When True, clone() will return self without
+    performing a deep copy. This should only be set when the params object
+    is guaranteed to be dedicated to a single request and won't be modified
+    in ways that would affect other uses."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -618,7 +624,12 @@ class SamplingParams(
         data that is expensive to copy. However, if not copied, the processor
         needs to support parallel decoding for multiple sequences
         See https://github.com/vllm-project/vllm/issues/3087
+
+        If skip_clone is True, returns self without copying (early exit).
         """
+
+        if self.skip_clone:
+            return self
 
         logit_processor_refs = (
             None

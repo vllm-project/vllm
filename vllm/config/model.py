@@ -4,6 +4,7 @@
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
+from functools import cached_property
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -1592,7 +1593,7 @@ class ModelConfig:
             )
         return diff_sampling_param
 
-    @property
+    @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
-from typing import Any, cast
+from collections.abc import Callable, Mapping
+from functools import wraps
+from typing import Any, TypeVar, cast
 
 from typing_extensions import assert_never
 
@@ -41,6 +42,25 @@ from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
 
+T = TypeVar("T")
+
+
+def cache_if_not_none(func: Callable[..., T]) -> Callable[..., T]:
+    """Cache function results only if they are not None."""
+    cache_attr = f"_cached_{func.__name__}"
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        self = args[0]
+        if hasattr(self, cache_attr):
+            return getattr(self, cache_attr)
+        result = func(*args, **kwargs)
+        if result is not None:
+            setattr(self, cache_attr, result)
+        return result
+
+    return wrapper
+
 
 class InputPreprocessor:
     def __init__(
@@ -59,6 +79,7 @@ class InputPreprocessor:
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
+    @cache_if_not_none
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError(
@@ -67,6 +88,7 @@ class InputPreprocessor:
 
         return self.tokenizer
 
+    @cache_if_not_none
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
             logger.warning_once(
@@ -76,6 +98,7 @@ class InputPreprocessor:
 
         return self.tokenizer.bos_token_id
 
+    @cache_if_not_none
     def get_eos_token_id(self) -> int | None:
         if self.tokenizer is None:
             logger.warning_once(
@@ -85,6 +108,7 @@ class InputPreprocessor:
 
         return self.tokenizer.eos_token_id
 
+    @cache_if_not_none
     def get_decoder_start_token_id(self) -> int | None:
         """
         Obtain the decoder start token id employed by an encoder/decoder

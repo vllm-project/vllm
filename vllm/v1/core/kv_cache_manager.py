@@ -9,12 +9,26 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _CacheHitCache:
+    """
+    Stores the result of find_longest_cache_hit to avoid recomputing when
+    consecutive requests have identical block sequences.
+    """
+
+    last_block_hash: BlockHash
+    num_block_hashes: int
+    max_cache_hit_length: int
+    computed_blocks: tuple[list[KVCacheBlock], ...]
+    num_new_computed_tokens: int
 
 
 @dataclass
@@ -151,6 +165,10 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        # Cache for optimizing get_computed_blocks when consecutive requests
+        # have the same last block hash and max_cache_hit_length.
+        self._cache_hit_cache: _CacheHitCache | None = None
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -198,11 +216,34 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens = (
-            self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+
+        # Optimization: Reuse previous result when consecutive requests are the same.
+        if (
+            request.block_hashes
+            and self._cache_hit_cache is not None
+            and max_cache_hit_length == self._cache_hit_cache.max_cache_hit_length
+            and len(request.block_hashes) == self._cache_hit_cache.num_block_hashes
+            and request.block_hashes[-1] == self._cache_hit_cache.last_block_hash
+        ):
+            computed_blocks = self._cache_hit_cache.computed_blocks
+            num_new_computed_tokens = self._cache_hit_cache.num_new_computed_tokens
+        else:
+            computed_blocks, num_new_computed_tokens = (
+                self.coordinator.find_longest_cache_hit(
+                    request.block_hashes, max_cache_hit_length
+                )
             )
-        )
+            self._cache_hit_cache = (
+                _CacheHitCache(
+                    request.block_hashes[-1],
+                    len(request.block_hashes),
+                    max_cache_hit_length,
+                    computed_blocks,
+                    num_new_computed_tokens,
+                )
+                if request.block_hashes
+                else None
+            )
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -352,6 +393,7 @@ class KVCacheManager:
         """
         if not self.block_pool.reset_prefix_cache():
             return False
+        self._cache_hit_cache = None
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True

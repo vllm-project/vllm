@@ -396,6 +396,7 @@ class OpenAIServing:
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
+            skip_clone=True,  # Safe to reuse without cloning
         )
         all_beams = [
             BeamSearchSequence(
