@@ -159,15 +159,9 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        if self.method == "eagle3":
-            # Eagle3 affects the computation graph because it returns intermediate
-            # hidden states in addition to the final hidden state, and
-            # some eagle3 draft models may have different intermediate_size
-            if self.draft_model_config is not None:
-                factors.append(self.draft_model_config.compute_hash())
-            else:
-                factors.append("None")
-
+        # Eagle3 affects the computation graph because it returns intermediate
+        # hidden states in addition to the final hidden state.
+        factors.append(self.method == "eagle3")
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
