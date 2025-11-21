@@ -51,7 +51,7 @@ class CudagraphDispatcher:
             "cudagraph_mode piecewise cudagraphs is used, "
             "and attention should be in splitting_ops or "
             "inductor splitting should be used. "
-            f"cudagraph_mode={self.cudagraph_mode}, "
+            f"cudagraph_mode={self.compilation_config.cudagraph_mode}, "
             f"compilation_mode={self.compilation_config.mode}, "
             f"splitting_ops={self.compilation_config.splitting_ops}"
         )
