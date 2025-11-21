@@ -3,10 +3,9 @@
 from collections.abc import Callable
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.config.model import LogprobsMode
+from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.states import SamplingMetadata
