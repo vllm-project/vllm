@@ -228,6 +228,8 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        # resample video to target num_frames and fps
+        # - the minimum of the two will be used
         num_frames_to_sample = total_frames_num
         if num_frames > 0:
             num_frames_to_sample = min(num_frames, total_frames_num)
@@ -243,6 +245,7 @@ class OpenCVVideoBackend(VideoLoader):
             )
             frame_idx = uniform_sampled_frames.tolist()
 
+        # Convert to set for O(1) lookup performance
         frame_idx_set = set(frame_idx)
 
         # Only warn in sequential read if we are NOT going to try recovery
@@ -295,12 +298,17 @@ class OpenCVVideoBackend(VideoLoader):
                     remaining_missing,
                 )
 
+        # Use transformers transformers.video_utils.VideoMetadata format
+        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
+        # can cause incorrect timestamp calculation without num_frames=-1.
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
             "video_backend": "opencv",
             "frames_indices": valid_frame_indices,
+            # extra field used to control hf processor's video
+            # sampling behavior
             "do_sample_frames": valid_num_frames == total_frames_num,
         }
 
@@ -335,9 +343,12 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        # resample video to target num_frames
         max_frame_idx = total_frames_num - 1
         duration = duration or round(max_frame_idx / original_fps) + 1
 
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices_list: list[int]
         if duration <= max_duration:
             n = int(math.floor(duration * fps))
@@ -360,6 +371,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     }
                 )
 
+        # Convert to set for O(1) lookup performance
         frame_indices_set = set(frame_indices_list)
 
         # Only warn in sequential read if we are NOT going to try recovery
@@ -413,6 +425,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     remaining_missing,
                 )
 
+        # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
