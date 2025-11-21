@@ -1993,7 +1993,7 @@ class MoRIIOConnectorWorker:
 
             meta.remote_engine_id = remote_engine_id
 
-            self.get_engine_name_with_dp(remote_engine_id, 0)
+            dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
             if dp0_remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
