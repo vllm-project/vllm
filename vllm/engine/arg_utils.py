@@ -529,6 +529,7 @@ class EngineArgs:
         ModelConfig.override_pooler_config
     )
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
+    attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -582,6 +583,8 @@ class EngineArgs:
         # CompilationConfig object
         if isinstance(self.compilation_config, dict):
             self.compilation_config = CompilationConfig(**self.compilation_config)
+        if isinstance(self.attention_config, dict):
+            self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
@@ -1167,6 +1170,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
         )
+        vllm_group.add_argument("--attention-config", **vllm_kwargs["attention_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
@@ -1720,7 +1724,15 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
-        attention_config = AttentionConfig(backend=self.attention_backend)
+        # Attention config overrides
+        attention_config = copy.deepcopy(self.attention_config)
+        if self.attention_backend is not None:
+            if attention_config.backend is not None:
+                raise ValueError(
+                    "attention_backend and attention_config.backend "
+                    "are mutually exclusive"
+                )
+            attention_config.backend = self.attention_backend
 
         load_config = self.create_load_config()
 

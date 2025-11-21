@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import field_validator
 from pydantic.dataclasses import dataclass
@@ -71,53 +71,38 @@ class AttentionConfig:
             return AttentionBackendEnum[value.upper()]
         return value
 
-    def __post_init__(self) -> None:
+    def _set_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
+        """Set field from env var if set, with deprecation warning."""
         from vllm import envs
 
-        if self.backend is None:
-            self.backend = envs.VLLM_ATTENTION_BACKEND
-            if envs.is_set("VLLM_ATTENTION_BACKEND"):
-                logger.warning(
-                    "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
-                    "and will be removed in a future release. "
-                    "Please use --attention-backend CLI argument instead."
-                )
-        elif envs.is_set("VLLM_ATTENTION_BACKEND"):
-            logger.warning(
-                "Both --attention-backend CLI argument and "
-                "VLLM_ATTENTION_BACKEND environment variable are set. "
-                "--attention-backend will take precedence. VLLM_ATTENTION_BACKEND "
-                "is deprecated and will be removed in a future release."
+        if envs.is_set(env_var_name):
+            setattr(self, field_name, getattr(envs, env_var_name))
+            logger.warning_once(
+                f"Using {env_var_name} environment variable is deprecated "
+                "and will be removed in a future release. "
+                "Please use --attention-config CLI argument instead."
             )
 
-        if envs.is_set("VLLM_FLASH_ATTN_VERSION"):
-            self.flash_attn_version = envs.VLLM_FLASH_ATTN_VERSION
-
-        if envs.is_set("VLLM_V1_USE_PREFILL_DECODE_ATTENTION"):
-            self.v1_use_prefill_decode_attention = (
-                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-            )
-
-        if envs.is_set("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH"):
-            self.flash_attn_max_num_splits_for_cuda_graph = (
-                envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
-            )
-
-        if envs.is_set("VLLM_USE_CUDNN_PREFILL"):
-            self.use_cudnn_prefill = envs.VLLM_USE_CUDNN_PREFILL
-
-        if envs.is_set("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL"):
-            self.use_trtllm_ragged_deepseek_prefill = (
-                envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
-            )
-
-        if envs.is_set("VLLM_USE_TRTLLM_ATTENTION"):
-            self.use_trtllm_attention = envs.VLLM_USE_TRTLLM_ATTENTION
-
-        if envs.is_set("VLLM_DISABLE_FLASHINFER_PREFILL"):
-            self.disable_flashinfer_prefill = envs.VLLM_DISABLE_FLASHINFER_PREFILL
-
-        if envs.is_set("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION"):
-            self.flashinfer_disable_q_quantization = (
-                envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
-            )
+    def __post_init__(self) -> None:
+        self._set_from_env_if_set("backend", "VLLM_ATTENTION_BACKEND")
+        self._set_from_env_if_set("flash_attn_version", "VLLM_FLASH_ATTN_VERSION")
+        self._set_from_env_if_set(
+            "v1_use_prefill_decode_attention", "VLLM_V1_USE_PREFILL_DECODE_ATTENTION"
+        )
+        self._set_from_env_if_set(
+            "flash_attn_max_num_splits_for_cuda_graph",
+            "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
+        )
+        self._set_from_env_if_set("use_cudnn_prefill", "VLLM_USE_CUDNN_PREFILL")
+        self._set_from_env_if_set(
+            "use_trtllm_ragged_deepseek_prefill",
+            "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
+        )
+        self._set_from_env_if_set("use_trtllm_attention", "VLLM_USE_TRTLLM_ATTENTION")
+        self._set_from_env_if_set(
+            "disable_flashinfer_prefill", "VLLM_DISABLE_FLASHINFER_PREFILL"
+        )
+        self._set_from_env_if_set(
+            "flashinfer_disable_q_quantization",
+            "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
+        )
