@@ -2755,9 +2755,7 @@ class GPUModelRunner(
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = (
-                    batch_desc.num_reqs
-                    if batch_desc.num_reqs is not None
-                    else num_reqs
+                    batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -2806,7 +2804,7 @@ class GPUModelRunner(
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
-                batch_descriptor=batch_descriptor,
+                batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
@@ -3739,7 +3737,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp = (
+        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -3765,11 +3763,9 @@ class GPUModelRunner(
                 f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
             )
 
-        num_tokens_padded = batch_descriptor.num_tokens
+        num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = (
-            batch_descriptor.num_reqs
-            if batch_descriptor.num_reqs is not None
-            else num_reqs
+            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -3862,7 +3858,7 @@ class GPUModelRunner(
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
+                    batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices,
                 ),
             ):
