@@ -2232,7 +2232,7 @@ class MoRIIOConnectorWorker:
                 w += 1
 
         merged_l, merged_r, merged_s = self.merge_contiguous_blocks(
-            offset_local, offset_remote, sizes, assume_sorted=True
+            offset_local, offset_remote, sizes, assume_sorted=False
         )
         return merged_l, merged_r, merged_s
 
