@@ -47,10 +47,34 @@ EAGLE_SPEC_CONFIG = {
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "mistralai/Ministral-8B-Instruct-2410",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
@@ -97,7 +121,6 @@ def test_guided_decoding_deprecated():
     assert sp1.structured_outputs == guided_decoding
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
@@ -602,7 +625,6 @@ Make the response as short as possible.
                 )
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
     [
@@ -687,7 +709,6 @@ def test_structured_output_with_reasoning_matrices(
         jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
     unsupported_json_schema: dict[str, Any],
@@ -734,7 +755,6 @@ def test_structured_output_auto_mode(
         assert isinstance(parsed_json, dict)
 
 
-@pytest.mark.skip_global_cleanup
 def test_guidance_no_additional_properties():
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
