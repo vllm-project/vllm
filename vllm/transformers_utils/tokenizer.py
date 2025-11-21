@@ -200,12 +200,14 @@ def get_tokenizer(
 
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
+        logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
         )
     elif tokenizer_mode == "custom":
         from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
 
+        logger.debug_once(f"Loading CustomTokenizer from {tokenizer_name}")
         tokenizer = TokenizerRegistry.get_tokenizer(
             str(tokenizer_name),
             *args,
@@ -215,6 +217,7 @@ def get_tokenizer(
         )
     else:
         try:
+            logger.debug_once(f"Loading AutoTokenizer from {tokenizer_name}")
             tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_name,
                 *args,
