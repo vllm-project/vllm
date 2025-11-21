@@ -136,6 +136,8 @@ def test_w8a8_block_fp8_fused_moe(
 ):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
+    if current_platform.is_fp8_fnuz():
+        pytest.skip("Test requires e4m3fn and platform does not support it.")
 
     torch.manual_seed(seed)
 
@@ -193,6 +195,8 @@ def test_w8a8_block_fp8_fused_moe(
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch):
     if topk > E:
         pytest.skip(f"Skipping test: topk={topk} > E={E}")
+    if current_platform.is_fp8_fnuz():
+        pytest.skip("Test requires e4m3fn and platform does not support it.")
 
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
