@@ -49,20 +49,16 @@ def _create_vllm_config(
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1()
 
-    # Set max_cudagraph_capture_size from cudagraph_capture_sizes
-    #   (mimics VllmConfig.__post_init__)
+    # mimic VllmConfig.__post_init__
     if compilation_config.cudagraph_capture_sizes:
         compilation_config.max_cudagraph_capture_size = (
             compilation_config.cudagraph_capture_sizes[-1]
         )
 
-    # Initialize cudagraph sizes (required for pad_for_cudagraph)
-    compilation_config.post_init_cudagraph_sizes()
-
-    # Add pad_for_cudagraph method to mock
-    mock_config.pad_for_cudagraph = (
-        lambda batch_size: compilation_config.bs_to_padded_graph_size[batch_size]
-    )
+        compilation_config.post_init_cudagraph_sizes()
+        mock_config.pad_for_cudagraph = (
+            lambda batch_size: compilation_config.bs_to_padded_graph_size[batch_size]
+        )
 
     return mock_config
 
