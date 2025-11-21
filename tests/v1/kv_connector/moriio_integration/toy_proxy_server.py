@@ -16,12 +16,11 @@ from quart import Quart, make_response, request
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-prefill_instances = []
-decode_instances = []
+prefill_instances: list[dict] = []
+decode_instances: list[dict] = []
 request_nums = 0
 app = Quart(__name__)
 
-yield_chunk = set()
 IP_PORT_PATTERN = re.compile(r"//(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)")
 
 
@@ -200,7 +199,10 @@ async def handle_request():
         request_nums += 1
 
         def extract_ip_port_fast(url):
-            return IP_PORT_PATTERN.search(url).groups()
+            match = IP_PORT_PATTERN.search(url)
+            if not match:
+                raise ValueError(f"Invalid URL format: {url}")
+            return match.groups()
 
         req_data = await request.get_json()
         request_id = str(uuid.uuid4())

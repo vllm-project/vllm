@@ -4,7 +4,6 @@ import contextlib
 import logging
 import math
 import os
-import pickle
 import queue
 import threading
 import time
@@ -1673,7 +1672,7 @@ class MoRIIOConnectorWorker:
                     )  # send local mori io engine meta data
                     logger.debug("MoRIIO handshake listener sent metadata")
                     # now we send tensor meta data for each block
-                    buf = pickle.dumps(layer_name_to_local_kv_cache_metadata)
+                    buf = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
                     sock.send_multipart((identity, b"", buf))
                 elif msg == MoRIIOConstants.POP_DONE_RECV:
                     _, req_id = sock.recv_multipart()
@@ -1752,7 +1751,7 @@ class MoRIIOConnectorWorker:
                 assert 0, f"Unexpected frame! {received_frame = }"
             buf = received_frame[1]
             self.layer_name_to_remote_kv_cache_metadata[expected_engine_id] = (
-                pickle.loads(buf)
+                msgpack.loads(buf)
             )
 
             setup_agent_time = time.perf_counter()
