@@ -17,7 +17,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import BoolWithReason, config, getattr_iter
+from vllm.config.utils import BoolWithReason, BoolWithReasonGroup, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.transformers_utils.config import (
@@ -1784,48 +1784,50 @@ class ModelConfig:
     @property
     def is_chunked_prefill_supported(self) -> BoolWithReason:
         if self.is_encoder_decoder:
-            return ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL
+            return cp_reasons.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL
         elif self.pooler_config is not None:
             # for pooling models
             if self.attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
-                return POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                return (
+                    cp_reasons.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                )
             else:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    return POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
+                    return cp_reasons.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
                 elif pooling_type == "mean":
-                    return POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                    return cp_reasons.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
                 else:  # pooling_type == "last"
-                    return POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
+                    return cp_reasons.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
         else:
-            return GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
+            return cp_reasons.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
 
     @property
     def is_prefix_caching_supported(self) -> BoolWithReason:
         if self.is_encoder_decoder:
-            return ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
+            return apc_reasons.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
         elif self.is_hybrid:
-            return HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
+            return apc_reasons.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
         elif self.pooler_config is not None:
             # for pooling models
             if self.attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
-                return POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
+                return (
+                    apc_reasons.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
+                )
             else:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    return POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING
+                    return apc_reasons.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING
                 elif pooling_type == "mean":
-                    return (
-                        POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING
-                    )
+                    return apc_reasons.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING
                 else:  # pooling_type == "last"
-                    return POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING
+                    return apc_reasons.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING
         else:
-            return GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
+            return apc_reasons.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
@@ -2251,70 +2253,74 @@ def is_current_platform_chunked_prefill_supported() -> bool:
     )
 
 
-# is_chunked_prefill_supported
-GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons = BoolWithReasonGroup()
+cp_reasons.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=True, reason="Generative models support chunked prefill."
 )
-PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=False,
     reason="Prefill context parallel does not compatible with chunked prefill.",
 )
-ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=False, reason="Encoder_decoder models does not support chunked prefill."
 )
-POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=True, reason="Pooling models with causal attn support chunked prefill."
 )
-POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=False,
     reason="Pooling models with bidirectional attn does not support chunked prefill.",
 )
-POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=False,
     reason="Pooling models with all pooling does not support chunked prefill.",
 )
-POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    value=False,
-    reason="Pooling models with mean pooling does not support chunked prefill.",
+cp_reasons.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = (
+    BoolWithReason(
+        value=False,
+        reason="Pooling models with mean pooling does not support chunked prefill.",
+    )
 )
-PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+cp_reasons.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
     value=False,
     reason="ARM and POWER, S390X and RISC-V CPUs does not support chunked prefill.",
 )
 
 
-# is_prefix_caching_supported
-GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons = BoolWithReasonGroup()
+apc_reasons.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=True, reason="Generative models support prefix caching."
 )
-HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False,
     reason="Hybrid models does not support prefix caching "
     "since the feature is still experimental.",
 )
-PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False,
     reason="Prefill context parallel does not compatible with prefix caching.",
 )
-ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False, reason="Encoder_decoder models does not support prefix caching."
 )
-POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=True, reason="Pooling models with causal attn support prefix caching."
 )
-POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False,
     reason="Pooling models with bidirectional attn does not support prefix caching.",
 )
-POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False,
     reason="Pooling models with all pooling does not support prefix caching.",
 )
-POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    value=False,
-    reason="Pooling models with mean pooling does not support prefix caching.",
+apc_reasons.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING = (
+    BoolWithReason(
+        value=False,
+        reason="Pooling models with mean pooling does not support prefix caching.",
+    )
 )
-PLATFORM_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+apc_reasons.PLATFORM_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
     value=False,
     reason="ARM and POWER, S390X and RISC-V CPUs does not support prefix caching.",
 )

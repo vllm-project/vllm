@@ -309,3 +309,7 @@ class BoolWithReason:
     def raise_if_false(self):
         if not self.value:
             raise ValueError(self.reason)
+
+
+class BoolWithReasonGroup:
+    pass

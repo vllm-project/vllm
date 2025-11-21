@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
@@ -106,7 +105,7 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: SIM117
         with vllm_runner(
             model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
         ) as vllm_model:
