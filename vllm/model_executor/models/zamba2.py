@@ -128,7 +128,6 @@ class Zamba2Attention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.num_hybrid_layers = num_hybrid_layers
-        self.rope_theta = config.rope_theta
 
         self.attention_hidden_size = config.attention_hidden_size
         self.total_num_attention_heads = config.num_attention_heads
@@ -233,8 +232,7 @@ class Zamba2Attention(nn.Module):
                 head_size=self.attention_head_dim,
                 rotary_dim=self.attention_head_dim,
                 max_position=config.max_position_embeddings,
-                base=self.rope_theta,
-                rope_scaling=None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=True,
             )
 

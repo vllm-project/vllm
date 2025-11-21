@@ -141,8 +141,7 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        if self.model_config.seed is not None:
-            xm.set_rng_state(self.model_config.seed, self.device)
+        xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -332,7 +331,7 @@ class TPUWorker:
             world_size=parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
-            distributed_init_method=distributed_init_method,
+            distributed_init_method=distributed_init_method or "env://",
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(

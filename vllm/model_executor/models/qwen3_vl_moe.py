@@ -15,7 +15,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,7 +29,9 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
-from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
+    Qwen3VLMoeConfig,
+)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -44,7 +46,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
-from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
+from .interfaces import MixtureOfExperts
+from .qwen3_moe import (
+    Qwen3MoeForCausalLM,
+    Qwen3MoeModel,
+    Qwen3MoeSparseMoeBlock,
+)
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
@@ -344,12 +351,56 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
+class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.language_model.model.layers:
+            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
+    def set_moe_parameters(self):
+        self.expert_weights = []
+
+        self.moe_layers = []
+        example_moe = None
+        for layer in self.language_model.model.layers:
+            if hasattr(layer, "mlp") and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
+        if example_moe is None:
+            raise RuntimeError("No Qwen3Moe layer found in the language_model.")
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3VLMultiModalProcessor,
     info=Qwen3VLMoeProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+class Qwen3VLMoeForConditionalGeneration(
+    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -413,3 +464,6 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        # Set MoE hyperparameters
+        self.set_moe_parameters()

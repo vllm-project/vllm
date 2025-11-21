@@ -116,9 +116,18 @@ class EagleProposer:
         )
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
-            # M-RoPE need (3, max_num_tokens)
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -487,7 +496,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -502,7 +511,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -513,9 +522,10 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        return torch.tensor(
+        next_token_ids = torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
+        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -1019,8 +1029,11 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    and torch.equal(
-                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    and torch.allclose(
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
+                        rtol=1e-5,
+                        atol=1e-7,
                     )
                 ):
                     share_embeddings = True

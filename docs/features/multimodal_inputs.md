@@ -365,6 +365,8 @@ You must enable this feature via `enable_mm_embeds=True`.
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+#### Image Embeddings
+
 ??? code
 
     ```python
@@ -434,6 +436,36 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": mm_data,
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
+#### Audio Embeddings
+
+You can pass pre-computed audio embeddings similar to image embeddings:
+
+??? code
+
+    ```python
+    from vllm import LLM
+    import torch
+
+    # Enable audio embeddings support
+    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+
+    # Load pre-computed audio embeddings
+    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    audio_embeds = torch.load(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"audio": audio_embeds},
     })
 
     for o in outputs:
