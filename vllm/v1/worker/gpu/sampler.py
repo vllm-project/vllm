@@ -128,7 +128,7 @@ def gumbel_sample(
     pos: torch.Tensor,  # [num_reqs]
 ) -> torch.Tensor:
     num_reqs, vocab_size = logits.shape
-    BLOCK_SIZE = 8192
+    BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = torch.empty(
         num_reqs,
