@@ -71,6 +71,8 @@ class TestOneTokenBadWord:
 class TestTwoTokenBadWord:
     # Another model (with a different tokenizer behaviour)
     MODEL = "distilbert/distilgpt2"
+    #MODEL = "microsoft/Phi-3.5-mini-instruct"
+    #MODEL = "openai-community/gpt2"
 
     PROMPT = "How old are you? I am 10"
     TARGET_TOKEN1 = "years"
@@ -94,7 +96,7 @@ class TestTwoTokenBadWord:
         )[0]
 
     def test_two_token_bad_word(self, vllm_runner):
-        with vllm_runner(self.MODEL, dtype="half") as llm:
+        with vllm_runner(self.MODEL, dtype="half", enforce_eager=True) as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[:2] == [
                 self.target_token_id1,
