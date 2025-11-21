@@ -78,8 +78,9 @@ class AttentionConfig:
             setattr(self, field_name, getattr(envs, env_var_name))
             logger.warning_once(
                 f"Using {env_var_name} environment variable is deprecated "
-                "and will be removed in a future release. "
-                "Please use --attention-config CLI argument instead."
+                "and will be removed in v0.13.0 or v1.0.0, whichever is soonest. "
+                f"Please use --attention-config.{field_name} command line argument or "
+                f"AttentionConfig.{field_name} config field instead."
             )
 
     def __post_init__(self) -> None:
