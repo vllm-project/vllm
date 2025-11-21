@@ -32,7 +32,7 @@ In V1, the `seed` parameter defaults to `0` which sets the random state for each
 It is impossible to un-specify a seed for V1 because different workers need to sample the same outputs
 for workflows such as speculative decoding. For more information, see: <https://github.com/vllm-project/vllm/pull/17929>
 
-!! note
+!!! note
 
     The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM 
     only if the workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
