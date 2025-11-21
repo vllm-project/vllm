@@ -14,6 +14,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttnTypeStr
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -1765,7 +1766,7 @@ class ModelConfig:
         return max_model_len
 
     @property
-    def attn_type(self) -> str:
+    def attn_type(self) -> AttnTypeStr:
         if self.pooler_config is not None:
             pooling_type = self._model_info.default_pooling_type.lower()
             if pooling_type == "cls":

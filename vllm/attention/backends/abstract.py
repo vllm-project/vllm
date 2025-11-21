@@ -2,7 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Generic,
+    Literal,
+    Protocol,
+    TypeVar,
+    get_args,
+)
 
 import torch
 
@@ -29,6 +37,9 @@ class AttentionType:
     """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
+
+
+AttnTypeStr = Literal["decoder", "encoder", "encoder_only", "encoder_decoder"]
 
 
 class MultipleOf:

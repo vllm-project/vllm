@@ -24,6 +24,7 @@ import torch.nn as nn
 import transformers
 
 from vllm import envs
+from vllm.attention.backends.abstract import AttnTypeStr
 from vllm.config import (
     ModelConfig,
     iter_architecture_defaults,
@@ -31,6 +32,7 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
+from vllm.model_executor.layers.pooler import PoolingTypeStr
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 
 from .interfaces import (
@@ -499,8 +501,8 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
-    attn_type: str
-    default_pooling_type: str
+    attn_type: AttnTypeStr
+    default_pooling_type: PoolingTypeStr
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
