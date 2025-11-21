@@ -1346,26 +1346,6 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
-    def create_attention_config(self) -> AttentionConfig:
-        """Create attention configuration.
-
-        This method reads from environment variables to maintain backward
-        compatibility with existing deployments. The following attention-related
-        environment variables are respected and applied in
-        AttentionConfig.__post_init__:
-        - VLLM_ATTENTION_BACKEND (deprecated, use --attention-backend instead)
-        - VLLM_FLASH_ATTN_VERSION
-        - VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-        - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
-        - VLLM_USE_CUDNN_PREFILL
-        - VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
-        - VLLM_USE_TRTLLM_ATTENTION
-        - VLLM_DISABLE_FLASHINFER_PREFILL
-        - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
-        """
-
-        return AttentionConfig(backend=self.attention_backend)
-
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
