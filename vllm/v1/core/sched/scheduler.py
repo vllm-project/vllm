@@ -39,7 +39,8 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.perf import ModelMetrics
+from vllm.v1.metrics.stats import PerfStats, PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -187,6 +188,15 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=self.pcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+
+        # Used to derive model's MFU stats for each SchedulerOutput
+        self.perf_metrics: ModelMetrics | None
+        try:
+            self.perf_metrics = ModelMetrics(vllm_config)
+            logger.info("Successfully initialized ModelMetrics")
+        except ValueError as e:
+            logger.info("Failed to initialize ModelMetrics due to %s", e)
+            self.perf_metrics = None
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -975,6 +985,11 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        perf_stats: PerfStats | None = None
+        if self.perf_metrics:
+            perf_stats = self.perf_metrics.get_step_perf_stats(
+                scheduler_output, per_gpu=True
+            )
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1159,7 +1174,9 @@ class Scheduler(SchedulerInterface):
             finished_req_ids.clear()
 
         if (
-            stats := self.make_stats(spec_decoding_stats, kv_connector_stats)
+            stats := self.make_stats(
+                spec_decoding_stats, kv_connector_stats, perf_stats
+            )
         ) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
@@ -1323,6 +1340,7 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
+        perf_stats: PerfStats | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1337,6 +1355,7 @@ class Scheduler(SchedulerInterface):
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
+            perf_stats=perf_stats,
         )
 
     def make_spec_decoding_stats(

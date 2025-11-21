@@ -23,6 +23,7 @@ from vllm.v1.metrics.stats import (
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
+    PerfStats,
     SchedulerStats,
 )
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -111,6 +112,12 @@ class LoggingStatLogger(StatLoggerBase):
         self.engine_is_idle = False
         self.aggregated = False
 
+        self.has_perf_stats = False
+        self.last_avg_tflops_per_gpu = 0.0
+        self.last_avg_gbps_per_gpu = 0.0
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
     def _reset(self, now):
         self.last_log_time = now
 
@@ -119,6 +126,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.total_num_flops_per_gpu: int = 0
+        self.total_read_bytes_per_gpu: int = 0
+        self.total_write_bytes_per_gpu: int = 0
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
@@ -126,6 +136,15 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+
+    def _enable_perf_stats(self) -> bool:
+        return True
+
+    def _track_perf_stats(self, perf_stats: PerfStats) -> None:
+        self.has_perf_stats = True
+        self.total_num_flops_per_gpu += perf_stats.num_flops
+        self.total_read_bytes_per_gpu += perf_stats.num_read_bytes
+        self.total_write_bytes_per_gpu += perf_stats.num_write_bytes
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -163,6 +182,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.kv_connector_logging.observe(kv_connector_stats)
             if not self.aggregated:
                 self.last_scheduler_stats = scheduler_stats
+            if scheduler_stats.perf_stats:
+                self._track_perf_stats(scheduler_stats.perf_stats)
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
@@ -170,6 +191,18 @@ class LoggingStatLogger(StatLoggerBase):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
+
+        delta_time = now - self.last_log_time
+        delta_time_per_gpu = delta_time / self.pp_size
+
+        self.last_avg_tflops_per_gpu = (
+            self.total_num_flops_per_gpu / delta_time_per_gpu / 1e12
+        )
+        self.last_avg_gbps_per_gpu = (
+            (self.total_read_bytes_per_gpu + self.total_write_bytes_per_gpu)
+            / delta_time_per_gpu
+            / 1e9
+        )
 
         self._reset(now)
         self.engine_is_idle = not any(
@@ -229,6 +262,16 @@ class LoggingStatLogger(StatLoggerBase):
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
+
+        if self.has_perf_stats and self._enable_perf_stats():
+            log_parts.append("MFU: %.1f TF/s/GPU %.1f GB/s/GPU")
+            log_args.extend(
+                [
+                    self.last_avg_tflops_per_gpu,
+                    self.last_avg_gbps_per_gpu,
+                ]
+            )
+
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
@@ -267,6 +310,18 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
     @property
     def log_prefix(self):
         return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+
+    def _enable_perf_stats(self) -> bool:
+        # Enable only when DP==1 for multiple reasons
+        # - Currently, LoggingStatLogger will not get instantiated and only
+        #   AggregatedLoggingStatLogger will be used in case of DP==1 and
+        #   if entered from FB-entrypoint.
+        # - When DP>1, both AggregatedStatLogger and LoggingStatLogger will
+        #   be used. But AggregatedStatLogger's per-gpu MFU stats can be misleading
+        #   because all stats are "added" across engines, which is a wrong arithmetic
+        #   for per-GPU MFU stats. So we disable perf stats in this class in those
+        #   cases and only emit MFU stats from per-engine LoggingStatLogger.
+        return self.vllm_config.parallel_config.data_parallel_size == 1
 
     def record(
         self,

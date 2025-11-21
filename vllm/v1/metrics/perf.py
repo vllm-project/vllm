@@ -18,6 +18,8 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     get_kv_cache_torch_dtype,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.stats import PerfStats
 
 logger = init_logger(__name__)
 
@@ -861,6 +863,61 @@ class ModelMetrics:
             }
             total.update(prefixed)
         return total
+
+    def get_perf_stats(self, ctx: ExecutionContext, per_gpu: bool = True) -> PerfStats:
+        return PerfStats(
+            self.get_num_flops(ctx, per_gpu),
+            self.get_read_bytes(ctx, per_gpu),
+            self.get_write_bytes(ctx, per_gpu),
+        )
+
+    def get_step_perf_stats(
+        self, scheduler_output: SchedulerOutput, per_gpu: bool = True
+    ) -> PerfStats:
+        """
+        Calculate perf stats for the current step based on scheduled tokens.
+        """
+
+        perf_stats = PerfStats()
+
+        # Process new requests (these are in prefill phase)
+        for new_req in scheduler_output.scheduled_new_reqs:
+            req_id = new_req.req_id
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if num_tokens == 0:
+                continue
+
+            # For new requests, context_len = num_computed_tokens + num_tokens
+            # num_computed_tokens represents previously computed tokens in the sequence
+            context_len = new_req.num_computed_tokens + num_tokens
+            ctx = ExecutionContext(
+                num_tokens=num_tokens,
+                context_len=context_len,
+                is_prefill=True,
+            )
+            perf_stats += self.get_perf_stats(ctx, per_gpu)
+
+        # Process cached requests (continuing requests)
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if num_tokens == 0:
+                continue
+
+            # For cached requests, we have the current num_computed_tokens
+            num_computed_tokens = cached_reqs.num_computed_tokens[i]
+            context_len = num_computed_tokens + num_tokens
+
+            # Cached requests are typically in decode phase (num_tokens == 1)
+            # unless they're doing chunked prefill (num_tokens > 1)
+            is_prefill = num_tokens > 1
+            ctx = ExecutionContext(
+                num_tokens=num_tokens, context_len=context_len, is_prefill=is_prefill
+            )
+
+            perf_stats += self.get_perf_stats(ctx, per_gpu)
+
+        return perf_stats
 
 
 ## util functions
