@@ -113,11 +113,6 @@ class VideoLoader:
                 valid_num_frames,
             )
 
-        assert i == valid_num_frames, (
-            f"Expected reading {valid_num_frames} frames, "
-            f"but only loaded {i} frames from video."
-        )
-
         return frames[:valid_num_frames], valid_num_frames, valid_frame_indices
 
 
