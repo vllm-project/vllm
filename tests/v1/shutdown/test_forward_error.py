@@ -6,7 +6,11 @@ import asyncio
 
 import pytest
 
-from tests.utils import check_gpu_memory_usage, wait_for_gpu_memory_to_clear
+from tests.utils import (
+    check_gpu_memory_usage,
+    create_new_process_for_each_test,
+    wait_for_gpu_memory_to_clear,
+)
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
@@ -104,39 +108,55 @@ async def test_async_llm_model_error(
     async_llm.shutdown()
 
 
-@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
-@pytest.mark.parametrize("enable_multiprocessing", [False, True])
-@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-@pytest.mark.parametrize("model", MODELS)
-def test_llm_model_error(
-    monkeypatch, tensor_parallel_size: int, enable_multiprocessing: bool, model: str
-) -> None:
-    """Test that LLM propagates a forward pass error and frees memory."""
-    if cuda_device_count_stateless() < tensor_parallel_size:
-        pytest.skip(reason="Not enough CUDA devices")
-    if not enable_multiprocessing:  # TODO: remove this skip
-        pytest.skip(reason="Skip multiprocessing=False - must run test in subprocess")
-
+def _test_llm_model_error(
+    monkeypatch, tensor_parallel_size: int, model: str, expected_exception: type
+):
     devices = list(range(tensor_parallel_size))
     check_gpu_memory_usage(devices)
 
-    with monkeypatch.context() as m:
-        MP_VALUE = "1" if enable_multiprocessing else "0"
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
+    # Monkeypatch an error in the model.
+    assert_mp_fork_context()
+    monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
 
-        # Monkeypatch an error in the model.
-        assert_mp_fork_context()
-        m.setattr(LlamaForCausalLM, "forward", evil_forward)
+    llm = LLM(
+        model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
+    )
 
-        llm = LLM(
-            model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
-        )
+    with pytest.raises(expected_exception):
+        llm.generate("Hello my name is Robert and I")
 
-        with pytest.raises(EngineDeadError if enable_multiprocessing else Exception):
-            llm.generate("Hello my name is Robert and I")
+    # Confirm all the processes are cleaned up.
+    wait_for_gpu_memory_to_clear(
+        devices=devices,
+        threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+    )
 
-        # Confirm all the processes are cleaned up.
-        wait_for_gpu_memory_to_clear(
-            devices=devices,
-            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
-        )
+
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+@pytest.mark.parametrize("model", MODELS)
+def test_llm_model_error(monkeypatch, tensor_parallel_size: int, model: str) -> None:
+    """Test that LLM propagates a forward pass error and frees memory."""
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+
+    _test_llm_model_error(monkeypatch, tensor_parallel_size, model, EngineDeadError)
+
+
+@pytest.mark.skip(reason="FIXME - this is currently broken")
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+@pytest.mark.parametrize("model", MODELS)
+@create_new_process_for_each_test()  # Avoid initing CUDA in this process with TP=1
+def test_llm_model_error_without_multiprocessing(
+    monkeypatch, tensor_parallel_size: int, model: str
+) -> None:
+    """Test that LLM forward pass error, but without multiprocessing."""
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    _test_llm_model_error(monkeypatch, tensor_parallel_size, model, Exception)
