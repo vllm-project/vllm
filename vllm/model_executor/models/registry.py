@@ -18,7 +18,7 @@ from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
@@ -36,6 +36,9 @@ from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_mo
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.model_executor.layers.pooler import PoolingTypeStr
+else:
+    AttnTypeStr = Any
+    PoolingTypeStr = Any
 
 
 from .interfaces import (

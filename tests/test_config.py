@@ -561,48 +561,48 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
         ),
         (
             "BAAI/bge-base-en",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         (
             "boltuix/NeuroBERT-NER",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         (
             "intfloat/e5-small",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
         ),
         (
             "google/siglip-base-patch16-224",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
         # generate models
@@ -619,7 +619,7 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         # encoder_decoder models
         (
             "openai/whisper-small",
-            config_model.ENCODER_DECODER_NOT_SUPPORT_CHUNKED_PREFILL,
+            config_model.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_decoder",
         ),
     ],
@@ -638,48 +638,48 @@ def test_is_chunked_prefill_supported(
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
         ),
         (
             "BAAI/bge-base-en",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         (
             "boltuix/NeuroBERT-NER",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         (
             "intfloat/e5-small",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
-            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
         ),
         (
             "google/siglip-base-patch16-224",
-            config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
         # generate models
@@ -696,7 +696,7 @@ def test_is_chunked_prefill_supported(
         # encoder_decoder models
         (
             "openai/whisper-small",
-            config_model.ENCODER_DECODER_NOT_SUPPORT_PREFIX_CACHING,
+            config_model.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_decoder",
         ),
     ],
