@@ -31,7 +31,6 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
-import vllm.config.model as config_model
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
@@ -72,6 +71,8 @@ from vllm.config.model import (
     RunnerOption,
     TaskOption,
     TokenizerMode,
+    apc_reasons,
+    cp_reasons,
     is_current_platform_chunked_prefill_supported,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
@@ -1902,18 +1903,18 @@ class EngineArgs:
 
         if self.prefill_context_parallel_size > 1:
             is_chunked_prefill_supported = (
-                config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
+                cp_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
             )
             is_prefix_caching_supported = (
-                config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
+                apc_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if not is_current_platform_chunked_prefill_supported():
             is_chunked_prefill_supported = (
-                config_model.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
+                cp_reasons.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
             )
             is_prefix_caching_supported = (
-                config_model.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
+                apc_reasons.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if self.enable_chunked_prefill is None:
