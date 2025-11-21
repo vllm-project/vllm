@@ -1120,7 +1120,27 @@ class DPAsyncMPClient(AsyncMPClient):
                         continue
 
                     # Update local load-balancing state.
-                    counts, wave, running = msgspec.msgpack.decode(buf)
+                    decoded = msgspec.msgpack.decode(buf)
+                    
+                    # Handle both old format (3 items) and new format (4 items)
+                    if len(decoded) == 4:
+                        counts, wave, running, masked_ranks = decoded
+                        
+                        # Update masked ranks tracking
+                        old_masked = self.masked_ranks.copy()
+                        self.masked_ranks = set(masked_ranks)
+                        
+                        # Log when masked ranks change
+                        if masked_ranks != list(old_masked):
+                            logger.info(
+                                "[GPU_FT] Load balancer: Updated masked ranks: %s "
+                                "(will not route requests to these ranks)",
+                                masked_ranks if masked_ranks else "none"
+                            )
+                    else:
+                        # Old format compatibility
+                        counts, wave, running = decoded
+                    
                     self.current_wave = wave
                     self.engines_running = running
                     if counts is not None:
@@ -1172,6 +1192,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
+        
+        # Track which DP ranks are masked (GPU unhealthy)
+        # Updated from SchedulerStats published by engines
+        self.masked_ranks: set[int] = set()
 
         super().__init__(
             vllm_config,
@@ -1200,6 +1224,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
+                
+                # Skip masked ranks (GPU unhealthy)
+                if idx in self.masked_ranks:
+                    logger.debug(
+                        "[GPU_FT] Skipping masked DP rank %d in load balancing",
+                        idx
+                    )
+                    continue
+                
                 waiting, running = current_counts[idx]
                 score = waiting * 4 + running
                 if score < min_score:

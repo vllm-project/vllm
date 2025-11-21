@@ -1168,6 +1168,38 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
+    def check_if_masked_by_eplb(self) -> bool:
+        """
+        Check if this DP rank is in EPLB's masked_ranks.
+        
+        NOTE: This implementation supports TP=1 only for now.
+        For TP=1: ep_rank == dp_rank, so we check if dp_rank is masked.
+        For TP>1: Would need to check all TP ranks within this DP rank.
+        
+        Returns:
+            True if this rank is masked (GPU unhealthy), False otherwise
+        """
+        try:
+            # Access EPLB state through model_executor
+            # Path: model_executor -> driver_worker -> model_runner -> eplb_state
+            eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+            
+            if eplb_state is None:
+                return False
+            
+            # Check if my dp_rank is in masked_ranks
+            return self.dp_rank in eplb_state.masked_ranks
+            
+        except AttributeError:
+            # Different executor type or EPLB not initialized
+            return False
+        except Exception as e:
+            logger.debug(
+                "DP rank %d: Cannot access EPLB masked_ranks: %s",
+                self.dp_rank, e
+            )
+            return False
+    
     def shutdown(self):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
@@ -1207,10 +1239,34 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Publish our request counts (if they've changed).
         counts = self.scheduler.get_request_counts()
-        if counts != self.last_counts:
+        
+        # Check if this rank is masked (GPU unhealthy)
+        is_masked = self.check_if_masked_by_eplb()
+        
+        if counts != self.last_counts or is_masked:
             self.last_counts = counts
+            
+            # Log when masked status changes
+            if is_masked and not getattr(self, '_last_masked_status', False):
+                logger.warning(
+                    "[GPU_FT] DP rank %d: Publishing masked status (GPU unhealthy). "
+                    "Load balancer will stop routing requests to this rank.",
+                    self.dp_rank
+                )
+                self._last_masked_status = True
+            elif not is_masked and getattr(self, '_last_masked_status', False):
+                logger.info(
+                    "[GPU_FT] DP rank %d: Publishing unmasked status (GPU recovered). "
+                    "Load balancer will resume routing requests to this rank.",
+                    self.dp_rank
+                )
+                self._last_masked_status = False
+            
             stats = SchedulerStats(
-                *counts, step_counter=self.step_counter, current_wave=self.current_wave
+                *counts,
+                step_counter=self.step_counter,
+                current_wave=self.current_wave,
+                is_masked=is_masked
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -1234,6 +1290,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                # Masked ranks also run dummy to maintain EPLB state synchronization.
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.

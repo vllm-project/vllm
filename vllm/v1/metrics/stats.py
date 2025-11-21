@@ -160,6 +160,9 @@ class SchedulerStats:
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
+    
+    # Track if this rank is masked
+    is_masked: bool = False
 
     kv_cache_usage: float = 0.0
 
