@@ -330,14 +330,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "TritonAttentionImpl"
+                "Encoder self-attention is not implemented for TritonAttentionImpl"
             )
-
+        self.attn_type = attn_type
         self.fp8_dtype = current_platform.fp8_dtype()
 
         self.sinks = sinks
@@ -398,7 +395,11 @@ class TritonAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
 
-        if self.kv_sharing_target_layer_name is None:
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             if self.kv_cache_dtype.startswith("fp8"):
@@ -431,7 +432,7 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
-
+        
         BLOCK_M = attn_metadata.BLOCK_M
         BLOCK_Q = attn_metadata.BLOCK_Q
         num_q_blocks = attn_metadata.num_q_blocks
@@ -439,7 +440,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         seq_threshold_3D = attn_metadata.seq_threshold_3D
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+        descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
 
         unified_attention(
             q=query[:num_actual_tokens],

@@ -7,6 +7,7 @@ fp8 block-quantized case.
 """
 
 import dataclasses
+from contextlib import contextmanager
 
 import pytest
 import torch.distributed
@@ -14,6 +15,7 @@ from torch.distributed import ProcessGroup
 from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
@@ -21,7 +23,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
+)
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
 
 from ...utils import multi_gpu_test
@@ -55,6 +61,23 @@ requires_deep_gemm = pytest.mark.skipif(
 )
 
 P = ParamSpec("P")
+
+
+@contextmanager
+def with_dp_metadata(M: int, world_size: int):
+    num_tokens_across_dp = torch.tensor([M] * world_size, device="cpu", dtype=torch.int)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.data_parallel_size = world_size
+    vllm_config.parallel_config.enable_expert_parallel = True
+
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=M,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        yield
 
 
 def next_power_of_2(x):
@@ -281,18 +304,21 @@ def deepep_deepgemm_moe_impl(
         quant_config=quant_config,
     )
 
-    out = mk.forward(
-        hidden_states=test_tensors.rank_tokens,
-        w1=w1,
-        w2=w2,
-        topk_weights=test_tensors.topk_weights,
-        topk_ids=test_tensors.topk,
-        inplace=False,
-        activation="silu",
-        global_num_experts=num_experts,
-        expert_map=build_expert_map(),
-        apply_router_weight_on_input=False,
-    )
+    with with_dp_metadata(
+        M=test_tensors.rank_tokens.size(0), world_size=pgi.world_size
+    ):
+        out = mk.forward(
+            hidden_states=test_tensors.rank_tokens,
+            w1=w1,
+            w2=w2,
+            topk_weights=test_tensors.topk_weights,
+            topk_ids=test_tensors.topk,
+            inplace=False,
+            activation="silu",
+            global_num_experts=num_experts,
+            expert_map=build_expert_map(),
+            apply_router_weight_on_input=False,
+        )
     return out
 
 
@@ -413,19 +439,16 @@ NUM_EXPERTS = [32]
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(
-    is_deep_gemm_e8m0_used(), reason="Skipping test for Blackwell DeepGEMM"
-)
 def test_ht_deepep_deepgemm_moe(
     mnk: tuple[int, int, int],
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
+    disable_deepgemm_ue8m0,
 ):
     """
     Tests for High-Throughput DeepEP + DeepGemm integration.
     """
-    import deep_gemm
 
     m, n, k = mnk
     current_platform.seed_everything(7)
@@ -433,7 +456,7 @@ def test_ht_deepep_deepgemm_moe(
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
 
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
+    block_m = get_mk_alignment_for_contiguous_layout()[0]
     block_size = [block_m, block_m]
 
     world_size, dp_size = world_dp_size
@@ -487,9 +510,6 @@ USE_FP8_DISPATCH = [False]
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(
-    is_deep_gemm_e8m0_used(), reason="Skipping test for Blackwell DeepGEMM"
-)
 def test_ll_deepep_deepgemm_moe(
     mnk: tuple[int, int, int],
     num_experts: int,
@@ -497,10 +517,12 @@ def test_ll_deepep_deepgemm_moe(
     use_fp8_dispatch: bool,
     block_size: list[int],
     world_dp_size: tuple[int, int],
+    disable_deepgemm_ue8m0,
 ):
     """
     Tests for Low-Latency DeepEP + DeepGemm integration.
     """
+    assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk
     current_platform.seed_everything(7)

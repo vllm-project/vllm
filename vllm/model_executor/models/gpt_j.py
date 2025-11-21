@@ -95,13 +95,12 @@ class GPTJAttention(nn.Module):
         scaling = self.head_size**-0.5
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
-        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
             rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
             is_neox_style=False,
         )
         self.attn = Attention(

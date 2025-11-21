@@ -140,21 +140,22 @@ CONFIGS: dict[str, ServerConfig] = {
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
     },
-    # V1 Test: Passing locally but failing in CI. This runs the
-    # V0 Engine because of CPU offloading. Need to debug why.
+    # FIXME: This test currently fails, need to debug why.
     # "granite20b": {
-    #     "model":
-    #     "mbayser/granite-20b-functioncalling-FP8-KV",
+    #     "model": "mbayser/granite-20b-functioncalling-FP8-KV",
     #     "arguments": [
-    #         "--tool-call-parser", "granite-20b-fc", "--chat-template",
-    #         str(VLLM_PATH /
-    #             "examples/tool_chat_template_granite_20b_fc.jinja"),
-    #         "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
+    #         "--tool-call-parser",
+    #         "granite-20b-fc",
+    #         "--chat-template",
+    #         str(VLLM_PATH / "examples/tool_chat_template_granite_20b_fc.jinja"),
+    #         "--max_num_seqs",
+    #         "1",
+    #         "--enforce-eager",
+    #         "--cpu-offload-gb",
+    #         "20",
     #     ],
-    #     "supports_parallel":
-    #     False,
-    #     "supports_rocm":
-    #     False,
+    #     "supports_parallel": False,
+    #     "supports_rocm": False,
     # },
     "granite-3.0-8b": {
         "model": "ibm-granite/granite-3.0-8b-instruct",

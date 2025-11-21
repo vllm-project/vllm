@@ -4,6 +4,6 @@
 
 --8<-- "docs/cli/json_tip.inc.md"
 
-## Options
+## Arguments
 
---8<-- "docs/argparse/bench_sweep_serve_sla.md"
+--8<-- "docs/argparse/bench_sweep_serve_sla.inc.md"

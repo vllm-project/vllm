@@ -224,6 +224,6 @@ snakeviz expensive_function.prof
 
 Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
 
-- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
 - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
   collected objects for each gc.collect

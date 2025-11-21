@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import logging
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -39,7 +40,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import Device, EngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicError,
     AnthropicErrorResponse,
@@ -65,6 +66,8 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorResponse,
     PoolingBytesResponse,
     PoolingRequest,
@@ -96,6 +99,7 @@ from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
+from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -357,6 +361,10 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def generate_tokens(request: Request) -> ServingTokens | None:
+    return request.app.state.serving_tokens
+
+
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
@@ -384,6 +392,84 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
+
+
+@router.post("/pause")
+async def pause_generation(
+    raw_request: Request,
+    wait_for_inflight_requests: bool = Query(False),
+    clear_cache: bool = Query(True),
+) -> JSONResponse:
+    """Pause generation requests to allow weight updates.
+
+    Args:
+        wait_for_inflight_requests: When ``True`` waits for in-flight
+            requests to finish before pausing. When ``False`` (default),
+            aborts any in-flight requests immediately.
+        clear_cache: Whether to clear KV/prefix caches after draining.
+    """
+
+    engine = engine_client(raw_request)
+
+    try:
+        await engine.pause_generation(
+            wait_for_inflight_requests=wait_for_inflight_requests,
+            clear_cache=clear_cache,
+        )
+        return JSONResponse(
+            content={"status": "paused"},
+            status_code=HTTPStatus.OK.value,
+        )
+
+    except ValueError as err:
+        return JSONResponse(
+            content={"error": str(err)},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to pause generation")
+        return JSONResponse(
+            content={"error": f"Failed to pause generation: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
+@router.post("/resume")
+async def resume_generation(raw_request: Request) -> JSONResponse:
+    """Resume generation after a pause."""
+
+    engine = engine_client(raw_request)
+
+    try:
+        await engine.resume_generation()
+        return JSONResponse(
+            content={"status": "resumed"},
+            status_code=HTTPStatus.OK.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to resume generation")
+        return JSONResponse(
+            content={"error": f"Failed to resume generation: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
+@router.get("/is_paused")
+async def is_paused(raw_request: Request) -> JSONResponse:
+    """Return the current pause status."""
+
+    engine = engine_client(raw_request)
+
+    try:
+        paused = await engine.is_paused()
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to fetch pause status")
+        return JSONResponse(
+            content={"error": f"Failed to fetch pause status: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+    return JSONResponse(content={"is_paused": paused})
 
 
 @router.post(
@@ -1062,12 +1148,8 @@ if envs.VLLM_SERVER_DEV_MODE:
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
-        device = None
-        device_str = raw_request.query_params.get("device")
-        if device_str is not None:
-            device = Device[device_str.upper()]
-        logger.info("Resetting prefix cache with specific %s...", str(device))
-        await engine_client(raw_request).reset_prefix_cache(device)
+        logger.info("Resetting prefix cache...")
+        await engine_client(raw_request).reset_prefix_cache()
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")
@@ -1226,6 +1308,41 @@ INVOCATION_VALIDATORS = [
     (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
     for request_type, (get_handler, endpoint) in INVOCATION_TYPES
 ]
+
+
+@router.post(
+    "/inference/v1/generate",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def generate(request: GenerateRequest, raw_request: Request):
+    handler = generate_tokens(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support generate tokens API"
+        )
+    try:
+        generator = await handler.serve_tokens(request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, GenerateResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1629,6 +1746,31 @@ def build_app(args: Namespace) -> FastAPI:
             )
 
     app = sagemaker_standards.bootstrap(app)
+    # Optional endpoints
+    if args.tokens_only:
+
+        @app.post("/abort_requests")
+        async def abort_requests(raw_request: Request):
+            """
+            Abort one or more requests. To be used in a
+            Disaggregated Everything setup.
+            """
+            try:
+                body = await raw_request.json()
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail=f"JSON decode error: {e}",
+                ) from e
+            request_ids = body.get("request_ids")
+            if request_ids is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail="Missing 'request_ids' in request body",
+                )
+            # Abort requests in background
+            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            return Response(status_code=200)
 
     return app
 
@@ -1784,6 +1926,9 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
@@ -1844,6 +1989,20 @@ async def init_app_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
+    state.serving_tokens = (
+        ServingTokens(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            log_error_stack=args.log_error_stack,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_log_outputs=args.enable_log_outputs,
+            force_no_detokenize=args.tokens_only,
         )
         if "generate" in supported_tasks
         else None
@@ -1939,6 +2098,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
+
+    # Suppress verbose logs from model_hosting_container_standards
+    logging.getLogger("model_hosting_container_standards").setLevel(logging.ERROR)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)

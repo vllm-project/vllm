@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for Mixture of Experts (MoE) models."""
+"""Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
-    """Custom FusedMoE for the Transformers backend."""
+    """Custom FusedMoE for the Transformers modeling backend."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -256,7 +256,14 @@ class MoEMixin(MixtureOfExperts):
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                if child_name == "experts" and isinstance(child_module, nn.ModuleList):
+                # Naive implementations will have experts as ModuleList
+                is_modulelist = isinstance(child_module, nn.ModuleList)
+                # Packed implementations will have experts as 3D tensors of shapes like:
+                # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
+                # down_proj = (num_experts, intermediate_size, hidden_size)
+                params = list(child_module.parameters())
+                is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
+                if child_name == "experts" and (is_modulelist or is_3d):
                     # Alias for readability
                     mlp = module
                     experts = child_module

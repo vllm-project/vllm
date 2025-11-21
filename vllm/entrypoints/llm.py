@@ -32,7 +32,6 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -340,7 +339,6 @@ class LLM:
 
         log_non_default_args(engine_args)
 
-        # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -467,7 +465,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (
@@ -1499,8 +1497,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> None:
-        self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         """

@@ -22,7 +22,14 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+
+try:
+    from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "flashinfer not supported for vLLM on ROCm", allow_module_level=True
+        )
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
@@ -45,8 +52,6 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def quant_fp8_per_tensor_batches(a):
@@ -79,10 +84,14 @@ class TestData:
 
     @staticmethod
     def make_moe_tensors_8bit(
-        m: int, k: int, n: int, e: int, reorder: bool
+        m: int, k: int, n: int, e: int, reorder: bool, activation: str = "silu"
     ) -> "TestData":
+        is_gated = activation != "relu2_no_mul"
+
         hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
-        w13 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16)
+        w13 = torch.randn(
+            (e, (2 * n) if is_gated else n, k), device="cuda", dtype=torch.bfloat16
+        )
         w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
@@ -192,18 +201,22 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("activation", ["silu", "relu2_no_mul"])
 def test_flashinfer_cutlass_moe_fp8_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    activation: str,
     monkeypatch,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
-        td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=False)
+        td = TestData.make_moe_tensors_8bit(
+            m, k, n, e, reorder=False, activation=activation
+        )
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
@@ -235,7 +248,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=False,
-            activation="silu",
+            activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
@@ -255,7 +268,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             td.layer,
             topk_weights,
             topk_ids,
-            activation="silu",
+            activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
