@@ -6,6 +6,9 @@ from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @config
@@ -60,6 +63,22 @@ class AttentionConfig:
 
     def __post_init__(self) -> None:
         from vllm import envs
+
+        if self.backend is None:
+            self.backend = envs.VLLM_ATTENTION_BACKEND
+            if envs.is_set("VLLM_ATTENTION_BACKEND"):
+                logger.warning(
+                    "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
+                    "and will be removed in a future release. "
+                    "Please use --attention-backend CLI argument instead."
+                )
+        elif envs.is_set("VLLM_ATTENTION_BACKEND"):
+            logger.warning(
+                "Both --attention-backend CLI argument and "
+                "VLLM_ATTENTION_BACKEND environment variable are set. "
+                "--attention-backend will take precedence. VLLM_ATTENTION_BACKEND "
+                "is deprecated and will be removed in a future release."
+            )
 
         if envs.is_set("VLLM_FLASH_ATTN_VERSION"):
             self.flash_attn_version = envs.VLLM_FLASH_ATTN_VERSION

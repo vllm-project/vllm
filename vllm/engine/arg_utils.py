@@ -1353,6 +1353,7 @@ class EngineArgs:
         compatibility with existing deployments. The following attention-related
         environment variables are respected and applied in
         AttentionConfig.__post_init__:
+        - VLLM_ATTENTION_BACKEND (deprecated, use --attention-backend instead)
         - VLLM_FLASH_ATTN_VERSION
         - VLLM_V1_USE_PREFILL_DECODE_ATTENTION
         - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
@@ -1363,25 +1364,7 @@ class EngineArgs:
         - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
         """
 
-        if self.attention_backend is not None:
-            backend = self.attention_backend
-            if envs.is_set("VLLM_ATTENTION_BACKEND"):
-                logger.warning(
-                    "Both --attention-backend CLI argument and "
-                    "VLLM_ATTENTION_BACKEND environment variable are set. "
-                    "--attention-backend will take precedence. VLLM_ATTENTION_BACKEND "
-                    "is deprecated and will be removed in a future release."
-                )
-        else:
-            backend = envs.VLLM_ATTENTION_BACKEND
-            if envs.is_set("VLLM_ATTENTION_BACKEND"):
-                logger.warning(
-                    "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
-                    "and will be removed in a future release. "
-                    "Please use --attention-backend CLI argument instead."
-                )
-
-        return AttentionConfig(backend=backend)
+        return AttentionConfig(backend=self.attention_backend)
 
     def create_engine_config(
         self,
