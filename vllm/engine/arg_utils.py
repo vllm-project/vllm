@@ -1740,7 +1740,7 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
-        attention_config = self.create_attention_config()
+        attention_config = AttentionConfig(backend=self.attention_backend)
 
         load_config = self.create_load_config()
 
