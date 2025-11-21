@@ -273,7 +273,9 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = self.quant_matcher.make_scale(input)
+            scale = self.quant_matcher.make_scale(
+                input, transposed=self.quant_matcher.use_col_major_scales
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
@@ -284,6 +286,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=residual,
                 group_size=self.group_shape[1],
+                is_scale_transposed=self.quant_matcher.use_col_major_scales,
             )
 
             # result, residual, scale
@@ -326,7 +329,9 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = self.quant_matcher.make_scale(input)
+            scale = self.quant_matcher.make_scale(
+                input, transposed=self.quant_matcher.use_col_major_scales
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
@@ -337,6 +342,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=None,
                 group_size=self.group_shape[1],
+                is_scale_transposed=self.quant_matcher.use_col_major_scales,
             )
 
             # result, scale

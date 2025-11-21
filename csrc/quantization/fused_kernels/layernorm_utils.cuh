@@ -62,7 +62,8 @@ __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
   return val[tid];
 }
 
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_scale_transposed = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -125,9 +126,14 @@ __device__ void compute_dynamic_per_token_scales(
       }
       // token scale computation
       scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      all_token_scales[blockIdx.x * num_groups +
-                       threadIdx.x / threads_per_group] =
-          scale;  // Global output store
+      // Global output store
+      if constexpr (is_scale_transposed) {
+        all_token_scales[(threadIdx.x / threads_per_group) * gridDim.x +
+                         blockIdx.x] = scale;
+      } else {
+        all_token_scales[blockIdx.x * num_groups +
+                         threadIdx.x / threads_per_group] = scale;
+      }
       token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] =
           scale;
     }
@@ -263,7 +269,8 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_scale_transposed = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -362,9 +369,14 @@ __device__ void compute_dynamic_per_token_scales(
       }
       // token scale computation
       scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      all_token_scales[blockIdx.x * num_groups +
-                       threadIdx.x / threads_per_group] =
-          scale;  // Global output store
+      // Global output store
+      if constexpr (is_scale_transposed) {
+        all_token_scales[(threadIdx.x / threads_per_group) * gridDim.x +
+                         blockIdx.x] = scale;
+      } else {
+        all_token_scales[blockIdx.x * num_groups +
+                         threadIdx.x / threads_per_group] = scale;
+      }
       token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] =
           scale;
     }

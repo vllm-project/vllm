@@ -448,6 +448,7 @@ def rms_norm_per_block_quant(
     group_size: list[int],
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
@@ -458,7 +459,15 @@ def rms_norm_per_block_quant(
     )
 
     torch.ops._C.rms_norm_per_block_quant(
-        output, input, weight, scales, epsilon, scale_ub, residual, group_size[1]
+        output,
+        input,
+        weight,
+        scales,
+        epsilon,
+        scale_ub,
+        residual,
+        group_size[1],
+        is_scale_transposed,
     )
     return output, scales
 
