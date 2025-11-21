@@ -118,15 +118,6 @@ class GGUFModelLoader(BaseModelLoader):
             local_files.extend(glob.glob(glob_pattern))
 
         if not local_files:
-            # Fallback: search for any GGUF file with quant_type in name
-            all_gguf_files = glob.glob(
-                os.path.join(folder, "**/*.gguf"), recursive=True
-            )
-            local_files = [
-                f for f in all_gguf_files if quant_type in os.path.basename(f)
-            ]
-
-        if not local_files:
             raise ValueError(
                 f"Downloaded GGUF files not found in {folder} "
                 f"for quant_type {quant_type}"
