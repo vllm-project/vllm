@@ -158,7 +158,10 @@ uv pip install -e .
 
 ##### Use an existing PyTorch installation
 
-There are scenarios where the PyTorch dependency cannot be easily installed with `uv`, for example, when building vLLM with non-default PyTorch builds (like nightly or a custom build).
+There are scenarios where the PyTorch dependency cannot be easily installed with `uv`, e.g.:
+
+- Building vLLM with PyTorch nightly or a custom PyTorch build.
+- Building vLLM with aarch64 and CUDA (GH200), where the PyTorch wheels are not available on PyPI. Currently, only the PyTorch nightly has wheels for aarch64 with CUDA. You can run `uv pip install --index-url https://download.pytorch.org/whl/nightly/cu128 torch torchvision torchaudio` to [install PyTorch nightly](https://pytorch.org/get-started/locally/) and then build vLLM on top of it.
 
 To build vLLM using an existing PyTorch installation:
 
