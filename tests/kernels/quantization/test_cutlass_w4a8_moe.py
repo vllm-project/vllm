@@ -73,7 +73,8 @@ def cutlass_preprocess(
 
 
 GROUP_SIZE = 128
-NUM_EXPERTS = [8, 64]
+# NUM_EXPERTS = [8, 64]
+NUM_EXPERTS = [4]
 Ks = [512]
 Ns = [2048]
 
@@ -97,8 +98,8 @@ if __name__ == '__main__':
                 c_strides = torch.full((num_experts,), N, dtype=torch.int64).cuda()
 
                 # channel/token scales (currently unused)
-                a1q_scale = torch.randn((M_full, 1), dtype=torch.float32).cuda()
-                w1_scale = torch.randn((N, 1, 1), dtype=torch.float32).cuda()
+                per_tok_scales = torch.randn((M_full, 1), dtype=torch.float32).cuda()
+                per_chan_scales = torch.randn((num_experts, N, 1), dtype=torch.float32).cuda()
 
                 # expert weights and scales
                 wtype = scalar_types.int4
@@ -126,8 +127,8 @@ if __name__ == '__main__':
                     out,
                     a,
                     w_q_packed,
-                    a1q_scale,
-                    w1_scale,
+                    per_tok_scales,
+                    per_chan_scales,
                     w_s_packed,
                     GROUP_SIZE,
                     expert_offsets,
