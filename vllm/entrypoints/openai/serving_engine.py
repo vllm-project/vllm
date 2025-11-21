@@ -395,8 +395,8 @@ class OpenAIServing:
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
-            detokenize=False,
-            skip_clone=True,  # Safe to reuse without cloning
+            detokenize=False,  # We detokenize the output after the search
+            skip_clone=True,  # Safe to reuse params without cloning
         )
         all_beams = [
             BeamSearchSequence(
