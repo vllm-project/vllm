@@ -68,12 +68,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # the existing model runner.
         # Going forward, we should keep the data structures as NumPy arrays
         # rather than Python lists.
-        sampled_token_ids_np = self.sampled_token_ids.numpy()
-        num_reqs = sampled_token_ids_np.shape[0]
-        sampled_token_ids: list[np.ndarray] = [
-            sampled_token_ids_np[i, : self.num_sampled_tokens[i]]
-            for i in range(num_reqs)
-        ]
+        sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
+        num_reqs = len(sampled_token_ids)
+        for i in range(num_reqs):
+            del sampled_token_ids[i][self.num_sampled_tokens[i] :]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.logprobs_tensors is not None:
