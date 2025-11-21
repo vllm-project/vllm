@@ -24,14 +24,16 @@ nav:
       - deployment/integrations
     - Training: training
     - Configuration:
-      - configuration/README.md
       - configuration/*
+      - TPU: https://docs.vllm.ai/projects/tpu/en/latest/
     - Models:
       - models/supported_models.md
       - models/generative_models.md
       - models/pooling_models.md
       - models/extensions
-      - Hardware Supported Models: models/hardware_supported_models
+      - Hardware Supported Models:
+        - models/hardware_supported_models/*
+        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/
     - Features: features
   - Developer Guide:
     - contributing/README.md
