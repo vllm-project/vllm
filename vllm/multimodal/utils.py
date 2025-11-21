@@ -3,7 +3,7 @@
 
 import asyncio
 import atexit
-from collections.abc import Iterable, Set
+from collections.abc import Generator, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
@@ -403,7 +403,7 @@ def group_mm_kwargs_by_modality(
     pin_memory: bool = False,
     merge_by_field_config: bool | None = None,
     multimodal_cpu_fields: Set[str] = frozenset(),
-) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
+) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
 
