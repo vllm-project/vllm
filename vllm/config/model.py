@@ -1796,11 +1796,11 @@ class ModelConfig:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    return CP_REASONS.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL
+                    return CP_REASONS.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL  # noqa: E501
                 elif pooling_type == "mean":
-                    return CP_REASONS.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
+                    return CP_REASONS.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL  # noqa: E501
                 else:  # pooling_type == "last"
-                    return CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL
+                    return CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL  # noqa: E501
         else:
             return CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
 
@@ -1821,11 +1821,11 @@ class ModelConfig:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    return APC_REASONS.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING
+                    return APC_REASONS.POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING  # noqa: E501
                 elif pooling_type == "mean":
-                    return APC_REASONS.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING
+                    return APC_REASONS.POOLING_MODELS_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING  # noqa: E501
                 else:  # pooling_type == "last"
-                    return APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING
+                    return APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING  # noqa: E501
         else:
             return APC_REASONS.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
 
@@ -2269,7 +2269,7 @@ class CP_REASONS:
     )
     POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
         value=False,
-        reason="Pooling models with bidirectional attn does not support chunked prefill.",
+        reason="Pooling models with bidirectional attn does not support chunked prefill.",  # noqa: E501
     )
     POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
         value=False,
@@ -2291,8 +2291,7 @@ class APC_REASONS:
     )
     HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
-        reason="Hybrid models does not support prefix caching "
-        "since the feature is still experimental.",
+        reason="Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
     )
     PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
@@ -2306,7 +2305,7 @@ class APC_REASONS:
     )
     POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
-        reason="Pooling models with bidirectional attn does not support prefix caching.",
+        reason="Pooling models with bidirectional attn does not support prefix caching.",  # noqa: E501
     )
     POOLING_MODELS_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
