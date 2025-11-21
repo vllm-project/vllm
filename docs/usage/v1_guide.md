@@ -149,7 +149,7 @@ encoder and decoder (e.g., `BartForConditionalGeneration`,
 | **Spec Decode**                             | <nobr>🟢 Functional</nobr>                                                        |
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟢 Functional</nobr>                                                        |
 | **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
-| **Concurrent Partial Prefills**             | <nobr>🟡 [In Progress](<ttps://github.com/vllm-project/vllm/issues/14003)</nobr>  |
+| **Concurrent Partial Prefills**             | <nobr>🟡 [In Progress](https://github.com/vllm-project/vllm/issues/14003)</nobr>  |
 | **best_of**                                 | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/issues/13361)</nobr>      |
 | **Per-Request Logits Processors**           | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/pull/13360)</nobr>        |
 | **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Removed</nobr>                                                           |
