@@ -704,7 +704,7 @@ class CompilationConfig:
             self.backend = "inductor" if self.use_inductor else "eager"
 
         if self.backend == "":
-                self.backend = current_platform.get_compile_backend()
+            self.backend = current_platform.get_compile_backend()
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
