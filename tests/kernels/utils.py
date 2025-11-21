@@ -17,9 +17,6 @@ from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import (
-    STR_BACKEND_ENV_VAR,
-)
 from vllm.utils.torch_utils import make_tensor_with_pad
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
@@ -230,7 +227,7 @@ def override_backend_env_variable(
     * mpatch: pytest monkeypatch instance
     * backend_name: attention backend name to force
     """
-    mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
+    mpatch.setenv("VLLM_ATTENTION_BACKEND", backend_name)
 
 
 def ref_masked_attention(

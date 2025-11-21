@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
-import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from functools import cache
@@ -18,24 +17,9 @@ from vllm.attention.backends.registry import (
 )
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.utils import STR_BACKEND_ENV_VAR
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
-
-
-def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
-    """
-    Get the backend override specified by the vLLM attention
-    backend environment variable, if one is specified.
-
-    Returns:
-
-    * AttentionBackendEnum value if an override is specified
-    * None otherwise
-    """
-    backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else AttentionBackendEnum[backend_name]
 
 
 def get_attn_backend(

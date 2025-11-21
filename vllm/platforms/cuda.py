@@ -172,7 +172,7 @@ class CudaPlatformBase(Platform):
             and cache_config.block_size is not None
         ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
-            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # If `--attention-config.backend` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
