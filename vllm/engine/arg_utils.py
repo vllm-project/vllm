@@ -1209,28 +1209,31 @@ class EngineArgs:
                 )
 
         if self.disable_mm_preprocessor_cache:
-            logger.warning(
+            logger.warning_once(
                 "`--disable-mm-preprocessor-cache` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb 0` instead.",
+                scope="local",
             )
 
             self.mm_processor_cache_gb = 0
         elif envs.VLLM_MM_INPUT_CACHE_GIB != 4:
-            logger.warning(
+            logger.warning_once(
                 "VLLM_MM_INPUT_CACHE_GIB` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb %d` instead.",
                 envs.VLLM_MM_INPUT_CACHE_GIB,
+                scope="local",
             )
 
             self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
 
         if self.enable_multimodal_encoder_data_parallel:
-            logger.warning(
+            logger.warning_once(
                 "--enable-multimodal-encoder-data-parallel` is deprecated "
                 "and will be removed in v0.13. "
-                "Please use `--mm-encoder-tp-mode data` instead."
+                "Please use `--mm-encoder-tp-mode data` instead.",
+                scope="local",
             )
 
             self.mm_encoder_tp_mode = "data"
