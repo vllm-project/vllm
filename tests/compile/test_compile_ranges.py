@@ -8,7 +8,6 @@ from torch import nn
 
 # This import automatically registers `torch.ops.silly.attention`
 import tests.compile.silly_attention  # noqa
-from tests.utils import use_fresh_compile_cache
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.inductor_pass import (
@@ -67,8 +66,7 @@ class PostGradRangeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
-@use_fresh_compile_cache
-def test_compile_ranges():
+def test_compile_ranges(use_fresh_inductor_cache):
     post_grad_range_checker = PostGradRangeChecker(
         [
             Range(start=1, end=8),
@@ -124,8 +122,7 @@ def test_compile_config_get_compile_ranges():
     ]
 
 
-@use_fresh_compile_cache
-def test_inductor_cache_compile_ranges(monkeypatch):
+def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
     # To force multiple compilations, we disable the compile cache
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
