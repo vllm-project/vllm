@@ -6,7 +6,7 @@ import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.distributed
@@ -87,8 +87,10 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch profiler. Enabled and configured through env vars:
+        # Torch/CUDA profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # VLLM_TORCH_CUDA_PROFILE=1
+        self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             self.profiler = TorchProfilerWrapper(
@@ -146,17 +148,17 @@ class Worker(WorkerBase):
                 assert allocator.get_current_usage() == 0, (
                     "Sleep mode can only be used for one instance per process."
                 )
-            context = allocator.use_memory_pool(tag=tag)
+            return allocator.use_memory_pool(tag=tag)
         else:
-            context = nullcontext()
-        return context
+            return nullcontext()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        if self.device_config.device.type == "cuda":
+        device = self.device_config.device
+        if isinstance(device, torch.device) and device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             if (
@@ -375,23 +377,21 @@ class Worker(WorkerBase):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
+            with allocator.use_memory_pool(tag="kv_cache"):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
-            context = nullcontext()
-        with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,
         # e.g. for the max-num-batched token size in chunked prefill.
-        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        compile_sizes = self.vllm_config.compilation_config.compile_sizes
+        warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
         if not self.model_config.enforce_eager:
-            warmup_sizes = [
-                x
-                for x in warmup_sizes
-                if x not in self.vllm_config.compilation_config.cudagraph_capture_sizes
-            ]
+            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            if capture_sizes is not None:
+                warmup_sizes = [x for x in warmup_sizes if x not in capture_sizes]
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -532,12 +532,12 @@ class Worker(WorkerBase):
             )
         }
         if forward_pass and not get_pp_group().is_first_rank:
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
-                )
+            tensor_dict = get_pp_group().recv_tensor_dict(
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
             )
+            assert tensor_dict is not None
+            intermediate_tensors = IntermediateTensors(tensor_dict)
 
         with self.annotate_profile(scheduler_output):
             output = self.model_runner.execute_model(
@@ -605,7 +605,7 @@ class Worker(WorkerBase):
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
-            global_expert_load=None,
+            global_expert_loads=None,
             rank_mapping=rank_mapping,
         )
         torch.cuda.synchronize()
@@ -661,7 +661,7 @@ class Worker(WorkerBase):
 
     def _reconfigure_moe(
         self, old_ep_size: int, new_ep_size: int
-    ) -> torch.Tensor | None:
+    ) -> list[torch.Tensor] | None:
         """
         Reconfigure MoE modules with provided reconfig_request
 
@@ -728,26 +728,29 @@ class Worker(WorkerBase):
             num_local_physical_experts = num_local_experts
             assert self.model_runner.eplb_state is not None
             new_physical_experts = (
-                self.model_runner.eplb_state.physical_to_logical_map.shape[1]
+                self.model_runner.eplb_state.physical_to_logical_map.shape[1]  # type: ignore[attr-defined]
             )
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts
-                - self.model_runner.eplb_state.logical_replica_count.shape[1]
+                - self.model_runner.eplb_state.logical_replica_count.shape[1]  # type: ignore[attr-defined]
             )
             global_expert_loads = None
         else:
-            num_local_physical_experts = torch.tensor(
+            num_local_physical_experts_tensor = torch.tensor(
                 [num_local_experts], dtype=torch.int32, device="cpu"
             )
             torch.distributed.broadcast(
-                num_local_physical_experts, group=get_ep_group().cpu_group, group_src=0
+                num_local_physical_experts_tensor,
+                group=get_ep_group().cpu_group,
+                group_src=0,
             )
-            num_local_physical_experts = num_local_physical_experts.item()
+            num_local_physical_experts = int(num_local_physical_experts_tensor.item())
             new_physical_experts = num_local_physical_experts * new_ep_size
             assert self.model_runner.eplb_state is not None
-            global_expert_loads = self.model_runner.eplb_state.rearrange(
+            global_expert_loads_any = self.model_runner.eplb_state.rearrange(
                 execute_shuffle=False
             )
+            global_expert_loads = cast(list[torch.Tensor], global_expert_loads_any)
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_loads[0].shape[1]
             )
@@ -849,8 +852,9 @@ def init_worker_distributed_environment(
     init_batch_invariance()
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
+    init_method = distributed_init_method or "env://"
     init_distributed_environment(
-        parallel_config.world_size, rank, distributed_init_method, local_rank, backend
+        parallel_config.world_size, rank, init_method, local_rank, backend
     )
 
     ensure_model_parallel_initialized(
