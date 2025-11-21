@@ -1989,10 +1989,11 @@ class EngineArgs:
             and self.enable_chunked_prefill
             and not default_chunked_prefill
         ):
-            logger.warning(
+            logger.warning_once(
                 "This model does not officially support chunked prefill. "
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
+                scope="local",
             )
 
         if self.enable_prefix_caching is None:
