@@ -430,39 +430,3 @@ def test_fusion_silu_and_mul_quant_helion(
 
         # In post-nodes, fused kernels should be present and quant op should not
         backend.check_after_ops(model.ops_in_model_after())
-
-        import time
-
-        # Warm-up runs
-        for _ in range(10):
-            _ = model(x)
-            _ = model2(x)
-        torch.cuda.synchronize()
-
-        # without Helion kernel
-        num_iterations = 1000
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
-        for _ in range(num_iterations):
-            _ = model(x)
-        torch.cuda.synchronize()
-        model_time = time.perf_counter() - start_time
-
-        # with Helion kernel
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
-        for _ in range(num_iterations):
-            _ = model2(x)
-        torch.cuda.synchronize()
-        model2_time = time.perf_counter() - start_time
-
-        model_avg = model_time / num_iterations * 1000
-        model2_avg = model2_time / num_iterations * 1000
-        speedup = model_time / model2_time
-
-        print(f"\n{'=' * 60}")
-        print(f"Benchmark Results ({num_iterations} iterations):")
-        print(f"  Non-Helion avg time:  {model_avg:.4f} ms")
-        print(f"  Helion avg time: {model2_avg:.4f} ms")
-        print(f"  Speedup: {speedup:.2f}x")
-        print(f"{'=' * 60}\n")
