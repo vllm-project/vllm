@@ -120,27 +120,24 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
             capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            if not capture_sizes:
-                # If no CUDA Graph capture sizes are specified, the threshold
-                # is reset to zero, forcing the 2D kernel to be used.
-                self.seq_threshold_3D = 0
-            else:
-                # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-                # as threshold. This ensures that each captured graph covers the
-                # correct execution path.
-                upd_seq_threshold_3D = min(
-                    capture_sizes,
-                    key=lambda x: abs(x - self.seq_threshold_3D),
-                )
+            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
 
-                # If the updated threshold becomes significantly larger than the
-                # initial value, it is reset to zero. This enforces the use of the
-                # 2D kernel only and ensures that the size of the allocated
-                # intermediate structures remains bounded.
-                if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
-                    self.seq_threshold_3D = upd_seq_threshold_3D
-                else:
-                    self.seq_threshold_3D = 0
+            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
+            # as threshold. This ensures that each captured graph covers the
+            # correct execution path.
+            upd_seq_threshold_3D = min(
+                capture_sizes,
+                key=lambda x: abs(x - self.seq_threshold_3D),
+            )
+
+            # If the updated threshold becomes significantly larger than the
+            # initial value, it is reset to zero. This enforces the use of the
+            # 2D kernel only and ensures that the size of the allocated
+            # intermediate structures remains bounded.
+            if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
+                self.seq_threshold_3D = upd_seq_threshold_3D
+            else:
+                self.seq_threshold_3D = 0
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
