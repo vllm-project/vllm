@@ -153,6 +153,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_FLASHINFER_FP8_LINEAR: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -1143,6 +1144,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
+    # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
+    "VLLM_USE_FLASHINFER_FP8_LINEAR": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_FP8_LINEAR", "0"))
+    ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
@@ -1458,7 +1464,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-
     # Enable programmatic Nsight Systems capture via CUDA profiler API.
     # Set to "<start>-<stop>" to start/stop profiling on engine iteration
     # numbers. Example: "10-20" starts at iteration 10 and stops at 20.
@@ -1467,9 +1472,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: "None" (disabled). Invalid values are ignored with a warning.
     # Note: "iteration" refers to the engine's internal scheduler loop, not
     # tokens; vLLM logs will indicate when profiling starts/stops.
-    "VLLM_NSYS_PROFILE_START_STOP":
-    lambda: os.environ.get("VLLM_NSYS_PROFILE_START_STOP", "None"),
-
+    "VLLM_NSYS_PROFILE_START_STOP": lambda: os.environ.get(
+        "VLLM_NSYS_PROFILE_START_STOP", "None"
+    ),
     # Flag to enable FBGemm kernels on model execution
     "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
     # GC debug config
@@ -1576,6 +1581,7 @@ def compute_hash() -> str:
         "VLLM_MOE_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
+        "VLLM_USE_FLASHINFER_FP8_LINEAR",
         "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
