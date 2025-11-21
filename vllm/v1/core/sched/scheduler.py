@@ -470,6 +470,7 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
+                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                     # Total computed tokens (local + external).
@@ -576,9 +577,6 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
-                    self._update_connector_prefix_cache_stats(
-                        request, num_external_computed_tokens
-                    )
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -589,6 +587,8 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
+
+                self._update_connector_prefix_cache_stats(request)
 
                 req_index += 1
                 self.running.append(request)
@@ -1380,15 +1380,13 @@ class Scheduler(SchedulerInterface):
     # KV Connector Related Methods
     ########################################################################
 
-    def _update_connector_prefix_cache_stats(
-        self, request: Request, num_external_tokens: int
-    ) -> None:
+    def _update_connector_prefix_cache_stats(self, request: Request) -> None:
         if self.connector_prefix_cache_stats is None:
             return
 
         self.connector_prefix_cache_stats.record(
             num_tokens=request.num_tokens,
-            num_hits=num_external_tokens,
+            num_hits=request.num_external_computed_tokens,
             preempted=request.num_preemptions > 0,
         )
 
@@ -1571,9 +1569,11 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
-                total_affected_tokens += (
+                num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
+                total_affected_tokens += num_affected_tokens
+                request.num_external_computed_tokens -= num_affected_tokens
 
             if is_affected:
                 if not marked_invalid_block:
