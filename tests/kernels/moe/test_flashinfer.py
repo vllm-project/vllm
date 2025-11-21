@@ -7,14 +7,14 @@ import torch
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
+    FusedMoEConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8,
     flashinfer_cutlass_moe_fp8,
-    register_moe_scaling_factors,
+    get_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31,
 )
@@ -79,7 +79,11 @@ class TestData:
     a2_scale: torch.Tensor
     w13_weight_scale: torch.Tensor
     w2_weight_scale: torch.Tensor
-    layer: torch.nn.Module
+    w13_weight_flashinfer: torch.Tensor
+    w2_weight_flashinfer: torch.Tensor
+    intermediate_size_per_partition: int
+    ep_rank: int
+    local_num_experts: int
 
     @staticmethod
     def make_moe_tensors_8bit(
@@ -100,24 +104,15 @@ class TestData:
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
         w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
 
-        layer = torch.nn.Module()
-        layer.w13_weight = w13_quantized.clone()
-        layer.w2_weight = w2_quantized.clone()
-        layer.w13_input_scale = a1_scale
-        layer.w2_input_scale = a2_scale
-        layer.w13_weight_scale = w13_weight_scale
-        layer.w2_weight_scale = w2_weight_scale
-
-        register_moe_scaling_factors(layer)
+        w13_weight_flashinfer = w13_quantized.clone()
+        w2_weight_flashinfer = w2_quantized.clone()
 
         # flashinfer expects swapped rows for w13
-        layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
+        w13_weight_flashinfer.data = swap_w13_to_w31(w13_weight_flashinfer.data)
         if reorder:
-            rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
-        layer.custom_routing_function = Llama4MoE.custom_routing_function
-        layer.intermediate_size_per_partition = n
-        layer.ep_rank = 0
-        layer.local_num_experts = e
+            rotate_flashinfer_fp8_moe_weights(
+                w13_weight_flashinfer, w2_weight_flashinfer
+            )
 
         return TestData(
             hidden_states=hidden_states,
@@ -127,7 +122,11 @@ class TestData:
             a2_scale=a2_scale,
             w13_weight_scale=w13_weight_scale,
             w2_weight_scale=w2_weight_scale,
-            layer=layer,
+            w13_weight_flashinfer=w13_weight_flashinfer,
+            w2_weight_flashinfer=w2_weight_flashinfer,
+            intermediate_size_per_partition=n,
+            ep_rank=0,
+            local_num_experts=e,
         )
 
 
@@ -179,8 +178,14 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
+        output1_scales, output1_gate_scales, output2_scales = get_moe_scaling_factors(
+            td.a1_scale,
+            td.w13_weight_scale,
+            td.a2_scale,
+            td.w2_weight_scale,
+        )
+
         flashinfer_output = apply_flashinfer_per_tensor_scale_fp8(
-            layer=td.layer,
             hidden_states=td.hidden_states,
             router_logits=score,
             routing_bias=None,
@@ -189,6 +194,14 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             num_expert_group=None,
             topk_group=None,
             apply_router_weight_on_input=True,
+            w13_weight=td.w13_weight_flashinfer,
+            w2_weight=td.w2_weight_flashinfer,
+            output1_scales_scalar=output1_scales,
+            output1_scales_gate_scalar=output1_gate_scales,
+            output2_scales_scalar=output2_scales,
+            intermediate_size_per_partition=td.intermediate_size_per_partition,
+            ep_rank=td.ep_rank,
+            local_num_experts=td.local_num_experts,
         )
 
         torch.testing.assert_close(output, flashinfer_output, atol=5.5e-2, rtol=1e-2)
@@ -248,23 +261,20 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
-        td.layer.dp_size = 1
-
-        def get_fused_moe_quant_config(n: torch.nn.Module) -> FusedMoEQuantConfig:
-            return quant_config
-
-        td.layer.get_fused_moe_quant_config = get_fused_moe_quant_config
-        td.layer.quant_method = td.layer
+        moe_config = FusedMoEConfig(dp_size=1)
 
         flashinfer_cutlass_output = flashinfer_cutlass_moe_fp8(
             td.hidden_states,
-            td.layer,
             topk_weights,
             topk_ids,
+            w13_weight=td.w13_quantized,
+            w2_weight=td.w2_quantized,
+            quant_config=quant_config,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
+            moe_config=moe_config,
         )
 
         torch.testing.assert_close(
