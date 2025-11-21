@@ -128,6 +128,12 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager",
             "--no-enable-prefix-caching",
+            "--tokenizer_mode",
+            "hf",
+            "--load_format",
+            "hf",
+            "--config_format",
+            "hf",
             "--tool-call-parser",
             "mistral",
             "--chat-template",

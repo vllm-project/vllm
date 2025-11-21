@@ -81,7 +81,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -130,7 +130,8 @@ class ModelConfig:
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
     """Tokenizer mode:\n
-    - "auto" will use the fast tokenizer if available.\n
+    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
     - "custom" will use --tokenizer to select the preregistered tokenizer."""
@@ -241,8 +242,8 @@ class ModelConfig:
     first one."""
     config_format: str | ConfigFormat = "auto"
     """The format of the model config to load:\n
-    - "auto" will try to load the config in hf format if available else it
-    will try to load in mistral format.\n
+    - "auto" will try to load the config in hf format if available after trying
+    to load in mistral format.\n
     - "hf" will load the config in hf format.\n
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None

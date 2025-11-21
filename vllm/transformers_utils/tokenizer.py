@@ -3,8 +3,8 @@
 
 import contextlib
 import copy
+import importlib.util
 import os
-import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -15,7 +15,10 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.config import (
+    get_sentence_transformer_tokenizer_config,
+    list_filtered_repo_files,
+)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -182,25 +185,29 @@ def get_tokenizer(
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
 
-    # if tokenizer is from official mistral org
-    is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
-    if is_from_mistral_org and tokenizer_mode != "mistral":
-        warnings.warn(
-            "It is strongly recommended to run mistral models with "
-            '`--tokenizer-mode "mistral"` to ensure correct '
-            "encoding and decoding.",
-            FutureWarning,
-            stacklevel=2,
+    # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format
+    # first to use official Mistral tokenizer if possible.
+    mistral_common_installed = importlib.util.find_spec("mistral_common") is not None
+    if tokenizer_mode == "auto" and mistral_common_installed:
+        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
+        files_list = list_filtered_repo_files(
+            model_name_or_path=str(tokenizer_name),
+            allow_patterns=allow_patterns,
+            revision=revision,
         )
+        if len(files_list) > 0:
+            tokenizer_mode = "mistral"
 
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
+        logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
         )
     elif tokenizer_mode == "custom":
         from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
 
+        logger.debug_once(f"Loading CustomTokenizer from {tokenizer_name}")
         tokenizer = TokenizerRegistry.get_tokenizer(
             str(tokenizer_name),
             *args,
@@ -210,6 +217,7 @@ def get_tokenizer(
         )
     else:
         try:
+            logger.debug_once(f"Loading AutoTokenizer from {tokenizer_name}")
             tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_name,
                 *args,
