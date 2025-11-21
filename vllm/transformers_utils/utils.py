@@ -57,9 +57,26 @@ def is_remote_gguf(model: str) -> bool:
 
 
 def is_gguf(model: str | Path, gguf_quant_type: str | None = None) -> bool:
-    return (
-        gguf_quant_type is not None or check_gguf_file(model) or (is_remote_gguf(model))
-    )
+    """Check if the model is a GGUF model.
+
+    Args:
+        model: Model name, path, or Path object to check.
+        gguf_quant_type: Optional quantization type for remote GGUF models.
+
+    Returns:
+        True if the model is a GGUF model, False otherwise.
+    """
+    model = str(model)
+    # If quant_type is explicitly provided, it's a GGUF model
+    if gguf_quant_type is not None:
+        return True
+
+    # Check if it's a local GGUF file
+    if check_gguf_file(model):
+        return True
+
+    # Check if it's a remote GGUF model (repo_id:quant_type format)
+    return is_remote_gguf(model)
 
 
 def modelscope_list_repo_files(
