@@ -856,7 +856,10 @@ class FlexAttentionImpl(AttentionImpl):
             needs_rebuild_block_mask = True
 
         if needs_rebuild_block_mask:
-            attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
+            if attn_metadata.direct_build:
+                attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
+            else:
+                attn_metadata.block_mask = attn_metadata.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
