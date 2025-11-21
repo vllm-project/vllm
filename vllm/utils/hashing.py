@@ -10,10 +10,12 @@ from collections.abc import Callable
 from typing import Any
 
 import cbor2
+
 try:
-    import xxhash as _xxhash  
-    if not hasattr(_xxhash, "xxh3_128_digest"):  
-        _xxhash = None  
+    import xxhash as _xxhash
+
+    if not hasattr(_xxhash, "xxh3_128_digest"):
+        _xxhash = None
 except ImportError:  # pragma: no cover
     _xxhash = None
 

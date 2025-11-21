@@ -16,7 +16,7 @@ import argparse
 import random
 import statistics
 import time
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from vllm.utils.hashing import sha256, xxhash
 

@@ -86,7 +86,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    blocks = _generate_blocks(args.num_blocks, args.block_size, args.vocab_size, args.seed)
+    blocks = _generate_blocks(
+        args.num_blocks, args.block_size, args.vocab_size, args.seed
+    )
     print(
         f"Benchmarking {len(args.algorithms)} algorithms on "
         f"{args.num_blocks} blocks (block size={args.block_size})."
@@ -100,7 +102,7 @@ def main() -> None:
         avg, best, throughput = result
         print(
             f"{algo:14s} avg: {avg:.6f}s  best: {best:.6f}s  "
-            f"throughput: {throughput/1e6:.2f}M tokens/s"
+            f"throughput: {throughput / 1e6:.2f}M tokens/s"
         )
 
 
