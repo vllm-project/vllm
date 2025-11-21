@@ -180,8 +180,7 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
-            attention_backend = vllm_config.attention_config.backend
-            if attention_backend is None:
+            if vllm_config.attention_config.backend is None:
                 # Default case
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
