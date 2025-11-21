@@ -951,9 +951,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
             return experts
 
-        # aiter path
-        from vllm.model_executor.layers.fused_moe import AiterExperts
-
         # triton path
         from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
             BatchedTritonOrDeepGemmExperts,
@@ -981,6 +978,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 ),
             )
         elif self.rocm_aiter_moe_enabled:
+            # aiter path
+            from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+                AiterExperts,
+            )
+
             logger.debug(
                 "AiterExperts(%s): per_act_token=%s",
                 self.__class__.__name__,

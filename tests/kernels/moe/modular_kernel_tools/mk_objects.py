@@ -509,7 +509,8 @@ def make_fused_experts(
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making NaiveBatchedExperts {kwargs} ...")
         experts = NaiveBatchedExperts(**kwargs)
-    elif cutlass_fp8_supported() and fused_experts_type.__name__ == "CutlassExpertsFp8":
+    elif fused_experts_type.__name__ == "CutlassExpertsFp8":
+        assert cutlass_fp8_supported(), "CutlassExpertsFp8 requires CUTLASS FP8 support"
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "out_dtype": moe.in_dtype,
@@ -520,10 +521,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
-    elif (
-        cutlass_fp8_supported()
-        and fused_experts_type.__name__ == "CutlassBatchedExpertsFp8"
-    ):
+    elif fused_experts_type.__name__ == "CutlassBatchedExpertsFp8":
+        assert cutlass_fp8_supported(), (
+            "CutlassBatchedExpertsFp8 requires CUTLASS FP8 support"
+        )
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
@@ -536,7 +537,8 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
         experts = CutlassBatchedExpertsFp8(**kwargs)
-    elif cutlass_fp4_supported() and fused_experts_type.__name__ == "CutlassExpertsFp4":
+    elif fused_experts_type.__name__ == "CutlassExpertsFp4":
+        assert cutlass_fp4_supported(), "CutlassExpertsFp4 requires CUTLASS FP4 support"
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
             "num_dispatchers": num_dispatchers,
@@ -544,10 +546,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
-    elif (
-        has_flashinfer_cutlass_fused_moe()
-        and fused_experts_type.__name__ == "FlashInferExperts"
-    ):
+    elif fused_experts_type.__name__ == "FlashInferExperts":
+        assert has_flashinfer_cutlass_fused_moe(), (
+            "FlashInferExperts requires FlashInfer CUTLASS fused MoE support"
+        )
         kwargs = {
             "out_dtype": moe.in_dtype,
             "ep_rank": moe.ep_rank,
@@ -557,7 +559,8 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making FlashInferExperts {kwargs} ...")
         experts = FlashInferExperts(**kwargs)
-    elif has_aiter() and fused_experts_type.__name__ == "AiterExperts":
+    elif fused_experts_type.__name__ == "AiterExperts":
+        assert has_aiter(), "AiterExperts requires AITER package"
         kwargs = quant_kwargs
         print(f"Making AiterExperts {kwargs} ...")
         experts = AiterExperts(**kwargs)

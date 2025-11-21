@@ -1049,7 +1049,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
-            AiterExperts,
             BatchedDeepGemmExperts,
             BatchedTritonExperts,
             TritonOrDeepGemmExperts,
@@ -1083,6 +1082,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_config=self.moe_quant_config,
             )
         elif self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+                AiterExperts,
+            )
+
             logger.debug(
                 "AiterExperts(%s): per_act_token=%s",
                 self.__class__.__name__,
