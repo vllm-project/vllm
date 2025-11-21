@@ -9,10 +9,16 @@ different routing strategies and analyze their performance, including
 integration tests with FusedMoE layer.
 """
 
+import tempfile
+
 import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
     DistributionBasedRouting,
     RoutingSimulator,
@@ -92,13 +98,6 @@ def test_routing_strategy_integration(monkeypatch, device):
 
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
-        import tempfile
-
-        from vllm.distributed import (
-            init_distributed_environment,
-            initialize_model_parallel,
-        )
-
         temp_file = tempfile.mkstemp()[1]
         init_distributed_environment(
             world_size=1,
