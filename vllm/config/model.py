@@ -4,6 +4,7 @@
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
+from functools import cached_property
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -1241,12 +1242,12 @@ class ModelConfig:
             )
         return False
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
         if not hasattr(self.hf_config, "model_type"):
             return False
-        return self.hf_config.model_type in ("gemma3", "gemma3_text")
+        return self.hf_config.model_type in ("gemma3", "paligemma")
 
     def get_head_size(self) -> int:
         # TODO remove hard code
