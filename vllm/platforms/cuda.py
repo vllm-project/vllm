@@ -188,15 +188,26 @@ class CudaPlatformBase(Platform):
                     use_cutlass_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
-                    vllm_config.attention_config.backend = "CUTLASS_MLA"
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.CUTLASS_MLA
+                    )
                 else:
                     # Not Blackwell
                     use_flashmla = True
             else:
                 # Forced case
-                use_flashmla = attention_backend == "FLASHMLA"
-                use_cutlass_mla = attention_backend == "CUTLASS_MLA"
-                use_flashinfer_mla = attention_backend == "FLASHINFER_MLA"
+                use_flashmla = (
+                    vllm_config.attention_config.backend
+                    == AttentionBackendEnum.FLASHMLA
+                )
+                use_cutlass_mla = (
+                    vllm_config.attention_config.backend
+                    == AttentionBackendEnum.CUTLASS_MLA
+                )
+                use_flashinfer_mla = (
+                    vllm_config.attention_config.backend
+                    == AttentionBackendEnum.FLASHINFER_MLA
+                )
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 

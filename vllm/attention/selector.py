@@ -81,24 +81,9 @@ def _cached_get_attn_backend(
     attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     from vllm.config import get_current_vllm_config
-
-    selected_backend = None
-    vllm_config = get_current_vllm_config()
-    backend_by_config: str | None = vllm_config.attention_config.backend
-    if backend_by_config is not None:
-        if backend_by_config.endswith("_VLLM_V1"):
-            logger.warning(
-                "The suffix '_VLLM_V1' in the attention backend "
-                "is no longer necessary as V0 backends have been "
-                "deprecated. Please remove this suffix from your "
-                "backend setting."
-            )
-            backend_by_config = backend_by_config.removesuffix("_VLLM_V1")
-        selected_backend = AttentionBackendEnum[backend_by_config]
-
-    # get device-specific attn_backend
     from vllm.platforms import current_platform
 
+    vllm_config = get_current_vllm_config()
     sig = inspect.signature(current_platform.get_attn_backend_cls)
     if "use_v1" in sig.parameters:
         logger.warning_once(
@@ -107,7 +92,7 @@ def _cached_get_attn_backend(
             "remove it from your plugin code."
         )
         attention_cls = current_platform.get_attn_backend_cls(
-            selected_backend,
+            vllm_config.attention_config.backend,
             head_size,
             dtype,
             kv_cache_dtype,
@@ -120,7 +105,7 @@ def _cached_get_attn_backend(
         )
     else:
         attention_cls = current_platform.get_attn_backend_cls(
-            selected_backend,
+            vllm_config.attention_config.backend,
             head_size,
             dtype,
             kv_cache_dtype,

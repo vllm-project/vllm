@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
-from pydantic import ConfigDict
+from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
 from vllm.logger import init_logger
 
@@ -16,7 +18,7 @@ logger = init_logger(__name__)
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: str | None = None
+    backend: AttentionBackendEnum | None = None
     """Attention backend to use. If None, will be selected automatically.
     Example options: FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
 
@@ -60,6 +62,14 @@ class AttentionConfig:
         ignored_factors: list[str] = []
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def validate_backend_before(cls, value: Any) -> Any:
+        """Enable parsing of the `backend` enum type from string."""
+        if isinstance(value, str):
+            return AttentionBackendEnum[value.upper()]
+        return value
 
     def __post_init__(self) -> None:
         from vllm import envs
