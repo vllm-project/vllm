@@ -73,9 +73,9 @@ class CudagraphDispatcher:
             for bs in self.compilation_config.cudagraph_capture_sizes:
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False, 
+                    BatchDescriptor(num_tokens=bs, uniform_decode=False,
                                    is_training=False))
-            
+
             # Register separate batch descriptors for training if enabled.
             # Training graphs have different computation (forward + backward) 
             # compared to inference (forward only).

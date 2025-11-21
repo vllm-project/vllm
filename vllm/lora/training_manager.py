@@ -53,8 +53,8 @@ class TrainingManager:
 
         self.rank = lora_config.max_lora_rank
         self.alpha = lora_config.lora_alpha
-        self.target_modules = lora_config.training_target_modules
-        self.scheduler_type = lora_config.scheduler_type
+        self.target_modules = lora_config.lora_training_target_modules
+        self.scheduler_type = lora_config.lora_scheduler_type
 
         self.trainable_lora_ids: Set[int] = set()
         self.in_prog_lora_ids: Set[int] = set()
