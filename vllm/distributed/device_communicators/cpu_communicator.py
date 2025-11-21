@@ -8,8 +8,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.ucc_communicator import (
-        UCCCommunicator)
+    from vllm.distributed.device_communicators.ucc_communicator import UCCCommunicator
 
 import vllm.envs as envs
 from vllm.distributed.utils import pickle
@@ -42,8 +41,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 UCCCommunicator,
             )
 
-            self.ucc_group = torch.distributed.new_group(self.ranks,
-                                                         backend="ucc")
+            self.ucc_group = torch.distributed.new_group(self.ranks, backend="ucc")
             self.ucc_comm = UCCCommunicator(
                 group=self.ucc_group,
                 device=self.device,
@@ -67,8 +65,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_):
         """Perform all-reduce operation using the optimal backend."""
         # Try UCC allreduce if available
-        if (self.ucc_comm is not None and not self.ucc_comm.disabled
-                and self.ucc_comm.should_use_ucc_allreduce(input_)):
+        if (
+            self.ucc_comm is not None
+            and not self.ucc_comm.disabled
+            and self.ucc_comm.should_use_ucc_allreduce(input_)
+        ):
             out = self.ucc_comm.all_reduce(input_)
             if out is not None:
                 return out

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -21,8 +20,7 @@ class UCCCommunicator:
     hardware acceleration when available.
     """
 
-    def __init__(self, group: ProcessGroup,
-                 device: Union[int, str, torch.device]) -> None:
+    def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
         """
         Initialize UCCCommunicator.
 
@@ -38,7 +36,8 @@ class UCCCommunicator:
             logger.warning(
                 "UCCCommunicator requires a UCC process group backend, "
                 "but got backend: %s. Disabling UCC allreduce.",
-                dist.get_backend(group))
+                dist.get_backend(group),
+            )
             return
 
         # Set up device
@@ -55,12 +54,14 @@ class UCCCommunicator:
         self.disabled = False
         logger.info(
             "UCCCommunicator initialized successfully with UCC backend "
-            "on device %s, world size: %d", self.device, self.world_size)
+            "on device %s, world size: %d",
+            self.device,
+            self.world_size,
+        )
 
     def all_reduce(
-            self,
-            tensor: torch.Tensor,
-            op: dist.ReduceOp = dist.ReduceOp.SUM) -> Optional[torch.Tensor]:
+        self, tensor: torch.Tensor, op: dist.ReduceOp = dist.ReduceOp.SUM
+    ) -> torch.Tensor | None:
         """
         Perform allreduce operation using UCC backend.
 
@@ -84,8 +85,8 @@ class UCCCommunicator:
             return tensor
         except Exception as e:
             logger.warning(
-                "UCC allreduce failed: %s. Falling back to regular allreduce.",
-                str(e))
+                "UCC allreduce failed: %s. Falling back to regular allreduce.", str(e)
+            )
             return None
 
     def should_use_ucc_allreduce(self, tensor: torch.Tensor) -> bool:
@@ -124,7 +125,8 @@ class UCCCommunicator:
         if hasattr(dist, "is_ucc_available"):
             return dist.is_ucc_available()
         try:
-            return hasattr(dist.Backend,
-                           "UCC") or "ucc" in dist.Backend.__dict__.values()
+            return (
+                hasattr(dist.Backend, "UCC") or "ucc" in dist.Backend.__dict__.values()
+            )
         except Exception:
             return False

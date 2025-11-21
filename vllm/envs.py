@@ -1582,10 +1582,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
-
     # If set to 1, use UCC allreduce
-    "VLLM_USE_UCC":
-    lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
+    "VLLM_USE_UCC": lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

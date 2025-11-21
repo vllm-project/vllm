@@ -9,11 +9,12 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.distributed.device_communicators.ucc_communicator import (
-    UCCCommunicator)
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             init_distributed_environment,
-                                             initialize_model_parallel)
+from vllm.distributed.device_communicators.ucc_communicator import UCCCommunicator
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_group,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
@@ -47,13 +48,15 @@ def ucc_allreduce_worker(local_rank: int, world_size: int):
             torch.set_default_device(device)
         torch.set_default_dtype(dtype)
 
-        update_environment_variables({
-            'RANK': str(local_rank),
-            'LOCAL_RANK': str(local_rank),
-            'WORLD_SIZE': str(world_size),
-            'MASTER_ADDR': 'localhost',
-            'MASTER_PORT': '12345',
-        })
+        update_environment_variables(
+            {
+                "RANK": str(local_rank),
+                "LOCAL_RANK": str(local_rank),
+                "WORLD_SIZE": str(world_size),
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "12345",
+            }
+        )
 
         init_distributed_environment()
         initialize_model_parallel(tensor_model_parallel_size=world_size)
@@ -63,8 +66,7 @@ def ucc_allreduce_worker(local_rank: int, world_size: int):
             pytest.skip("UCC backend is not available in PyTorch.")
 
         # Create reference device group from TP group
-        group = get_tensor_model_parallel_group(
-        ).device_group  # pyright: ignore[reportDeprecated]
+        group = get_tensor_model_parallel_group().device_group  # pyright: ignore[reportDeprecated]
 
         # Try to create a UCC process group
         try:
@@ -79,10 +81,9 @@ def ucc_allreduce_worker(local_rank: int, world_size: int):
             pytest.skip("UCCCommunicator is disabled.")
 
         # Test direct UCC allreduce
-        inp_direct_ucc = torch.randint(1,
-                                       23, (test_size_elements, ),
-                                       dtype=dtype,
-                                       device=device)
+        inp_direct_ucc = torch.randint(
+            1, 23, (test_size_elements,), dtype=dtype, device=device
+        )
 
         if not ucc_communicator.should_use_ucc_allreduce(inp_direct_ucc):
             pytest.skip(
@@ -101,32 +102,27 @@ def ucc_allreduce_worker(local_rank: int, world_size: int):
             atol, rtol = 1e-3, 1e-4
         else:
             atol, rtol = 2.5, 0.1
-        torch.testing.assert_close(out_direct_ucc,
-                                   original_inp_direct_ucc,
-                                   atol=atol,
-                                   rtol=rtol)
+        torch.testing.assert_close(
+            out_direct_ucc, original_inp_direct_ucc, atol=atol, rtol=rtol
+        )
 
         # Test different reduction operations
         for op in [dist.ReduceOp.SUM, dist.ReduceOp.MAX, dist.ReduceOp.MIN]:
-            inp_op_test = torch.randint(1,
-                                        10, (1024, ),
-                                        dtype=dtype,
-                                        device=device)
+            inp_op_test = torch.randint(1, 10, (1024,), dtype=dtype, device=device)
             original_inp_op_test = inp_op_test.clone()
 
             out_ucc_op = ucc_communicator.all_reduce(inp_op_test, op=op)
             if out_ucc_op is not None:
                 dist.all_reduce(original_inp_op_test, op=op, group=group)
-                torch.testing.assert_close(out_ucc_op,
-                                           original_inp_op_test,
-                                           atol=atol,
-                                           rtol=rtol)
+                torch.testing.assert_close(
+                    out_ucc_op, original_inp_op_test, atol=atol, rtol=rtol
+                )
 
         # Test tensor size threshold (avoid huge allocation by using meta)
         small_tensor = torch.ones(100, dtype=dtype, device=device)
-        large_tensor = torch.empty(513 * 1024 * 1024,
-                                   dtype=torch.uint8,
-                                   device='meta')  # > 512MB, meta device
+        large_tensor = torch.empty(
+            513 * 1024 * 1024, dtype=torch.uint8, device="meta"
+        )  # > 512MB, meta device
 
         assert ucc_communicator.should_use_ucc_allreduce(small_tensor) is True
         assert ucc_communicator.should_use_ucc_allreduce(large_tensor) is False
@@ -147,13 +143,15 @@ def ucc_availability_worker(local_rank: int, world_size: int):
         if current_platform.is_cuda():
             torch.cuda.set_device(device)
 
-        update_environment_variables({
-            'RANK': str(local_rank),
-            'LOCAL_RANK': str(local_rank),
-            'WORLD_SIZE': str(world_size),
-            'MASTER_ADDR': 'localhost',
-            'MASTER_PORT': '12347',
-        })
+        update_environment_variables(
+            {
+                "RANK": str(local_rank),
+                "LOCAL_RANK": str(local_rank),
+                "WORLD_SIZE": str(world_size),
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "12347",
+            }
+        )
 
         init_distributed_environment()
         initialize_model_parallel(tensor_model_parallel_size=world_size)
@@ -173,28 +171,30 @@ def ucc_availability_worker(local_rank: int, world_size: int):
 
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
-def test_ucc_allreduce(monkeypatch: pytest.MonkeyPatch, tp_size,
-                       pipeline_parallel_size):
+def test_ucc_allreduce(
+    monkeypatch: pytest.MonkeyPatch, tp_size, pipeline_parallel_size
+):
     world_size = tp_size * pipeline_parallel_size
 
     # For CUDA, ensure enough GPUs; for CPU, proceed.
     if current_platform.is_cuda() and world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
-    mp.spawn(ucc_allreduce_worker, args=(world_size, ), nprocs=world_size)
+    mp.spawn(ucc_allreduce_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
-def test_ucc_availability(monkeypatch: pytest.MonkeyPatch, tp_size,
-                          pipeline_parallel_size):
+def test_ucc_availability(
+    monkeypatch: pytest.MonkeyPatch, tp_size, pipeline_parallel_size
+):
     world_size = tp_size * pipeline_parallel_size
 
     if current_platform.is_cuda() and world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
-    mp.spawn(ucc_availability_worker, args=(world_size, ), nprocs=world_size)
+    mp.spawn(ucc_availability_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
 
 
