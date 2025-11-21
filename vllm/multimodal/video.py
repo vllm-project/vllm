@@ -212,6 +212,10 @@ class OpenCVVideoBackend(VideoLoader):
         recovery_offset: int = 0,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        if recovery_offset < 0:
+            raise ValueError(
+                f"recovery_offset must be non-negative, got {recovery_offset}"
+            )
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -315,6 +319,10 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         recovery_offset: int = 0,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        if recovery_offset < 0:
+            raise ValueError(
+                f"recovery_offset must be non-negative, got {recovery_offset}"
+            )
         import cv2
 
         backend = cls().get_cv2_video_api()

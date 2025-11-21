@@ -411,6 +411,33 @@ def test_video_recovery_dynamic_backend(caplog, monkeypatch):
             OpenCVDynamicVideoBackend._read_frames = original_read_frames
 
 
+def test_video_recovery_negative_offset_validation(monkeypatch):
+    """Test that negative recovery_offset raises ValueError."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Create minimal test data
+        test_data = b"fake video data"
+
+        # Test OpenCV backend
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        with pytest.raises(
+            ValueError,
+            match="recovery_offset must be non-negative, got -1",
+        ):
+            loader.load_bytes(test_data, recovery_offset=-1)
+
+        # Test OpenCV dynamic backend
+        with monkeypatch.context() as m2:
+            m2.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+            loader_dynamic = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+            with pytest.raises(
+                ValueError,
+                match="recovery_offset must be non-negative, got -5",
+            ):
+                loader_dynamic.load_bytes(test_data, recovery_offset=-5)
+
+
 def test_video_recovery_failure_logging(caplog, monkeypatch):
     """Test that recovery failure is properly logged."""
     with monkeypatch.context() as m:
