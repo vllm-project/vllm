@@ -186,7 +186,7 @@ def global_force_attn_backend_context_manager(
     original_value = vllm_config.attention_config.backend
 
     # Override the backend in config
-    vllm_config.attention_config.backend = str(attn_backend.name)
+    vllm_config.attention_config.backend = attn_backend
 
     # Yield control back to the enclosed code block
     try:
