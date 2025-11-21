@@ -8,7 +8,7 @@ from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config, normalize_value
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -69,7 +69,7 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -81,17 +81,18 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
-
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        factors: list[Any] = [
+            self.max_lora_rank,
+            self.max_loras,
+            self.fully_sharded_loras,
+            self.lora_dtype,
+            self.lora_extra_vocab_size,
+            self.lora_vocab_padding_size,
+        ]
+        normalized = normalize_value(factors)
+        if not normalized:
+            return None
+        return {"factors": normalized}
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:

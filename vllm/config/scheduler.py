@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self, deprecated
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -162,7 +162,7 @@ class SchedulerConfig:
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -174,12 +174,8 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        # This config does not affect the compiled graph.
+        return None
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

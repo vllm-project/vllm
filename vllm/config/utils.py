@@ -26,7 +26,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
-HashResult = str | dict[str, object] | list[Any] | None
+HashResult = dict[str, object] | None
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -157,7 +157,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 @runtime_checkable
 class SupportsCompileFactors(Protocol):
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult: ...
+    def compile_factors(self) -> HashResult: ...
 
 
 class SupportsMetricsInfo(Protocol):
@@ -285,8 +285,8 @@ def get_compile_factors(
         value = getattr(config, factor, None)
         # Nested configs expose factors via compile_factors; unwrap first.
         if isinstance(value, SupportsCompileFactors):
-            nested = value.compile_factors(return_factors=True)
-            value = [] if nested is None else nested
+            nested = value.compile_factors()
+            value = {} if nested is None else nested
         try:
             factors[factor] = normalize_value(value)
         except TypeError as e:

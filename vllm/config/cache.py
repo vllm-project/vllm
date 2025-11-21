@@ -147,7 +147,7 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config, review
         `ignored_factors` to decide whether the field should be excluded.
@@ -181,7 +181,8 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        return get_compile_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
+        return factors or None
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

@@ -93,8 +93,14 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compile_factors(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compile_factors(vllm_config)
+    def compile_factors(
+        self, vllm_config: VllmConfig
+    ) -> tuple[dict[str, object], str]:
+        raw_factors = self.compiler.compile_factors(vllm_config) or {}
+        hash_str = hashlib.md5(
+            str(raw_factors).encode(), usedforsecurity=False
+        ).hexdigest()[:10]
+        return raw_factors, hash_str
 
     @contextmanager
     def compile_context(self, runtime_shape: int | None = None):
@@ -590,28 +596,40 @@ class VllmBackend:
         env_factors = envs.compile_factors()
         env_hash = hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
-        config_compile_signature = vllm_config.compile_factors()
-        compiler_compile_signature = self.compiler_manager.compile_factors(vllm_config)
+        config_factors = vllm_config.compile_factors() or {}
+        config_hash = hash_factors(config_factors)
+        compiler_factors, compiler_hash = self.compiler_manager.compile_factors(
+            vllm_config
+        )
         forward_code_files = list(sorted(self.compilation_config.traced_files))
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
             lazy(lambda: "\n".join(forward_code_files)),
         )
-        hash_content = []
+        code_factors: list[dict[str, str]] = []
+        hash_content_parts: list[str] = []
         for filepath in forward_code_files:
-            hash_content.append(filepath)
+            hash_content_parts.append(filepath)
+            entry: dict[str, str] = {"path": filepath}
             if filepath == "<string>":
                 # This means the function was dynamically generated, with
                 # e.g. exec(). We can't actually check these.
+                code_factors.append(entry)
                 continue
             try:
                 with open(filepath) as f:
-                    hash_content.append(f.read())
+                    content = f.read()
             except Exception:
                 logger.warning("Failed to read file %s", filepath)
+                code_factors.append(entry)
                 continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+            entry["content"] = content
+            code_factors.append(entry)
+            hash_content_parts.append(content)
+        code_hash = hashlib.sha256(
+            "\n".join(hash_content_parts).encode()
+        ).hexdigest()
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -619,12 +637,7 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [
-                env_hash,
-                config_compile_signature,
-                code_hash,
-                compiler_compile_signature,
-            ]
+            factors = [env_hash, config_hash, code_hash, compiler_hash]
             # Use SHA-256 for cache key hashing to be consistent across
             # compile_factors functions. Truncate for a short cache dir name.
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
@@ -665,8 +678,8 @@ class VllmBackend:
         logger.debug(
             "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
             env_hash,
-            config_compile_signature,
-            compiler_compile_signature,
+            config_hash,
+            compiler_hash,
             code_hash,
             local_cache_dir,
         )
@@ -676,7 +689,7 @@ class VllmBackend:
             logger.debug(
                 "Compile env factors (raw):\n%s\nVllm config hash: %s",
                 lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_compile_signature,
+                config_hash,
             )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
@@ -684,9 +697,12 @@ class VllmBackend:
                     json.dump(
                         {
                             "env": env_factors,  # raw factors used for env_hash
-                            "config_hash": config_compile_signature,
+                            "config": config_factors,
+                            "config_hash": config_hash,
+                            "compiler": compiler_factors,
+                            "compiler_hash": compiler_hash,
                             "code_hash": code_hash,
-                            "compiler_hash": compiler_compile_signature,
+                            "code": code_factors,
                         },
                         f,
                         indent=2,

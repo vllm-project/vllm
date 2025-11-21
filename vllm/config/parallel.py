@@ -11,7 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import HashResult, config, get_compile_factors, hash_factors
+from vllm.config.utils import HashResult, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -454,7 +454,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -501,9 +501,7 @@ class ParallelConfig:
         factors = get_compile_factors(self, ignored_factors)
         # Explicitly include backend affecting env factor as before
         factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
-        if return_factors:
-            return factors or None
-        return hash_factors(factors)
+        return factors or None
 
     def __post_init__(self) -> None:
         # Set all2all_backend from env var if not specified, with deprecation warning

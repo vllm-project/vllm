@@ -7,7 +7,7 @@ from typing import Any, Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -63,7 +63,7 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -75,12 +75,8 @@ class KVTransferConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        # This config does not affect the compiled graph.
+        return None
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

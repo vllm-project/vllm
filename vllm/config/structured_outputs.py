@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -42,7 +42,7 @@ class StructuredOutputsConfig:
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -54,12 +54,7 @@ class StructuredOutputsConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        return None
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:

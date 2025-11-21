@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -17,6 +17,7 @@ import zmq
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -1000,7 +1001,8 @@ def wait_for_engine_startup(
                     f"dp lb mode"
                 )
 
-        parallel_hash = cast(str, parallel_config.compile_factors())
+        parallel_factors = parallel_config.compile_factors() or {}
+        parallel_hash = hash_factors(parallel_factors)
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info and config hash.
             # The config hash ensures all DP workers have compatible configs.

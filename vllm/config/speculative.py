@@ -9,7 +9,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -146,7 +146,7 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -158,13 +158,15 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        factors: list[Any] = [
+            # Eagle3 affects the computation graph because it returns
+            # intermediate hidden states in addition to the final hidden state.
+            self.method == "eagle3"
+        ]
+        normalized = normalize_value(factors)
+        if not normalized:
+            return None
+        return {"factors": normalized}
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

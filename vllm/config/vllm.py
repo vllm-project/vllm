@@ -3,8 +3,6 @@
 
 import copy
 import getpass
-import hashlib
-import json
 import os
 import tempfile
 import threading
@@ -117,7 +115,7 @@ class VllmConfig:
     instance_id: str = ""
     """The ID of the vLLM instance."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -136,81 +134,44 @@ class VllmConfig:
         from vllm import __version__
 
         vllm_factors.append(__version__)
-        if self.model_config:
-            vllm_factors.append(self.model_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.cache_config:
-            vllm_factors.append(self.cache_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.parallel_config:
-            vllm_factors.append(self.parallel_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.scheduler_config:
-            vllm_factors.append(self.scheduler_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.device_config:
-            vllm_factors.append(self.device_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.load_config:
-            vllm_factors.append(self.load_config.compile_factors())
-        else:
-            vllm_factors.append("None")
+
+        def _append_config(config_obj: SupportsCompileFactors | None) -> None:
+            vllm_factors.append(config_obj.compile_factors() if config_obj else None)
+
+        _append_config(self.model_config)
+        _append_config(self.cache_config)
+        _append_config(self.parallel_config)
+        _append_config(self.scheduler_config)
+        _append_config(self.device_config)
+        _append_config(self.load_config)
         if self.lora_config:
             vllm_factors.append(self.lora_config.compile_factors())
             # LoRA creates static buffers based on max_num_batched_tokens.
             # The tensor sizes and strides get captured in the torch.compile
             # graph explicitly.
-            vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
+            vllm_factors.append(self.scheduler_config.max_num_batched_tokens)
         else:
-            vllm_factors.append("None")
-        if self.speculative_config:
-            vllm_factors.append(self.speculative_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.structured_outputs_config:
-            vllm_factors.append(self.structured_outputs_config.compile_factors())
-        else:
-            vllm_factors.append("None")
+            vllm_factors.append(None)
+        _append_config(self.speculative_config)
+        _append_config(self.structured_outputs_config)
         vllm_factors.append(self.observability_config.compile_factors())
-        if self.quant_config:
-            pass  # should be captured by model_config.quantization
         if self.compilation_config:
             vllm_factors.append(self.compilation_config.compile_factors())
         else:
-            vllm_factors.append("None")
-        if self.kv_transfer_config:
-            vllm_factors.append(self.kv_transfer_config.compile_factors())
-        else:
-            vllm_factors.append("None")
-        if self.ec_transfer_config:
-            vllm_factors.append(self.ec_transfer_config.compile_factors())
-        else:
-            vllm_factors.append("None")
+            vllm_factors.append(None)
+        _append_config(self.kv_transfer_config)
+        _append_config(self.ec_transfer_config)
         if self.additional_config:
-            if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = hashlib.md5(
-                    json.dumps(additional_config, sort_keys=True).encode(),
-                    usedforsecurity=False,
-                ).hexdigest()
+            additional_config = self.additional_config
+            if isinstance(additional_config, dict):
+                vllm_factors.append(additional_config)
             else:
-                additional_config_hash = additional_config.compile_factors()
-            vllm_factors.append(additional_config_hash)
+                vllm_factors.append(additional_config.compile_factors())
         else:
-            vllm_factors.append("None")
+            vllm_factors.append(None)
+
         factors.append(vllm_factors)
-
-        if return_factors:
-            return vllm_factors if vllm_factors else []
-
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+        return {"vllm": factors}
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
         # if batch_size > self.compilation_config.max_cudagraph_capture_size,

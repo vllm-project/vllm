@@ -29,12 +29,12 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_node_count,
@@ -386,7 +386,8 @@ class EplbState:
             )
             self.expert_rearrangement_step = 0
 
-        model_hash = cast(str, model_config.compile_factors())
+        model_factors = model_config.compile_factors() or {}
+        model_hash = hash_factors(model_factors)
         self.model_states[model_hash] = EplbModelState(
             physical_to_logical_map,
             logical_to_physical_map,

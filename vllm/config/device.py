@@ -8,7 +8,7 @@ import torch
 from pydantic import ConfigDict, SkipValidation
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
@@ -28,7 +28,7 @@ class DeviceConfig:
     """Device type from the current platform. This is set in
     `__post_init__`."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -43,10 +43,7 @@ class DeviceConfig:
         # no factors to consider.
         # the device/platform information will be summarized
         # by torch/vllm automatically.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        return None
 
     def __post_init__(self):
         if self.device == "auto":

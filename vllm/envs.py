@@ -10,7 +10,7 @@ import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
-from vllm.config.utils import hash_factors, normalize_value
+from vllm.config.utils import normalize_value
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -1678,9 +1678,6 @@ def collect_compile_factors() -> dict[str, object]:
     return factors
 
 
-def compile_factors(*, return_factors: bool = True):
-    """Return env compile factors (dict) or hashed string when requested."""
-    factors = collect_compile_factors()
-    if return_factors:
-        return factors
-    return hash_factors(factors)
+def compile_factors() -> dict[str, object]:
+    """Return env compile factors."""
+    return collect_compile_factors()

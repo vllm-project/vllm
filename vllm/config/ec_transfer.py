@@ -6,7 +6,7 @@ from typing import Any, Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 
 ECProducer = Literal["ec_producer"]
 ECConsumer = Literal["ec_consumer"]
@@ -59,7 +59,7 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -71,12 +71,8 @@ class ECTransferConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        # This config does not affect the compiled graph.
+        return None
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

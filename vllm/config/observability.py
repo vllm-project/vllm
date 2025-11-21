@@ -9,7 +9,7 @@ from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm import version
-from vllm.config.utils import HashResult, config, hash_factors, normalize_value
+from vllm.config.utils import HashResult, config
 
 DetailedTraceModules = Literal["model", "worker", "all"]
 
@@ -62,7 +62,7 @@ class ObservabilityConfig:
             or "all" in self.collect_detailed_traces
         )
 
-    def compile_factors(self, *, return_factors: bool = False) -> HashResult:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -76,10 +76,7 @@ class ObservabilityConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: list[Any] = []
-        if return_factors:
-            return factors or None
-        return hash_factors({"factors": normalize_value(factors)})
+        return None
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod

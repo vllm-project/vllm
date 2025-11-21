@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
-import hashlib
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -46,17 +45,16 @@ class CompilerInterface:
         """
         pass
 
-    def compile_factors(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
         """
-        Gather all the relevant information from the vLLM config,
-        to compute a hash so that we can cache the compiled model.
+        Gather compiler-specific factors that influence the generated code.
 
         See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
-        to check what information
-        is already considered by default. This function should only
-        consider the information that is specific to the compiler.
+        for the base configuration factors. This method should return any
+        additional data that uniquely identifies the compiler's contribution to
+        the cache key.
         """
-        return ""
+        return None
 
     def compile(
         self,
@@ -195,12 +193,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]):
         self.save_format = save_format
 
-    def compile_factors(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
+        return {"inductor_standalone": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -284,12 +278,8 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compile_factors(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
+        return {"inductor": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
