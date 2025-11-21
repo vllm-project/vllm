@@ -1236,10 +1236,11 @@ def _report_kv_cache_config(
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     )
-    logger.info(
+    logger.info_once(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
         max_concurrency,
+        scope="local",
     )
 
 
