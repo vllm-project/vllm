@@ -1867,11 +1867,11 @@ async def warmup_model(
             # Call through model_runner -> model, same pattern as prefill_forward/decode_forward
             # This calls: worker.model_runner.warmup_model_metal() 
             # which should call: self.model.warmup_model_metal()
-            results = engine.model_executor.collective_rpc(
+            engine.model_executor.collective_rpc(
                 method="warmup_model_metal",
                 timeout=300.0  # 5 minute timeout for warmup
             )
-            logger.info(f"warmup_model_metal completed on all workers: {results}")
+            logger.info(f"warmup_model_metal completed on all workers")
             
         # Check if this is V1 AsyncLLM
         elif hasattr(engine_client, 'engine_core'):
