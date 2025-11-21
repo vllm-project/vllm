@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
+    VLLM_LOGGING_COLOR: str = "auto"
+    NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -90,11 +92,14 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
+    VLLM_PROFILER_DELAY_ITERS: int = 0
+    VLLM_PROFILER_MAX_ITERS: int = 0
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -226,6 +231,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_USE_V2_MODEL_RUNNER: bool = False
 
 
 def get_default_cache_root():
@@ -616,6 +622,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_STREAM": lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+    # Controls colored logging output. Options: "auto" (default, colors when terminal),
+    # "1" (always use colors), "0" (never use colors)
+    "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
+    # Standard unix flag for disabling ANSI color codes
+    "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val
@@ -865,6 +876,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
         os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
     ),
+    # Disable torch profiling of the AsyncLLMEngine process.
+    # If set to 1, will not profile the engine process.
+    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM", "0") != "0"
+    ),
+    # Delay number of iterations before starting profiling when using
+    # the torch/torch CUDA profiler. If set to 0, will start profiling immediately.
+    "VLLM_PROFILER_DELAY_ITERS": lambda: int(
+        os.getenv("VLLM_PROFILER_DELAY_ITERS", "0")
+    ),
+    # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
+    # If set to 0, will not limit the number of iterations.
+    "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,
@@ -1499,6 +1523,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Flag to enable v2 model runner.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
+        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1578,6 +1606,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_PREFIX",
         "VLLM_LOGGING_STREAM",
         "VLLM_LOGGING_CONFIG_PATH",
+        "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
@@ -1608,6 +1637,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "NO_COLOR",
     }
 
     from vllm.config.utils import normalize_value
