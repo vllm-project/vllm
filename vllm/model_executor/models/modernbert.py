@@ -395,6 +395,7 @@ class ModernBertPredictionHead(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(self.act(self.dense(hidden_states)))
 
+
 @attn_type("encoder_only")
 @default_pooling_type("ALL")
 class ModernBertForTokenClassification(nn.Module):

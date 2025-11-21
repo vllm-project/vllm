@@ -47,9 +47,10 @@ from .interfaces import (
     supports_transcription,
 )
 from .interfaces_base import (
+    get_attn_type,
     get_default_pooling_type,
     is_pooling_model,
-    is_text_generation_model, get_attn_type,
+    is_text_generation_model,
 )
 
 logger = init_logger(__name__)

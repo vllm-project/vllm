@@ -1902,18 +1902,18 @@ class EngineArgs:
 
         if self.prefill_context_parallel_size > 1:
             is_chunked_prefill_supported = (
-                config_model.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
-            )
-            is_prefix_caching_supported = (
-                config_model.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
-            )
-
-        if not is_current_platform_chunked_prefill_supported():
-            is_chunked_prefill_supported = (
                 config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
             )
             is_prefix_caching_supported = (
                 config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
+            )
+
+        if not is_current_platform_chunked_prefill_supported():
+            is_chunked_prefill_supported = (
+                config_model.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
+            )
+            is_prefix_caching_supported = (
+                config_model.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if self.enable_chunked_prefill is None:
