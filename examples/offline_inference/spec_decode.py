@@ -158,11 +158,7 @@ def main(args):
             print(f"generated text: {output.outputs[0].text}")
             print("-" * 50)
 
-    try:
-        metrics = llm.get_metrics()
-    except AssertionError:
-        print("Metrics are not supported in the V0 engine.")
-        return
+    metrics = llm.get_metrics()
 
     total_num_output_tokens = sum(
         len(output.outputs[0].token_ids) for output in outputs
