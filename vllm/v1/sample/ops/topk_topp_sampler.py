@@ -60,13 +60,20 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
         ):
-            import aiter.ops.sampling  # noqa: F401
+            try:
+                import aiter.ops.sampling  # noqa: F401
 
-            self.aiter_ops = torch.ops.aiter
-            logger.info_once(
-                "Using aiter sampler on ROCm (lazy import, sampling-only)."
-            )
-            self.forward = self.forward_hip
+                self.aiter_ops = torch.ops.aiter
+                logger.info_once(
+                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
+                )
+                self.forward = self.forward_hip
+            except ImportError:
+                logger.warning_once(
+                    "aiter.ops.sampling is not available on ROCm. "
+                    "Falling back to forward_native implementation."
+                )
+                self.forward = self.forward_native
         else:
             self.forward = self.forward_native
 
