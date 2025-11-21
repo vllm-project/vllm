@@ -41,7 +41,7 @@ TOP_KS = [1, 2, 6]
 
 DTYPES = [torch.bfloat16]
 
-if current_platform.is_rocm() and not current_platform.is_fp8_fnuz():
+if not current_platform.is_fp8_fnuz():
     DTYPES.append(torch.float8_e4m3fn)
 
 vllm_config = VllmConfig()
