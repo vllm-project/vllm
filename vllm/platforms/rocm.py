@@ -265,6 +265,9 @@ class RocmPlatform(Platform):
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info("Using FlexAttention backend.")
             return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+        if selected_backend == AttentionBackendEnum.EXPERIMENTAL_HELION_ATTN:
+            logger.info("Using EXPERIMENTAL Helion backend.")
+            return "vllm.v1.attention.backends.helion_attn.HelionAttentionBackend"
         if (
             rocm_aiter_ops.is_mha_enabled()
         ) or selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
