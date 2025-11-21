@@ -442,6 +442,32 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
+def uses_custom_attention_masks(config: PretrainedConfig, model_path: str) -> bool:
+    """Detect if model uses custom attention mask generation for multimodal.
+
+    Some multimodal models require custom attention masks that enable
+    bidirectional attention between image tokens while maintaining causal
+    attention for text tokens. Currently applies ONLY to Gemma3 GGUF models.
+
+    Args:
+        config: HuggingFace model config
+        model_path: Path to the model (used to check if it's a GGUF file)
+
+    Returns:
+        True if the model is a GGUF Gemma3 multimodal model
+    """
+    from vllm.transformers_utils.utils import check_gguf_file
+
+    # Check architecture
+    architectures = getattr(config, "architectures", [])
+    is_gemma3 = "Gemma3ForConditionalGeneration" in architectures
+
+    # CRITICAL: Only return True for GGUF models
+    is_gguf = check_gguf_file(model_path)
+
+    return is_gemma3 and is_gguf
+
+
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """
     Update kwargs for AutoConfig initialization based on model_type
