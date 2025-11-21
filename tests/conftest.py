@@ -749,8 +749,8 @@ class VllmRunner:
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
             # Make sure we have atleast one cudagraph large enough for a single decode.
-            if num_speculative_tokens := kwargs.get("speculative_config", {}).get(
-                "num_speculative_tokens", None
+            if (speculative_config := kwargs["speculative_config"]) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
             ):
                 kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
                     num_speculative_tokens + 1
