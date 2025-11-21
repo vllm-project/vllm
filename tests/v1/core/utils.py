@@ -63,7 +63,7 @@ def create_scheduler(
       max_num_batch_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
-                             (None)
+                             (False)
 
     Returns:
       {class}`Scheduler` instance
