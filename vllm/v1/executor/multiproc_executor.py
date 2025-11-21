@@ -330,16 +330,46 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            max_retries = 3
+
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else (deadline - time.monotonic())
                 )
-                try:
-                    status, result = mq.dequeue(
-                        timeout=dequeue_timeout, cancel=shutdown_event
-                    )
-                except TimeoutError as e:
-                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+
+                retry_count = 0
+                last_exception = None
+
+                while retry_count < max_retries:
+                    try:
+                        status, result = mq.dequeue(
+                            timeout=dequeue_timeout, cancel=shutdown_event
+                        )
+                        break  # Success
+                    except RuntimeError as e:
+                        if "cancelled" in str(e) and not shutdown_event.is_set():
+                            retry_count += 1
+                            last_exception = e
+                            logger.warning(
+                                "retrying (%d/%d)",
+                                retry_count,
+                                max_retries,
+                            )
+                            time.sleep(0.1 * retry_count)
+                            continue
+                        raise
+                    except TimeoutError as e:
+                        raise TimeoutError(f"RPC call to {method} timed out.") from e
+
+                if retry_count >= max_retries:
+                    raise RuntimeError(
+                        f"Worker communication failed after {max_retries} retries. "
+                        f"Last error: {last_exception}. "
+                        "This may indicate worker process failure or severe system "
+                        "overload. Try reducing --max-num-seqs or using "
+                        "--tensor-parallel-size instead of --pipeline-parallel-size."
+                    ) from last_exception
+
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
