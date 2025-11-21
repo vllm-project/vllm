@@ -1093,8 +1093,7 @@ def get_dcp_group() -> GroupCoordinator:
     return _DCP
 
 
-# kept for backward compatibility
-get_context_model_parallel_group = get_dcp_group
+_CP: GroupCoordinator | None = None
 
 _PP: GroupCoordinator | None = None
 

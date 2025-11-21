@@ -194,7 +194,8 @@ def _cp_lse_common(
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
     out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
-    assert out.is_contiguous()
+    # remove out.is_contiguous() check
+    # Ref: https://github.com/vllm-project/vllm/pull/25414
     return out, lse
 
 
