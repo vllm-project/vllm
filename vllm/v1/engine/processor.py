@@ -142,9 +142,6 @@ class Processor:
         self,
         params: SamplingParams,
     ) -> None:
-        # Best of not yet supported.
-        if params.best_of is not None and params.best_of > 1:
-            raise ValueError("vLLM V1 does not yet support best_of.")
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
