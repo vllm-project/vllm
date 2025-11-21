@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Optional
-
 import torch
 from torch.distributed import ProcessGroup
 
@@ -43,8 +41,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
         if envs.VLLM_USE_UCC:
-            self.ucc_group = torch.distributed.new_group(self.ranks,
-                                                         backend="ucc")
+            self.ucc_group = torch.distributed.new_group(self.ranks, backend="ucc")
         else:
             self.ucc_group = None
 
@@ -103,7 +100,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         # Initialize UCC allreduce if available
-        self.ucc_comm: Optional[UCCCommunicator] = None
+        self.ucc_comm: UCCCommunicator | None = None
         if envs.VLLM_USE_UCC and self.world_size > 1:
             self.ucc_comm = UCCCommunicator(
                 group=self.ucc_group,
@@ -165,8 +162,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert out is not None
             return out
         ucc_comm = self.ucc_comm
-        if ucc_comm is not None and not ucc_comm.disabled and \
-            ucc_comm.should_use_ucc_allreduce(input_):
+        if (
+            ucc_comm is not None
+            and not ucc_comm.disabled
+            and ucc_comm.should_use_ucc_allreduce(input_)
+        ):
             out = ucc_comm.all_reduce(input_)
             assert out is not None
             return out

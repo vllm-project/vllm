@@ -1528,10 +1528,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
-
     # If set to 1, use UCC allreduce
-    "VLLM_USE_UCC":
-    lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
+    "VLLM_USE_UCC": lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
