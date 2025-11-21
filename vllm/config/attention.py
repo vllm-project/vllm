@@ -9,7 +9,7 @@ from vllm.config.utils import config
 
 
 @config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@dataclass
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
