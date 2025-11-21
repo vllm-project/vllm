@@ -29,19 +29,13 @@ However, in some cases, setting the seed will also [change the random state in u
 
 In V1, the `seed` parameter defaults to `0` which sets the random state for each worker, so the results will remain consistent for each vLLM run even if `temperature > 0`.
 
-!!! note
+It is impossible to un-specify a seed for V1 because different workers need to sample the same outputs
+for workflows such as speculative decoding. For more information, see: <https://github.com/vllm-project/vllm/pull/17929>
 
-    It is impossible to un-specify a seed for V1 because different workers need to sample the same outputs
-    for workflows such as speculative decoding.
-    
-    For more information, see: <https://github.com/vllm-project/vllm/pull/17929>
+!! note
 
-### Locality of random state
+    The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM 
+    only if the workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
 
-The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM under the following conditions:
-
-- For V0: The seed is specified.
-- For V1: The workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
-
-By default, these conditions are not active so you can use vLLM without having to worry about
-accidentally making deterministic subsequent operations that rely on random state.
+    By default, `VLLM_ENABLE_V1_MULTIPROCESSING=1` so you can use vLLM without having to worry about
+    accidentally making deterministic subsequent operations that rely on random state.
