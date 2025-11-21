@@ -64,6 +64,8 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.model import (
+    APC_REASONS,
+    CP_REASONS,
     ConvertOption,
     HfOverrides,
     LogprobsMode,
@@ -71,8 +73,6 @@ from vllm.config.model import (
     RunnerOption,
     TaskOption,
     TokenizerMode,
-    apc_reasons,
-    cp_reasons,
     is_current_platform_chunked_prefill_supported,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
@@ -1903,18 +1903,18 @@ class EngineArgs:
 
         if self.prefill_context_parallel_size > 1:
             is_chunked_prefill_supported = (
-                cp_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
+                CP_REASONS.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
             )
             is_prefix_caching_supported = (
-                apc_reasons.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
+                APC_REASONS.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if not is_current_platform_chunked_prefill_supported():
             is_chunked_prefill_supported = (
-                cp_reasons.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
+                CP_REASONS.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
             )
             is_prefix_caching_supported = (
-                apc_reasons.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
+                APC_REASONS.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if self.enable_chunked_prefill is None:

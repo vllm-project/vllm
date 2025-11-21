@@ -309,12 +309,3 @@ class BoolWithReason:
     def raise_if_false(self):
         if not self.value:
             raise ValueError(self.reason)
-
-
-class BoolWithReasonGroup(dict):
-    def __setattr__(self, key: str, value: BoolWithReason):
-        assert isinstance(value, BoolWithReason)
-        self[key] = value
-
-    def __getattr__(self, key: str) -> BoolWithReason:
-        return self[key]
