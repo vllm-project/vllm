@@ -4,6 +4,7 @@
 import tempfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -14,7 +15,12 @@ from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.image import ImageMediaIO
 from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader, VideoMediaIO
 
-from .utils import cosine_similarity, create_video_from_image, normalize_image
+from .utils import (
+    cosine_similarity,
+    create_video_from_image,
+    normalize_image,
+    random_video,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -177,3 +183,297 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+def test_video_recovery_functionality(caplog, monkeypatch):
+    """Test video frame recovery functionality when sequential reading fails."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Create a simple test video
+        rng = np.random.RandomState(42)
+        test_frames = random_video(rng, 10, 11, 64, 65)  # 10 frames, 64x64
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+            # Create video file
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            video_writer = cv2.VideoWriter(temp_path, fourcc, 30, (64, 64))
+
+            for frame in test_frames:
+                # Convert RGB to BGR for OpenCV
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                video_writer.write(bgr_frame)
+
+            video_writer.release()
+
+            # Read the video file
+            with open(temp_path, "rb") as f:
+                video_data = f.read()
+
+        # Clean up
+        Path(temp_path).unlink()
+
+        # Mock the _read_frames method to simulate missing frames
+        # This will force the recovery logic to trigger
+        original_read_frames = None
+
+        def mock_read_frames(
+            cap, frame_indices, num_expected, max_frame_idx, warn_on_failure=True
+        ):
+            # Simulate that only frames 0, 2, 4, 6, 8 are successfully read
+            # (frames 1, 3, 5, 7, 9 fail)
+            successful_indices = [0, 2, 4, 6, 8]
+            successful_frames = []
+
+            # Get video properties
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            for idx in successful_indices:
+                if idx in frame_indices:
+                    # Seek to the frame and read it
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, frame = cap.read()
+                    if ret:
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        successful_frames.append(rgb_frame)
+
+            if successful_frames:
+                frames_array = np.stack(successful_frames)
+            else:
+                frames_array = np.empty((0, height, width, 3), dtype=np.uint8)
+
+            return frames_array, len(successful_frames), successful_indices
+
+        # Patch the _read_frames method
+        from vllm.multimodal.video import OpenCVVideoBackend
+
+        original_read_frames = OpenCVVideoBackend._read_frames
+        OpenCVVideoBackend._read_frames = staticmethod(mock_read_frames)
+
+        try:
+            # Test with recovery enabled
+            loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+            with caplog.at_level("INFO"):
+                frames, metadata = loader.load_bytes(
+                    video_data, num_frames=10, recovery_offset=2
+                )
+
+            # Verify recovery was attempted and succeeded
+            assert "Sequential loading missing" in caplog.text
+            assert "Recovery successful" in caplog.text
+
+            # Should have recovered some frames
+            assert frames.shape[0] > 0
+            assert len(metadata["frames_indices"]) == frames.shape[0]
+
+            # Verify frames are in correct order (temporal order preserved)
+            assert metadata["frames_indices"] == sorted(metadata["frames_indices"])
+
+        finally:
+            # Restore original method
+            OpenCVVideoBackend._read_frames = original_read_frames
+
+
+def test_video_recovery_disabled(caplog, monkeypatch):
+    """Test that recovery is not attempted when recovery_offset is 0."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Create a simple test video
+        rng = np.random.RandomState(42)
+        test_frames = random_video(rng, 6, 7, 64, 65)  # 6 frames, 64x64
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+            # Create video file
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            video_writer = cv2.VideoWriter(temp_path, fourcc, 30, (64, 64))
+
+            for frame in test_frames:
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                video_writer.write(bgr_frame)
+
+            video_writer.release()
+
+            with open(temp_path, "rb") as f:
+                video_data = f.read()
+
+        Path(temp_path).unlink()
+
+        # Mock _read_frames to return no frames (simulating complete failure)
+        def mock_read_frames_no_frames(
+            cap, frame_indices, num_expected, max_frame_idx, warn_on_failure=True
+        ):
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return np.empty((0, height, width, 3), dtype=np.uint8), 0, []
+
+        from vllm.multimodal.video import OpenCVVideoBackend
+
+        original_read_frames = OpenCVVideoBackend._read_frames
+        OpenCVVideoBackend._read_frames = staticmethod(mock_read_frames_no_frames)
+
+        try:
+            loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+            with caplog.at_level("INFO"):
+                frames, metadata = loader.load_bytes(
+                    video_data, num_frames=6, recovery_offset=0
+                )
+
+            # Verify no recovery messages when recovery_offset is 0
+            assert "Sequential loading missing" not in caplog.text
+            assert "Recovery" not in caplog.text
+
+            # Should return empty frames
+            assert frames.shape[0] == 0
+
+        finally:
+            OpenCVVideoBackend._read_frames = original_read_frames
+
+
+def test_video_recovery_dynamic_backend(caplog, monkeypatch):
+    """Test recovery functionality in the dynamic backend."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+
+        # Create a test video with more frames
+        rng = np.random.RandomState(42)
+        test_frames = random_video(rng, 20, 21, 64, 65)  # 20 frames
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            video_writer = cv2.VideoWriter(temp_path, fourcc, 30, (64, 64))
+
+            for frame in test_frames:
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                video_writer.write(bgr_frame)
+
+            video_writer.release()
+
+            with open(temp_path, "rb") as f:
+                video_data = f.read()
+
+        Path(temp_path).unlink()
+
+        # Mock to simulate partial frame loading
+        def mock_read_frames_partial(
+            cap, frame_indices, num_expected, max_frame_idx, warn_on_failure=True
+        ):
+            # Return only half the expected frames
+            successful_count = max(1, num_expected // 2)
+            successful_frames = []
+
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            for i in range(successful_count):
+                # Read actual frames from the video
+                ret, frame = cap.read()
+                if ret:
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    successful_frames.append(rgb_frame)
+
+            if successful_frames:
+                frames_array = np.stack(successful_frames)
+            else:
+                frames_array = np.empty((0, height, width, 3), dtype=np.uint8)
+
+            successful_indices = list(range(successful_count))
+            return frames_array, successful_count, successful_indices
+
+        from vllm.multimodal.video import OpenCVDynamicVideoBackend
+
+        original_read_frames = OpenCVDynamicVideoBackend._read_frames
+        OpenCVDynamicVideoBackend._read_frames = staticmethod(mock_read_frames_partial)
+
+        try:
+            loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+
+            with caplog.at_level("INFO"):
+                frames, metadata = loader.load_bytes(
+                    video_data, fps=2, max_duration=10, recovery_offset=3
+                )
+
+            # Should have some frames loaded
+            assert frames.shape[0] > 0
+            assert "do_sample_frames" in metadata
+            assert metadata["do_sample_frames"] is False  # Dynamic backend
+
+        finally:
+            OpenCVDynamicVideoBackend._read_frames = original_read_frames
+
+
+def test_video_recovery_failure_logging(caplog, monkeypatch):
+    """Test that recovery failure is properly logged."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Create a test video
+        rng = np.random.RandomState(42)
+        test_frames = random_video(rng, 5, 6, 64, 65)
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            video_writer = cv2.VideoWriter(temp_path, fourcc, 30, (64, 64))
+
+            for frame in test_frames:
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                video_writer.write(bgr_frame)
+
+            video_writer.release()
+
+            with open(temp_path, "rb") as f:
+                video_data = f.read()
+
+        Path(temp_path).unlink()
+
+        # Mock complete failure in both sequential and seeking reads
+        def mock_read_frames_failure(
+            cap, frame_indices, num_expected, max_frame_idx, warn_on_failure=True
+        ):
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return np.empty((0, height, width, 3), dtype=np.uint8), 0, []
+
+        def mock_seek_failure(cap, frame_indices, recovery_offset):
+            # Return empty results - no recovery possible
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return np.empty((0, height, width, 3), dtype=np.uint8), [], {}
+
+        from vllm.multimodal.video import OpenCVVideoBackend
+
+        original_read_frames = OpenCVVideoBackend._read_frames
+        original_seek_frames = OpenCVVideoBackend._load_frames_with_seeking
+
+        OpenCVVideoBackend._read_frames = staticmethod(mock_read_frames_failure)
+        OpenCVVideoBackend._load_frames_with_seeking = staticmethod(mock_seek_failure)
+
+        try:
+            loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+            with caplog.at_level("WARNING"):
+                frames, metadata = loader.load_bytes(
+                    video_data, num_frames=5, recovery_offset=1
+                )
+
+            # Should log recovery attempt and failure
+            assert "Sequential loading missing" in caplog.text
+            assert "Recovery finished but video is still missing" in caplog.text
+
+            # Should return empty frames
+            assert frames.shape[0] == 0
+
+        finally:
+            OpenCVVideoBackend._read_frames = original_read_frames
+            OpenCVVideoBackend._load_frames_with_seeking = original_seek_frames
