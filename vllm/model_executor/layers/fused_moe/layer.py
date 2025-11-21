@@ -18,6 +18,7 @@ from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_pcp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -67,7 +68,6 @@ else:
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
-        indices_type: torch.dtype | None,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
@@ -343,6 +343,7 @@ class FusedMoE(CustomOp):
         tp_size: int | None = None,
         ep_size: int | None = None,
         dp_size: int | None = None,
+        pcp_size: int | None = None,
         prefix: str = "",
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
@@ -371,8 +372,8 @@ class FusedMoE(CustomOp):
             logger.info_once("Disabling MoE shared_experts cuda stream")
             self.shared_experts_stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda.
-            # aux_stream() returns None on non-cuda platforms.
+            # TODO(rob): enable shared expert overlap with non-cuda-alike.
+            # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
                 logger.info_once("Enabled separate cuda stream for MoE shared_experts")
@@ -398,12 +399,14 @@ class FusedMoE(CustomOp):
             tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
         )
         dp_size_ = dp_size if dp_size is not None else get_dp_group().world_size
+        pcp_size_ = pcp_size if pcp_size is not None else get_pcp_group().world_size
 
         self.is_sequence_parallel = is_sequence_parallel
         self.sp_size = tp_size_ if is_sequence_parallel else 1
 
         self.moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
             tp_size_=tp_size_,
+            pcp_size_=pcp_size_,
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
@@ -570,6 +573,9 @@ class FusedMoE(CustomOp):
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
+        self.moe_config_use_flashinfer_cutlass_kernels = (
+            self.moe_config.use_flashinfer_cutlass_kernels
+        )
 
         self.quant_config = quant_config
 
@@ -680,6 +686,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.dp_size
 
     @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
+
+    @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
 
@@ -690,6 +700,10 @@ class FusedMoE(CustomOp):
     @property
     def dp_rank(self):
         return self.moe_parallel_config.dp_rank
+
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
 
     @property
     def ep_rank(self):
@@ -716,7 +730,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_quant_config is not None
             and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config.use_flashinfer_cutlass_kernels
+            and self.moe_config_use_flashinfer_cutlass_kernels
         )
 
     @property
@@ -835,6 +849,45 @@ class FusedMoE(CustomOp):
                     vllm_config=get_current_vllm_config(),
                     dp_size=get_dp_group().world_size,
                 )
+
+    def _maybe_setup_shared_experts_stream(
+        self,
+        hidden_states: torch.Tensor,
+        has_separate_shared_experts: bool,
+        use_chunked_impl: bool,
+    ) -> tuple[bool, torch.Tensor | None]:
+        use_shared_experts_stream = (
+            has_separate_shared_experts
+            and not use_chunked_impl
+            and self.shared_experts_stream is not None
+            and (
+                hidden_states.shape[0]
+                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            )
+        )
+
+        hidden_states_clone: torch.Tensor | None = None
+        if use_shared_experts_stream:
+            assert self.shared_experts_stream is not None
+
+            # Clone BEFORE switching streams to avoid race condition
+            # where routed_expert kernel may mutate hidden_states.
+            hidden_states_clone = hidden_states.clone()
+
+            # Record that the clone will be used by shared_experts_stream
+            # to avoid gc issue from deallocation of hidden_states_clone
+            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+            # NOTE: We dont need shared_output.record_stream(current_stream())
+            # because we synch the streams before using shared_output.
+            hidden_states_clone.record_stream(self.shared_experts_stream)
+
+            # Mark sync start point for the separate shared experts
+            # stream here since we want to run in parallel with the
+            # router/gate (next op below)
+            assert self.shared_experts_stream is not None
+            self.shared_experts_stream.wait_stream(current_stream())
+
+        return use_shared_experts_stream, hidden_states_clone
 
     def _load_per_tensor_weight_scale(
         self,
@@ -1494,8 +1547,6 @@ class FusedMoE(CustomOp):
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
             )
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
         elif e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -1504,7 +1555,7 @@ class FusedMoE(CustomOp):
                 topk=top_k,
                 renormalize=renormalize,
             )
-            if routed_scaling_factor is not None:
+            if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
         elif custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(
@@ -1521,8 +1572,6 @@ class FusedMoE(CustomOp):
                 topk=top_k,
                 renormalize=renormalize,
             )
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
 
         if enable_eplb:
             assert expert_load_view is not None
@@ -1534,8 +1583,10 @@ class FusedMoE(CustomOp):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
-                indices_type=indices_type,
             )
+
+        if (indices_type is not None) and topk_ids.dtype != indices_type:
+            topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
@@ -1812,35 +1863,11 @@ class FusedMoE(CustomOp):
 
         use_chunked_impl = self.use_dp_chunking
 
-        use_shared_experts_stream = (
-            has_separate_shared_experts
-            and not use_chunked_impl
-            and self.shared_experts_stream is not None
-            and (
-                hidden_states.shape[0]
-                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        use_shared_experts_stream, hidden_states_clone = (
+            self._maybe_setup_shared_experts_stream(
+                hidden_states, has_separate_shared_experts, use_chunked_impl
             )
         )
-
-        if use_shared_experts_stream:
-            assert self.shared_experts_stream is not None
-
-            # Clone BEFORE switching streams to avoid race condition
-            # where routed_expert kernel may mutate hidden_states.
-            hidden_states_clone = hidden_states.clone()
-
-            # Record that the clone will be used by shared_experts_stream
-            # to avoid gc issue from deallocation of hidden_states_clone
-            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-            # NOTE: We dont need shared_output.record_stream(current_stream())
-            # because we synch the streams before using shared_output.
-            hidden_states_clone.record_stream(self.shared_experts_stream)
-
-            # Mark sync start point for the separate shared experts
-            # stream here since we want to run in parallel with the
-            # router/gate (next op below)
-            assert self.shared_experts_stream is not None
-            self.shared_experts_stream.wait_stream(current_stream())
 
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
@@ -1869,6 +1896,24 @@ class FusedMoE(CustomOp):
             if do_naive_dispatch_combine:
                 hidden_states_combined, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
+                )
+            # Run shared experts before matrix multiply.
+            # because matrix multiply maybe modify the hidden_states.
+            if has_separate_shared_experts and not use_shared_experts_stream:
+                assert self.shared_experts is not None
+                shared_output = self.shared_experts(hidden_states)
+
+            # NOTE: Similar with DP, PCP also needs dispatch and combine. For
+            # simplicity, AgRsAll2All was added separately for PCP here. Maybe
+            # we should modify All2AllManager abstract to better support PCP.
+            if self.pcp_size > 1:
+                hidden_states = get_pcp_group().all_gather(
+                    hidden_states,
+                    dim=0,
+                )
+                router_logits = get_pcp_group().all_gather(
+                    router_logits,
+                    dim=0,
                 )
 
             # Matrix multiply.
@@ -1913,8 +1958,6 @@ class FusedMoE(CustomOp):
                         # conflict with the main stream
                         shared_output = self.shared_experts(hidden_states_clone)
                     current_stream().wait_stream(self.shared_experts_stream)
-                else:
-                    shared_output = self.shared_experts(hidden_states)
 
                 final_hidden_states = (
                     shared_output,
@@ -1927,6 +1970,13 @@ class FusedMoE(CustomOp):
             def combine_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
+
+                if self.pcp_size > 1:
+                    states = get_pcp_group().reduce_scatter(
+                        states,
+                        dim=0,
+                    )
+
                 return states
 
             if self.shared_experts is not None:

@@ -287,7 +287,10 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        if config.n_shared_experts is None or self.is_rocm_aiter_moe_enabled:
+        self.is_fusion_moe_shared_experts_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
+        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -327,7 +330,7 @@ class DeepseekV2MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
-            if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            if self.is_fusion_moe_shared_experts_enabled
             else None,
         )
 
@@ -591,6 +594,7 @@ def sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
+    fp8_dtype = current_platform.fp8_dtype()
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return sparse_attn_indexer_fake(
@@ -630,7 +634,7 @@ def sparse_attn_indexer(
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
                 device=k.device,
-                dtype=torch.float8_e4m3fn,
+                dtype=fp8_dtype,
             )
             k_scale = torch.empty(
                 [chunk.total_seq_lens, 4],
@@ -644,7 +648,12 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            logits = fp8_mqa_logits(
+            fp8_mqa_logits_func = fp8_mqa_logits
+            if current_platform.is_rocm():
+                from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
+
+                fp8_mqa_logits_func = rocm_fp8_mqa_logits
+            logits = fp8_mqa_logits_func(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
                 weights[chunk.token_start : chunk.token_end],
@@ -689,7 +698,14 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        logits = fp8_paged_mqa_logits(
+        fp8_paged_mqa_logits_func = fp8_paged_mqa_logits
+        if current_platform.is_rocm():
+            from vllm.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_fp8_paged_mqa_logits,
+            )
+
+            fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+        logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
@@ -746,7 +762,8 @@ def sparse_attn_indexer_fake(
     _flattened_kv = torch.empty(
         [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
     )
-    _k_fp8 = _flattened_kv[..., :head_dim].view(torch.float8_e4m3fn).contiguous()
+    fp8_dtype = current_platform.fp8_dtype()
+    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
     _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
@@ -837,8 +854,8 @@ class Indexer(nn.Module):
         )
 
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze(1), k_nope], dim=-1)
+        q = torch.cat([q_pe.squeeze(0), q_nope], dim=-1)
+        k = torch.cat([k_pe.squeeze((0, 2)), k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -987,6 +1004,13 @@ class DeepseekV2MLAAttention(nn.Module):
         self.is_v32 = hasattr(config, "index_topk")
 
         if self.is_v32:
+            self.indexer_rope_emb = get_rope(
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=config.rope_parameters,
+                is_neox_style=True,
+            )
             self.indexer = Indexer(
                 vllm_config,
                 config,
@@ -998,6 +1022,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 f"{prefix}.indexer",
             )
         else:
+            self.indexer_rope_emb = None
             self.indexer = None
 
         mla_modules = MLAModules(
@@ -1015,6 +1040,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
             indexer=self.indexer,
+            indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
         )

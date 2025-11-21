@@ -197,6 +197,7 @@ def get_rope(
                     "beta_fast",
                     "beta_slow",
                     "apply_yarn_scaling",
+                    "truncate",
                 )
             }
             if "mrope_section" in rope_parameters:
