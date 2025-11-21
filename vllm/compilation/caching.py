@@ -11,6 +11,7 @@ from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
@@ -138,7 +139,7 @@ def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors = []
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = envs.compute_hash()
+    env_hash = hash_factors(envs.compile_factors())
     factors.append(env_hash)
 
     # 1. factors come from the vllm_config (it mainly summarizes how the
