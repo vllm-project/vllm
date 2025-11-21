@@ -7,6 +7,7 @@ import torch
 
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    LogprobsTensors,
     ModelRunnerOutput,
     SamplerOutput,
 )
@@ -46,16 +47,19 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 "cpu", non_blocking=True
             )
             if sampler_output.logprobs_tensors is not None:
-                self.logprobs_tensors = (
+                self.logprobs_tensors: LogprobsTensors | None = (
                     sampler_output.logprobs_tensors.to_cpu_nonblocking()
                 )
             else:
                 self.logprobs_tensors = None
             self.num_sampled_tokens = num_sampled_tokens.to("cpu", non_blocking=True)
-            self.prompt_logprobs_dict = {}
+            self.prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
-                    self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
+                    if v is not None:
+                        self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
+                    else:
+                        self.prompt_logprobs_dict[k] = None
             self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
@@ -66,11 +70,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # the existing model runner.
         # Going forward, we should keep the data structures as NumPy arrays
         # rather than Python lists.
-        sampled_token_ids_np = self.sampled_token_ids.numpy()
-        num_reqs = sampled_token_ids_np.shape[0]
-        sampled_token_ids: list[np.ndarray] = [
-            sampled_token_ids_np[i, : num_sampled_tokens_np[i]] for i in range(num_reqs)
-        ]
+        sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
+        num_reqs = len(sampled_token_ids)
+        for i in range(num_reqs):
+            del sampled_token_ids[i][num_sampled_tokens_np[i] :]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.logprobs_tensors is not None:

@@ -34,8 +34,16 @@ class CudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
-        self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        self.cudagraph_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        if self.compilation_config.cudagraph_mode is None:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        if self.compilation_config.cudagraph_capture_sizes is not None:
+            self.cudagraph_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes
+            )
+        else:
+            self.cudagraph_sizes = []
         self.padded_sizes = self._init_padded_sizes()
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
