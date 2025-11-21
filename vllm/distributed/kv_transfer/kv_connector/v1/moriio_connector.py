@@ -869,7 +869,8 @@ class MoRIIOConnector(KVConnectorBase_V1):
             self.connector_scheduler = None
             self.connector_worker = MoRIIOConnectorWorker(vllm_config, self.engine_id)
         logger.info(
-            "Initialized MoRIIO Connector,engine_id:{self.engine_id},role: {role.value}"
+            "Initialized MoRIIO Connector,engine_id:%s,role: %s", 
+            self.engine_id, role.value
         )
 
     ############################################################
