@@ -914,7 +914,7 @@ __global__ void gather_and_maybe_dequant_cache(
     const int32_t* __restrict__ block_table,   // [BATCH, BLOCK_INDICES]
     const int32_t* __restrict__ cu_seq_lens,   // [BATCH+1]
     const int32_t* __restrict__ token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNK]
-    const int32_t total_tokens, const int32_t block_size,
+    const int32_t num_tokens, const int32_t block_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
     const float* __restrict__ scale,
@@ -923,8 +923,12 @@ __global__ void gather_and_maybe_dequant_cache(
   constexpr int vec_size = sizeof(float4) / sizeof(scalar_t);
   using ltype = vllm::vec_n_t<cache_t, vec_size>;
   using stype = vllm::vec_n_t<scalar_t, vec_size>;
+  // We are adding this for code readability which will be optimized out when
+  // build in release.
+  assert(CTA_SIZE == blockDim.x);
 
-  for (int token_id = blockIdx.x; token_id < total_tokens;
+#pragma unroll
+  for (int token_id = blockIdx.x; token_id < num_tokens;
        token_id += gridDim.x) {
     int64_t batch_id = token_to_seq[token_id];
     int64_t batch_start = cu_seq_lens[batch_id];
@@ -964,10 +968,11 @@ __global__ void gather_and_maybe_dequant_cache(
       }
     }
     // process tail
-    int32_t tail_cnt = ENTRY_SIZE % vec_size;
+    constexpr int32_t tail_cnt = ENTRY_SIZE % vec_size;
     dst_ = dst_ + ENTRY_SIZE - tail_cnt;
     src_ = src_ + ENTRY_SIZE - tail_cnt;
-    for (int idx = threadIdx.x; idx < tail_cnt; idx += blockDim.x) {
+#pragma unroll
+    for (int idx = threadIdx.x; idx < tail_cnt; idx += CTA_SIZE) {
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst_[idx] = static_cast<scalar_t>(src_[idx]);
       } else {
@@ -1007,7 +1012,7 @@ void gather_and_maybe_dequant_cache(
     torch::Tensor const& dst,           // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,   // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,   // [BATCH+1]
-    torch::Tensor const& token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNK]
+    torch::Tensor const& token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNKS]
     int64_t num_tokens, const std::string& kv_cache_dtype,
     torch::Tensor const& scale,
     std::optional<torch::Tensor> seq_starts = std::nullopt) {
