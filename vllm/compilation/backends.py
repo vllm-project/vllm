@@ -25,6 +25,7 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -610,9 +611,7 @@ class VllmBackend:
             lazy(lambda: "\n".join(forward_code_files)),
         )
         code_factors: list[dict[str, str]] = []
-        hash_content_parts: list[str] = []
         for filepath in forward_code_files:
-            hash_content_parts.append(filepath)
             entry: dict[str, str] = {"path": filepath}
             if filepath == "<string>":
                 # This means the function was dynamically generated, with
@@ -628,8 +627,7 @@ class VllmBackend:
                 continue
             entry["content"] = content
             code_factors.append(entry)
-            hash_content_parts.append(content)
-        code_hash = hashlib.sha256("\n".join(hash_content_parts).encode()).hexdigest()
+        code_hash = hash_factors({"files": code_factors})
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
