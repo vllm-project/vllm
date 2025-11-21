@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 
 from vllm.v1.outputs import (
