@@ -1495,7 +1495,9 @@ class FusedMoE(CustomOp):
         if self.enable_eplb:
             if self.quant_method.supports_eplb:
                 if self.expert_load_view is None:
-                    raise ValueError("enable_eplb=True requiere expert_load_view != None")
+                    raise ValueError(
+                        "enable_eplb=True requiere expert_load_view != None"
+                    )
                 if self.logical_to_physical_map is None:
                     raise ValueError(
                         "enable_eplb=True requiere logical_to_physical_map != None"
@@ -1574,10 +1576,6 @@ class FusedMoE(CustomOp):
             )
 
         if self.enable_eplb:
-            assert self.expert_load_view is not None
-            assert self.logical_to_physical_map is not None
-            assert self.logical_replica_count is not None
-
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=self.expert_load_view,

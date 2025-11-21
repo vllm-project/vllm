@@ -1475,6 +1475,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
+            if enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
+                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
