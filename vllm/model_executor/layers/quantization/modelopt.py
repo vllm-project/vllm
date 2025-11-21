@@ -722,6 +722,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
             assert not layer.renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
+                layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,
                 routing_bias=layer.e_score_correction_bias,
@@ -730,15 +731,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 num_expert_group=layer.num_expert_group,
                 topk_group=layer.topk_group,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                w13_weight=layer.w13_weight,
-                w13_input_scale=layer.w13_input_scale,
-                w2_weight=layer.w2_weight,
-                output1_scales_scalar=layer.output1_scales_scalar,
-                output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
-                output2_scales_scalar=layer.output2_scales_scalar,
-                local_num_experts=layer.local_num_experts,
-                ep_rank=layer.ep_rank,
-                intermediate_size_per_partition=layer.intermediate_size_per_partition,
             )
 
         # Expert selection
@@ -752,15 +744,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
                 f"but got {layer.activation}"
             )
-            assert self.moe_quant_config is not None
             return flashinfer_cutlass_moe_fp8(
                 x,
+                layer,
                 topk_weights,
                 topk_ids,
-                layer.w13_weight,
-                layer.w2_weight,
-                self.moe_quant_config,
-                inplace=False,  # self.allow_inplace()
+                inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
@@ -777,7 +766,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,  # XXXX allow_inplace
+                inplace=True,
                 activation=layer.activation,
                 quant_config=self.moe_quant_config,
                 global_num_experts=layer.global_num_experts,

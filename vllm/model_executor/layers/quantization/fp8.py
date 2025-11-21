@@ -681,7 +681,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             self.flashinfer_moe_fn = partial(
                 flashinfer_cutlass_moe_fp8,
-                moe_config=self.moe,
+                moe=self.moe,
                 use_deepseek_fp8_block_scale=self.block_quant,
             )
 
@@ -1219,6 +1219,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "FusedMoE flashinfer kernels are only supported for Llama4"
                 )
                 result = apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
                     routing_bias=layer.e_score_correction_bias,
@@ -1227,15 +1228,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     num_expert_group=layer.num_expert_group,
                     topk_group=layer.topk_group,
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                    w13_weight=layer.w13_weight,
-                    w13_input_scale=layer.w13_input_scale,
-                    w2_weight=layer.w2_weight,
-                    output1_scales_scalar=layer.output1_scales_scalar,
-                    output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
-                    output2_scales_scalar=layer.output2_scales_scalar,
-                    local_num_experts=layer.local_num_experts,
-                    ep_rank=layer.ep_rank,
-                    intermediate_size_per_partition=layer.intermediate_size_per_partition,
                 )
 
         select_result = layer.select_experts(
@@ -1296,14 +1288,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             # Delegate to CUTLASS FlashInfer path; function already bound with
             # use_deepseek_fp8_block_scale for block-quant when applicable
-            assert self.moe_quant_config is not None
             result = self.flashinfer_moe_fn(
                 x,
+                layer,
                 topk_weights,
                 topk_ids,
-                layer.w13_weight,
-                layer.w2_weight,
-                self.moe_quant_config,
                 inplace=False,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
