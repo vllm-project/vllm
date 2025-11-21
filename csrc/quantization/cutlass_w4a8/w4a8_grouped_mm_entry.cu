@@ -45,6 +45,8 @@
 
 #include "core/registration.h"
 #include "get_group_starts.cuh"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+
 
 namespace vllm::cutlass_w4a8_moe {
 using namespace cute;
@@ -106,14 +108,20 @@ using StageCountType = cutlass::gemm::collective::StageCountAuto;           // S
 using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
 using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative; // Epilogue to launch
 
+// per-chan per-tok epilogue
+using ElementSChannel = float;
+using ChTokScalesEpilogue =
+    typename vllm::c3x::ScaledEpilogueArray<ElementAccumulator, ElementD,
+                                        TileShape>;
+using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape, ClusterShape,
+    ArchTag, OperatorClass, TileShape, ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementAccumulator,
+    ElementAccumulator, ElementSChannel,
     ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type *, AlignmentC,
     ElementD, typename cutlass::layout::LayoutTranspose<LayoutD>::type *, AlignmentD,
-    EpilogueSchedule
+    EpilogueSchedule, EVTCompute
   >::CollectiveOp;
 
 // =========================================================== MIXED INPUT WITH SCALES ===========================================================================
@@ -180,26 +188,6 @@ uint64_t seed = 2020;
     int n = static_cast<int>(b_tensors.size(1));
     int k = static_cast<int>(b_tensors.size(2)) * 8; // int4 -> int32 pack factor
 
-    // get args ---------------------------------
-    using Args = typename GemmShuffled::Arguments;
-    static const cutlass::KernelHardwareInfo hw_info{
-        device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-                      device_id)};
-
-    Args arguments;
-
-    // default epilogue arguments
-    decltype(arguments.epilogue.thread) fusion_args;
-    fusion_args.alpha = 1.0f;
-    fusion_args.beta = 0.0f;
-    fusion_args.alpha_ptr = nullptr;
-    fusion_args.beta_ptr = nullptr;
-    fusion_args.alpha_ptr_array = nullptr;
-    fusion_args.beta_ptr_array = nullptr;
-    // Single alpha and beta for all groups
-    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
-    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
-
     // reconstruct b and S stride
     // TODO: need some way to serialize this info to torch so we don't have to rebuild each time
     // perhaps through the pack methods
@@ -241,6 +229,12 @@ uint64_t seed = 2020;
     using Args = typename GemmShuffled::Arguments;
     using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
     using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
+    Args arguments;
+
+    ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
+      static_cast<ProblemShape::UnderlyingProblemShape*>(
+          problem_sizes_torch.data_ptr());
+    ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
 
     // SwapAB so B operands come first
     MainloopArguments mainloop_arguments{
@@ -252,15 +246,22 @@ uint64_t seed = 2020;
     };
 
     EpilogueArguments epilogue_arguments {
-      fusion_args,
-      nullptr, static_cast<StrideC*>(c_strides.data_ptr()), // epilogue should be good
-      static_cast<ElementD**>(out_ptrs.data_ptr()), static_cast<StrideC*>(c_strides.data_ptr())
+      // since we are doing SwapAB the channel scales comes first, then token scales
+      ChTokScalesEpilogue::prepare_args( // see ScaledEpilogueArray
+          static_cast<const ElementAccumulator**>(b_scales_ptrs.data_ptr()), // per-channel
+          static_cast<const ElementAccumulator**>(a_scales_ptrs.data_ptr()), // per-token
+          true,
+          true
+      ),
+      nullptr, // C
+      static_cast<StrideC*>(c_strides.data_ptr()), // C
+      static_cast<ElementD**>(out_ptrs.data_ptr()), // D
+      static_cast<StrideC*>(c_strides.data_ptr()) // D
     };
-
-    ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
-      static_cast<ProblemShape::UnderlyingProblemShape*>(
-          problem_sizes_torch.data_ptr());
-    ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
+    
+    static const cutlass::KernelHardwareInfo hw_info{
+    device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+                  device_id)};
 
     arguments = Args {
       cutlass::gemm::GemmUniversalMode::kGrouped,
@@ -272,7 +273,6 @@ uint64_t seed = 2020;
 
     // Allocate workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-    printf("workspace size: %d\n", workspace_size);
     torch::Tensor workspace =
         torch::empty(workspace_size,
                      torch::TensorOptions().dtype(torch::kU8).device(device));
@@ -282,7 +282,6 @@ uint64_t seed = 2020;
     CUTLASS_CHECK(gemm.can_implement(arguments));
     CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
     CUTLASS_CHECK(gemm.run(stream));
-    print("grouped gemm done!\n");
   }
 
 void mm(
