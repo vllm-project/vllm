@@ -52,11 +52,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             else:
                 self.logprobs_tensors = None
-            self.prompt_logprobs_dict = {}
+            self.prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
                     if v is not None:
                         self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
+                    else:
+                        self.prompt_logprobs_dict[k] = None
             self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:

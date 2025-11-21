@@ -348,6 +348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Add new requests.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prompt_token_ids is not None
+            assert new_req_data.prefill_token_ids is not None
             assert new_req_data.sampling_params is not None
             req_id = new_req_data.req_id
             self.req_states.add_request(
@@ -401,8 +402,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Decode first, then prefill.
         # batch_idx -> req_id
         req_ids = sorted(
-            scheduler_output.num_scheduled_tokens,
-            key=scheduler_output.num_scheduled_tokens.get,
+            scheduler_output.num_scheduled_tokens.keys(),
+            key=lambda k: scheduler_output.num_scheduled_tokens[k],
         )
         num_scheduled_tokens = np.array(
             [scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32
