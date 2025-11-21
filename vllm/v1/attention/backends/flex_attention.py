@@ -446,17 +446,19 @@ class FlexAttentionMetadata:
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
 
-        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        assert self.doc_ids is not None
+        request_lookup = self.doc_ids
 
         def prefix_lm_mask_mod(
             b: torch.Tensor,
             h: torch.Tensor,
+            cu_q_idx: torch.Tensor,
             q_idx: torch.Tensor,
             kv_idx: torch.Tensor,
         ):
             mask = torch.zeros_like(q_idx, dtype=torch.bool)
             for req, doc_range_lst in (self.mm_prefix_range or {}).items():
-                req_mask = request_lookup[q_idx] == req
+                req_mask = request_lookup[cu_q_idx] == req
                 for start, end in doc_range_lst:
                     doc_mask_q = (q_idx >= start) & (q_idx <= end)
                     doc_mask_kv = (kv_idx >= start) & (kv_idx <= end)
@@ -474,7 +476,7 @@ class FlexAttentionMetadata:
             )
             return torch.where(
                 is_valid,
-                prefix_lm_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                prefix_lm_mask_mod(b, h, q_idx, logical_q_idx, logical_kv_idx),
                 False,
             )
 
