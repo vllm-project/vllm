@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import json
 import os
 import time
@@ -355,6 +356,41 @@ def list_repo_files(
     return with_retry(lookup_files, "Error retrieving file list")
 
 
+def list_filtered_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> list[str]:
+    try:
+        all_files = list_repo_files(
+            repo_id=model_name_or_path,
+            revision=revision,
+            token=token,
+            repo_type=repo_type,
+        )
+    except Exception:
+        logger.error(
+            "Error retrieving file list. Please ensure your `model_name_or_path`"
+            "`repo_type`, `token` and `revision` arguments are correctly set. "
+            "Returning an empty list."
+        )
+        return []
+
+    file_list = []
+    # Filter patterns on filenames
+    for pattern in allow_patterns:
+        file_list.extend(
+            [
+                file
+                for file in all_files
+                if fnmatch.fnmatch(os.path.basename(file), pattern)
+            ]
+        )
+    return file_list
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -520,17 +556,6 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
-def uses_custom_attention_masks(config: PretrainedConfig) -> bool:
-    """Detect if model uses custom attention mask generation for multimodal.
-
-    Some multimodal models require custom attention masks that enable
-    bidirectional attention between image tokens while maintaining causal
-    attention for text tokens. Currently applies to Gemma3 multimodal models.
-    """
-    architectures = getattr(config, "architectures", [])
-    return "Gemma3ForConditionalGeneration" in architectures
-
-
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """
     Update kwargs for AutoConfig initialization based on model_type
@@ -630,10 +655,14 @@ def get_config(
 
     if config_format == "auto":
         try:
-            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
-                config_format = "hf"
-            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            # First check for Mistral to avoid defaulting to
+            # Transformers implementation.
+            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
+            elif is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                config_format = "hf"
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "

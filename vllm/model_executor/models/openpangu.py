@@ -625,7 +625,7 @@ class OpenPanguDecoderLayer(nn.Module):
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
             )
-        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", None)
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.num_hidden_layers = config.num_hidden_layers
         self.first_k_dense_replace = getattr(
             config, "first_k_dense_replace", self.num_hidden_layers

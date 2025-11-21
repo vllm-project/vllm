@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from vllm.transformers_utils.utils import is_cloud_storage, is_gcs, is_s3
+from vllm.transformers_utils.utils import (
+    is_cloud_storage,
+    is_gcs,
+    is_s3,
+)
 
 
 def test_is_gcs():

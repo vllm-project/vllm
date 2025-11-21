@@ -22,7 +22,14 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+
+try:
+    from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "flashinfer not supported for vLLM on ROCm", allow_module_level=True
+        )
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90

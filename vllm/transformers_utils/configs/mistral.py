@@ -90,6 +90,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "rope_type": "yarn",
         "mscale_all_dim": 1,
     }
+
+    if rope_theta := config.pop("rope_theta", None):
+        config["rope_parameters"]["rope_theta"] = rope_theta
+
     for old_name, new_name in yarn_config_map.items():
         if old_name in yarn_config:
             config["rope_parameters"][new_name] = yarn_config.pop(old_name)
@@ -114,7 +118,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "model_type": ("model_type", "transformer"),
         "hidden_act": ("activation", "silu"),
         "tie_word_embeddings": ("tied_embeddings", False),
-        "max_seq_len": ("max_seq_len", 128_000),
+        "max_seq_len": ("max_seq_len", config.get("max_position_embeddings", 128_000)),
         "max_position_embeddings": ("max_position_embeddings", 128_000),
     }
 
