@@ -279,7 +279,6 @@ def _combine_sampled_and_draft_tokens_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     prefill_len_ptr,
-    num_draft_tokens_ptr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -292,13 +291,7 @@ def _combine_sampled_and_draft_tokens_kernel(
 
     last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
     end = tl.load(query_start_loc_ptr + batch_idx + 1)
-
-    if num_draft_tokens_ptr is not None:
-        num_draft_tokens = tl.load(num_draft_tokens_ptr + batch_idx)
-    else:
-        num_draft_tokens = 0
-    num_tokens = num_draft_tokens + 1
-    tl.store(input_ids_ptr + end - num_tokens, last_token_id)
+    tl.store(input_ids_ptr + end - 1, last_token_id)
 
 
 def combine_sampled_and_draft_tokens(
