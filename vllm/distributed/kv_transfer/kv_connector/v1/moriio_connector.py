@@ -73,7 +73,7 @@ class MoRIIOConstants:
     COMPLETION_PREFIX = "cmpl"
 
     PING_INTERVAL = 5
-    MAX_PING_RETRIES = 100000
+    MAX_PING_RETRIES = 1000000
     DEFAULT_HANDSHAKE_PORT = "6301"
     DEFAULT_NOTIFY_PORT = "61005"
 
@@ -1932,7 +1932,7 @@ class MoRIIOConnectorWorker:
         to track which workers are done.
         """
 
-        done_sending = set()
+        done_sending, done_recving  = set() ,set()
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
