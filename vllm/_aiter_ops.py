@@ -279,7 +279,7 @@ def _rocm_aiter_grouped_topk_fake(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-    return
+    pass
 
 
 def _rocm_aiter_mla_decode_fwd_impl(
