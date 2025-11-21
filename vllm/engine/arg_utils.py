@@ -544,7 +544,6 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -713,16 +712,6 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
-        )
-
-        # Attention arguments
-        attention_kwargs = get_kwargs(AttentionConfig)
-        attention_group = parser.add_argument_group(
-            title="AttentionConfig",
-            description=AttentionConfig.__doc__,
-        )
-        attention_group.add_argument(
-            "--attention-backend", **attention_kwargs["backend"]
         )
 
         # Structured outputs arguments
@@ -1742,16 +1731,6 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
-        # Attention config overrides
-        attention_config = copy.deepcopy(self.attention_config)
-        if self.attention_backend is not None:
-            if attention_config.backend is not None:
-                raise ValueError(
-                    "attention_backend and attention_config.backend "
-                    "are mutually exclusive"
-                )
-            attention_config.backend = self.attention_backend
-
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1822,7 +1801,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             load_config=load_config,
-            attention_config=attention_config,
+            attention_config=self.attention_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,

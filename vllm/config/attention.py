@@ -19,8 +19,7 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. If None, will be selected automatically.
-    Example options: FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
+    """Attention backend to use. If None, will be selected automatically."""
 
     flash_attn_version: Literal[2, 3] | None = None
     """Force vllm to use a specific flash-attention version (2 or 3).
