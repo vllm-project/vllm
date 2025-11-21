@@ -44,7 +44,7 @@ class CudagraphDispatcher:
         }
 
         assert (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
