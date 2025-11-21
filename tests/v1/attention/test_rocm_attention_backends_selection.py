@@ -150,7 +150,6 @@ def test_standard_attention_backend_selection(
         dtype=torch.float16,
         kv_cache_dtype="auto",
         block_size=16,
-        use_v1=True,
         use_mla=False,
         has_sink=False,
         use_sparse=False,
@@ -190,8 +189,8 @@ def test_standard_attention_backend_selection(
             {},
             "ROCM_AITER_MLA",
             16,
-            None,
-            True,
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
+            False,
         ),
         # Test Case 5: VLLM_ROCM_USE_AITER=1 with block_size == 1
         (
@@ -207,7 +206,7 @@ def test_standard_attention_backend_selection(
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
             16,
-            "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
             False,
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_MLA
@@ -245,10 +244,13 @@ def test_mla_backend_selection(
 
     # Mock is_aiter_mla_enabled based on env vars and block_size
     aiter_enabled = env_vars.get("VLLM_ROCM_USE_AITER") == "1"
-    with patch(
-        "vllm.v1.attention.backends.mla.rocm_aiter_mla.is_aiter_mla_enabled",
-        return_value=aiter_enabled,
-    ):
+
+    mock_rocm_ops = MagicMock()
+    mock_rocm_ops.is_mla_enabled.return_value = aiter_enabled
+    mock_aiter_module = MagicMock()
+    mock_aiter_module.rocm_aiter_ops = mock_rocm_ops
+
+    with patch.dict("sys.modules", {"vllm._aiter_ops": mock_aiter_module}):
         # Convert string backend to enum if provided
         backend_enum = None
         if selected_backend:
@@ -264,7 +266,6 @@ def test_mla_backend_selection(
                     dtype=torch.float16,
                     kv_cache_dtype="auto",
                     block_size=block_size,
-                    use_v1=True,
                     use_mla=True,
                     has_sink=False,
                     use_sparse=False,
@@ -276,7 +277,6 @@ def test_mla_backend_selection(
                 dtype=torch.float16,
                 kv_cache_dtype="auto",
                 block_size=block_size,
-                use_v1=True,
                 use_mla=True,
                 has_sink=False,
                 use_sparse=False,
@@ -303,46 +303,7 @@ def test_aiter_fa_requires_gfx9(mock_vllm_config):
             dtype=torch.float16,
             kv_cache_dtype="auto",
             block_size=16,
-            use_v1=True,
             use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-        )
-
-
-def test_v0_raises_error(mock_vllm_config):
-    """Test that V0 engine raises an error."""
-    from vllm.platforms.rocm import RocmPlatform
-
-    with pytest.raises(RuntimeError, match="V0 attention backends have been removed"):
-        RocmPlatform.get_attn_backend_cls(
-            selected_backend=None,
-            head_size=128,
-            dtype=torch.float16,
-            kv_cache_dtype="auto",
-            block_size=16,
-            use_v1=False,
-            use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-        )
-
-
-def test_mla_requires_v1(mock_vllm_config):
-    """Test that MLA backends require V1 engine."""
-    from vllm.platforms.rocm import RocmPlatform
-
-    with pytest.raises(
-        RuntimeError, match="MLA attention backends require the V1 engine"
-    ):
-        RocmPlatform.get_attn_backend_cls(
-            selected_backend=None,
-            head_size=128,
-            dtype=torch.float16,
-            kv_cache_dtype="auto",
-            block_size=16,
-            use_v1=False,
-            use_mla=True,
             has_sink=False,
             use_sparse=False,
         )
@@ -352,14 +313,15 @@ def test_sparse_not_supported(mock_vllm_config):
     """Test that sparse attention is not supported on ROCm."""
     from vllm.platforms.rocm import RocmPlatform
 
-    with pytest.raises(NotImplementedError, match="Sparse Attention is not supported"):
+    with pytest.raises(
+        AssertionError, match="Sparse MLA backend on ROCm only supports block size 1"
+    ):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None,
             head_size=128,
             dtype=torch.float16,
             kv_cache_dtype="auto",
             block_size=16,
-            use_v1=True,
             use_mla=False,
             has_sink=False,
             use_sparse=True,
