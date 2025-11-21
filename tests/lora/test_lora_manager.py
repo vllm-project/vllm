@@ -48,9 +48,6 @@ DEFAULT_DTYPE = torch.get_default_dtype()
 @pytest.mark.parametrize("device", DEVICES)
 def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(os.path.join(sql_lora_files, "adapter_model.safetensors"))
-    new_embeddings = load_file(
-        os.path.join(sql_lora_files, "new_embeddings.safetensors")
-    )
 
     peft_helper = PEFTHelper.from_local_dir(
         sql_lora_files, max_position_embeddings=4096
@@ -60,7 +57,6 @@ def test_from_lora_tensors(sql_lora_files, device):
         tensors,
         peft_helper=peft_helper,
         device=device,
-        embeddings=new_embeddings,
         embedding_modules=EMBEDDING_MODULES,
         embedding_padding_modules=EMBEDDING_PADDING_MODULES,
     )
@@ -76,18 +72,6 @@ def test_from_lora_tensors(sql_lora_files, device):
             f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         )
         assert lora.lora_a.shape[0] == 8
-        embeddings_module = next(
-            (k for k in EMBEDDING_MODULES if k in module_name), None
-        )
-        if embeddings_module:
-            assert torch.equal(
-                lora.embeddings_tensor,
-                new_embeddings[EMBEDDING_MODULES[embeddings_module]].to(
-                    device=lora.embeddings_tensor.device
-                ),
-            )
-        else:
-            assert lora.embeddings_tensor is None
 
 
 def create_lora(
@@ -552,9 +536,7 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
     worker_adapter_manager = WorkerLoRAManager(
         vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES
     )
-    worker_adapter_manager.vocab_size = (
-        dummy_model_gate_up.unpadded_vocab_size - lora_config.lora_extra_vocab_size
-    )
+    worker_adapter_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
     worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"

@@ -250,6 +250,16 @@ def olmoe_lora_files():
     return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def qwen3_lora_files():
+    return snapshot_download(repo_id="charent/self_cognition_Alice")
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files():
+    return snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")
+
+
 @pytest.fixture
 def reset_default_device():
     """
