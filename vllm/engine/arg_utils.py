@@ -367,7 +367,7 @@ class EngineArgs:
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: int | None = None
+    seed: int | None = 0
     max_model_len: int | None = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
     cudagraph_capture_sizes: list[int] | None = (
@@ -1192,6 +1192,11 @@ class EngineArgs:
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
         # doesn't affect the user process.
         if self.seed is None:
+            logger.warning(
+                "`seed=None` is equivalent to `seed=0` in V1 Engine. "
+                "You will no longer be allowed to pass `None` in v0.13."
+            )
+
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
