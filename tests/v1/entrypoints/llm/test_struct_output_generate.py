@@ -46,11 +46,15 @@ EAGLE_SPEC_CONFIG = {
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
+    # it, we skip these tests for now.
+    # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
     pytest.param(
         "mistralai/Ministral-8B-Instruct-2410",
         "lm-format-enforcer",
-        "auto",
+        "hf",
         None,
         marks=pytest.mark.skip(
             reason=(
@@ -80,7 +84,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
     # ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG),
 ]
@@ -151,6 +155,8 @@ def test_structured_output(
         ),
         seed=120,
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
     )
 
@@ -720,6 +726,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
+        load_format="auto",
+        config_format="auto",
     )
 
     sampling_params = SamplingParams(
