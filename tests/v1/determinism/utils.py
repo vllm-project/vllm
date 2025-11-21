@@ -17,6 +17,7 @@ skip_unsupported = pytest.mark.skipif(
 BACKENDS: list[str] = [
     "FLASH_ATTN",
     "FLASHINFER",
+    "TRITON_MLA",
 ]
 
 if flash_attn_supports_mla():
