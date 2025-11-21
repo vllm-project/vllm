@@ -286,7 +286,7 @@ class MessageQueue:
             local_subscribe_addr = None
             self.local_socket = None
             self.current_idx = -1
-
+        self.close_queue = False
         remote_addr_ipv6 = False
         if n_remote_reader > 0:
             # for remote readers, we will:
@@ -332,6 +332,7 @@ class MessageQueue:
         self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
+        self.close_queue = False
 
         context = Context()
 
@@ -471,6 +472,8 @@ class MessageQueue:
         start_time = time.monotonic()
         n_warning = 1
         while True:
+            if self.close_queue:
+                raise RuntimeError("MessageQueue is closed")
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
                 written_flag = metadata_buffer[0]
@@ -731,3 +734,6 @@ class MessageQueue:
         if blocking:
             buffer_io.wait_until_ready()
         return buffer_io
+
+    def close(self):
+        self.close_queue = True
