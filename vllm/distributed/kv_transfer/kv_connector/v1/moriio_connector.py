@@ -518,6 +518,8 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper.send_notify(
                 task.request_id, task.remote_ip, remote_port
             )
+            # mark request as done, then we can free the blocks
+            self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
             del self.worker.moriio_wrapper.done_remote_allocate_req_dict[
                 task.request_id
             ]
@@ -1936,15 +1938,13 @@ class MoRIIOConnectorWorker:
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
+           
+        else:
             if self.mode == MoRIIOMode.WRITE:
-                done_recving = set()
+                done_recving = self.moriio_wrapper.pop_finished_write_req_ids()
             else:
                 done_recving = self._pop_done_transfers()
-        else:
-            done_sending, done_recving = (
-                set(),
-                self.moriio_wrapper.pop_finished_write_req_ids(),
-            )
+
 
         return done_sending, done_recving
 
