@@ -235,6 +235,12 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+
+        # TODO: Remove before merging. Only for testing.
+        if sliding_window is None:
+            print("set kv_cache_dtype to fp8_e4m3 for layer", prefix)
+            kv_cache_dtype = "fp8_e4m3"
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
