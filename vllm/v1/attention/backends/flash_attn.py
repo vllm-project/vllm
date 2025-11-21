@@ -62,9 +62,13 @@ class FlashAttentionBackend(AttentionBackend):
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
-        if model_config.is_hybrid and (
-            cache_config.mamba_ssm_cache_dtype == "float32"
-            or cache_config.mamba_cache_dtype == "float32"
+        if (
+            model_config
+            and model_config.is_hybrid
+            and (
+                cache_config.mamba_ssm_cache_dtype == "float32"
+                or cache_config.mamba_cache_dtype == "float32"
+            )
         ):
             # NOTE(tdoublep): while in principle, FA supports
             # MultipleOf(16), these are the block sizes that do not
