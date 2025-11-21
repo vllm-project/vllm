@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
+# Constants for cancellation debouncing
+_CONSECUTIVE_CANCEL_CHECKS_THRESHOLD = 5
+_CANCEL_CHECK_SLEEP_S = 0.01
+
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
 
@@ -489,9 +493,12 @@ class MessageQueue:
 
                     if cancel is not None and cancel.is_set():
                         consecutive_cancel_checks += 1
-                        if consecutive_cancel_checks > 5:
+                        if (
+                            consecutive_cancel_checks
+                            > _CONSECUTIVE_CANCEL_CHECKS_THRESHOLD
+                        ):
                             raise RuntimeError("cancelled")
-                        time.sleep(0.01)
+                        time.sleep(_CANCEL_CHECK_SLEEP_S)
                     else:
                         consecutive_cancel_checks = 0
 
