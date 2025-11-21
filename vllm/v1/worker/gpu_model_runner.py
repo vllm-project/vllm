@@ -4578,8 +4578,7 @@ class GPUModelRunner(
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
-        cudagraph_mode = self.compilation_config.cudagraph_mode
-        assert cudagraph_mode is not None
+        self.compilation_config.cudagraph_mode = cudagraph_mode
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )

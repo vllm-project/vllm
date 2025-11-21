@@ -31,7 +31,6 @@ class CudagraphDispatcher:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.uniform_decode_query_len = (
             1
             if not self.vllm_config.speculative_config
@@ -44,12 +43,8 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        not_use_piecewise_compilation = (
-            not self.cudagraph_mode.requires_piecewise_compilation()
-        )
-
         assert (
-            not_use_piecewise_compilation
+            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
@@ -75,6 +70,7 @@ class CudagraphDispatcher:
             assert num_tokens_padded % uniform_decode_query_len == 0
             assert num_reqs <= max_num_seqs
         else:
+            uniform_decode = False
             num_reqs = min(num_tokens_padded, max_num_seqs)
 
         return BatchDescriptor(
@@ -95,7 +91,9 @@ class CudagraphDispatcher:
     def initialize_cudagraph_keys(
         self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int
     ):
-        # This should be called only after attention backend is initialized.
+        # This should be called only after attention backend is initialized. So we can
+        # get the correct cudagraph mode after backend support is resolved.
+        self.cudagraph_mode = cudagraph_mode
 
         # LoRA activation cases to specialize the cuda graphs on
         if self.vllm_config.lora_config:
