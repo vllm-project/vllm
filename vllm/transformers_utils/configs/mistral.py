@@ -90,6 +90,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "rope_type": "yarn",
         "mscale_all_dim": 1,
     }
+
+    if rope_theta := config.pop("rope_theta", None):
+        config["rope_parameters"]["rope_theta"] = rope_theta
+
     for old_name, new_name in yarn_config_map.items():
         if old_name in yarn_config:
             config["rope_parameters"][new_name] = yarn_config.pop(old_name)
