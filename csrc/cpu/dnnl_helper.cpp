@@ -5,6 +5,7 @@
 #include "common/memory.hpp"
 
 #include "dnnl_helper.h"
+#include "scratchpad_manager.h"
 
 static dnnl::engine& default_engine() {
   static dnnl::engine engine(dnnl::engine::kind::cpu, 0);
@@ -20,23 +21,6 @@ void release_dnnl_matmul_handler(int64_t handler) {
   DNNLMatMulPrimitiveHandler* ptr =
       reinterpret_cast<DNNLMatMulPrimitiveHandler*>(handler);
   delete ptr;
-}
-
-DNNLScratchPadManager::DNNLScratchPadManager() : size_(0), ptr_(nullptr) {
-  this->realloc(allocation_unit * 128);
-}
-
-void DNNLScratchPadManager::realloc(size_t new_size) {
-  new_size = round(new_size);
-  if (new_size > size_) {
-    ptr_ = std::aligned_alloc(64, new_size);
-    size_ = new_size;
-  }
-}
-
-DNNLScratchPadManager* DNNLScratchPadManager::get_dnnl_scratchpad_manager() {
-  static DNNLScratchPadManager manager;
-  return &manager;
 }
 
 template <typename KT, typename VT>
@@ -412,9 +396,9 @@ MatMulPrimitiveHandler::MatMulPrimitiveHandler(const Args& args)
     : DNNLMatMulPrimitiveHandler(
           static_cast<DNNLMatMulPrimitiveHandler::Args>(args), args.ab_type),
       m_size_cache_(nullptr) {
-  assert(ab_type_ == dnnl::memory::data_type::f32 ||
-         ab_type_ == dnnl::memory::data_type::bf16 ||
-         ab_type_ == dnnl::memory::data_type::f16);
+  assert(b_type_ == dnnl::memory::data_type::f32 ||
+         b_type_ == dnnl::memory::data_type::bf16 ||
+         b_type_ == dnnl::memory::data_type::f16);
 
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});

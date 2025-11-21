@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +11,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
-    from vllm.v1.engine.output_processor import RequestState
 
 
 @dataclass
@@ -170,11 +169,8 @@ class SchedulerStats:
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
-
-@dataclass
-class LoRAStats:
-    waiting_requests: set[str] = field(default_factory=set)
-    running_requests: set[str] = field(default_factory=set)
+    waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
+    running_lora_adapters: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -229,8 +225,6 @@ class IterationStats:
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
-        self.waiting_lora_adapters: dict[str, int] = {}
-        self.running_lora_adapters: dict[str, int] = {}
         self.num_corrupted_reqs: int = 0
 
     def __repr__(self) -> str:
@@ -248,7 +242,8 @@ class IterationStats:
         is_prefilling: bool,
         prompt_len: int,
         req_stats: RequestStateStats,
-        lora_stats: LoRAStats | None,
+        lora_states: "LoRARequestStates",
+        lora_name: str | None,
     ):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -274,7 +269,12 @@ class IterationStats:
         # Process request-level engine core events
         if output.events is not None:
             self.update_from_events(
-                output.request_id, output.events, is_prefilling, req_stats, lora_stats
+                output.request_id,
+                output.events,
+                is_prefilling,
+                req_stats,
+                lora_states,
+                lora_name,
             )
 
         # Process the batch-level "new tokens" engine core event
@@ -292,7 +292,8 @@ class IterationStats:
         events: list["EngineCoreEvent"],
         is_prefilling: bool,
         req_stats: RequestStateStats,
-        lora_stats: LoRAStats | None,
+        lora_states: "LoRARequestStates",
+        lora_name: str | None,
     ):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
@@ -300,15 +301,14 @@ class IterationStats:
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
                 req_stats.queued_ts = event.timestamp
-                if lora_stats is not None:
-                    lora_stats.waiting_requests.add(req_id)
+                lora_states.request_waiting(req_id, lora_name)
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
                     req_stats.scheduled_ts = event.timestamp
-                LoRARequestStates.scheduled_request(lora_stats, req_id)
+                lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
-                LoRARequestStates.preempted_request(lora_stats, req_id)
+                lora_states.request_waiting(req_id, lora_name)
 
     def update_from_finished_request(
         self,
@@ -361,61 +361,60 @@ class IterationStats:
             self.num_corrupted_reqs += 1
 
 
-class LoRARequestStates:
-    """Per-LoRA request state stats."""
+class LoRAStats:
+    """Tracks waiting and running request IDs for a single LoRA."""
 
     def __init__(self):
-        self.lora_name_to_stats: dict[str, LoRAStats] = {}
+        self.waiting: set[str] = set()
+        self.running: set[str] = set()
 
-    def get_stats(self, req_state: "RequestState") -> LoRAStats | None:
-        if req_state.lora_name is None:
-            return None
-        if req_state.lora_name not in self.lora_name_to_stats:
-            self.lora_name_to_stats[req_state.lora_name] = LoRAStats()
-        return self.lora_name_to_stats[req_state.lora_name]
+    def update(self, req_id: str, waiting: bool, running: bool):
+        assert not (waiting and running)
+        if waiting:
+            self.waiting.add(req_id)
+        else:
+            self.waiting.discard(req_id)
 
-    def add_request(self, req_state: "RequestState"):
-        if (lora_stats := self.get_stats(req_state)) is not None:
-            lora_stats.waiting_requests.add(req_state.request_id)
+        if running:
+            self.running.add(req_id)
+        else:
+            self.running.discard(req_id)
 
-    def finish_request(self, req_state: "RequestState"):
-        if req_state.lora_name is None:
+    @property
+    def empty(self) -> bool:
+        return not (self.waiting or self.running)
+
+
+class LoRARequestStates:
+    """A per-LoRA count of running and waiting requests."""
+
+    def __init__(self, log_stats: bool = False):
+        self.log_stats = log_stats
+        self.requests: defaultdict[str, LoRAStats] = defaultdict(LoRAStats)
+
+    def _request_update(
+        self, req_id: str, lora_name: str | None, waiting: bool, running: bool
+    ):
+        if not self.log_stats or lora_name is None:
             return
-        lora_stats = self.lora_name_to_stats[req_state.lora_name]
-        lora_stats.running_requests.remove(req_state.request_id)
 
-    def abort_request(self, req_state: "RequestState"):
-        if req_state.lora_name is None:
-            return
-        lora_stats = self.lora_name_to_stats[req_state.lora_name]
-        lora_stats.waiting_requests.discard(req_state.request_id)
-        lora_stats.running_requests.discard(req_state.request_id)
+        lora_stats = self.requests[lora_name]
+        lora_stats.update(req_id, waiting, running)
+        if lora_stats.empty:
+            del self.requests[lora_name]
 
-    # Break the pattern for this lifecycle methods so we can
-    # call this from IterationStats.update_from_events()
-    @staticmethod
-    def scheduled_request(lora_stats: LoRAStats | None, request_id: str):
-        if lora_stats is None:
-            return
-        lora_stats.waiting_requests.remove(request_id)
-        lora_stats.running_requests.add(request_id)
+    def request_waiting(self, req_id: str, lora_name: str | None):
+        self._request_update(req_id, lora_name, waiting=True, running=False)
 
-    @staticmethod
-    def preempted_request(lora_stats: LoRAStats | None, request_id: str):
-        if lora_stats is None:
-            return
-        lora_stats.running_requests.remove(request_id)
-        lora_stats.waiting_requests.add(request_id)
+    def request_running(self, req_id: str, lora_name: str | None):
+        self._request_update(req_id, lora_name, waiting=False, running=True)
 
-    def update_iteration_stats(self, iteration_stats: IterationStats | None):
-        if iteration_stats is None:
+    def request_finished(self, req_id: str, lora_name: str | None):
+        self._request_update(req_id, lora_name, waiting=False, running=False)
+
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        if not self.log_stats or scheduler_stats is None:
             return
-        for lora_name, stats in self.lora_name_to_stats.items():
-            if stats.waiting_requests:
-                iteration_stats.waiting_lora_adapters[lora_name] = len(
-                    stats.waiting_requests
-                )
-            if stats.running_requests:
-                iteration_stats.running_lora_adapters[lora_name] = len(
-                    stats.running_requests
-                )
+        for lora_name, stats in self.requests.items():
+            scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
+            scheduler_stats.running_lora_adapters[lora_name] = len(stats.running)

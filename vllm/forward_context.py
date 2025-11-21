@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
@@ -185,18 +185,13 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     """
-    Type AttentionMetadata for v0, 
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
     Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
     for each microbatch.
     Set dynamically for each forward pass
     """
-    attn_metadata: Union[
-        "AttentionMetadata",
-        dict[str, "AttentionMetadata"],
-        list[dict[str, "AttentionMetadata"]],
-    ]
+    attn_metadata: dict[str, "AttentionMetadata"] | list[dict[str, "AttentionMetadata"]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -224,6 +219,10 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def is_forward_context_available() -> bool:
+    return _forward_context is not None
 
 
 def create_forward_context(
@@ -324,14 +323,7 @@ def set_forward_context(
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = (
-                    attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
-                )
-            else:
-                # for v1 attention backends
-                batchsize = num_tokens
+            batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch

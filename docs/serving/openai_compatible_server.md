@@ -77,11 +77,11 @@ In addition, we have the following custom APIs:
 
 In order for the language model to support chat protocol, vLLM requires the model to include
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
-specifies how are roles, messages, and other chat-specific tokens are encoded in the input.
+specifies how roles, messages, and other chat-specific tokens are encoded in the input.
 
 An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
 
-Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those model,
+Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those models,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
 template, or the template in string form. Without a chat template, the server will not be able to process chat
 and all chat requests will error.
@@ -293,7 +293,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
             base_url="http://localhost:8000/v1",
             api_key="EMPTY",
         )
-        image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
         response = create_chat_embeddings(
             client,
