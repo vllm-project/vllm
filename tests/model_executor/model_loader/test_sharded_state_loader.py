@@ -60,18 +60,9 @@ def llama_3p2_1b_files():
 
 def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     llm_sharded_writer = LLM(model=input_dir, **kwargs)
-    # Check which engine version is being used
-    is_v1_engine = hasattr(llm_sharded_writer.llm_engine, "engine_core")
+
     # Dump worker states to output directory
-    if is_v1_engine:
-        # For V1 engine, we need to use engine_core.save_sharded_state
-        print("Using V1 engine save path")
-        llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
-    else:
-        # For V0 engine
-        print("Using V0 engine save path")
-        model_executor = llm_sharded_writer.llm_engine.model_executor
-        model_executor.save_sharded_state(path=output_dir)
+    llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
 
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
