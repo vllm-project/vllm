@@ -154,7 +154,7 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         use_cascade_attn: bool = False,
-    ) -> tuple[CUDAGraphMode, BatchDescriptor | None]:
+    ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.
