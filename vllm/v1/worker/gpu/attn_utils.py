@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -23,7 +23,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
@@ -43,9 +44,8 @@ def init_attn_backend(
         layer_names = kv_cache_group_spec.layer_names
         any_layer_name = next(iter(layer_names))
 
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config, AttentionLayerBase, layer_names
-        )
+        layer_type = cast(type[Any], AttentionLayerBase)
+        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
         attn_backend = attn_layers[any_layer_name].get_attn_backend()
         for layer_name in layer_names:
             attn_backends[layer_name] = attn_backend
