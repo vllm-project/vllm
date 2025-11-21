@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPrometheus,
 )
 from vllm.logger import init_logger
-from vllm.plugins import load_plugins_by_group
+from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -67,7 +67,7 @@ class StatLoggerBase(ABC):
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
 
-    for name, plugin_class in load_plugins_by_group("vllm.stat_logger_plugins").items():
+    for name, plugin_class in load_plugins_by_group(STAT_LOGGER_PLUGINS_GROUP).items():
         if not isinstance(plugin_class, type) or not issubclass(
             plugin_class, StatLoggerBase
         ):
