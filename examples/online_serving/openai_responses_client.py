@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Set up this example by starting a vLLM OpenAI-compatible server with tool call
-options enabled.
+Set up this example by starting a vLLM OpenAI-compatible server.
 Reasoning models can be used through the Responses API as seen here
 https://platform.openai.com/docs/api-reference/responses
 For example:
@@ -16,37 +15,29 @@ input_messages = [{"role": "user", "content": "What model are you?"}]
 
 
 def main():
-    base_url = "http://0.0.0.0:8000/v1"
+    base_url = "http://localhost:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = "Qwen/Qwen3-1.7B"  # get_first_model(client)
+    model = "Qwen/Qwen3-8B"  # get_first_model(client)
     response = client.responses.create(
         model=model,
         input=input_messages,
     )
 
-    for out in response.output:
-        if out.type == "function_call":
-            print("Function call:", out.name, out.arguments)
-            tool_call = out
+    for message in response.output:
+        if message.type == "reasoning":
+            # append reasoning message
+            input_messages.append(message)
 
-    import fbvscode
-
-    fbvscode.set_trace()
-
-    input_messages.append(tool_call)  # append model's function call message
-    input_messages.append(
-        {  # append result message
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }
-    )
     response_2 = client.responses.create(
         model=model,
         input=input_messages,
-        tools=tools,
     )
     print(response_2.output_text)
+    # I am Qwen, a large language model developed by Alibaba Cloud.
+    # I am designed to assist with a wide range of tasks, including
+    # answering questions, creating content, coding, and engaging in
+    # conversations. I can help with various topics and provide
+    # information or support in multiple languages. How can I assist you today?
 
 
 if __name__ == "__main__":
