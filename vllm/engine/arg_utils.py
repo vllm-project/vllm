@@ -1980,6 +1980,16 @@ class EngineArgs:
                 "Enabling" if default_chunked_prefill else "Disabling",
             )
         elif (
+            model_config.runner_type == "generate"
+            and not self.enable_chunked_prefill
+            and default_chunked_prefill
+        ):
+            logger.warning(
+                "This model does not officially support disabling chunked prefill. "
+                "Disabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+            )
+        elif (
             model_config.runner_type == "pooling"
             and self.enable_chunked_prefill
             and not default_chunked_prefill
