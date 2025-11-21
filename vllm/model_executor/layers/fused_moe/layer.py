@@ -850,6 +850,45 @@ class FusedMoE(CustomOp):
                     dp_size=get_dp_group().world_size,
                 )
 
+    def _maybe_setup_shared_experts_stream(
+        self,
+        hidden_states: torch.Tensor,
+        has_separate_shared_experts: bool,
+        use_chunked_impl: bool,
+    ) -> tuple[bool, torch.Tensor | None]:
+        use_shared_experts_stream = (
+            has_separate_shared_experts
+            and not use_chunked_impl
+            and self.shared_experts_stream is not None
+            and (
+                hidden_states.shape[0]
+                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            )
+        )
+
+        hidden_states_clone: torch.Tensor | None = None
+        if use_shared_experts_stream:
+            assert self.shared_experts_stream is not None
+
+            # Clone BEFORE switching streams to avoid race condition
+            # where routed_expert kernel may mutate hidden_states.
+            hidden_states_clone = hidden_states.clone()
+
+            # Record that the clone will be used by shared_experts_stream
+            # to avoid gc issue from deallocation of hidden_states_clone
+            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+            # NOTE: We dont need shared_output.record_stream(current_stream())
+            # because we synch the streams before using shared_output.
+            hidden_states_clone.record_stream(self.shared_experts_stream)
+
+            # Mark sync start point for the separate shared experts
+            # stream here since we want to run in parallel with the
+            # router/gate (next op below)
+            assert self.shared_experts_stream is not None
+            self.shared_experts_stream.wait_stream(current_stream())
+
+        return use_shared_experts_stream, hidden_states_clone
+
     def _load_per_tensor_weight_scale(
         self,
         shard_id: str,
@@ -1819,35 +1858,11 @@ class FusedMoE(CustomOp):
 
         use_chunked_impl = self.use_dp_chunking
 
-        use_shared_experts_stream = (
-            has_separate_shared_experts
-            and not use_chunked_impl
-            and self.shared_experts_stream is not None
-            and (
-                hidden_states.shape[0]
-                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        use_shared_experts_stream, hidden_states_clone = (
+            self._maybe_setup_shared_experts_stream(
+                hidden_states, has_separate_shared_experts, use_chunked_impl
             )
         )
-
-        if use_shared_experts_stream:
-            assert self.shared_experts_stream is not None
-
-            # Clone BEFORE switching streams to avoid race condition
-            # where routed_expert kernel may mutate hidden_states.
-            hidden_states_clone = hidden_states.clone()
-
-            # Record that the clone will be used by shared_experts_stream
-            # to avoid gc issue from deallocation of hidden_states_clone
-            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-            # NOTE: We dont need shared_output.record_stream(current_stream())
-            # because we synch the streams before using shared_output.
-            hidden_states_clone.record_stream(self.shared_experts_stream)
-
-            # Mark sync start point for the separate shared experts
-            # stream here since we want to run in parallel with the
-            # router/gate (next op below)
-            assert self.shared_experts_stream is not None
-            self.shared_experts_stream.wait_stream(current_stream())
 
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
