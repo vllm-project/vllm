@@ -78,7 +78,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         .get("type", None)
                     )
                     return arg_type == "string"
-            logger.warning("No tool named '%s'.", tool_name)
+            logger.debug("No tool named '%s'.", tool_name)
             return False
 
         def _deserialize(value: str) -> Any:
