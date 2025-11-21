@@ -346,6 +346,18 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: Batch Invariance Tests (H100) # 10min
+  timeout_in_minutes: 25
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
