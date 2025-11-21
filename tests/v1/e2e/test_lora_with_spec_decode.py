@@ -61,8 +61,6 @@ def test_batch_inference_correctness(
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Disable randomness
         m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.manual_seed(SEED)
