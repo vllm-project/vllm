@@ -21,8 +21,8 @@ $PIP_CMD install cmake torch ninja
 # build nvshmem
 pushd $WORKSPACE
 mkdir -p nvshmem_src
-wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz
-tar -xvf nvshmem_src_3.2.5-1.txz -C nvshmem_src --strip-components=1
+wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.4.5/source/nvshmem_src_cuda12-all-all-3.4.5.tar.gz
+tar -xvzf nvshmem_src_cuda12-all-all-3.4.5.tar.gz -C nvshmem_src --strip-components=1
 pushd nvshmem_src
 wget https://github.com/deepseek-ai/DeepEP/raw/main/third-party/nvshmem.patch
 git init
@@ -56,6 +56,7 @@ export NVSHMEM_MPI_SUPPORT=0
 export NVSHMEM_BUILD_HYDRA_LAUNCHER=0
 export NVSHMEM_BUILD_TXZ_PACKAGE=0
 export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
+export NVSHMEM_BUILD_PYTHON_LIB=0
 
 cmake -G Ninja -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
 cmake --build $WORKSPACE/nvshmem_build/ --target install
@@ -123,5 +124,11 @@ pushd $WORKSPACE
 clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "73b6ea4"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
+
+cuda_version_major=${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2
+if [${cuda_version_major} -ge 13]; then
+    sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '/usr/local/cuda/include/cccl']|" "setup.py"
+fi
+
 $PIP_CMD install --no-build-isolation -vvv -e .
 popd
