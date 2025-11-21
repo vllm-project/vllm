@@ -7,8 +7,9 @@ import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
+from vllm.platforms import current_platform
 
-from ...utils import check_answers, prep_prompts, spawn_new_process_for_each_test
+from ...utils import check_answers, fork_new_process_for_each_test, prep_prompts
 
 # global seed
 SEED = 42
@@ -43,7 +44,7 @@ def test_prompts():
     return prompts
 
 
-@spawn_new_process_for_each_test
+@fork_new_process_for_each_test
 @pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
@@ -52,6 +53,12 @@ def test_kv_sharing_fast_prefill(
     enforce_eager: bool,
     test_prompts: list[str],
 ):
+    if not enforce_eager and current_platform.is_rocm():
+        pytest.skip(
+            "Skipping enforce_eager==False. Currently, torch.compile "
+            "outputs garbage for gemma-3n-E2B-it on ROCm platform."
+        )
+
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
         # This allows vLLM compilation backend to handle allocating and
@@ -65,7 +72,12 @@ def test_kv_sharing_fast_prefill(
 
     with monkeypatch.context() as m:
         # Make scheduling deterministic for reproducibility
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        if not current_platform.is_rocm():
+            # Avoid 'fork' method to prevent cuda
+            # re-initialization error
+            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        else:
+            m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         prompts, answer, indices = prep_prompts(batch_size)
 
