@@ -52,7 +52,10 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 
 try:
     from torch._inductor.utils import fresh_cache
+
+    torch_inductor_fresh_cache_available = True
 except ImportError:
+    torch_inductor_fresh_cache_available = False
     fresh_cache = nullcontext()
 
 
@@ -1129,6 +1132,11 @@ def use_fresh_compile_cache(f: Callable[_P, None]) -> Callable[_P, None]:
     This is useful to ensure that the test is not affected by the
     previous test calls.
     """
+    if not torch_inductor_fresh_cache_available:
+        print(
+            "torch._inductor.utils.fresh_cache is not available, "
+            "the test will not use fresh inductor cache."
+        )
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
