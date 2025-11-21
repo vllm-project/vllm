@@ -178,7 +178,7 @@ uint64_t seed = 2020;
 
     int num_experts = static_cast<int>(expert_offsets.size(0));
     int n = static_cast<int>(b_tensors.size(1));
-    int k = static_cast<int>(b_tensors.size(2)) * 8; // pack factor
+    int k = static_cast<int>(b_tensors.size(2)) * 8; // int4 -> int32 pack factor
 
     // get args ---------------------------------
     using Args = typename GemmShuffled::Arguments;
