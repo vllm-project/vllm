@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from copy import deepcopy
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig,
     GPTQMarlinMoEMethod,
+    get_moe_quant_method,
 )
 
 
@@ -42,9 +43,15 @@ class _DummyMoELayer(torch.nn.Module):
 def test_gptq_marlin_moe_method_uses_dynamic_bits_override():
     config = _make_marlin_config()
 
-    eight_bit_config = deepcopy(config)
-    eight_bit_config._layer_prefix = "model.layers.1.mlp.experts"
-    eight_bit_method = GPTQMarlinMoEMethod(eight_bit_config, MagicMock())
+    # Create a mock FusedMoE layer with moe_config
+    mock_moe_config = MagicMock()
+    mock_layer = MagicMock(spec=FusedMoE)
+    mock_layer.moe_config = mock_moe_config
+    
+    # Use get_moe_quant_method to properly instantiate the method
+    eight_bit_method = get_moe_quant_method(
+        config, mock_layer, "model.layers.1.mlp.experts", GPTQMarlinMoEMethod
+    )
 
     assert eight_bit_method.quant_metadata["bits"] == 8
     assert eight_bit_method.quant_config.pack_factor == 4
@@ -72,9 +79,15 @@ def test_gptq_marlin_moe_method_uses_dynamic_bits_override():
 def test_gptq_marlin_moe_method_retains_base_bits_without_override():
     config = _make_marlin_config()
 
-    four_bit_config = deepcopy(config)
-    four_bit_config._layer_prefix = "model.layers.5.mlp.experts"
-    four_bit_method = GPTQMarlinMoEMethod(four_bit_config, MagicMock())
+    # Create a mock FusedMoE layer with moe_config
+    mock_moe_config = MagicMock()
+    mock_layer = MagicMock(spec=FusedMoE)
+    mock_layer.moe_config = mock_moe_config
+    
+    # Use get_moe_quant_method to properly instantiate the method
+    four_bit_method = get_moe_quant_method(
+        config, mock_layer, "model.layers.5.mlp.experts", GPTQMarlinMoEMethod
+    )
 
     assert four_bit_method.quant_metadata["bits"] == 4
     assert four_bit_method.quant_config.pack_factor == 8
