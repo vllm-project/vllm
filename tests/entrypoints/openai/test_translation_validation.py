@@ -20,7 +20,7 @@ SERVER_ARGS = ["--enforce-eager"]
 
 
 @pytest.fixture(scope="module", autouse=True)
-def rocm_flex_attention():
+def rocm_aiter_fa_attention():
     """
     Automatically sets VLLM_ATTENTION_BACKEND=ROCM_AITER_FA for ROCm
     for the duration of this test module.
@@ -30,13 +30,10 @@ def rocm_flex_attention():
     if current_platform.is_rocm():
         # Store previous value to restore later (cleanup)
         old_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
-
         # Set the specific backend required for audio models on ROCm
         os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
-
         yield
-
-        # Cleanup: Restore the environment to avoiding polluting other test files
+        # Cleanup: Restore the environment
         if old_backend is None:
             del os.environ["VLLM_ATTENTION_BACKEND"]
         else:
