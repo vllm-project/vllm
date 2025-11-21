@@ -49,7 +49,11 @@ def check_gguf_file(model: str | PathLike) -> bool:
 @cache
 def is_remote_gguf(model: str) -> bool:
     """Check if the model is a remote GGUF model."""
-    return "/" in model and ":" in model
+    return (
+        (not is_cloud_storage(model))
+        and (not model.startswith(("http://", "https://")))
+        and ("/" in model and ":" in model)
+    )
 
 
 def is_gguf(model: str | Path, gguf_quant_type: str | None = None) -> bool:
