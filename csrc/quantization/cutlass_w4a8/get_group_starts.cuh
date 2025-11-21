@@ -75,6 +75,7 @@ void run_get_group_gemm_starts(
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_group_scales.dtype() == torch::kFloat8_e4m3fn); // the underlying torch type is e4m3
+  TORCH_CHECK(out_tensors.dtype() == torch::kBFloat16); // only support bf16 for now
   // expect int64_t to avoid overflow during offset calculations
   TORCH_CHECK(expert_offsets.dtype() == torch::kInt64);
 
@@ -82,6 +83,7 @@ void run_get_group_gemm_starts(
   // logical k, n
   int64_t n = out_tensors.size(1);
   int64_t k = a_tensors.size(1);
+  printf("inside run_get_group_gemm_starts got n=%d, k=%d\n", n, k);
   int scale_k = cutlass::ceil_div(k, b_group_size);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
