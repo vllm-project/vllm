@@ -104,6 +104,7 @@ def rotate_flashinfer_fp8_moe_weights(
 
 
 def apply_flashinfer_per_tensor_scale_fp8(
+    layer: torch.nn.Module,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
@@ -112,37 +113,43 @@ def apply_flashinfer_per_tensor_scale_fp8(
     topk_group: int | None,
     global_num_experts: int,
     apply_router_weight_on_input: bool,
-    w13_weight: torch.Tensor,
-    w13_input_scale: torch.Tensor,
-    w2_weight: torch.Tensor,
-    output1_scales_scalar: torch.Tensor,
-    output1_scales_gate_scalar: torch.Tensor,
-    output2_scales_scalar: torch.Tensor,
-    local_num_experts: int,
-    ep_rank: int,
-    intermediate_size_per_partition: int,
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
 
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output1_scales_scalar to be initialized"
+    )
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output1_scales_gate_scalar to be initialized"
+    )
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output2_scales_scalar to be initialized"
+    )
+
+    from vllm.model_executor.models.llama4 import Llama4MoE
+
+    assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
+        "FusedMoE flashinfer kernels are only supported for Llama4"
+    )
     return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
         routing_logits=router_logits,
         routing_bias=routing_bias,
         hidden_states=hidden_states,
-        input_scale=w13_input_scale,
-        gemm1_weights=w13_weight,
-        gemm2_weights=w2_weight,
-        output1_scales_scalar=output1_scales_scalar,
-        output1_scales_gate_scalar=output1_scales_gate_scalar,
-        output2_scales_scalar=output2_scales_scalar,
+        input_scale=layer.w13_input_scale,
+        gemm1_weights=layer.w13_weight,
+        gemm2_weights=layer.w2_weight,
+        output1_scales_scalar=layer.output1_scales_scalar,
+        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+        output2_scales_scalar=layer.output2_scales_scalar,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
-        intermediate_size=intermediate_size_per_partition,
-        local_expert_offset=ep_rank * local_num_experts,
-        local_num_experts=local_num_experts,
+        intermediate_size=layer.intermediate_size_per_partition,
+        local_expert_offset=layer.ep_rank * layer.local_num_experts,
+        local_num_experts=layer.local_num_experts,
         use_routing_scales_on_input=apply_router_weight_on_input,
         routing_method_type=RoutingMethodType.Llama4,
     )
@@ -225,26 +232,27 @@ def select_cutlass_fp8_gemm_impl(
 
 def flashinfer_cutlass_moe_fp8(
     hidden_states: torch.Tensor,
+    layer: torch.nn.Module,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
-    moe_config: FusedMoEConfig | None = None,
+    moe: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
+    quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
+    assert quant_config is not None
+
     # Construct modular kernel with block-scale support when requested.
     fused_experts = mk.FusedMoEModularKernel(
         build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe=moe_config, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+            moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
         ),
         select_cutlass_fp8_gemm_impl(
-            moe=moe_config,
+            moe=moe,
             quant_config=quant_config,
             out_dtype=hidden_states.dtype,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
@@ -253,8 +261,8 @@ def flashinfer_cutlass_moe_fp8(
 
     return fused_experts(
         hidden_states,
-        w13_weight,
-        w2_weight,
+        layer.w13_weight,
+        layer.w2_weight,
         topk_weights,
         topk_ids,
         inplace=inplace,
