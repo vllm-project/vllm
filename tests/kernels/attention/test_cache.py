@@ -1097,7 +1097,6 @@ def test_concat_and_cache_mla_cpu(
     kv_cache_dtype = "auto"
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
 
     total_slots = num_blocks * block_size
     slot_mapping_lst = random.sample(range(total_slots), num_tokens)
