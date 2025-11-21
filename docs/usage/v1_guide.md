@@ -182,4 +182,4 @@ to handle request preemptions.
 
 ##### Structured Output features
 
-- **Request-level Structured Output Backend**: Removed; alternative backends (outlines, guidance) with fallbacks is supported now.
+- **Request-level Structured Output Backend**: Removed; alternative backends (outlines, guidance) with fallbacks are supported now.
