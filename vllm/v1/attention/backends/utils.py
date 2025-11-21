@@ -247,10 +247,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
-    # Does this backend/builder reorder the batch?
-    # If not, set this to None. Otherwise set it to the query
-    # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: int | None = None
 
     @abstractmethod
     def __init__(
@@ -265,6 +261,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
     @classmethod
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
@@ -274,14 +271,22 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
+    def get_reorder_batch_threshold(self) -> int | None:
+        if hasattr(self, "_reorder_batch_threshold"):
+            return self._reorder_batch_threshold
+        return None
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
         supports_spec_as_decode: bool = False,
         supports_dcp_with_varlen: bool = False,
     ) -> None:
-        self.reorder_batch_threshold = reorder_batch_threshold
-        if self.reorder_batch_threshold is not None and supports_spec_as_decode:
+        self._reorder_batch_threshold = reorder_batch_threshold
+        if self._reorder_batch_threshold is not None and supports_spec_as_decode:
             # If the backend supports spec-as-decode kernels, then we can set
             # the reorder_batch_threshold based on the number of speculative
             # tokens from the config.
@@ -290,8 +295,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_batch_threshold = max(
-                    self.reorder_batch_threshold,
+                self._reorder_batch_threshold = max(
+                    self._reorder_batch_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
 
@@ -299,7 +304,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             self.vllm_config.parallel_config.decode_context_parallel_size > 1
             and not supports_dcp_with_varlen
         ):
-            self.reorder_batch_threshold = 1
+            self._reorder_batch_threshold = 1
 
     @abstractmethod
     def build(

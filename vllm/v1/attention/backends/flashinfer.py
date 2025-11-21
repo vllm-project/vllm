@@ -412,8 +412,6 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    reorder_batch_threshold: int = 1
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -659,10 +657,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
+
+        assert self._reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self._reorder_batch_threshold,
                 require_uniform=True,
             )
         )
@@ -760,7 +760,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_np,
         )
 
-        uses_spec_reorder = self.reorder_batch_threshold > 1
+        uses_spec_reorder = self._reorder_batch_threshold > 1
+
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,

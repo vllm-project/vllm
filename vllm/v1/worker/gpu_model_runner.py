@@ -4580,7 +4580,7 @@ class GPUModelRunner(
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
         reorder_batch_thresholds = [
-            group.get_metadata_builder().reorder_batch_threshold
+            group.get_metadata_builder().get_reorder_batch_threshold()
             for group in self._attn_group_iterator()
         ]
         # If there are no attention groups (attention-free model) or no backend
