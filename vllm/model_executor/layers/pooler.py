@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import TypeVar, Literal
+from typing import Literal, TypeVar
 
 import torch
 import torch.nn as nn
@@ -38,6 +38,7 @@ class PoolingType(IntEnum):
     CLS = 2
     STEP = 3
     MEAN = 4
+
 
 PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
 

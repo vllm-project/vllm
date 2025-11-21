@@ -14,16 +14,18 @@ import torch
 import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
-from vllm.attention.backends.abstract import AttnTypeStr
 from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import Pooler, PoolingTypeStr
 else:
     VllmConfig = Any
     Pooler = Any
+    PoolingTypeStr = Any
+    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
@@ -180,7 +182,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     attn_type: ClassVar[AttnTypeStr] = "decoder"
     """
     Indicates the
-    [vllm.config.model.ModelConfigattn_type.][]
+    [vllm.config.model.ModelConfig.attn_type][]
     to use by default.
 
     You can use the
