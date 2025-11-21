@@ -540,24 +540,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prefill_len = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
         is_chunked_prefilling = input_batch.seq_lens < prefill_len
         num_sampled = (~is_chunked_prefilling).int()
-
-        # Update the number of computed tokens.
-        update_num_computed_tokens(
-            input_batch.idx_mapping,
-            self.req_states.num_computed_tokens,
-            input_batch.query_start_loc,
-        )
-        idx_mapping_np = input_batch.idx_mapping_np
-        computed_prefill = self.req_states.num_computed_prefill_tokens
-        # TODO(woosuk): Simplify this.
-        computed_prefill[idx_mapping_np] = np.minimum(
-            computed_prefill[idx_mapping_np] + input_batch.num_scheduled_tokens,
-            self.req_states.prefill_len.np[idx_mapping_np],
-        )
-
-        # Store the last sampled token ids.
-        last_sampled = sampler_output.sampled_token_ids
-        self.req_states.last_sampled_tokens[input_batch.idx_mapping] = last_sampled
         return sampler_output, num_sampled
 
     def compute_prompt_logprobs(
@@ -658,6 +640,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             prompt_logprobs_dict[req_id] = logprobs
         return prompt_logprobs_dict
+
+    def postprocess(
+        self,
+        input_batch: InputBatch,
+        sampled_tokens: torch.Tensor,
+        num_sampled: torch.Tensor,
+    ) -> None:
+        # Update the number of computed tokens.
+        update_num_computed_tokens(
+            input_batch.idx_mapping,
+            self.req_states.num_computed_tokens,
+            input_batch.query_start_loc,
+        )
+        idx_mapping_np = input_batch.idx_mapping_np
+        computed_prefill = self.req_states.num_computed_prefill_tokens
+        # TODO(woosuk): Simplify this.
+        computed_prefill[idx_mapping_np] = np.minimum(
+            computed_prefill[idx_mapping_np] + input_batch.num_scheduled_tokens,
+            self.req_states.prefill_len.np[idx_mapping_np],
+        )
+
+        # Store the last sampled token ids.
+        last_sampled = sampled_tokens
+        self.req_states.last_sampled_tokens[input_batch.idx_mapping] = last_sampled
 
     def get_cudagraph_and_dp_padding(
         self,
@@ -832,6 +838,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
+
+        # Postprocess results and update request states.
+        # NOTE: This is intentionally done after creating the AsyncOutput,
+        # ensuring that `copy_event` is recorded before calling postprocess.
+        # This sequencing may slightly reduce latency as async D2H copy does not
+        # need to wait for the postprocess to finish.
+        self.postprocess(
+            input_batch, sampler_output.sampled_token_ids, num_sampled_tokens
+        )
+
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
