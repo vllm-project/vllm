@@ -146,7 +146,7 @@ def build_attn_metadata(
     query_start_loc: CpuGpuBuffer,
     seq_lens: torch.Tensor,
     seq_lens_np: np.ndarray,
-    num_computed_tokens_cpu: torch.Tensor,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
