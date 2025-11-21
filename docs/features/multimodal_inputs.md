@@ -654,24 +654,18 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
 
 #### Video Frame Recovery
 
-For improved robustness when processing potentially corrupted video files, vLLM supports optional frame recovery. When enabled, if some frames fail to load during sequential reading, the system will attempt to recover them by seeking to nearby frames in the video.
+For improved robustness when processing potentially corrupted video files, vLLM supports optional frame recovery. When enabled, if some frames fail to load during sequential reading, the system will attempt to recover them by seeking to nearby frames in the video. Works with common video formats like MP4 when using OpenCV backends, but may not work for all. 
 
 To enable video frame recovery, pass the `recovery_offset` parameter via `--media-io-kwargs`:
 
 ```bash
 # Example: Enable recovery with offset of 5 frames
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"recovery_offset": 5}}'
-
-# Example: Combined with fps control
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
-  --media-io-kwargs '{"video": {"fps": 2, "recovery_offset": 8}}'
 ```
 
 **Parameters:**
 - `recovery_offset`: Maximum distance (in frames) to search for recovery frames. Set to `0` to disable recovery (default). Higher values provide better recovery but may impact performance.
-
-**Note**: Recovery is disabled by default (`recovery_offset = 0`) to maintain backward compatibility and optimal performance for uncorrupted videos.
 
 #### Custom RGBA Background Color
 
