@@ -1904,7 +1904,8 @@ class EngineArgs:
 
         is_chunked_prefill_supported = model_config.is_chunked_prefill_supported
         is_prefix_caching_supported = model_config.is_prefix_caching_supported
-        if not is_current_platform_chunked_prefill_supported():
+
+        if self.prefill_context_parallel_size > 1:
             is_chunked_prefill_supported = (
                 config_model.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
             )
@@ -1912,33 +1913,32 @@ class EngineArgs:
                 config_model.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
             )
 
-        if self.prefill_context_parallel_size > 1:
-            default_chunked_prefill = False
-            default_prefix_caching = False
-            logger.warning(
-                "--prefill-context-parallel-size > 1 is not compatible with "
-                "chunked prefill and prefix caching now. Chunked prefill "
-                "and prefix caching have been disabled by default."
+        if not is_current_platform_chunked_prefill_supported():
+            is_chunked_prefill_supported = (
+                config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
+            )
+            is_prefix_caching_supported = (
+                config_model.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
             )
 
         if self.enable_chunked_prefill is None:
-            self.enable_chunked_prefill = is_chunked_prefill_supported.state
+            self.enable_chunked_prefill = is_chunked_prefill_supported.value
 
             logger.debug(
                 "%s. %s chunked prefill by default. ",
                 is_chunked_prefill_supported.reason,
-                "Enabling" if is_chunked_prefill_supported.state else "Disabling",
+                "Enabling" if is_chunked_prefill_supported.value else "Disabling",
             )
         elif self.enable_chunked_prefill:
             is_chunked_prefill_supported.raise_if_false()
 
         if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = is_prefix_caching_supported.state
+            self.enable_prefix_caching = is_prefix_caching_supported.value
 
             logger.debug(
                 "%s prefix caching by default. %s",
                 is_prefix_caching_supported.reason,
-                "Enabling" if is_prefix_caching_supported.state else "Disabling",
+                "Enabling" if is_prefix_caching_supported.value else "Disabling",
             )
         elif self.enable_prefix_caching:
             is_prefix_caching_supported.raise_if_false()

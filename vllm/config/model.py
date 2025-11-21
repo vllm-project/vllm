@@ -104,18 +104,18 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 
 
 class BoolWithReason:
-    def __init__(self, state: bool, reason: str):
-        self.state = state
+    def __init__(self, value: bool, reason: str):
+        self.value = value
         self.reason = reason
 
     def __bool__(self):
-        return self.state
+        return self.value
 
     def __repr__(self):
-        return f"{self.state=} {self.reason=}"
+        return f"value={self.value} reason={self.reason}"
 
     def raise_if_false(self):
-        if not self.state:
+        if not self.value:
             raise ValueError(self.reason)
 
 
@@ -2250,60 +2250,68 @@ def is_current_platform_chunked_prefill_supported() -> bool:
 
 # is_chunked_prefill_supported
 GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=True, reason="Generative models support chunked prefill."
+    value=True, reason="Generative models support chunked prefill."
+)
+PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
+    value=False,
+    reason="Prefill context parallel does not compatible with chunked prefill.",
 )
 ENCODER_DECODER_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=True, reason="encoder_decoder models does not support chunked prefill."
+    value=False, reason="encoder_decoder models does not support chunked prefill."
 )
 POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=True, reason="Pooling models with causal attn support chunked prefill."
+    value=True, reason="Pooling models with causal attn support chunked prefill."
 )
 POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with bidirectional attn does not support chunked prefill.",
 )
 POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with all pooling does not support chunked prefill.",
 )
 POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with mean pooling does not support chunked prefill.",
 )
 PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-    state=False,
+    value=False,
     reason="ARM and POWER, S390X and RISC-V CPUs does not support chunked prefill.",
 )
 
 
 # is_prefix_caching_supported
 GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=True, reason="Generative models support prefix caching."
+    value=True, reason="Generative models support prefix caching."
 )
 HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False,
+    value=False,
     reason="Hybrid models does not support prefix caching "
     "since the feature is still experimental.",
 )
+PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+    value=False,
+    reason="Prefill context parallel does not compatible with prefix caching.",
+)
 ENCODER_DECODER_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False, reason="encoder_decoder models does not support prefix caching."
+    value=False, reason="encoder_decoder models does not support prefix caching."
 )
 POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=True, reason="Pooling models with causal attn support prefix caching."
+    value=True, reason="Pooling models with causal attn support prefix caching."
 )
 POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with bidirectional attn does not support prefix caching.",
 )
 POOLING_MODEL_WITH_ALL_POOLING_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with all pooling does not support prefix caching.",
 )
 POOLING_MODEL_WITH_MEAN_POOLING_ATTN_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False,
+    value=False,
     reason="Pooling models with mean pooling does not support prefix caching.",
 )
 PLATFORM_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-    state=False,
+    value=False,
     reason="ARM and POWER, S390X and RISC-V CPUs does not support prefix caching.",
 )
