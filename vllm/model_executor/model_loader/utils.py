@@ -166,7 +166,7 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 """Caches the outputs of `_get_model_architecture`."""
 
 
-def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str, bool]:
+def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     from vllm.model_executor.models.adapters import (
         as_embedding_model,
         as_reward_model,
