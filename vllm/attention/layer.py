@@ -14,6 +14,7 @@ from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
+from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -138,7 +139,10 @@ def maybe_get_vit_flash_attn_backend(
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
-                flash_attn_varlen_func = None
+                if is_flash_attn_varlen_func_available():
+                    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+                else:
+                    flash_attn_varlen_func = None
     else:
         flash_attn_varlen_func = None
 
