@@ -597,6 +597,11 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
+            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
+            "decoder",
+        ),
+        (
+            "google/siglip-base-patch16-224",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
         ),
@@ -669,6 +674,11 @@ def test_is_chunked_prefill_supported(
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
+            config_model.POOLING_MODEL_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
+            "decoder",
+        ),
+        (
+            "google/siglip-base-patch16-224",
             config_model.POOLING_MODEL_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
         ),
