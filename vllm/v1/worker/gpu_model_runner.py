@@ -323,7 +323,7 @@ class GPUModelRunner(
         self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
-        self.is_prefix_lm = self.model_config.is_prefix_lm()
+        self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -1600,7 +1600,7 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
-        if self.is_prefix_lm:
+        if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -1615,10 +1615,10 @@ class GPUModelRunner(
             if isinstance(attn_metadata, list):
                 for ub_metadata in attn_metadata:
                     for _metadata in ub_metadata.values():
-                        _metadata.mm_prefix_range = req_doc_ranges
+                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
             else:
                 for _metadata in attn_metadata.values():
-                    _metadata.mm_prefix_range = req_doc_ranges
+                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
         return attn_metadata, spec_decode_common_attn_metadata
 

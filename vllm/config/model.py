@@ -1241,13 +1241,12 @@ class ModelConfig:
             )
         return False
 
-    def is_prefix_lm(self) -> bool:
+    @property
+    def is_mm_prefix_lm(self) -> bool:
+        """Whether to use bidirectional attention for mm positions."""
         if not hasattr(self.hf_config, "model_type"):
             return False
-        return self.hf_config.model_type in (
-            "paligemma",
-            "gemma3",
-        )
+        return self.hf_config.model_type in ("gemma3",)
 
     def get_head_size(self) -> int:
         # TODO remove hard code
