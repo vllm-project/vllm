@@ -399,10 +399,12 @@ RUN set -eux; \
     rm ./install_gdrcopy.sh
 
 # Install EP kernels(pplx-kernels and DeepEP)
+ARG PPLX_COMMIT_HASH
+ARG DEEPEP_COMMIT_HASH
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
-    && bash install_python_libraries.sh
+    && bash install_python_libraries.sh ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"}
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers

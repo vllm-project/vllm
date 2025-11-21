@@ -14,8 +14,39 @@ fi
 # configurable pip command (default: pip3)
 PIP_CMD=${PIP_CMD:-pip3}
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"c336faf"}
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
 
-# install dependencies if not installed
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --pplx-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --pplx-ref requires an argument." >&2
+                exit 1
+            fi
+            PPLX_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        --deepep-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --deepep-ref requires an argument." >&2
+                exit 1
+            fi
+            DEEPEP_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        *)
+            if [ -z "$WORKSPACE" ]; then
+                WORKSPACE=$1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$WORKSPACE" ]; then
+    export WORKSPACE=$(pwd)/ep_kernels_workspace
+fi
 $PIP_CMD install cmake torch ninja
 
 # build nvshmem
@@ -113,14 +144,14 @@ clone_repo() {
 
 # build and install pplx, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "c336faf"
+clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "$PPLX_COMMIT_HASH"
 cd pplx-kernels
 $PIP_CMD install --no-build-isolation -vvv -e .
 popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "73b6ea4"
+clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "$DEEPEP_COMMIT_HASH"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
 $PIP_CMD install --no-build-isolation -vvv -e .
