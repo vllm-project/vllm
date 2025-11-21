@@ -112,6 +112,9 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        self.token_ids_gpu_tensor = torch.zeros(
+            max_num_reqs, max_model_len, dtype=torch.int32, device=device
+        )
         self.is_token_ids_tensor = torch.zeros(
             (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
         )
@@ -122,6 +125,9 @@ class InputBatch:
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec_gpu = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
