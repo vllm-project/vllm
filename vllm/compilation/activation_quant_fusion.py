@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from contextlib import suppress
 
-import helion
-import helion.language as hl
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (
@@ -28,93 +27,13 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
+# Import Helion kernel definitions to ensure ops are registered
+# This import has side effects - it registers the custom ops
+# Helion may not be available in all environments
+with suppress(ImportError):
+    import vllm.compilation.helion.silu_mul_fp8  # noqa: F401
+
 logger = init_logger(__name__)
-
-
-# TODO(gmagogsfm): Instead of speciying one config, we should
-# use Helion bound kernel to generate many kernels according to
-@torch.library.custom_op(
-    "my_helion_lib::silu_mul_fp8", mutates_args=(), device_types="cuda"
-)
-@helion.kernel(
-    autotune_baseline_atol=0.0,
-    autotune_baseline_rtol=0.0,
-    config=helion.Config(
-        block_sizes=[1, 2048],
-        flatten_loops=[True],
-        indexing=["tensor_descriptor", "pointer", "tensor_descriptor", "pointer"],
-        l2_groupings=[32],
-        load_eviction_policies=["first", "first", "first"],
-        loop_orders=[[0, 1]],
-        num_stages=7,
-        num_warps=4,
-        pid_type="persistent_interleaved",
-        range_flattens=[None],
-        range_multi_buffers=[None],
-        range_num_stages=[1],
-        range_unroll_factors=[0],
-        range_warp_specializes=[],
-    ),
-)
-def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """
-    Fused SiLU-and-mul with FP8 quantization.
-
-    Takes an input tensor, splits it along the last dimension into two halves,
-    applies SiLU activation to the first half, multiplies with the second half,
-    and quantizes the result to FP8.
-
-    Operation: quantize_fp8(SiLU(input[..., :d]) * input[..., d:2*d])
-    where SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
-
-    Args:
-        input (Tensor): Input tensor with last dimension = 2*d
-        scale (Tensor): Scalar scale factor for FP8 quantization
-
-    Returns:
-        Tensor: Output tensor with shape [..., d] and dtype float8_e4m3fn
-    """
-    d = input.shape[-1] // 2
-    output_shape = input.shape[:-1] + (d,)
-
-    out = torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
-
-    input_part_a = input[..., :d]
-    input_part_b = input[..., d:]
-
-    assert scale.numel() == 1, "Scale must be a scalar Tensor"
-
-    for tile_idx in hl.tile(out.shape):
-        a_vals = input_part_a[tile_idx].to(torch.float32)
-        sigmoid_a = torch.sigmoid(a_vals)
-        silu_result = a_vals * sigmoid_a
-        silu_result = silu_result.to(input.dtype)
-        b_vals = input_part_b[tile_idx]
-        result = silu_result * b_vals
-        result_f32 = result.to(torch.float32)
-        scale_val = hl.load(scale, [0])
-        inv_scale = 1.0 / scale_val
-        result_scaled = result_f32 * inv_scale
-        out[tile_idx] = result_scaled.to(out.dtype)
-
-    return out
-
-
-@silu_mul_fp8.register_fake
-def silu_mul_fp8_fake(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """
-    Fake/meta implementation for silu_mul_fp8.
-    Defines the input/output shape relationship without actual computation.
-
-    Shape contract:
-    - input: [..., 2*d]
-    - scale: scalar (numel == 1)
-    - returns: [..., d] with dtype float8_e4m3fn
-    """
-    d = input.shape[-1] // 2
-    output_shape = input.shape[:-1] + (d,)
-
-    return torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
 
 
 FP8_DTYPE = current_platform.fp8_dtype()
