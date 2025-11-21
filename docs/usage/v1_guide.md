@@ -169,8 +169,8 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 - **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](https://github.com/vllm-project/vllm/issues/13361).
 - **Per-Request Logits Processors**: In V0, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1, this
-  feature has been deprecated. Instead, the design is moving toward supporting **global logits
-  processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](https://github.com/vllm-project/vllm/pull/13360).
+  feature has been deprecated. Instead, we now support **global logits processors**
+  which are set at startup time, see [RFC #17799](https://github.com/vllm-project/vllm/issues/17799).
 
 ##### KV Cache features
 
