@@ -1187,13 +1187,13 @@ class DPEngineCoreProc(EngineCoreProc):
             max_blocks_decode = int(max_blocks_t.item())
 
             # Build tensorized gather input for decode.
-            local_input = self.model_executor.collective_rpc(
+            tensorized_input = self.model_executor.collective_rpc(
                 "build_dp_decode_gather_input",
                 args=(local_input, max_blocks_decode))[0]
 
             # Decode: use all_gather_into_tensor with fixed-shape inputs.
-            int_local = local_input["int_inputs"]  # 1D int32
-            float_local = local_input["float_inputs"]  # 1D float32
+            int_local = tensorized_input["int_inputs"]  # 1D int32
+            float_local = tensorized_input["float_inputs"]  # 1D float32
             int_out_1d = torch.empty(int_local.numel() * world,
                                      dtype=int_local.dtype)
             float_out_1d = torch.empty(float_local.numel() * world,
@@ -1202,11 +1202,31 @@ class DPEngineCoreProc(EngineCoreProc):
             # this could be gather instead of all_gather.
             dist.all_gather_into_tensor(int_out_1d, int_local, group=group)
             dist.all_gather_into_tensor(float_out_1d, float_local, group=group)
+
+            int_inputs = int_out_1d.view(world, -1)
+            float_inputs = float_out_1d.view(world, -1)
+
             if rank == 0:
                 gathered_inputs = {
-                    "int_inputs": int_out_1d.view(world, -1),
-                    "float_inputs": float_out_1d.view(world, -1),
+                    "int_inputs": int_inputs,
+                    "float_inputs": float_inputs,
                 }
+
+            # has_structured_inputs is always last element of int_inputs
+            has_structured_inputs = int_inputs[:, -1]
+            if any(has_structured_inputs > 0):
+                local_bitmask = self.model_executor.collective_rpc(
+                    "build_padded_bitmasks", args=(local_input, ))[0]
+                local_bitmask = local_bitmask.contiguous().view(-1)
+                bitmask_out_1d = torch.empty(local_bitmask.numel() * world,
+                                             dtype=local_bitmask.dtype)
+                dist.all_gather_into_tensor(bitmask_out_1d,
+                                            local_bitmask,
+                                            group=group)
+                bitmasks = bitmask_out_1d.view(world, -1)
+                if rank == 0:
+                    gathered_inputs["bitmasks"] = bitmasks
+
         else:
             # Prefill: use object all_gather with variable sized inputs.
             gathered_inputs = [None for _ in range(world)]  # type: ignore

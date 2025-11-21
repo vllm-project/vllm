@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import torch
 import ttnn
@@ -18,8 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.worker.tt_input_batch import CachedRequestState, InputBatch
-from vllm.worker.tt_model_runner import (TTModelInput, TTSamplingParams,
-                                         sample_tokens)
+from vllm.worker.tt_model_runner import TTSamplingParams, sample_tokens
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -27,6 +27,24 @@ if TYPE_CHECKING:
 import numpy as np
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class TTModelInput:
+    """
+    Used by the TTModelRunner.
+    """
+    input_tokens: torch.Tensor
+    input_positions: torch.Tensor
+    prompt_lens: Optional[list[int]]
+    block_tables: torch.Tensor
+    unpadded_batch_size: Union[int, list[int]]  # List is used for DP
+    tt_sampling_params: Union[TTSamplingParams, list[TTSamplingParams]]
+    multi_modal_kwargs: dict[str, Any]
+
+    # always lists: single-element for non-DP, multi-element for DP
+    # If not using structured outputs, [None]
+    grammar_bitmask: list[Optional[torch.Tensor]]
 
 
 class TTModelRunner:
@@ -77,6 +95,10 @@ class TTModelRunner:
         # that have been scheduled before, only the diff is received from
         # the scheduler output.
         self.requests: dict[str, CachedRequestState] = {}
+
+        # Cache the arange needed for unpacking structured output bitmask
+        self.structured_output_arange = torch.arange(0, 32)
+        self.bitmask_size = cdiv(self.model_config.get_vocab_size(), 32)
 
     def load_model(self) -> None:
         loader = TTModelLoader(self.load_config)
@@ -315,6 +337,8 @@ class TTModelRunner:
 
     def _prepare_model_inputs(
             self, scheduler_output: "SchedulerOutput") -> TTModelInput:
+        # In DP, called on each rank
+        # In non-DP, this is the only input preparation function
 
         assert scheduler_output.total_num_scheduled_tokens > 0
         input_batch = self.input_batch
@@ -400,13 +424,10 @@ class TTModelRunner:
                 "for all sequences in batch, "
                 "falling back to first sequence's top_p (%s)", top_p[0])
         tt_sampling_params = TTSamplingParams(
-            temperature=temperature[0],
-            top_k=top_k[0],
-            top_p=top_p[0],
+            temperature=float(temperature[0]),
+            top_k=int(top_k[0]),
+            top_p=float(top_p[0]),
         )
-
-        compat_sampling_used = False
-        sampling_metadata = None
 
         if self.model_config.is_multimodal_model and is_prompt:
             multi_modal_kwargs = self._gather_multi_modal_inputs(
@@ -414,19 +435,37 @@ class TTModelRunner:
         else:
             multi_modal_kwargs = {}
 
+        # If we're not using structured outputs, grammar_bitmask is None
+        bitmask = scheduler_output.grammar_bitmask
+        if bitmask is not None:
+            # Using torch tensor instead of numpy array for consistency
+            # because we need it as tensor for gather.
+            bitmask = torch.from_numpy(bitmask)
+            # unpadded for prefill, padded for decode
+            batch_length = input_tokens.shape[0]
+            grammar_bitmask_length = bitmask.shape[1]
+            # Ones in the compressed bitmask represent tokens that are allowed.
+            reordered_bitmask = torch.zeros(
+                (batch_length, grammar_bitmask_length), dtype=torch.int32)
+            reordered_bitmask = torch.bitwise_not(reordered_bitmask)
+            structured_request_ids = scheduler_output.structured_output_request_ids  # noqa: E501
+            for req_id, persistent_batch_index in self.input_batch.req_id_to_index.items(  # noqa: E501
+            ):
+                if req_id in structured_request_ids:
+                    scheduler_batch_index = structured_request_ids[req_id]
+                    reordered_bitmask[persistent_batch_index, :] = bitmask[
+                        scheduler_batch_index, :]
+            bitmask = reordered_bitmask
+
         return TTModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
             prompt_lens=prompt_lens,
-            seq_groups=None,  # Not used in V1
             block_tables=block_tables,
             unpadded_batch_size=num_reqs,
-            perform_device_sampling=None,  #currently unused in v1
             tt_sampling_params=tt_sampling_params,
-            compat_sampling_used=compat_sampling_used,
-            sampling_metadata=sampling_metadata,
             multi_modal_kwargs=multi_modal_kwargs,
-            cross_block_tables=None  # Not yet supported in V1
+            grammar_bitmask=[bitmask],  # wrap to match DP case
         )
 
     def build_model_input(
@@ -451,10 +490,8 @@ class TTModelRunner:
         return model_input
 
     def build_dp_decode_gather_input(
-        self,
-        model_input: Optional[TTModelInput],
-        max_blocks_decode_batch: int,
-    ) -> dict[str, torch.Tensor]:
+            self, model_input: Optional[TTModelInput],
+            max_blocks_decode_batch: int) -> dict[str, torch.Tensor]:
         """
         Called by each DP rank to build tensorized gather input for decode.
         max_blocks_decode_batch is the max blocks in the global DP batch.
@@ -463,8 +500,8 @@ class TTModelRunner:
           - "float_inputs": flattened float tensor of constant size.
         """
 
+        max_batch = int(self.scheduler_config.max_num_seqs)
         if model_input is None:
-            max_batch = int(self.scheduler_config.max_num_seqs)
             tokens = torch.zeros((max_batch, 1), dtype=torch.int32)
             positions = torch.full((max_batch, ), -1, dtype=torch.int32)
             block_tables = torch.zeros((max_batch, max_blocks_decode_batch),
@@ -473,6 +510,8 @@ class TTModelRunner:
             temperature = torch.tensor([-1.0], dtype=torch.float32)
             top_k = torch.tensor([-1], dtype=torch.int32)
             top_p = torch.tensor([-1.0], dtype=torch.float32)
+            has_structured_inputs = torch.tensor([0], dtype=torch.int32)
+
         else:
             tokens = model_input.input_tokens
             positions = model_input.input_positions
@@ -486,13 +525,19 @@ class TTModelRunner:
                                 dtype=block_tables.dtype)
                 ],
                                          dim=1)
+            # We know these are not a list here before concatenation
             unpadded_batch_size = torch.tensor(
-                [int(model_input.unpadded_batch_size)], dtype=torch.int32)
-            sp = model_input.tt_sampling_params
-            temperature = torch.tensor([float(sp.temperature)],
-                                       dtype=torch.float32)
-            top_k = torch.tensor([int(sp.top_k)], dtype=torch.int32)
-            top_p = torch.tensor([float(sp.top_p)], dtype=torch.float32)
+                [cast(int, model_input.unpadded_batch_size)],
+                dtype=torch.int32)
+            sp: TTSamplingParams = model_input.tt_sampling_params
+
+            temperature = torch.tensor([sp.temperature], dtype=torch.float32)
+            top_k = torch.tensor([sp.top_k], dtype=torch.int32)
+            top_p = torch.tensor([sp.top_p], dtype=torch.float32)
+            has_structured_input = int(
+                model_input.grammar_bitmask[0] is not None)
+            has_structured_inputs = torch.tensor([has_structured_input],
+                                                 dtype=torch.int32)
 
         # Pack into flattened tensors to reduce number of collectives.
         # B = max batch size, W = max_num_blocks_per_req.
@@ -503,6 +548,9 @@ class TTModelRunner:
                 block_tables.contiguous().view(-1),  # B*W
                 unpadded_batch_size.contiguous().view(-1),  # 1
                 top_k.contiguous().view(-1),  # 1
+                # This needs to stay at the end so that DPEngineCoreProc
+                # can check it without doing the full unpacking
+                has_structured_inputs.contiguous().view(-1),  # 1
             ],
             dim=0).contiguous()
         float_inputs = torch.cat(
@@ -517,6 +565,14 @@ class TTModelRunner:
             "float_inputs": float_inputs,
         }
 
+    def build_padded_bitmasks(
+            self, model_input: Optional[TTModelInput]) -> torch.Tensor:
+        if model_input is None or model_input.grammar_bitmask[0] is None:
+            max_batch = int(self.scheduler_config.max_num_seqs)
+            return torch.zeros((max_batch, self.bitmask_size),
+                               dtype=torch.int32)
+        return model_input.grammar_bitmask[0]
+
     def concat_dp_model_inputs(
             self, inputs, is_decode: bool,
             max_blocks_decode_batch: Optional[int]) -> "TTModelInput":
@@ -527,6 +583,8 @@ class TTModelRunner:
         - For decode (optimized gather): dict[str, torch.Tensor] with keys:
           - "int_inputs": stacked int32 tensor of shape [world, -1]
           - "float_inputs": stacked float32 tensor of shape [world, -1]
+          - if any of the batches has structured inputs, 
+          "bitmasks": stacked int32 tensor of shape [world, -1]
         """
 
         input_tokens_list: list[torch.Tensor] = []
@@ -535,6 +593,7 @@ class TTModelRunner:
         prompt_lens_list: list[np.ndarray] = []  # (prefill only)
         batch_size_per_dp: list[int] = []
         sampling_params_per_dp: list[Optional[TTSamplingParams]] = []
+        grammar_bitmask_list = []
 
         # Need to pad block tables to global max num blocks for constant shape.
         def pad_block_tables(block_tables):
@@ -555,10 +614,11 @@ class TTModelRunner:
             # Floats: [temperature(1), top_p(1)]
             assert max_blocks_decode_batch is not None, (
                 "max_blocks_decode_batch must be provided for decode")
+            has_structured_list = []
             B = int(self.scheduler_config.max_num_seqs)
             W = max_blocks_decode_batch
-            for int_inputs, float_inputs in zip(inputs["int_inputs"],
-                                                inputs["float_inputs"]):
+            for batch_num, (int_inputs, float_inputs) in enumerate(
+                    zip(inputs["int_inputs"], inputs["float_inputs"])):
                 # Slices
                 off = 0
                 stride = B
@@ -574,6 +634,9 @@ class TTModelRunner:
                 off += 1
                 top_k = int(int_inputs[off].item())
                 off += 1
+                has_structured_input = int(int_inputs[off].item())
+                off += 1
+
                 temperature = float(float_inputs[0].item())
                 top_p = float(float_inputs[1].item())
 
@@ -588,9 +651,22 @@ class TTModelRunner:
                                          top_p=top_p))
                 else:
                     sampling_params_per_dp.append(None)
+                has_structured_list.append(has_structured_input)
 
             input_positions = torch.cat(input_positions_list, dim=0)
             prompt_lens = None
+
+            if any(has_structured_list):
+                bitmasks = inputs["bitmasks"]
+                for position, has_structured in enumerate(has_structured_list):
+                    if has_structured > 0:
+                        bitmask = bitmasks[position, :]
+                        bitmask = bitmask.view(B, self.bitmask_size)
+                        grammar_bitmask_list.append(bitmask)
+                    else:
+                        grammar_bitmask_list.append(None)
+            else:
+                grammar_bitmask_list = [None] * len(has_structured_list)
         else:
             active_inputs: list[TTModelInput] = [mi for mi in inputs if mi]
             if not active_inputs:
@@ -622,18 +698,20 @@ class TTModelRunner:
                     prompt_lens_list.append(mi.prompt_lens)
                     block_tables_list.append(pad_block_tables(mi.block_tables))
 
-                batch_size_per_dp.append(mi.unpadded_batch_size if mi else 0)
+                # We know it's not a list here before concatenation
+                unpadded_batch_size: int = cast(
+                    int, mi.unpadded_batch_size) if mi else 0
+                batch_size_per_dp.append(unpadded_batch_size)
                 sampling_params_per_dp.append(
                     mi.tt_sampling_params if mi else None)
+                grammar_bitmask_list.append(
+                    mi.grammar_bitmask[0] if mi else None)
 
             input_positions = 0
             prompt_lens = np.concatenate(prompt_lens_list, axis=0)
 
         input_tokens = torch.cat(input_tokens_list, dim=0)
         block_tables = torch.cat(block_tables_list, dim=0)
-
-        compat_sampling_used = False
-        sampling_metadata = None
 
         if self.model_config.is_multimodal_model and not is_decode:
             # Gather multi-modal inputs from all DP ranks
@@ -650,15 +728,11 @@ class TTModelRunner:
             input_tokens=input_tokens,
             input_positions=input_positions,
             prompt_lens=prompt_lens,
-            seq_groups=None,
             block_tables=block_tables,
             unpadded_batch_size=batch_size_per_dp,
-            perform_device_sampling=None,  #currently unused in v1
             tt_sampling_params=sampling_params_per_dp,
-            compat_sampling_used=compat_sampling_used,
-            sampling_metadata=sampling_metadata,
             multi_modal_kwargs=multi_modal_kwargs,
-            cross_block_tables=None  # Not yet supported in V1
+            grammar_bitmask=grammar_bitmask_list,
         )
         return merged
 
@@ -670,6 +744,10 @@ class TTModelRunner:
     ) -> ModelRunnerOutput:
         ''' Execution path for non-DP case.
             Execute the model with the given scheduler output.'''
+        # In the DP case, this function is skipped!
+        # tt_worker.py directly calls execute_with_model_input
+        # With DP, the actual model pass happens on a batch
+        # produced by concatenating the inputs from all DP ranks.
 
         # Update cached state and prepare model inputs
         model_input = self.build_model_input(scheduler_output)
@@ -746,7 +824,11 @@ class TTModelRunner:
                                                enable_trace=self.trace_mode,
                                                read_from_device=True)
 
+        # The model input we got here may come from
+        # concatenating multiple DP ranks.
+        # We need to split the data back before sampling.
         sampled_token_ids_per_dp: list[torch.Tensor] = []
+
         start = 0
         for dp_rank, sz in enumerate(batch_size_per_dp):
             if sz <= 0:
@@ -757,9 +839,18 @@ class TTModelRunner:
                     or (self.sample_on_device_mode == "decode_only"
                         and not is_decode)):
                 logits = tt_out[start:start + sz, -1, :]
+
+                grammar_bitmask = model_input.grammar_bitmask[dp_rank]
+
+                if grammar_bitmask is not None:
+                    # match shape of logits, which are now unpadded on batch dim
+                    grammar_bitmask = grammar_bitmask[:sz, :]
+                    self.apply_grammar_bitmask(logits, grammar_bitmask)
+
                 next_token_ids = sample_tokens(logits,
                                                sampling_params_per_dp[dp_rank])
-            else:
+            else:  # sample on device
+                # Grammar bitmask is applied on device
                 next_token_ids = tt_out[start:start + sz]
             sampled_token_ids_per_dp.append(next_token_ids.view(sz, 1))
 
@@ -771,6 +862,25 @@ class TTModelRunner:
                 start += sz
 
         return sampled_token_ids_per_dp
+
+    def apply_grammar_bitmask(self, logits: torch.Tensor,
+                              grammar_bitmask: torch.Tensor) -> None:
+        """Apply structured output grammar constraints to logits in-place"""
+        # The grammar bitmask is compressed as packed int32 values
+        # where each bit represents one token. We need to unpack it
+        # like the TPU model runner does.
+        # Ones in the compressed bitmask represent tokens that are allowed.
+
+        #TODO this is likely a quite inefficient way of doing it on host.
+
+        # grammar_bitmask: (batch_size, bitmask_size)
+        # logits: (batch_size, vocab_size)
+        unpacked_bitmask = (torch.bitwise_right_shift(
+            grammar_bitmask[:, :, None],
+            self.structured_output_arange[None, None, :]) & 1) == 0
+        unpacked_bitmask = unpacked_bitmask.reshape(grammar_bitmask.shape[0],
+                                                    -1)[:, :logits.shape[-1]]
+        logits.masked_fill_(unpacked_bitmask, -float("inf"))
 
     def generate_runner_output(self, sampled_token_ids: torch.Tensor):
         # Cache the sampled tokens in the model runner, so that the scheduler

@@ -175,6 +175,10 @@ class TTWorker(WorkerBase):
         max_blocks = model_input.block_tables.shape[1] if model_input else 0
         return model_input, max_blocks
 
+    def build_padded_bitmasks(
+            self, model_input: Optional[TTModelInput]) -> torch.Tensor:
+        return self.model_runner.build_padded_bitmasks(model_input)
+
     def build_dp_decode_gather_input(
             self, model_input: Optional[TTModelInput],
             max_blocks_decode_batch: int) -> dict[str, torch.Tensor]:

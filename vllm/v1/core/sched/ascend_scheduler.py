@@ -58,6 +58,15 @@ class AscendScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
+        # Copied from scheduler.py
+        # NOTE: structured_output_request_ids maps
+        # a request's (request that uses structured output)
+        # request_id to the running request index.
+        # This will helps us determine to slice the grammar bitmask
+        # and only applies valid mask for requests that
+        # uses structured decoding.
+        structured_output_request_ids: dict[str, int] = {}
+
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -75,6 +84,7 @@ class AscendScheduler(Scheduler):
         skipped_waiting_requests: deque[Request] = deque()
 
         # Schedule prefill requests first (unless decode is forced).
+        req_index = 0
         while self.waiting and token_budget > 0 and self._forced_mode != 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
@@ -91,6 +101,18 @@ class AscendScheduler(Scheduler):
                 if is_ready:
                     request.status = RequestStatus.WAITING
                 else:
+                    skip_cur_request()
+                    continue
+
+            # Skip request if the structured output request is still waiting
+            # for FSM compilation.
+            if request.status == RequestStatus.WAITING_FOR_FSM:
+                structured_output_req = request.structured_output_request
+                if structured_output_req and structured_output_req.grammar:
+                    # unblock request if FSM is now ready
+                    request.status = RequestStatus.WAITING
+                else:
+                    # skip request if FSM is still not ready
                     skip_cur_request()
                     continue
 
@@ -214,6 +236,10 @@ class AscendScheduler(Scheduler):
             else:
                 raise RuntimeError(f"Invalid request status: {request.status}")
 
+            if request.use_structured_output:
+                structured_output_request_ids[request.request_id] = req_index
+            req_index += 1
+
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
             req_to_new_block_ids[request.request_id] = (
@@ -307,6 +333,9 @@ class AscendScheduler(Scheduler):
 
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
+                if request.use_structured_output:
+                    structured_output_request_ids[
+                        request.request_id] = req_index
                 self.scheduled_req_ids.add(request.request_id)
                 req_to_new_block_ids[request.request_id] = (
                     new_blocks.get_block_ids())
@@ -347,6 +376,13 @@ class AscendScheduler(Scheduler):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        # Generate grammar bitmask for structured output requests
+        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests,
+            structured_output_request_ids,
+            scheduled_spec_decode_tokens,
+        )
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -374,8 +410,8 @@ class AscendScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,  # type: ignore
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_request_ids={},
-            grammar_bitmask=None,
+            structured_output_request_ids=structured_output_request_ids,
+            grammar_bitmask=grammar_bitmask,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
