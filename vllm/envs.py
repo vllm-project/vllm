@@ -153,6 +153,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_FLASHINFER_FP8_LINEAR: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -1142,6 +1143,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
+    # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
+    "VLLM_USE_FLASHINFER_FP8_LINEAR": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_FP8_LINEAR", "0"))
+    ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
@@ -1563,6 +1569,7 @@ def compute_hash() -> str:
         "VLLM_MOE_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
+        "VLLM_USE_FLASHINFER_FP8_LINEAR",
         "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
