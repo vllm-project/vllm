@@ -83,7 +83,6 @@ void run_get_group_gemm_starts(
   // logical k, n
   int64_t n = out_tensors.size(1);
   int64_t k = a_tensors.size(1);
-  printf("inside run_get_group_gemm_starts got n=%d, k=%d\n", n, k);
   int scale_k = cutlass::ceil_div(k, b_group_size);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());

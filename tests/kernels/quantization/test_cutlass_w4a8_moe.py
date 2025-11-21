@@ -73,10 +73,11 @@ def cutlass_preprocess(
 
 
 GROUP_SIZE = 128
-# NUM_EXPERTS = [8, 64]
-NUM_EXPERTS = [4]
-Ks = [512]
-Ns = [2048]
+NUM_EXPERTS = [8, 64]
+# NUM_EXPERTS = [4]
+Ks = [512, 256] # need divisible by gorup size
+Ns = [2048, 1024]
+ALIGNMENT = 16 # torch scaled mm alignment for M, needed for reference check
 
 if __name__ == '__main__':
     current_platform.seed_everything(42)
@@ -84,7 +85,7 @@ if __name__ == '__main__':
         for K in Ks:
             for N in Ns:
                 # generate random number of tokens per expert
-                Ms = [random.randint(1, 1024) for _ in range(num_experts)]
+                Ms = [ALIGNMENT * random.randint(1, 64) for _ in range(num_experts)]
                 M_full = sum(Ms)
                 scale_k = K // GROUP_SIZE
 
@@ -97,7 +98,7 @@ if __name__ == '__main__':
                 out = torch.empty((M_full, N), dtype=torch.bfloat16, device='cuda')
                 c_strides = torch.full((num_experts,), N, dtype=torch.int64).cuda()
 
-                # channel/token scales (currently unused)
+                # channel/token scales
                 per_tok_scales = torch.randn((M_full, 1), dtype=torch.float32).cuda()
                 per_chan_scales = torch.randn((num_experts, N, 1), dtype=torch.float32).cuda()
 
@@ -147,10 +148,11 @@ if __name__ == '__main__':
                     out_ref = torch._scaled_mm(
                         a_ref[start:end].to(torch.float8_e4m3fn),
                         w_refs[i].to(torch.float8_e4m3fn).t().contiguous().t(),
-                        torch.tensor(1.0).cuda(),
-                        torch.tensor(1.0).cuda(),
+                        per_tok_scales[start:end], # (M, 1)
+                        per_chan_scales[i].reshape(1, -1), # (1, N)
                         out_dtype=torch.bfloat16,
                         use_fast_accum=True
                     )
-                    torch.testing.assert_close(out[start:end], out_ref, rtol=1e-3, atol=1e-3)
+                    # rtol=1e-2, atol=1e-2 is closest to cutlass epsilon 1e-2, non zero floor 1e-4
+                    torch.testing.assert_close(out[start:end], out_ref, rtol=1e-2, atol=1e-2)
     print('tests passed!')
