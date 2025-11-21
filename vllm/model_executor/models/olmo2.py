@@ -99,7 +99,6 @@ class Olmo2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.max_position_embeddings = self.config.max_position_embeddings
-        self.rope_theta = self.config.rope_theta
 
         # Attention input projection. Projects x -> (q, k, v)
         self.qkv_proj = QKVParallelLinear(
@@ -139,15 +138,17 @@ class Olmo2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        # Rotary embeddings. Rope scaling is only applied on full attention
-        # layers.
-        self.rope_scaling = self.config.rope_scaling if sliding_window is None else None
+        # Rotary embeddings. Rope scaling is only applied on full attention layers.
+        if sliding_window is None:
+            rope_parameters = self.config.rope_parameters
+        else:
+            rope_theta = self.config.rope_parameters["rope_theta"]
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,  # type: ignore
-            rope_scaling=self.rope_scaling,
+            rope_parameters=rope_parameters,
         )
 
         # Attention output projection.
@@ -304,7 +305,7 @@ class Olmo2Model(nn.Module):
             ["hidden_states"], self.config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -408,11 +409,9 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -421,8 +420,8 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

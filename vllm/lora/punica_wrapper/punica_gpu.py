@@ -51,8 +51,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.max_loras, max_num_batched_tokens, device=device
         )
 
+        # When speculative decoding is enabled, max_num_samples is
+        # max_batches * (num_speculative_decoding_tokens + 1).
+        # This line can be optimized by replacing max_num_batched_tokens
+        # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_batches, device=device
+            self.max_loras, max_num_batched_tokens, device=device
         )
 
     def update_metadata(
@@ -61,13 +65,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(
-            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
-        )
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
@@ -367,9 +368,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         num_tokens_post_padded: torch.Tensor,
         max_lora_rank: int,
         top_k_num: int,
-        config,
+        shrink_config,
+        expand_config,
         adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
+        fully_sharded: bool = False,
+        offset: int = 0,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
@@ -388,10 +392,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             top_k_num,
             lora_ids,
             adapter_enabled,
-            config["BLOCK_SIZE_M"],
-            config["BLOCK_SIZE_N"],
-            config["BLOCK_SIZE_K"],
-            config["GROUP_SIZE_M"],
-            config.get("SPLIT_K", 1),
+            shrink_config.get("BLOCK_SIZE_M", 64),
+            shrink_config.get("BLOCK_SIZE_N", 64),
+            shrink_config.get("BLOCK_SIZE_K", 32),
+            shrink_config.get("GROUP_SIZE_M", 8),
+            shrink_config.get("NUM_WARPS", 4),
+            shrink_config.get("NUM_STAGES", 3),
+            shrink_config.get("SPLIT_K", 1),
+            expand_config.get("BLOCK_SIZE_M", 64),
+            expand_config.get("BLOCK_SIZE_N", 64),
+            expand_config.get("BLOCK_SIZE_K", 32),
+            expand_config.get("GROUP_SIZE_M", 8),
+            expand_config.get("NUM_WARPS", 4),
+            expand_config.get("NUM_STAGES", 3),
+            expand_config.get("SPLIT_K", 1),
             mul_routed_weight,
+            fully_sharded,
+            offset,
         )

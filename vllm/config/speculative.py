@@ -3,12 +3,13 @@
 
 import ast
 import hashlib
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -18,10 +19,8 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
-    from vllm.config import ModelConfig
 else:
     PretrainedConfig = Any
-    ModelConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -29,29 +28,25 @@ else:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal[
-    "ngram",
-    "eagle",
-    "eagle3",
-    "medusa",
-    "mlp_speculator",
-    "draft_model",
-    "deepseek_mtp",
-    "ernie_mtp",
-    "qwen3_next_mtp",
-    "mimo_mtp",
-    "longcat_flash_mtp",
-    "mtp",
-    "suffix",
-]
-MTP_MODEL_TYPES = (
+MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
-)
+    "mtp",
+    "pangu_ultra_moe_mtp",
+]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+SpeculativeMethod = Literal[
+    "ngram",
+    "medusa",
+    "mlp_speculator",
+    "draft_model",
+    "suffix",
+    EagleModelTypes,
+]
 
 
 @config
@@ -179,6 +174,13 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
             )
+        if hf_config.model_type in ("pangu_ultra_moe"):
+            hf_config.model_type = "pangu_ultra_moe_mtp"
+        if hf_config.model_type == "pangu_ultra_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
@@ -235,7 +237,7 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        if self.method in MTP_MODEL_TYPES:
+        if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
@@ -313,10 +315,6 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
-                # TODO: Move this import to the top once `ModelConfig`
-                # lives in `vllm.config.model`.
-                from vllm.config import ModelConfig
-
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -352,7 +350,9 @@ class SpeculativeConfig:
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in MTP_MODEL_TYPES:
+                elif self.draft_model_config.hf_config.model_type in get_args(
+                    MTPModelTypes
+                ):
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -460,7 +460,7 @@ class SpeculativeConfig:
         if not has_arctic_inference():
             raise ImportError(
                 "Arctic Inference is required for suffix decoding. "
-                "Install via `pip install arctic-inference==0.1.0`."
+                "Install via `pip install arctic-inference==0.1.1`."
             )
         if self.num_speculative_tokens is None:
             # Suffix decoding decides the actual number of speculative tokens
@@ -628,16 +628,6 @@ class SpeculativeConfig:
             )
 
         return self
-
-    @property
-    def num_lookahead_slots(self) -> int:
-        """The number of additional slots the scheduler should allocate per
-        step, in addition to the slots allocated for each known token.
-
-        This is equal to the number of speculative tokens, as each speculative
-        token must be scored.
-        """
-        return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
