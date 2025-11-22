@@ -8,6 +8,7 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
+from vllm.model_executor.model_loader.weight_utils import download_gguf
 
 
 class TestGGUFDownload:
@@ -26,7 +27,7 @@ class TestGGUFDownload:
                 [f"{mock_folder}/model-IQ1_S.gguf"] if "IQ1_S" in pattern else []
             )
 
-            result = GGUFModelLoader.download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
+            result = download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
             # Verify download_weights_from_hf was called with correct patterns
             mock_download.assert_called_once_with(
@@ -62,7 +63,7 @@ class TestGGUFDownload:
                 else []
             )
 
-            result = GGUFModelLoader.download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
+            result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
             # Should return the first file after sorting
             assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
@@ -80,30 +81,9 @@ class TestGGUFDownload:
                 else []
             )
 
-            result = GGUFModelLoader.download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
+            result = download_gguf("unsloth/gpt-oss-120b-GGUF", "Q2_K")
 
             assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
-
-    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_fallback_search(self, mock_download):
-        """Test fallback search when pattern matching fails."""
-        mock_folder = "/tmp/mock_cache"
-        mock_download.return_value = mock_folder
-
-        with patch("glob.glob") as mock_glob:
-            # First glob calls return empty (pattern match fails)
-            # Then recursive search finds the file
-            def glob_side_effect(pattern, **kwargs):
-                if "**/*.gguf" in pattern:
-                    # Fallback recursive search
-                    return [f"{mock_folder}/custom-name-IQ1_S.gguf"]
-                return []
-
-            mock_glob.side_effect = glob_side_effect
-
-            result = GGUFModelLoader.download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
-
-            assert result == f"{mock_folder}/custom-name-IQ1_S.gguf"
 
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
     @patch("glob.glob", return_value=[])
@@ -113,65 +93,11 @@ class TestGGUFDownload:
         mock_download.return_value = mock_folder
 
         with pytest.raises(ValueError, match="Downloaded GGUF files not found"):
-            GGUFModelLoader.download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
+            download_gguf("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
 
 
 class TestGGUFModelLoader:
     """Test GGUFModelLoader class methods."""
-
-    @patch("vllm.config.model.get_config")
-    @patch("vllm.config.model.is_gguf")
-    @patch(
-        "vllm.model_executor.models.registry.ModelRegistry.is_text_generation_model",
-        return_value=True,
-    )
-    def test_get_model_path_for_download_with_quant_type(
-        self, mock_is_text_gen, mock_is_gguf, mock_get_config
-    ):
-        """Test _get_model_path_for_download with quant_type."""
-        mock_is_gguf.return_value = True
-        mock_hf_config = MagicMock()
-        mock_hf_config.architectures = ["Qwen3ForCausalLM"]
-
-        # Setup get_text_config to return a config with max_position_embeddings
-        # Use a simple object with only the attributes we need
-        class MockTextConfig:
-            max_position_embeddings = 4096
-            sliding_window = None
-            # Add model_type to avoid errors in _get_and_verify_max_len
-            model_type = "qwen3"
-            # Add num_attention_heads for get_hf_text_config assertion
-            num_attention_heads = 32
-
-        mock_text_config = MockTextConfig()
-        mock_hf_config.get_text_config.return_value = mock_text_config
-        mock_hf_config.dtype = "bfloat16"
-        mock_get_config.return_value = mock_hf_config
-
-        load_config = LoadConfig(load_format="gguf")
-        loader = GGUFModelLoader(load_config)
-
-        model_config = ModelConfig(
-            model="unsloth/Qwen3-0.6B-GGUF",
-            gguf_quant_type="IQ1_S",
-            tokenizer="Qwen/Qwen3-0.6B",
-        )
-
-        path = loader._get_model_path_for_download(model_config)
-        assert path == "unsloth/Qwen3-0.6B-GGUF:IQ1_S"
-
-    def test_get_model_path_for_download_without_quant_type(self):
-        """Test _get_model_path_for_download without quant_type."""
-        load_config = LoadConfig(load_format="gguf")
-        loader = GGUFModelLoader(load_config)
-
-        model_config = ModelConfig(
-            model="unsloth/Qwen3-0.6B-GGUF",
-            gguf_quant_type=None,
-        )
-
-        path = loader._get_model_path_for_download(model_config)
-        assert path == "unsloth/Qwen3-0.6B-GGUF"
 
     @patch("os.path.isfile", return_value=True)
     def test_prepare_weights_local_file(self, mock_isfile):
@@ -179,7 +105,11 @@ class TestGGUFModelLoader:
         load_config = LoadConfig(load_format="gguf")
         loader = GGUFModelLoader(load_config)
 
-        result = loader._prepare_weights("/path/to/model.gguf")
+        # Create a simple mock ModelConfig with only the model attribute
+        model_config = MagicMock()
+        model_config.model = "/path/to/model.gguf"
+
+        result = loader._prepare_weights(model_config)
         assert result == "/path/to/model.gguf"
         mock_isfile.assert_called_once_with("/path/to/model.gguf")
 
@@ -192,7 +122,11 @@ class TestGGUFModelLoader:
 
         mock_hf_download.return_value = "/downloaded/model.gguf"
 
-        result = loader._prepare_weights("https://huggingface.co/model.gguf")
+        # Create a simple mock ModelConfig with only the model attribute
+        model_config = MagicMock()
+        model_config.model = "https://huggingface.co/model.gguf"
+
+        result = loader._prepare_weights(model_config)
         assert result == "/downloaded/model.gguf"
         mock_hf_download.assert_called_once_with(
             url="https://huggingface.co/model.gguf"
@@ -207,30 +141,100 @@ class TestGGUFModelLoader:
 
         mock_hf_download.return_value = "/downloaded/model.gguf"
 
-        result = loader._prepare_weights("unsloth/Qwen3-0.6B-GGUF/model.gguf")
+        # Create a simple mock ModelConfig with only the model attribute
+        model_config = MagicMock()
+        model_config.model = "unsloth/Qwen3-0.6B-GGUF/model.gguf"
+
+        result = loader._prepare_weights(model_config)
         assert result == "/downloaded/model.gguf"
         mock_hf_download.assert_called_once_with(
             repo_id="unsloth/Qwen3-0.6B-GGUF", filename="model.gguf"
         )
 
-    @patch.object(GGUFModelLoader, "download_gguf")
+    @patch("vllm.config.model.get_hf_image_processor_config", return_value=None)
+    @patch("vllm.transformers_utils.config.file_or_path_exists", return_value=True)
+    @patch("vllm.config.model.get_config")
+    @patch("vllm.config.model.is_gguf", return_value=True)
+    @patch("vllm.model_executor.model_loader.gguf_loader.download_gguf")
     @patch("os.path.isfile", return_value=False)
-    def test_prepare_weights_repo_quant_type(self, mock_isfile, mock_download_gguf):
+    def test_prepare_weights_repo_quant_type(
+        self,
+        mock_isfile,
+        mock_download_gguf,
+        mock_is_gguf,
+        mock_get_config,
+        mock_file_exists,
+        mock_get_image_config,
+    ):
         """Test _prepare_weights with repo_id:quant_type format."""
+        mock_hf_config = MagicMock()
+        mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+
+        class MockTextConfig:
+            max_position_embeddings = 4096
+            sliding_window = None
+            model_type = "qwen3"
+            num_attention_heads = 32
+
+        mock_text_config = MockTextConfig()
+        mock_hf_config.get_text_config.return_value = mock_text_config
+        mock_hf_config.dtype = "bfloat16"
+        mock_get_config.return_value = mock_hf_config
+
         load_config = LoadConfig(load_format="gguf")
         loader = GGUFModelLoader(load_config)
 
         mock_download_gguf.return_value = "/downloaded/model-IQ1_S.gguf"
 
-        result = loader._prepare_weights("unsloth/Qwen3-0.6B-GGUF:IQ1_S")
+        model_config = ModelConfig(
+            model="unsloth/Qwen3-0.6B-GGUF:IQ1_S", tokenizer="Qwen/Qwen3-0.6B"
+        )
+        result = loader._prepare_weights(model_config)
+        # The actual result will be the downloaded file path from mock
         assert result == "/downloaded/model-IQ1_S.gguf"
-        mock_download_gguf.assert_called_once_with("unsloth/Qwen3-0.6B-GGUF", "IQ1_S")
+        mock_download_gguf.assert_called_once_with(
+            "unsloth/Qwen3-0.6B-GGUF",
+            "IQ1_S",
+            cache_dir=None,
+            revision=None,
+            ignore_patterns=["original/**/*"],
+        )
 
+    @patch("vllm.config.model.get_hf_image_processor_config", return_value=None)
+    @patch("vllm.config.model.get_config")
+    @patch("vllm.config.model.is_gguf", return_value=False)
+    @patch("vllm.transformers_utils.utils.check_gguf_file", return_value=False)
     @patch("os.path.isfile", return_value=False)
-    def test_prepare_weights_invalid_format(self, mock_isfile):
+    def test_prepare_weights_invalid_format(
+        self,
+        mock_isfile,
+        mock_check_gguf,
+        mock_is_gguf,
+        mock_get_config,
+        mock_get_image_config,
+    ):
         """Test _prepare_weights with invalid format."""
+        mock_hf_config = MagicMock()
+        mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+
+        class MockTextConfig:
+            max_position_embeddings = 4096
+            sliding_window = None
+            model_type = "qwen3"
+            num_attention_heads = 32
+
+        mock_text_config = MockTextConfig()
+        mock_hf_config.get_text_config.return_value = mock_text_config
+        mock_hf_config.dtype = "bfloat16"
+        mock_get_config.return_value = mock_hf_config
+
         load_config = LoadConfig(load_format="gguf")
         loader = GGUFModelLoader(load_config)
 
+        # Create ModelConfig with a valid repo_id to avoid validation errors
+        # Then test _prepare_weights with invalid format
+        model_config = ModelConfig(model="unsloth/Qwen3-0.6B")
+        # Manually set model to invalid format after creation
+        model_config.model = "invalid-format"
         with pytest.raises(ValueError, match="Unrecognised GGUF reference"):
-            loader._prepare_weights("invalid-format")
+            loader._prepare_weights(model_config)
