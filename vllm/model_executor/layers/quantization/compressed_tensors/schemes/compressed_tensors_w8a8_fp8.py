@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
+from collections import defaultdict
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -221,21 +222,23 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         )
 
 
-def online_quantize(layer, weight_loader, name, wait_for_params, wait_for_shards):
-    numel_loaded = 0
+def online_quantize(layer, weight_loader, param_name, wait_for_params):
+    numel_loaded = defaultdict(int)
 
     def wrapped_weight_loader(param, loaded_weight, **kwargs):
         # (2) allocate unquantized buffer on GPU for loading
-        if getattr(layer, name).device == "meta":
-            layer.register_parameter(name, param.to(torch.cuda.current_device()))
+        if getattr(layer, param_name).device == "meta":
+            layer.register_parameter(param_name, param.to(torch.cuda.current_device()))
 
         # (3) load into unquantized GPU buffer
-        weight_loader(getattr(layer, name), loaded_weight, **kwargs)
+        weight_loader(getattr(layer, param_name), loaded_weight, **kwargs)
 
         # check if all necessary weights and shards are loaded
-        nonlocal numel_loaded
-        numel_loaded += loaded_weight.numel()
-        if numel_loaded >= getattr(layer, name).numel():
+        numel_loaded[param_name] += loaded_weight.numel()
+        if all(
+            numel_loaded[name] >= getattr(layer, name).numel()
+            for name in wait_for_params
+        ):
             # (4) do quantization and allocate new quantized params
             layer.weight, layer.scale = fp8_quantize(layer.weight)
 
