@@ -116,7 +116,8 @@ class VllmSerializableFunction(SerializableCallable):
             the AOT compiled path.
             """
             compile_inputs = [
-                inp or example_inputs[i] for i, inp in enumerate(fn.example_inputs)
+                inp if inp is not None else example_inputs[i]
+                for i, inp in enumerate(fn.example_inputs)
             ]
             with tracing(TracingContext(fake_mode)):
                 fn.optimized_call = vllm_backend(
