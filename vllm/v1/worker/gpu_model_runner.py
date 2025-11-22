@@ -2466,7 +2466,9 @@ class GPUModelRunner(
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
+        cu_num_new_tokens: list[int] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2479,6 +2481,12 @@ class GPUModelRunner(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                 )
+                if logprobs_tensors:
+                    # Needed for extracting logprobs when spec decoding.
+                    # This must be done prior to discarding sampled tokens.
+                    cu_num_new_tokens = [0]
+                    for toks in valid_sampled_token_ids:
+                        cu_num_new_tokens.append(cu_num_new_tokens[-1] + len(toks))
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()
@@ -2506,10 +2514,6 @@ class GPUModelRunner(
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        logprobs_tensors = sampler_output.logprobs_tensors
-        cu_num_accepted_tokens = (
-            [0] if spec_decode_metadata and logprobs_tensors else None
-        )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
@@ -2517,11 +2521,6 @@ class GPUModelRunner(
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
             num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
-
-            if cu_num_accepted_tokens is not None:
-                cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + num_sampled_ids
-                )
 
             if not sampled_ids:
                 continue
@@ -2544,7 +2543,7 @@ class GPUModelRunner(
             req_state.output_token_ids.extend(sampled_ids)
 
         logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_accepted_tokens)
+            logprobs_tensors.tolists(cu_num_new_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
