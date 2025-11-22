@@ -217,6 +217,11 @@ def fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,
+    moe_align: Callable[
+        [torch.Tensor, int, int, torch.Tensor | None],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]
+    | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -289,9 +294,15 @@ def fused_marlin_moe(
 
     if global_num_experts == -1:
         global_num_experts = E
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, block_size_m, global_num_experts, expert_map
-    )
+
+    if moe_align is None:
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, block_size_m, global_num_experts, expert_map
+        )
+    else:
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align(
+            topk_ids, block_size_m, global_num_experts, expert_map
+        )
 
     assert activation is not None
     moe_output = _fused_marlin_moe(
@@ -672,10 +683,22 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
+            moe_align=self.moe_align,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
+
+    def moe_align(
+        self,
+        topk_ids: torch.Tensor,
+        block_size_m: int,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None = None,
+    ):
+        return moe_align_block_size(
+            topk_ids, block_size_m, global_num_experts, expert_map
+        )
 
 
 def modular_marlin_fused_moe(

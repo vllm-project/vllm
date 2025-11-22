@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
+from vllm.utils.torch_utils import current_stream
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -43,6 +44,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = base_layer.w2_weight.device
         self._inject_lora_into_fused_moe()
+        self.align_stream = torch.cuda.Stream(device=self.device)
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}
@@ -133,14 +135,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        def act_decorator(layer, func):
+        def moe_align_decorator(layer, func):
             def wrapper(*args, **kwargs):
-                _, output, input = args
-
                 hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
                 curr_topk_ids = moe_state_dict["topk_ids"]
-
                 expert_map = moe_state_dict["expert_map"]
 
                 config_dtype = _get_config_dtype_str(
@@ -164,33 +162,72 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config_dtype=config_dtype,
                 )
 
-                # get the block size of m from customized config or default config
                 max_loras = self.w1_lora_a_stacked.shape[0]
-                (
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
-                    num_tokens_post_padded_lora,
-                ) = self.punica_wrapper.moe_lora_align_block_size(
-                    curr_topk_ids,
-                    num_tokens,
-                    shrink_config["BLOCK_SIZE_M"],
-                    self.base_layer.local_num_experts,
-                    max_loras,
-                    self.adapter_enabled,
-                    expert_map,
-                )
+                self.align_stream.wait_stream(current_stream())
+                with torch.cuda.stream(self.align_stream):
+                    (
+                        sorted_token_ids_lora,
+                        expert_ids_lora,
+                        num_tokens_post_padded_lora,
+                    ) = self.punica_wrapper.moe_lora_align_block_size(
+                        curr_topk_ids,
+                        num_tokens,
+                        shrink_config["BLOCK_SIZE_M"],
+                        self.base_layer.local_num_experts,
+                        max_loras,
+                        self.adapter_enabled,
+                        expert_map,
+                    )
 
-                moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
-                moe_state_dict["expert_ids_lora"] = expert_ids_lora
-                moe_state_dict["num_tokens_post_padded_lora"] = (
-                    num_tokens_post_padded_lora
+                    moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
+                    moe_state_dict["expert_ids_lora"] = expert_ids_lora
+                    moe_state_dict["num_tokens_post_padded_lora"] = (
+                        num_tokens_post_padded_lora
+                    )
+
+                result = func(*args, **kwargs)
+                current_stream().wait_stream(self.align_stream)
+
+                return result
+
+            return wrapper
+
+        def act_decorator(layer, func):
+            def wrapper(*args, **kwargs):
+                _, output, input = args
+
+                hidden_states = moe_state_dict["hidden_states"]
+                topk_weights = moe_state_dict["topk_weights"]
+
+                config_dtype = _get_config_dtype_str(
+                    dtype=hidden_states.dtype,
+                    use_fp8_w8a8=False,
+                    use_int8_w8a16=False,
+                    use_int4_w4a16=False,
                 )
+                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+                num_tokens = hidden_states.size(0)
+                M = min(num_tokens, CHUNK_SIZE)
+
+                shrink_config, expand_config = self._get_lora_moe_configs(
+                    op_prefix="w13",
+                    lora_a_stacked=self.w1_lora_a_stacked,
+                    lora_b_stacked=self.w1_lora_b_stacked,
+                    num_slices=2,
+                    M=M,
+                    layer=layer,
+                    top_k=top_k,
+                    config_dtype=config_dtype,
+                )
+                max_loras = self.w1_lora_a_stacked.shape[0]
 
                 w13_lora_a_stacked = [self.w1_lora_a_stacked, self.w3_lora_a_stacked]
                 w13_lora_b_stacked = [self.w1_lora_b_stacked, self.w3_lora_b_stacked]
                 max_lora_rank = self.w1_lora_a_stacked.shape[-2]
-                expert_ids_lora = expert_ids_lora.view(max_loras, -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(max_loras, -1)
+                expert_ids_lora = moe_state_dict["expert_ids_lora"].view(max_loras, -1)
+                sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"].view(
+                    max_loras, -1
+                )
 
                 self.punica_wrapper.add_lora_fused_moe(
                     input.view(-1, top_k, input.shape[-1]),
@@ -200,7 +237,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     topk_weights,
                     sorted_token_ids_lora,
                     expert_ids_lora,
-                    num_tokens_post_padded_lora,
+                    moe_state_dict["num_tokens_post_padded_lora"],
                     max_lora_rank,
                     top_k,
                     shrink_config,  ## pass the shrink config
@@ -288,6 +325,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
         fused_experts.moe_sum = moe_sum_decorator(
             self.base_layer, fused_experts.moe_sum
+        )
+
+        fused_experts.moe_align = moe_align_decorator(
+            self.base_layer, fused_experts.moe_align
         )
 
         self.base_layer.quant_method = FusedMoEModularMethod(

@@ -126,7 +126,7 @@ __global__ void moe_lora_align_sum_kernel(
   }
 }
 
-void moe_lora_align_block_size(
+void __moe_lora_align_block_size(
     torch::Tensor topk_ids, torch::Tensor token_lora_mapping,
     int64_t num_experts, int64_t block_size, int64_t max_loras,
     int64_t max_num_tokens_padded, int64_t max_num_m_blocks,
