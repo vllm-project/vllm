@@ -142,9 +142,6 @@ class TokenformerSurgeon(ABC):
     def _is_adapter_layer(self, layer_name):
         return (
             "mlp" in layer_name.split(".")[-1]
-            or "q_proj" in layer_name.split(".")[-1]
-            or "k_proj" in layer_name.split(".")[-1]
-            or "v_proj" in layer_name.split(".")[-1]
         )
 
     def _recursive_setattr(self, obj, attr, value):
