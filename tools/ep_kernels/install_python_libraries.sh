@@ -96,6 +96,13 @@ clone_repo() {
     fi
 }
 
+deepep_cuda13_patch() {
+    cuda_version_major=$(${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2)
+    if [ ${cuda_version_major} -ge 13 ]; then
+        sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
+    fi
+}
+
 do_build() {
     local repo=$1
     local name=$2
@@ -106,6 +113,10 @@ do_build() {
     pushd "$WORKSPACE"
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
+
+    if [ "$name" == "DeepEP" ]; then
+        deepep_cuda13_patch
+    fi
 
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
