@@ -213,7 +213,7 @@ class MistralConfigParser(ConfigParserBase):
                 token=_get_hf_token(),
                 **kwargs,
             )
-        except OSError:
+        except OSError:  # Not found
             hf_config_dict = {}
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
