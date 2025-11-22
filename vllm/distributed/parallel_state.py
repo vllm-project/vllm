@@ -385,6 +385,33 @@ class GroupCoordinator:
             torch.ops._C, "init_shm_manager"
         )
 
+    def create_mq_broadcaster(
+        self, writer_rank=0, external_writer_handle=None, blocking=True
+    ):
+        from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+        return MessageQueue.create_from_process_group(
+            self.cpu_group,
+            1 << 22,
+            6,
+            writer_rank=writer_rank,
+            external_writer_handle=external_writer_handle,
+            blocking=blocking,
+        )
+
+    def create_single_reader_mq_broadcasters(
+        self, reader_rank_in_group=0, blocking=False
+    ):
+        from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+        return MessageQueue.create_from_process_group_single_reader(
+            self.cpu_group,
+            1 << 22,
+            6,
+            reader_rank=self.ranks[reader_rank_in_group],
+            blocking=blocking,
+        )
+
     @property
     def first_rank(self):
         """Return the global rank of the first process in the group"""
@@ -997,12 +1024,18 @@ class GroupCoordinator:
 
 
 _WORLD: GroupCoordinator | None = None
+_INNER_DP_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
+
+
+def get_inner_dp_world_group() -> GroupCoordinator:
+    assert _INNER_DP_WORLD is not None, "inner dp world group is not initialized"
+    return _INNER_DP_WORLD
 
 
 def init_world_group(
@@ -1023,12 +1056,13 @@ def init_model_parallel_group(
     backend: str,
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
+    use_device_communicator: bool = True,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_device_communicator=True,
+        use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
@@ -1064,6 +1098,12 @@ get_context_model_parallel_group = get_dcp_group
 
 _PP: GroupCoordinator | None = None
 
+
+def get_pp_group() -> GroupCoordinator:
+    assert _PP is not None, "pipeline model parallel group is not initialized"
+    return _PP
+
+
 _DP: GroupCoordinator | None = None
 
 
@@ -1080,9 +1120,12 @@ def get_ep_group() -> GroupCoordinator:
     return _EP
 
 
-def get_pp_group() -> GroupCoordinator:
-    assert _PP is not None, "pipeline model parallel group is not initialized"
-    return _PP
+_PCP: GroupCoordinator | None = None
+
+
+def get_pcp_group() -> GroupCoordinator:
+    assert _PCP is not None, "prefill context parallel group is not initialized"
+    return _PCP
 
 
 @deprecated(
@@ -1143,7 +1186,14 @@ def init_distributed_environment(
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
-    if (
+    if config is not None and config.parallel_config.nnodes > 1:
+        parallel_config = config.parallel_config
+        ip = parallel_config.master_addr
+        rank = parallel_config.data_parallel_rank * world_size + rank
+        world_size = parallel_config.world_size_across_dp
+        port = parallel_config.master_port
+        distributed_init_method = get_distributed_init_method(ip, port)
+    elif (
         config is not None
         and config.parallel_config.data_parallel_size > 1
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1164,6 +1214,14 @@ def init_distributed_environment(
             distributed_init_method,
         )
     if not torch.distributed.is_initialized():
+        logger.info(
+            "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
+            world_size,
+            rank,
+            local_rank,
+            distributed_init_method,
+            backend,
+        )
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment"
@@ -1192,21 +1250,42 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
-    global _WORLD, _NODE_COUNT
+    global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        _NODE_COUNT = _node_count(_WORLD.cpu_group)
+        if config.parallel_config.nnodes > 1:
+            _NODE_COUNT = config.parallel_config.nnodes
+        else:
+            _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
+    if config.parallel_config.nnodes_within_dp > 1:
+        if parallel_config.data_parallel_size > 1:
+            world_size_inner_dp = parallel_config.world_size
+            group_ranks = [
+                [dp_rank * world_size_inner_dp + i for i in range(world_size_inner_dp)]
+                for dp_rank in range(parallel_config.data_parallel_size)
+            ]
+            _INNER_DP_WORLD = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                use_message_queue_broadcaster=True,
+                group_name="inner_dp_world",
+                use_device_communicator=False,
+            )
+        else:
+            _INNER_DP_WORLD = _WORLD
 
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
@@ -1256,7 +1335,11 @@ def initialize_model_parallel(
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
-        -1, data_parallel_size, pipeline_model_parallel_size, tensor_model_parallel_size
+        -1,
+        data_parallel_size,
+        pipeline_model_parallel_size,
+        prefill_context_model_parallel_size,
+        tensor_model_parallel_size,
     )  # noqa
 
     # Build the tensor model-parallel groups.
@@ -1291,11 +1374,23 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
+    global _PCP
+    assert _PCP is None, "prefill context parallel group is already initialized"
+    group_ranks = (
+        all_ranks.transpose(3, 4)
+        .reshape(-1, prefill_context_model_parallel_size)
+        .unbind(0)
+    )
+    group_ranks = [x.tolist() for x in group_ranks]
+    _PCP = init_model_parallel_group(
+        group_ranks, get_world_group().local_rank, backend, group_name="pcp"
+    )
+
     # Build the pipeline model-parallel groups.
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
     group_ranks = (
-        all_ranks.transpose(2, 3).reshape(-1, pipeline_model_parallel_size).unbind(0)
+        all_ranks.transpose(2, 4).reshape(-1, pipeline_model_parallel_size).unbind(0)
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
@@ -1304,7 +1399,7 @@ def initialize_model_parallel(
 
     global _DP
     assert _DP is None, "data parallel group is already initialized"
-    group_ranks = all_ranks.transpose(1, 3).reshape(-1, data_parallel_size).unbind(0)
+    group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(
         group_ranks, get_world_group().local_rank, backend, group_name="dp"
@@ -1314,7 +1409,12 @@ def initialize_model_parallel(
     assert _EP is None, "expert parallel group is already initialized"
     group_ranks = (
         all_ranks.transpose(1, 2)
-        .reshape(-1, data_parallel_size * tensor_model_parallel_size)
+        .reshape(
+            -1,
+            data_parallel_size
+            * prefill_context_model_parallel_size
+            * tensor_model_parallel_size,
+        )
         .unbind(0)
     )
     group_ranks = [x.tolist() for x in group_ranks]
@@ -1324,11 +1424,13 @@ def initialize_model_parallel(
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s, EP rank %s",
+        "DP rank %s, PP rank %s, PCP rank %s, "
+        "TP rank %s, EP rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
         _PP.rank_in_group,
+        _PCP.rank_in_group,
         _TP.rank_in_group,
         _EP.rank_in_group,
     )
@@ -1337,6 +1439,7 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
@@ -1349,6 +1452,7 @@ def ensure_model_parallel_initialized(
         initialize_model_parallel(
             tensor_model_parallel_size,
             pipeline_model_parallel_size,
+            prefill_context_model_parallel_size,
             decode_context_model_parallel_size,
             backend,
         )
@@ -1365,6 +1469,12 @@ def ensure_model_parallel_initialized(
         f"got: {pp_world_size=} vs. "
         f"wanted: {pipeline_model_parallel_size=}"
     )
+    pcp_world_size = get_pcp_group().world_size
+    assert pcp_world_size == prefill_context_model_parallel_size, (
+        "prefill context parallel group already initialized, but of unexpected size: "
+        f"{pcp_world_size=} vs. "
+        f"{prefill_context_model_parallel_size=}"
+    )
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
@@ -1376,6 +1486,8 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
     """
     if _TP is not None:
         _TP.prepare_communication_buffer_for_model(model)
+    if _PCP is not None:
+        _PCP.prepare_communication_buffer_for_model(model)
     if _PP is not None:
         _PP.prepare_communication_buffer_for_model(model)
     if _DP is not None:
@@ -1451,15 +1563,20 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    global _PP
-    if _PP:
-        _PP.destroy()
-    _PP = None
-
     global _DCP
     if _DCP:
         _DCP.destroy()
     _DCP = None
+
+    global _PCP
+    if _PCP:
+        _PCP.destroy()
+    _PCP = None
+
+    global _PP
+    if _PP:
+        _PP.destroy()
+    _PP = None
 
     global _DP
     if _DP:

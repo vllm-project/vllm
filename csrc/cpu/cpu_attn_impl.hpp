@@ -1,7 +1,6 @@
 #ifndef CPU_ATTN_HPP
 #define CPU_ATTN_HPP
 
-#include <unistd.h>
 #include <type_traits>
 #include <cstddef>
 
@@ -12,6 +11,7 @@
 #include "cpu_types.hpp"
 #include "scratchpad_manager.h"
 #include "cpu_attn_macros.h"
+#include "utils.hpp"
 
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16 };
@@ -754,7 +754,7 @@ class AttentionScheduler {
         return l2_cache_size >> 1;  // use 50% of L2 cache
       }
       // Fallback if sysctlbyname fails
-      return 128 * 1024 >> 1;  // use 50% of 128KB
+      return 128LL * 1024 >> 1;  // use 50% of 128KB
 #else
       long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
       TORCH_CHECK_NE(l2_cache_size, -1);

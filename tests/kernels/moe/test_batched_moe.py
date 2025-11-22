@@ -40,8 +40,6 @@ NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclass
