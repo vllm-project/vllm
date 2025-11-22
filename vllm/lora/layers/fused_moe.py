@@ -42,11 +42,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = base_layer.w2_weight.device
-<<<<<<< HEAD
         self._w13_slices = 2
-=======
-        self.w13_slices = 2
->>>>>>> origin/main
         self._inject_lora_into_fused_moe()
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
@@ -164,11 +160,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     op_prefix="w13",
                     num_loras=self.max_loras,
                     rank=max_lora_rank,
-<<<<<<< HEAD
                     num_slices=self._w13_slices,
-=======
-                    num_slices=self.w13_slices,
->>>>>>> origin/main
                     M=M,
                     layer=layer,
                     top_k=top_k,
@@ -307,10 +299,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
-<<<<<<< HEAD
-=======
-        assert self.w13_slices == 2
->>>>>>> origin/main
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -331,11 +319,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
-<<<<<<< HEAD
             for _ in range(self._w13_slices)
-=======
-            for _ in range(self.w13_slices)
->>>>>>> origin/main
         )
 
         self.w13_lora_b_stacked = tuple(
@@ -349,11 +333,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
-<<<<<<< HEAD
             for _ in range(self._w13_slices)
-=======
-            for _ in range(self.w13_slices)
->>>>>>> origin/main
         )
 
         self.w2_lora_a_stacked = torch.zeros(
@@ -391,18 +371,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.w13_lora_a_stacked[0][lora_id][experts_id]
                 )
                 self.lora_a_stacked.append(self.w2_lora_a_stacked[lora_id][experts_id])
-<<<<<<< HEAD
-=======
-                self.lora_a_stacked.append(
-                    self.w13_lora_a_stacked[1][lora_id][experts_id]
-                )
->>>>>>> origin/main
 
                 self.lora_b_stacked.append(
                     self.w13_lora_b_stacked[0][lora_id][experts_id]
                 )
                 self.lora_b_stacked.append(self.w2_lora_b_stacked[lora_id][experts_id])
-<<<<<<< HEAD
 
                 if self._w13_slices > 1:
                     self.lora_a_stacked.append(
@@ -415,15 +388,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
-=======
-                self.lora_b_stacked.append(
-                    self.w13_lora_b_stacked[1][lora_id][experts_id]
-                )
-
-    def reset_lora(self, index: int):
-        """Resets the lora weights at index back to 0."""
-        for pos in range(self.w13_slices):
->>>>>>> origin/main
             self.w13_lora_a_stacked[pos][index] = 0
             self.w13_lora_b_stacked[pos][index] = 0
 
@@ -499,21 +463,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.w2_lora_b_stacked[
                 index, eid, : w2_lora_b.shape[0], : w2_lora_b.shape[1]
             ].copy_(w2_lora_b, non_blocking=True)
-<<<<<<< HEAD
-=======
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None,
-    ) -> bool:
-        """Returns True if the layer can be replaced by this LoRA layer."""
-        # return type(source_layer) is FusedMoE
-        return isinstance(source_layer, FusedMoE)
->>>>>>> origin/main
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
