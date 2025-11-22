@@ -7,9 +7,8 @@ import numba
 import numba.types as types
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
+from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
