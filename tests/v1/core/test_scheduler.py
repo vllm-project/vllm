@@ -76,11 +76,11 @@ def test_get_num_unfinished_requests():
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [
-        (None, None),
+        (False, None),
         (True, 5),
     ],
 )
-def test_schedule(enable_prefix_caching: bool | None, prompt_logprobs: int | None):
+def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     """Test scheduling.
     Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
     """
@@ -582,12 +582,12 @@ def test_check_stop_min_tokens():
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [
-        (None, None),
+        (False, None),
         (True, 5),
     ],
 )
 def test_schedule_concurrent_batches(
-    enable_prefix_caching: bool | None, prompt_logprobs: int | None
+    enable_prefix_caching: bool, prompt_logprobs: int | None
 ):
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
@@ -1425,7 +1425,7 @@ def create_scheduler_with_priority(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
-    enable_prefix_caching: bool | None = None,
+    enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: bool = False,
@@ -1444,7 +1444,7 @@ def create_scheduler_with_priority(
       max_num_batch_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
-                             (None)
+                             (False)
 
     Returns:
       {class}`Scheduler` instance with priority scheduling
@@ -1467,17 +1467,12 @@ def create_scheduler_with_priority(
         seed=42,
     )
     # Cache config, optionally force APC
-    kwargs_cache = (
-        {}
-        if enable_prefix_caching is None
-        else {"enable_prefix_caching": enable_prefix_caching}
-    )
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
         swap_space=0,
         cache_dtype="auto",
-        **kwargs_cache,
+        enable_prefix_caching=enable_prefix_caching,
     )
     kv_transfer_config = (
         KVTransferConfig(
