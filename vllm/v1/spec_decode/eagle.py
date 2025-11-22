@@ -226,6 +226,11 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        # Synchronize CUDA stream to avoid race conditions with async scheduling.
+        # This ensures all previous operations on shared tensors are complete
+        # before EAGLE modifies them.
+        torch.cuda.synchronize()
+
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
