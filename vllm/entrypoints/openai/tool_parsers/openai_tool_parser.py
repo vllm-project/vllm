@@ -44,37 +44,54 @@ class OpenAIToolParser(ToolParser):
         tool_calls = []
         final_content = None
 
+        def _create_tool_call(function_name: str, arguments: str) -> ToolCall:
+            # Sanitize the function name to remove leaked tags (e.g. <|channel|>)
+            clean_name = function_name.split("<")[0].strip()
+            
+            try:
+                clean_args = json.dumps(json.loads(arguments))
+            except json.JSONDecodeError:
+                logger.debug("Partial or invalid JSON tool call detected.")
+                clean_args = arguments
+            
+            return ToolCall(
+                type="function",
+                function=FunctionCall(
+                    name=clean_name,
+                    arguments=clean_args,
+                ),
+            )
+
         if len(parser.messages) > 0:
             for msg in parser.messages:
                 if len(msg.content) < 1:
                     continue
                 msg_text = msg.content[0].text
+                
                 if msg.recipient and msg.recipient.startswith("functions."):
-                    # If no content-type is given assume JSON, as that's the
-                    # most common case with gpt-oss models.
                     if not msg.content_type or "json" in msg.content_type:
-                        # load and dump the JSON text to check validity and
-                        # remove any extra newlines or other odd formatting
-                        try:
-                            tool_args = json.dumps(json.loads(msg_text))
-                        except json.JSONDecodeError:
-                            logger.exception(
-                                "Error decoding JSON tool call from response."
-                            )
-                            tool_args = msg_text
-                    else:
-                        tool_args = msg_text
-                    tool_calls.append(
-                        ToolCall(
-                            type="function",
-                            function=FunctionCall(
-                                name=msg.recipient.split("functions.")[1],
-                                arguments=tool_args,
-                            ),
-                        )
-                    )
+                        func_name = msg.recipient.split("functions.")[1]
+                        tool_calls.append(_create_tool_call(func_name, msg_text))
                 elif msg.channel == "final":
                     final_content = msg_text
+
+        if parser.current_content:
+            curr_text = parser.current_content
+            curr_channel = parser.current_channel
+            curr_recipient = parser.current_recipient
+
+            if (curr_channel == "commentary" 
+                and curr_recipient 
+                and curr_recipient.startswith("functions.")):
+                
+                func_name = curr_recipient.split("functions.")[1]
+                tool_calls.append(_create_tool_call(func_name, curr_text))
+            
+            elif curr_channel == "final":
+                if final_content:
+                    final_content += curr_text
+                else:
+                    final_content = curr_text
 
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
