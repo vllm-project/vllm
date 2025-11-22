@@ -748,6 +748,14 @@ class VllmRunner:
             # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
+            # Make sure we have atleast one cudagraph large enough for a single decode.
+            if (speculative_config := kwargs.get("speculative_config")) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
+            ):
+                kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
+                    num_speculative_tokens + 1
+                )
+
         with init_ctx:
             self.llm = LLM(
                 model=model_name,
@@ -1384,3 +1392,16 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def disable_deepgemm_ue8m0(monkeypatch):
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    with monkeypatch.context() as monkeypatch_ctx:
+        monkeypatch_ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+        is_deep_gemm_e8m0_used.cache_clear()
+        yield
+        # Clear cache so the next time it is used it is processed with the
+        # default VLLM_USE_DEEP_GEMM_E8M0  setting.
+        is_deep_gemm_e8m0_used.cache_clear()

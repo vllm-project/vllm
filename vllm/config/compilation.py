@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import hashlib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
@@ -18,6 +17,7 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -159,7 +159,7 @@ class PassConfig:
             current_platform.get_device_capability().to_int(), {}
         )
 
-    def uuid(self):
+    def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -320,9 +320,10 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
-    compile_mm_encoder: bool = True
+    compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl`."""
+    Currently, this only works for `Qwen2_5_vl` on selected platforms. 
+    Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
     use_inductor: bool | None = None
@@ -504,28 +505,33 @@ class CompilationConfig:
 
     def compute_hash(self) -> str:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.mode)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.use_inductor_graph_partition)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        factors.append(self.compile_cache_save_format)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields; keep a tiny exclude set;
+        # normalize types; keep SHA-256. For nested opaque configs, include a
+        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
+
+        ignored_factors = {
+            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            "debug_dump_path",
+            "cache_dir",
+            "local_cache_dir",
+            "bs_to_padded_graph_size",
+            "traced_files",
+            "compilation_time",
+            "static_forward_context",
+            "pass_config",  # handled separately below
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors)
+        factors["pass_config"] = self.pass_config.compute_hash()
+        return hash_factors(factors)
 
     def __repr__(self) -> str:
         exclude = {
@@ -658,6 +664,8 @@ class CompilationConfig:
             is_torch_equal_or_newer("2.9.0.dev")
             and "combo_kernels" not in self.inductor_compile_config
             and "benchmark_combo_kernel" not in self.inductor_compile_config
+            # (fixme @boyuan) combo kernel does not support cpu yet.
+            and not current_platform.is_cpu()
         ):
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
@@ -772,19 +780,8 @@ class CompilationConfig:
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_cudagraph_capture_size + 1)
-        ]
-        for end, start in zip(
-            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
-            [0] + self.cudagraph_capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
+        # May get recomputed in the model runner if adjustment is needed for spec-decode
+        self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is
@@ -921,3 +918,68 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def adjust_cudagraph_sizes_for_spec_decode(
+        self, uniform_decode_query_len: int, tensor_parallel_size: int
+    ):
+        multiple_of = uniform_decode_query_len
+        if tensor_parallel_size > 1 and self.pass_config.enable_sequence_parallelism:
+            multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
+            if (
+                multiple_of % uniform_decode_query_len != 0
+                or multiple_of % tensor_parallel_size != 0
+            ):
+                raise ValueError(
+                    f"Can't determine cudagraph shapes that are both a "
+                    f"multiple of {uniform_decode_query_len} "
+                    f"(num_speculative_tokens + 1) required by spec-decode "
+                    f"and {tensor_parallel_size} (tensor_parallel_size) "
+                    f"required by sequence parallelism please adjust "
+                    f"num_speculative_tokens or disable sequence parallelism"
+                )
+
+        if not self.cudagraph_capture_sizes or multiple_of <= 1:
+            return
+
+        assert self.max_cudagraph_capture_size is not None
+        rounded_sizes = sorted(
+            set(
+                round_up(size, multiple_of)
+                for size in self.cudagraph_capture_sizes
+                if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
+            )
+        )
+
+        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
+            # if one valid but would be round_down use that
+            rounded_sizes = [multiple_of]
+
+        if len(rounded_sizes) == 0:
+            raise ValueError(
+                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
+                f"(num_speculative_tokens + 1 or tp if sequence parallelism is enabled)"
+                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
+                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
+                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
+            )
+
+        self.max_cudagraph_capture_size = rounded_sizes[-1]
+        self.cudagraph_capture_sizes = rounded_sizes
+
+        # Recompute after adjusting the cudagraph sizes
+        self.compute_bs_to_padded_graph_size()
+
+    def compute_bs_to_padded_graph_size(self):
+        # pre-compute the mapping from batch size to padded graph size
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_cudagraph_capture_size + 1)
+        ]
+        for end, start in zip(
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self.bs_to_padded_graph_size[bs] = start
+                else:
+                    self.bs_to_padded_graph_size[bs] = end
