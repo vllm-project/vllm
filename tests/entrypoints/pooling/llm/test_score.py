@@ -9,6 +9,12 @@ import torch
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 

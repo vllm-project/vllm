@@ -8,6 +8,12 @@ import torch.nn.functional as F
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import PoolingResponse, RerankResponse
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "bfloat16"
