@@ -12,10 +12,14 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
 CPU_BLOCK_SIZES = [48]
-ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER"]
+ATTN_BACKENDS = ["FLASH_ATTN"]
+
+if current_platform.is_cuda():
+    ATTN_BACKENDS.append("FLASHINFER")
 
 
 class MockSubscriber:

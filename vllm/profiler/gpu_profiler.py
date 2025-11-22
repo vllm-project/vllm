@@ -139,18 +139,19 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         self.local_rank = local_rank
         torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-        logger.info(
-            "Torch profiling enabled. Traces will be saved to: %s",
-            torch_profiler_trace_dir,
-        )
-        logger.debug(
-            "Profiler config: record_shapes=%s,"
-            "profile_memory=%s,with_stack=%s,with_flops=%s",
-            envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-            envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-            envs.VLLM_TORCH_PROFILER_WITH_STACK,
-            envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-        )
+        if local_rank in (None, 0):
+            logger.info(
+                "Torch profiling enabled. Traces will be saved to: %s",
+                torch_profiler_trace_dir,
+            )
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
         self.profiler = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,

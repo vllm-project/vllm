@@ -42,7 +42,7 @@ def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
-    enable_prefix_caching: bool | None = None,
+    enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: None | bool | MockKVConfig = None,
@@ -63,7 +63,7 @@ def create_scheduler(
       max_num_batch_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
-                             (None)
+                             (False)
 
     Returns:
       {class}`Scheduler` instance
@@ -87,17 +87,12 @@ def create_scheduler(
         skip_tokenizer_init=skip_tokenizer_init,
     )
     # Cache config, optionally force APC
-    kwargs_cache = (
-        {}
-        if enable_prefix_caching is None
-        else {"enable_prefix_caching": enable_prefix_caching}
-    )
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
         swap_space=0,
         cache_dtype="auto",
-        **kwargs_cache,
+        enable_prefix_caching=enable_prefix_caching,
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):

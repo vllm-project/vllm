@@ -86,9 +86,9 @@ class EagleProposer:
 
         self.use_cuda_graph = False
 
-        compilation_config = self.vllm_config.compilation_config
-        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = compilation_config.cudagraph_mode
+        self.compilation_config = self.vllm_config.compilation_config
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
             ):
@@ -103,13 +103,6 @@ class EagleProposer:
                 and not self.speculative_config.enforce_eager
             )
 
-        self.cudagraph_batch_sizes = (
-            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
-            if self.use_cuda_graph
-            else []
-        )
-
-        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -276,7 +269,10 @@ class EagleProposer:
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
         cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -366,7 +362,10 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+        ):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -777,7 +776,10 @@ class EagleProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            if (
+                self.use_cuda_graph
+                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            ):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
                 cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
@@ -1114,7 +1116,10 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            cudagraphs_enabled
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(

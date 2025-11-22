@@ -9,6 +9,12 @@
 # Assumption vs. Correctness Tests:
 # these unit tests do *not* test correctness of LMCache-side or vLLM-side logic
 # it is to ensure that assumptions LMCache makes about vLLM's interface are stable
+
+import pytest
+
+from vllm.platforms import current_platform
+
+
 def assumes(obj, attr, is_callable=False, is_instance_of=None):
     import inspect
     from dataclasses import is_dataclass
@@ -48,6 +54,9 @@ def assumes(obj, attr, is_callable=False, is_instance_of=None):
                 assert isinstance(attr_value, is_instance_of), assumption_msg
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
+)
 def test_multimodal_interface():
     # protect against interface changes
     from vllm.multimodal.inputs import PlaceholderRange
@@ -72,6 +81,9 @@ def test_multimodal_interface():
     assert token_ids.tolist() == [0, 0, 0, 0, 4, 4369, 4369, 4369, 4369, 9]
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
+)
 def test_config_interface():
     # protect against interface changes
     from vllm.config import VllmConfig
@@ -146,6 +158,9 @@ def test_config_interface():
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
+)
 def test_request_interface():
     # protect against interface changes
     from types import NoneType
