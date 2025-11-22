@@ -85,7 +85,7 @@ ARG GET_PIP_URL
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo python3-pip \
+    && apt-get install -y ccache software-properties-common git curl sudo python3-pip libibverbs-dev \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
@@ -224,6 +224,22 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REF
+COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} --wheel-dir /tmp/deepgemm/dist
+
+# Ensure the wheel dir exists so later-stage COPY won't fail when DeepGEMM is skipped
+RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
+
+COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+# Install EP kernels(pplx-kernels and DeepEP)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
+    /tmp/install_python_libraries.sh /tmp/ep_kernels_workspace wheel && \
+    find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
+
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
@@ -289,7 +305,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
+    && apt-get install -y software-properties-common curl sudo python3-pip \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
@@ -356,36 +372,32 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
-# Even when we build Flashinfer with AOT mode, there's still
-# some issues w.r.t. JIT compilation. Therefore we need to
-# install build dependencies for JIT compilation.
-# TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements/build.txt requirements/build.txt
+# Install deepgemm wheel that has been built in the `build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
+    --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
+    sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
+              uv pip install --system /tmp/deepgemm/dist/*.whl; \
+           else \
+              echo "No DeepGEMM wheels to install; skipping."; \
+           fi'
+
+# Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH (https://github.com/pytorch/pytorch/blob/d38164a545b4a4e4e0cf73ce67173f70574890b6/.ci/manywheel/build_cuda.sh#L141C14-L141C36)
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
+RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REF
-COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
-RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
-
-COPY tools/install_gdrcopy.sh install_gdrcopy.sh
-RUN set -eux; \
+RUN --mount=type=bind,source=tools/install_gdrcopy.sh,target=/tmp/install_gdrcopy.sh,ro \
+    set -eux; \
     case "${TARGETPLATFORM}" in \
       linux/arm64) UUARCH="aarch64" ;; \
       linux/amd64) UUARCH="x64" ;; \
       *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
     esac; \
-    ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
-    rm ./install_gdrcopy.sh
-
-# Install EP kernels(pplx-kernels and DeepEP)
-COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
-ENV CUDA_HOME=/usr/local/cuda
-RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
-    && bash install_python_libraries.sh
+    /tmp/install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -414,6 +426,11 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y git
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -455,12 +472,11 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
-COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
-
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r requirements/kv_connectors.txt; \
+        uv pip install --system -r /tmp/kv_connectors.txt; \
     fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="0.42.0"; \
