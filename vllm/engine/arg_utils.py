@@ -253,7 +253,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 default = (
                     default.default
                     if default.default_factory is None
-                    # ????
+                    # FIXME: A default vllm_config will be constructed here.
+                    # Info logs will be output, which is confusing.
                     else default.default_factory()
                 )
         elif field.default_factory is not MISSING:

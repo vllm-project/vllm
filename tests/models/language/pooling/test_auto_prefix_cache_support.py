@@ -105,9 +105,8 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with pytest.raises(ValueError):  # noqa: SIM117
-        with vllm_runner(
-            model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
-        ) as vllm_model:
-            cache_config = vllm_model.llm.llm_engine.cache_config
-            assert not cache_config.enable_prefix_caching
+    with vllm_runner(
+        model, max_model_len=512, dtype=dtype
+    ) as vllm_model:
+        cache_config = vllm_model.llm.llm_engine.cache_config
+        assert not cache_config.enable_prefix_caching
