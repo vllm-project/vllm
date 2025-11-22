@@ -112,11 +112,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
+        use_mxfp4 = quant_config is not None and quant_config.use_mxfp4_w4a16
+
         m_fused_moe_fn = (
             modular_triton_fused_moe(
                 quant_config, shared_experts=self.base_layer.shared_experts
             )
-            if not quant_config.use_mxfp4_w4a16
+            if not use_mxfp4
             else modular_marlin_fused_moe(
                 quant_config, shared_experts=self.base_layer.shared_experts
             )
