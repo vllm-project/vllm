@@ -5,6 +5,7 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -19,6 +20,11 @@ if current_platform.is_cuda_alike():
     from .fusion_attn import AttnFusionPass
     from .qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .sequence_parallelism import SequenceParallelismPass
+
+if current_platform.is_rocm():
+    from .rocm_aiter_rmsnorm_fusion import (
+        RMSNormAiterQuantFusionPass,
+    )
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
@@ -106,6 +112,8 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_fusion:
                 self.passes += [RMSNormQuantFusionPass(config)]
                 self.passes += [ActivationQuantFusionPass(config)]
+                if rocm_aiter_ops.is_rmsnorm_enabled():
+                    self.passes += [RMSNormAiterQuantFusionPass(config)]
 
             if self.pass_config.enable_attn_fusion:
                 self.passes += [AttnFusionPass(config)]
