@@ -3,11 +3,21 @@
 
 # Test infrastructure
 tblib==3.1.0
+pytest==8.3.5
+pytest-asyncio==0.24.0
+pytest-timeout==2.3.1
+pytest-cov==6.3.0
+pytest-forked==1.6.0
+pytest-rerunfailures==14.0
+pytest-shard==0.1.2
 
+# Async/HTTP dependencies
 anyio==4.6.2.post1
-    # via
-    #   httpx
-    #   starlette
+    # via httpx, starlette
+aiohttp==3.13.0
+    # via gpt-oss
+httpx==0.27.2
+    # HTTP testing
 
 # Audio processing dependencies
 audioread==3.0.1
@@ -28,18 +38,13 @@ soxr==0.5.0.post1
     # via librosa
 librosa==0.10.2.post1
 
-# HTTP/async dependencies
-aiohttp==3.13.0
-    # via gpt-oss
-pytest-asyncio==0.24.0
-    # via httpx
-
 # Retrieval and search
 bm25s==0.2.13
     # via mteb
 pystemmer==3.0.0
     # via mteb
 
+# Multi-modal processing
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
@@ -56,13 +61,6 @@ lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7
     # eval tests
 mteb[bm25s]>=1.38.11, <2
     # MTEB Benchmark Test
-sentence-transformers==3.4.1
-    # required by entrypoints/openai/test_score.py
-
-# Visualization and plotting
-matplotlib==3.10.3
-    # Basic Models Test
-
 # Data processing
 multiprocess==0.70.16
     # Datasets and Evaluate Test
