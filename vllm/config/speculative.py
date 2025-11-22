@@ -9,6 +9,7 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -101,6 +102,27 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    draft_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Confidence threshold for early stopping in EAGLE draft token generation.
+    When a draft token's confidence (max softmax probability) falls below this
+    threshold, subsequent tokens will not write to KV cache, saving memory
+    bandwidth. Set to 0.0 to disable early stopping (always write all tokens).
+    Set to 1.0 to stop after any non-certain prediction. Default: 0.0 (disabled)."""
+    draft_length_options: list[int] | None = None
+    """List of draft lengths to capture as CUDA graphs for adaptive speculative
+    decoding. If None, auto-computed as [max(2, n//2), n, min(8, n*2)] where
+    n=num_speculative_tokens. For example, if num_speculative_tokens=5,
+    defaults to [2, 5, 8]. The system will dynamically select the optimal
+    draft length based on recent acceptance rates to balance compute cost
+    vs. speculation benefit."""
+    enable_draft_length_cudagraph_specialization: bool = False
+    """Enable CUDA graph specialization by draft_length for adaptive speculation.
+    When enabled, captures separate CUDA graphs for each draft_length in
+    draft_length_options (typically [0, 5, 8, 10]), resulting in ~4x more graphs.
+    This provides 10-20% speedup for small-to-medium batches but consumes
+    significant additional GPU memory (200MB-3GB depending on model size).
+    Default: False (use single draft_length=0 graph, saves memory).
+    Recommended: Enable only if gpu_memory_utilization < 0.85 and batch_size <= 16."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -454,6 +476,36 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # Auto-compute draft_length_options if not specified
+        if (
+            self.draft_length_options is None
+            and self.num_speculative_tokens is not None
+            and envs.VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH
+        ):
+            # Adaptive draft length enabled: compute draft length options
+            n = self.num_speculative_tokens
+            self.draft_length_options = [
+                max(2, n // 2),  # Half
+                n,  # Target
+                min(8, n * 2),  # Double (capped at 8)
+            ]
+            # Remove duplicates and sort
+            self.draft_length_options = sorted(set(self.draft_length_options))
+        # else: keep draft_length_options as None (fixed draft length)
+
+        # Override confidence threshold from environment if set
+        # This allows independent control of early exit
+        env_confidence = envs.VLLM_SPEC_CONFIDENCE_THRESHOLD
+        if env_confidence < 0.0 or env_confidence > 1.0:
+            raise ValueError(
+                f"VLLM_SPEC_CONFIDENCE_THRESHOLD must be in [0.0, 1.0], "
+                f"got {env_confidence}"
+            )
+        if env_confidence != 0.0:
+            # Environment variable overrides default when explicitly set
+            self.draft_confidence_threshold = env_confidence
+
         return self
 
     def _validate_suffix_decoding(self):

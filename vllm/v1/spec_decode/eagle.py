@@ -56,7 +56,11 @@ class EagleProposer:
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
-        assert self.speculative_config is not None
+        if self.speculative_config is None:
+            raise ValueError(
+                "EagleProposer requires speculative_config to be set. "
+                "This indicates a configuration error in vLLM initialization."
+            )
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
 
@@ -64,8 +68,16 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
+        # Get pad_token_id from draft model config for masking stopped sequences
+        self.pad_token_id = (
+            self.draft_model_config.hf_config.pad_token_id
+            if hasattr(self.draft_model_config.hf_config, "pad_token_id")
+            and self.draft_model_config.hf_config.pad_token_id is not None
+            else 0
+        )
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+        self.confidence_threshold = self.speculative_config.draft_confidence_threshold
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
@@ -129,6 +141,10 @@ class EagleProposer:
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
+        )
+        # Continue mask for confidence-based early stopping
+        self.continue_mask = torch.ones(
+            self.max_num_tokens, dtype=torch.bool, device=device
         )
 
         # We need +1 here because the arange is used to set query_start_loc,
@@ -218,9 +234,23 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        draft_length: int | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
+
+        # Use provided draft_length or fall back to default
+        if draft_length is None:
+            draft_length = self.num_speculative_tokens
+        elif draft_length < 1:
+            # Minimum draft length is 1
+            draft_length = 1
+        elif draft_length > self.num_speculative_tokens:
+            # Cap at max configured length
+            draft_length = self.num_speculative_tokens
+
+        # After normalization, draft_length is guaranteed to be an int
+        assert draft_length is not None
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -238,7 +268,11 @@ class EagleProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        assert self.runner is not None
+        if self.runner is None:
+            raise RuntimeError(
+                "EagleProposer.runner must be initialized before calling propose(). "
+                "Call load_model() first to initialize the runner."
+            )
 
         if self.attn_metadata_builder is None:
             attn_metadata_builder = self._get_attention_metadata_builder()
@@ -317,7 +351,7 @@ class EagleProposer:
         logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
+        if draft_length == 1:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
@@ -378,11 +412,21 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
-        for token_index in range(self.num_speculative_tokens - 1):
+        # Initialize continue mask for confidence-based early stopping
+        self.continue_mask[:batch_size] = True
+        for token_index in range(draft_length - 1):
+            # Snapshot which requests are still emitting draft tokens before this
+            # iteration mutates the continue mask.
+            active_mask = self.continue_mask[:batch_size]
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
+            # Mask stopped sequences to PAD token for early stopping
+            if token_index > 0:
+                input_ids = torch.where(
+                    self.continue_mask[:batch_size], input_ids, self.pad_token_id
+                )
             if self.uses_mrope:
                 positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
@@ -405,13 +449,18 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-            # For data integrity when async scheduling, we shouldn't use in place
-            # operations in case they are modified in next step's `prepare_input`
-            # of main model.
-            # Increment the sequence lengths.
-            common_attn_metadata.seq_lens += 1
+
+            # Increment sequence lengths only for active requests so metadata stays
+            # consistent with actual KV writes (inactive ones are masked out).
+            # For data integrity when async scheduling, we use out-of-place operations
+            # in case they are modified in next step's `prepare_input` of main model.
+            length_increments = active_mask.to(common_attn_metadata.seq_lens.dtype)
+            common_attn_metadata.seq_lens += length_increments
             # This is an out-of-place operation to avoid modifying the original tensor.
-            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
+            common_attn_metadata.seq_lens_cpu = (
+                common_attn_metadata.seq_lens_cpu
+                + active_mask.cpu().to(common_attn_metadata.seq_lens_cpu.dtype)
+            )
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 
@@ -445,6 +494,10 @@ class EagleProposer:
             common_attn_metadata.slot_mapping.masked_fill_(
                 exceeds_max_model_len, PADDING_SLOT_ID
             )
+            # Gate K/V writes for stopped sequences (confidence-based early stopping)
+            if token_index > 0:
+                stopped_mask = ~self.continue_mask[:batch_size]
+                common_attn_metadata.slot_mapping[stopped_mask] = PADDING_SLOT_ID
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
@@ -487,6 +540,10 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
+            # Compute confidence and update continue mask for early stopping
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            confidence = probs.max(dim=-1).values
+            self.continue_mask[:batch_size] &= confidence >= self.confidence_threshold
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
