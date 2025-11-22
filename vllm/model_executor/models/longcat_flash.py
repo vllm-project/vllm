@@ -46,7 +46,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, ZeroExpertFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -65,7 +65,6 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .longcat_zero_expert import zero_experts_compute_triton
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -281,10 +280,6 @@ class LongcatMoe(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.zero_expert_num = config.zero_expert_num
-        self.zero_expert_type = config.zero_expert_type
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.enable_eplb = enable_eplb
         # Gate always runs at half / full precision for now.
         self.rounter_params_dtype = params_dtype
         if config.router_dtype == "float32":
@@ -292,18 +287,21 @@ class LongcatMoe(nn.Module):
 
         self.router = LongcatRouter(
             config=config,
-            zero_expert_num=self.zero_expert_num,
+            zero_expert_num=config.zero_expert_num,
             rounter_params_dtype=self.rounter_params_dtype,
             prefix=f"{prefix}.gate",
         )
 
         # Slice e_score_correction_bias to only include real experts (not zero_experts)
-        # FusedMoE only works with real experts, so we need to slice the bias
+        # ZeroExpertFusedMoE will handle zero experts internally
         e_score_correction_bias_for_experts = self.router.e_score_correction_bias[
             :num_experts
         ]
 
-        self.experts = FusedMoE(
+        self.experts = ZeroExpertFusedMoE(
+            zero_expert_num=config.zero_expert_num,
+            zero_expert_type=config.zero_expert_type,
+            router=self.router,  # Pass full router for zero expert support
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -314,25 +312,8 @@ class LongcatMoe(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            enable_eplb=self.enable_eplb,
+            enable_eplb=enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
-        )
-
-    def _compute_zero_expert_result(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor | None:
-        if self.zero_expert_num <= 0 or self.zero_expert_type is None:
-            return None
-
-        return zero_experts_compute_triton(
-            expert_indices=topk_ids.clone(),
-            expert_scales=topk_weights.clone(),
-            num_experts=self.experts.logical_num_experts,
-            zero_expert_type=self.zero_expert_type,
-            hidden_states=hidden_states,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -355,82 +336,13 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.rounter_params_dtype)
         )
 
-        # Compute routing once and reuse for both zero expert and FusedMoE
-        # Use full router_logits (including zero experts) for routing selection
-        # so that zero experts can be properly identified in topk_ids
-        topk_weights, topk_ids = self.experts.select_experts(
-            hidden_states=hidden_states_padded,
-            router_logits=router_logits_full,  # Use full logits (includes zero experts)
-            use_grouped_topk=self.experts.use_grouped_topk,
-            top_k=self.experts.top_k,
-            renormalize=self.experts.renormalize,
-            topk_group=self.experts.topk_group,
-            num_expert_group=self.experts.num_expert_group,
-            custom_routing_function=self.experts.custom_routing_function,
-            scoring_func=self.experts.scoring_func,
-            routed_scaling_factor=self.experts.routed_scaling_factor,
-            # Use full bias (includes zero experts)
-            e_score_correction_bias=self.router.e_score_correction_bias,
-            indices_type=None,
-            enable_eplb=False,
-            expert_map=None,
-            expert_load_view=None,
-            logical_to_physical_map=None,
-            logical_replica_count=None,
-            num_fused_shared_experts=self.experts.num_fused_shared_experts,
-        )
-
-        # Slice router_logits for FusedMoE (only real experts)
-        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
-
-        # Use pre-computed routing results for zero expert computation
-        zero_expert_result = self._compute_zero_expert_result(
-            hidden_states_padded, topk_weights, topk_ids
-        )
-
-        # FusedMoE will still compute routing internally (to be optimized later)
+        # ZeroExpertFusedMoE handles routing memoization and zero expert computation
+        # internally. Pass full router_logits (including zero experts) so that
+        # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
-            hidden_states=hidden_states_padded, router_logits=router_logits
+            hidden_states=hidden_states_padded,
+            router_logits=router_logits_full,  # Full logits (includes zero experts)
         )
-        if zero_expert_result is not None:
-            # Force shape alignment before addition to avoid dimension mismatch
-            # This handles cases where FusedMoE returns different hidden_size
-            # than expected
-            final_dim = final_hidden_states.size(-1)
-            zero_dim = zero_expert_result.size(-1)
-
-            # Align by padding the smaller one to match the larger one
-            if final_dim != zero_dim:
-                # Auto-align by padding the smaller tensor
-                if final_dim < zero_dim:
-                    final_hidden_states = torch.nn.functional.pad(
-                        final_hidden_states,
-                        (0, zero_dim - final_dim),
-                        mode="constant",
-                        value=0.0,
-                    )
-                else:
-                    zero_expert_result = torch.nn.functional.pad(
-                        zero_expert_result,
-                        (0, final_dim - zero_dim),
-                        mode="constant",
-                        value=0.0,
-                    )
-
-            # Verify alignment succeeded
-            if final_hidden_states.size(-1) != zero_expert_result.size(-1):
-                raise RuntimeError(
-                    f"[LongcatMoe] Shape mismatch after alignment: "
-                    f"final_hidden_states.shape={final_hidden_states.shape} "
-                    f"(last_dim={final_hidden_states.size(-1)}), "
-                    f"zero_expert_result.shape={zero_expert_result.shape} "
-                    f"(last_dim={zero_expert_result.size(-1)}), "
-                    f"hidden_dim={hidden_dim}, padded_hidden={padded_hidden}, "
-                    f"experts_hidden_size={self.experts.hidden_size}, "
-                    f"logical_num_experts={self.experts.logical_num_experts}"
-                )
-
-            final_hidden_states = final_hidden_states + zero_expert_result
 
         # Crop back to original hidden dimension if padded earlier
         if padded_hidden != hidden_dim:
