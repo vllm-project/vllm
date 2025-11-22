@@ -14,6 +14,12 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
 from vllm.utils.math_utils import cdiv, round_up
 
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
+
 fp8_dtype = torch.float8_e4m3fn
 
 CASES = [
