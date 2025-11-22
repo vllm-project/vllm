@@ -51,9 +51,8 @@ class TokenformerModel(AdapterModel):
         state_dict = torch.load(checkpoint_file, map_location=device)
         module_state_dict = state_dict['model_state_dict']
         for module, tensor in module_state_dict.items():
-            if any(key in module for key in ("tokenformer", "lm_head")):
-                logger.info(f"Loading {module} from {checkpoint_file}")
-                tokenformers[module] = tensor.to(device)
+            logger.info(f"Loading {module} from {checkpoint_file}")
+            tokenformers[module] = tensor.to(device)
 
         return cls(tokenformers)
 
