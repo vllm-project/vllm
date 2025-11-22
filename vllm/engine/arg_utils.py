@@ -367,7 +367,7 @@ class EngineArgs:
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-    seed: int | None = ModelConfig.seed
+    seed: int | None = 0
     max_model_len: int | None = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
     cudagraph_capture_sizes: list[int] | None = (
@@ -389,8 +389,10 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -482,11 +484,9 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
-    num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
@@ -771,6 +771,15 @@ class EngineArgs:
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
         parallel_group.add_argument(
+            "--cp-kv-cache-interleave-size",
+            **parallel_kwargs["cp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--prefill-context-parallel-size",
+            "-pcp",
+            **parallel_kwargs["prefill_context_parallel_size"],
+        )
+        parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
         )
         parallel_group.add_argument(
@@ -1002,9 +1011,6 @@ class EngineArgs:
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
-            "--lora-extra-vocab-size", **lora_kwargs["lora_extra_vocab_size"]
-        )
-        lora_group.add_argument(
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
@@ -1046,10 +1052,18 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
-            "--max-num-batched-tokens", **scheduler_kwargs["max_num_batched_tokens"]
+            "--max-num-batched-tokens",
+            **{
+                **scheduler_kwargs["max_num_batched_tokens"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
-            "--max-num-seqs", **scheduler_kwargs["max_num_seqs"]
+            "--max-num-seqs",
+            **{
+                **scheduler_kwargs["max_num_seqs"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
@@ -1062,16 +1076,17 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
-        scheduler_group.add_argument(
-            "--num-lookahead-slots", **scheduler_kwargs["num_lookahead_slots"]
-        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
         scheduler_group.add_argument(
-            "--enable-chunked-prefill", **scheduler_kwargs["enable_chunked_prefill"]
+            "--enable-chunked-prefill",
+            **{
+                **scheduler_kwargs["enable_chunked_prefill"],
+                "default": None,
+            },
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
@@ -1173,29 +1188,52 @@ class EngineArgs:
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
+        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
+        # doesn't affect the user process.
+        if self.seed is None:
+            logger.warning_once(
+                "`seed=None` is equivalent to `seed=0` in V1 Engine. "
+                "You will no longer be allowed to pass `None` in v0.13.",
+                scope="local",
+            )
+
+            self.seed = 0
+            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+                logger.warning(
+                    "The global random seed is set to %d. Since "
+                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                    "affect the random state of the Python process that "
+                    "launched vLLM.",
+                    self.seed,
+                )
+
         if self.disable_mm_preprocessor_cache:
-            logger.warning(
+            logger.warning_once(
                 "`--disable-mm-preprocessor-cache` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb 0` instead.",
+                scope="local",
             )
 
             self.mm_processor_cache_gb = 0
         elif envs.VLLM_MM_INPUT_CACHE_GIB != 4:
-            logger.warning(
+            logger.warning_once(
                 "VLLM_MM_INPUT_CACHE_GIB` is deprecated "
                 "and will be removed in v0.13. "
                 "Please use `--mm-processor-cache-gb %d` instead.",
                 envs.VLLM_MM_INPUT_CACHE_GIB,
+                scope="local",
             )
 
             self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
 
         if self.enable_multimodal_encoder_data_parallel:
-            logger.warning(
+            logger.warning_once(
                 "--enable-multimodal-encoder-data-parallel` is deprecated "
                 "and will be removed in v0.13. "
-                "Please use `--mm-encoder-tp-mode data` instead."
+                "Please use `--mm-encoder-tp-mode data` instead.",
+                scope="local",
             )
 
             self.mm_encoder_tp_mode = "data"
@@ -1488,7 +1526,7 @@ class EngineArgs:
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be spefified if "
+                "data_parallel_rank or node_rank must be specified if "
                 "data_parallel_external_lb is enable."
             )
             assert self.data_parallel_size_local in (1, None), (
@@ -1588,6 +1626,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
@@ -1619,6 +1658,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
@@ -1628,18 +1668,11 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
 
-        # make sure num_lookahead_slots is set appropriately depending on
-        # whether speculative decoding is enabled
-        num_lookahead_slots = self.num_lookahead_slots
-        if speculative_config is not None:
-            num_lookahead_slots = speculative_config.num_lookahead_slots
-
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
-            num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
@@ -1666,7 +1699,6 @@ class EngineArgs:
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
-                lora_extra_vocab_size=self.lora_extra_vocab_size,
                 lora_dtype=self.lora_dtype,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
@@ -1939,6 +1971,15 @@ class EngineArgs:
             default_chunked_prefill,
             default_prefix_caching,
         ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
+
+        if self.prefill_context_parallel_size > 1:
+            default_chunked_prefill = False
+            default_prefix_caching = False
+            logger.warning(
+                "--prefill-context-parallel-size > 1 is not compatible with "
+                "chunked prefill and prefix caching now. Chunked prefill "
+                "and prefix caching have been disabled by default."
+            )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
