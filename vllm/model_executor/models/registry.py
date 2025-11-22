@@ -56,6 +56,7 @@ logger = init_logger(__name__)
 
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
@@ -76,7 +77,7 @@ _TEXT_GENERATION_MODELS = {
     "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
-    "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
+    "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
@@ -149,11 +150,14 @@ _TEXT_GENERATION_MODELS = {
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
+    "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
+    "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
+    "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -340,6 +344,10 @@ _MULTIMODAL_MODELS = {
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "PaddleOCRVLForConditionalGeneration": (
+        "paddleocr_vl",
+        "PaddleOCRVLForConditionalGeneration",
+    ),
     "PaliGemmaForConditionalGeneration": (
         "paligemma",
         "PaliGemmaForConditionalGeneration",
@@ -402,6 +410,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -589,7 +598,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                     mi_dict = json.load(file)
             except FileNotFoundError:
                 logger.debug(
-                    ("Cached model info file for class %s.%s not found"),
+                    "Cached model info file for class %s.%s not found",
                     self.module_name,
                     self.class_name,
                 )
@@ -597,7 +606,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
             if mi_dict["hash"] != module_hash:
                 logger.debug(
-                    ("Cached model info file for class %s.%s is stale"),
+                    "Cached model info file for class %s.%s is stale",
                     self.module_name,
                     self.class_name,
                 )
@@ -607,7 +616,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
             logger.debug(
-                ("Cached model info for class %s.%s error. "),
+                "Cached model info for class %s.%s error. ",
                 self.module_name,
                 self.class_name,
             )
@@ -642,14 +651,14 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
-                    ("Loaded model info for class %s.%s from cache"),
+                    "Loaded model info for class %s.%s from cache",
                     self.module_name,
                     self.class_name,
                 )
                 return mi
             else:
                 logger.debug(
-                    ("Cache model info for class %s.%s miss. Loading model instead."),
+                    "Cache model info for class %s.%s miss. Loading model instead.",
                     self.module_name,
                     self.class_name,
                 )

@@ -155,25 +155,30 @@ class Gemma3Attention(nn.Module):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        layer_type = config.layer_types[layer_idx]
+        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize the rotary embedding.
-        if self.is_sliding:
-            # Local attention. Override the values in config.json.
-            self.rope_theta = config.rope_local_base_freq
-            self.rope_scaling = {"rope_type": "default"}
+        if layer_type in config.rope_parameters:
+            # Transformers v5 rope config.
+            rope_parameters = config.rope_parameters[layer_type]
         else:
+            # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            self.rope_theta = config.rope_theta
-            self.rope_scaling = config.rope_scaling
+            rope_parameters = config.rope_parameters
+            # Local attention. Override the values in config.json.
+            if self.is_sliding:
+                rope_parameters = dict(
+                    rope_type="default", rope_theta=config.rope_local_base_freq
+                )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=self.rope_scaling,
         )
 
         if getattr(config, "is_causal", True):
@@ -393,7 +398,7 @@ class Gemma3Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         # NOTE(woosuk): Only apply the normalizer to the output of
         # vocab embedding. Don't apply it to the vision embedding.
         return self.embed_tokens(input_ids) * self.normalizer
@@ -410,7 +415,7 @@ class Gemma3Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -524,8 +529,7 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+
         super().__init__()
         self.config = config
         # currently all existing Gemma models have `tie_word_embeddings` enabled
@@ -541,8 +545,8 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

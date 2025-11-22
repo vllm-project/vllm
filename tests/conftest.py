@@ -154,26 +154,6 @@ AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
 
 
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
-
-
 @pytest.fixture(autouse=True)
 def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
@@ -767,6 +747,14 @@ class VllmRunner:
             # set to larger than max_num_seqs, then it will lead to *no* graphs
             # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
+
+            # Make sure we have atleast one cudagraph large enough for a single decode.
+            if (speculative_config := kwargs.get("speculative_config")) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
+            ):
+                kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
+                    num_speculative_tokens + 1
+                )
 
         with init_ctx:
             self.llm = LLM(
@@ -1404,3 +1392,16 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def disable_deepgemm_ue8m0(monkeypatch):
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    with monkeypatch.context() as monkeypatch_ctx:
+        monkeypatch_ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+        is_deep_gemm_e8m0_used.cache_clear()
+        yield
+        # Clear cache so the next time it is used it is processed with the
+        # default VLLM_USE_DEEP_GEMM_E8M0  setting.
+        is_deep_gemm_e8m0_used.cache_clear()

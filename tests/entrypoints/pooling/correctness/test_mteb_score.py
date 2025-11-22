@@ -13,6 +13,12 @@ from tests.models.language.pooling_mteb_test.mteb_utils import (
     run_mteb_rerank,
 )
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
