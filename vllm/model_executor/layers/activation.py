@@ -233,10 +233,11 @@ class GeluAndMul(CustomOp):
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         # TODO: [ROCm] PyTorch's native GELU with tanh is unstable with torch.compile
-        if current_platform.is_rocm() and self.approximate == "tanh":
-            self.approximate = "none"
+        approximate = self.approximate
+        if current_platform.is_rocm() and approximate == "tanh":
+            approximate = "none"
         d = x.shape[-1] // 2
-        return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
+        return F.gelu(x[..., :d], approximate=approximate) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
