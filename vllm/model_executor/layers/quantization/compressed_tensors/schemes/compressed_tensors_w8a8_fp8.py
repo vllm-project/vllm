@@ -34,7 +34,6 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
