@@ -22,11 +22,13 @@ from vllm.lora.utils import (
     from_layer_logits_processor,
     get_supported_lora_modules,
     is_base_embeddding_weights,
+    is_moe_model,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
     process_packed_modules_mapping,
     replace_submodule,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
@@ -356,7 +358,11 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
+        self._is_3d_moe_model = is_moe_model(self.model) and hasattr(
+            self.model, "is_3d_moe_weight"
+        )
         self._create_lora_modules()
+
         self.model.lora_manager = self
 
     def __len__(self) -> int:
@@ -414,36 +420,45 @@ class LoRAModelManager:
 
                     assert gate_up_proj_lora is not None
                     assert module_lora is not None
+                    if not self._is_3d_moe_model:
+                        down_proj_lora = module_lora
+                        num_experts = module_lora.lora_a.shape[0] // module_lora.rank
 
-                    down_proj_lora = module_lora
-                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+                        gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                        up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
 
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                        gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                            num_experts, dim=-1
+                        )
+                        up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                            num_experts, dim=-1
+                        )
 
-                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
-                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
-                        num_experts, dim=-1
-                    )
+                        down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
+                        down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
 
-                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+                        lora_a = []
+                        lora_b = []
+                        for i in range(num_experts):
+                            lora_a.append(gate_proj_a[i])
+                            lora_a.append(down_proj_a[i])
+                            lora_a.append(up_proj_a[i])
 
-                    lora_a = []
-                    lora_b = []
-                    for i in range(num_experts):
-                        lora_a.append(gate_proj_a[i])
-                        lora_a.append(down_proj_a[i])
-                        lora_a.append(up_proj_a[i])
+                            lora_b.append(gate_proj_b[i])
+                            lora_b.append(down_proj_b[i])
+                            lora_b.append(up_proj_b[i])
 
-                        lora_b.append(gate_proj_b[i])
-                        lora_b.append(down_proj_b[i])
-                        lora_b.append(up_proj_b[i])
-
-                    module_lora.lora_a = lora_a
-                    module_lora.lora_b = lora_b
+                        module_lora.lora_a = lora_a
+                        module_lora.lora_b = lora_b
+                    else:
+                        module_lora.lora_a = [
+                            gate_up_proj_lora.lora_a,
+                            down_proj_b.lora_a,
+                        ]
+                        module_lora.lora_b = [
+                            gate_up_proj_lora.lora_b,
+                            down_proj_b.lora_b,
+                        ]
 
                 module.set_lora(
                     index,
@@ -512,6 +527,12 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
+            if isinstance(module, FusedMoE):
+                # packed_moduled_lst is used here to determine whether to
+                # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
+                # difference between these two LoRA layers is whether the
+                # LoRA weights of w1 and w3 have already been fused on disk.
+                packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
             new_module = replace_submodule(
                 self.model,
                 module_name,
@@ -560,6 +581,7 @@ class LoRAModelManager:
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(self.punica_wrapper)
+        pass
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (
