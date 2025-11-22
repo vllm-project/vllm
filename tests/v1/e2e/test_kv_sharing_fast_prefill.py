@@ -44,19 +44,24 @@ def test_prompts():
     return prompts
 
 
-@fork_new_process_for_each_test
+use_fork_for_test = (
+    fork_new_process_for_each_test if not current_platform.is_rocm() else lambda x: x
+)
+
+
+@use_fork_for_test
 @pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,
     enforce_eager: bool,
-    test_prompts: list[str],
 ):
     if not enforce_eager and current_platform.is_rocm():
+        # Relevant context: https://github.com/vllm-project/vllm/pull/29244
         pytest.skip(
-            "Skipping enforce_eager==False. Currently, torch.compile "
-            "outputs garbage for gemma-3n-E2B-it on ROCm platform."
+            "ROCm: torch.compile produces incorrect output for gemma-3n's GELU "
+            "with tanh approximation. Use enforce_eager=True instead."
         )
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
@@ -72,9 +77,8 @@ def test_kv_sharing_fast_prefill(
 
     with monkeypatch.context() as m:
         # Make scheduling deterministic for reproducibility
-        if not current_platform.is_rocm():
-            # Avoid 'fork' method to prevent cuda
-            # re-initialization error
+        if current_platform.is_rocm():
+            # Use spawn to prevent cuda re-initialization error
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         else:
             m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
