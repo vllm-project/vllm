@@ -13,7 +13,7 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--reasoning-parser", "qwen3"]
+    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         # uncomment for tool calling

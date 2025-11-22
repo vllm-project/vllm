@@ -35,7 +35,7 @@ GET_WEATHER_SCHEMA = {
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--tool-server", "demo"]
+    args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
