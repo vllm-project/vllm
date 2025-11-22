@@ -20,6 +20,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.gpt_oss_fused_router import fused_router
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -184,9 +185,18 @@ class MLPBlock(torch.nn.Module):
             g = rocm_unquantized_gemm(
                 self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
+            x = self.experts(hidden_states=x, router_logits=g)
         else:
-            g = self.router(x)
-        x = self.experts(hidden_states=x, router_logits=g)
+            topk_weights, topk_indices = fused_router(
+                hidden_states=x,
+                router_weights=self.router.weight,
+                router_bias=self.router.bias,
+                top_k=self.experts_per_token,
+            )
+
+            x = self.experts(
+                hidden_states=x, topk_weights=topk_weights, topk_ids=topk_indices
+            )
 
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)
