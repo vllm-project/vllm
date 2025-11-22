@@ -12,6 +12,9 @@ from typing import Any
 import cbor2
 
 try:
+    # It is important that this remains an optional dependency.
+    # It would not be allowed in environments with strict security controls,
+    # so it's best not to have it installed when not in use.
     import xxhash as _xxhash
 
     if not hasattr(_xxhash, "xxh3_128_digest"):
