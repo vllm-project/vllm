@@ -233,7 +233,7 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
             arguments = func.get("arguments", "") or ""
             if isinstance(arguments, dict):
                 arguments = json.dumps(arguments)
-            
+
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
             msg = msg.with_recipient(f"functions.{name}")
@@ -306,7 +306,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
-    
+
     if recipient is not None and recipient.startswith("browser."):
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
@@ -322,7 +322,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 "url": json_retry_output_message,
                 "pattern": json_retry_output_message,
             }
-        
+
         if recipient == "browser.search":
             action = ActionSearch(
                 query=f"cursor:{browser_call.get('query', '')}", type="search"
@@ -346,7 +346,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             type="web_search_call",
         )
         output_items.append(web_search_item)
-        
+
     elif message.channel == "analysis":
         for content in message.content:
             reasoning_item = ResponseReasoningItem(
@@ -361,13 +361,13 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 status=None,
             )
             output_items.append(reasoning_item)
-            
+
     elif message.channel == "commentary":
         if recipient is not None and recipient.startswith("functions."):
             # FIX: Strict name sanitization to remove leaked tags like <|channel|>
             raw_name = recipient.split("functions.")[1]
             function_name = raw_name.split("<")[0].strip()
-            
+
             for content in message.content:
                 random_id = random_uuid()
                 response_item = ResponseFunctionToolCall(
@@ -378,7 +378,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"fc_{random_id}",
                 )
                 output_items.append(response_item)
-                
+
         elif recipient is not None and (
             recipient.startswith("python")
             or recipient.startswith("browser")
@@ -399,13 +399,13 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 output_items.append(reasoning_item)
         else:
             raise ValueError(f"Unknown recipient: {recipient}")
-            
+
     elif message.channel == "final":
         contents = []
         for content in message.content:
             output_text = ResponseOutputText(
                 text=content.text,
-                annotations=[],  
+                annotations=[],
                 type="output_text",
                 logprobs=None,
             )
@@ -445,13 +445,13 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
             status=None,
         )
         return [reasoning_item]
-        
+
     elif parser.current_channel == "commentary":
         if current_recipient is not None and current_recipient.startswith("functions."):
             # FIX: Strict name sanitization here as well
             raw_name = current_recipient.split("functions.")[1]
             function_name = raw_name.split("<")[0].strip()
-            
+
             random_id = random_uuid()
             response_item = ResponseFunctionToolCall(
                 arguments=parser.current_content,
@@ -461,13 +461,13 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 id=f"fc_{random_id}",
             )
             return [response_item]
-            
+
     elif parser.current_channel == "final":
         output_text = ResponseOutputText(
             text=parser.current_content,
-            annotations=[],  
+            annotations=[],
             type="output_text",
-            logprobs=None, 
+            logprobs=None,
         )
         text_item = ResponseOutputMessage(
             id=f"msg_{random_uuid()}",
@@ -490,17 +490,18 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
-    
+
     tokens = list(token_ids)
     if not tokens:
         return parser
 
     encoding = get_encoding()
-    
+
     # FIX: Use allowed_special="all" to avoid Tokenizer error
     start_token = encoding.encode("<|start|>", allowed_special="all")[0]
-    
+
     if tokens[0] != start_token:
+
         def get_id(text):
             return encoding.encode(text, allowed_special="all")[0]
 
@@ -509,7 +510,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
             get_id("assistant"),
             get_id("<|channel|>"),
             get_id("analysis"),
-            get_id("<|message|>")
+            get_id("<|message|>"),
         ]
         tokens = header_tokens + tokens
 
@@ -518,7 +519,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
             parser.process(token_id)
         except Exception:
             break
-            
+
     return parser
 
 
@@ -527,11 +528,11 @@ def parse_chat_output(
 ) -> tuple[str | None, str | None, bool]:
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
-    
+
     reasoning_parts = []
     final_content = None
     is_tool_call = False
-    
+
     for msg in output_msgs:
         if msg.channel == "analysis":
             for content in msg.content:
@@ -539,21 +540,29 @@ def parse_chat_output(
         elif msg.channel == "final":
             for content in msg.content:
                 final_content = content.text
-        elif msg.channel == "commentary" and msg.recipient and msg.recipient.startswith("functions."):
+        elif (
+            msg.channel == "commentary"
+            and msg.recipient
+            and msg.recipient.startswith("functions.")
+        ):
             is_tool_call = True
             if not final_content:
                 final_content = ""
             for content in msg.content:
-                 final_content = content.text
+                final_content = content.text
 
     if parser.current_content:
         if parser.current_channel == "analysis":
-             reasoning_parts.append(parser.current_content)
+            reasoning_parts.append(parser.current_content)
         elif parser.current_channel == "final":
-             final_content = parser.current_content
-        elif parser.current_channel == "commentary" and parser.current_recipient and parser.current_recipient.startswith("functions."):
-             is_tool_call = True
-             final_content = parser.current_content
+            final_content = parser.current_content
+        elif (
+            parser.current_channel == "commentary"
+            and parser.current_recipient
+            and parser.current_recipient.startswith("functions.")
+        ):
+            is_tool_call = True
+            final_content = parser.current_content
 
     reasoning = "\n".join(reasoning_parts) if reasoning_parts else None
 

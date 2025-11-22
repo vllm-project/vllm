@@ -47,13 +47,13 @@ class OpenAIToolParser(ToolParser):
         def _create_tool_call(function_name: str, arguments: str) -> ToolCall:
             # Sanitize the function name to remove leaked tags (e.g. <|channel|>)
             clean_name = function_name.split("<")[0].strip()
-            
+
             try:
                 clean_args = json.dumps(json.loads(arguments))
             except json.JSONDecodeError:
                 logger.debug("Partial or invalid JSON tool call detected.")
                 clean_args = arguments
-            
+
             return ToolCall(
                 type="function",
                 function=FunctionCall(
@@ -67,7 +67,7 @@ class OpenAIToolParser(ToolParser):
                 if len(msg.content) < 1:
                     continue
                 msg_text = msg.content[0].text
-                
+
                 if msg.recipient and msg.recipient.startswith("functions."):
                     if not msg.content_type or "json" in msg.content_type:
                         func_name = msg.recipient.split("functions.")[1]
@@ -80,13 +80,14 @@ class OpenAIToolParser(ToolParser):
             curr_channel = parser.current_channel
             curr_recipient = parser.current_recipient
 
-            if (curr_channel == "commentary" 
-                and curr_recipient 
-                and curr_recipient.startswith("functions.")):
-                
+            if (
+                curr_channel == "commentary"
+                and curr_recipient
+                and curr_recipient.startswith("functions.")
+            ):
                 func_name = curr_recipient.split("functions.")[1]
                 tool_calls.append(_create_tool_call(func_name, curr_text))
-            
+
             elif curr_channel == "final":
                 if final_content:
                     final_content += curr_text
