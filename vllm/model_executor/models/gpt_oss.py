@@ -20,6 +20,9 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.gpt_oss_fused_router import (
+    gpt_oss_custom_routing_function,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -173,6 +176,11 @@ class MLPBlock(torch.nn.Module):
             has_bias=True,
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
+            custom_routing_function=(
+                gpt_oss_custom_routing_function
+                if not current_platform.is_rocm()
+                else None
+            ),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
