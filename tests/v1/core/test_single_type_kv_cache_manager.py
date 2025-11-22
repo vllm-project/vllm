@@ -72,6 +72,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
             use_eagle=False,
+            alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
 
@@ -142,6 +143,7 @@ def test_sliding_window_possible_cached_prefix():
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
             use_eagle=False,
+            alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
 

@@ -306,6 +306,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
+            alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
@@ -440,7 +441,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
         # First, find the longest cache hit for full attention.
-        if self.full_attention_spec.block_size == self.hash_block_size:  # Common case.
+        if self.full_attention_spec.block_size == self.hash_block_size:
+            # Common case.
             full_attention_block_hashes: BlockHashList = block_hashes
         else:
             # block_size is a multiple of hash_block_size. This happens when different
@@ -463,7 +465,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
-        if self.other_spec.block_size == self.hash_block_size:  # Common case.
+        if self.other_spec.block_size == self.hash_block_size:
+            # Common case.
             other_block_hashes: BlockHashList = block_hashes
         else:
             # Similar to the full attention case, here we need to recalculate

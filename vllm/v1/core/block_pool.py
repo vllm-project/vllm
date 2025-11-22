@@ -231,7 +231,8 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
-        if block_size == self.hash_block_size:  # Common case.
+        if block_size == self.hash_block_size:
+            # Common case.
             block_hashes: BlockHashList = request.block_hashes
         else:
             # block_size is a multiple of hash_block_size. This happens when
