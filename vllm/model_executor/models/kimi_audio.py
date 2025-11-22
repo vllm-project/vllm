@@ -116,6 +116,7 @@ class KimiAudioDummyInputsBuilder(
         target_length = self.info.get_max_audio_len()
 
         audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
             self._get_dummy_audios(
