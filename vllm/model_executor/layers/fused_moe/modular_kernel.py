@@ -793,14 +793,11 @@ class FusedMoEModularKernel(torch.nn.Module):
                     expert_tokens_meta,
                 )
             )
-            buffers.workspace13.get(
-                max_workspace_13, device=device, dtype=workspace_dtype
-            )
-            buffers.workspace2.get(
-                max_workspace_2, device=device, dtype=workspace_dtype
-            )
-            buffers.fused_out.get(
-                max_fused_out_shape, device=device, dtype=workspace_dtype
+
+            current_workspace_manager().get_simultaneous(
+                (max_workspace_13, workspace_dtype),
+                (max_workspace_2, workspace_dtype),
+                (max_fused_out_shape, out_dtype),
             )
 
         # Get intermediate workspace shapes based off the chunked M size.
@@ -824,31 +821,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             local_num_experts,
             expert_tokens_meta,
         )
-
-        # For modular kernels that use "mk.FusedMoEModularKernel.Standard" format
-        # we may not see the worst case during profiling in the DP+EP case due to
-        # random token routing. Force allocating the worst case.
-        is_profile_run = get_forward_context().attn_metadata is None
-        if is_profile_run and self.fused_experts.supports_chunking():
-            (
-                max_workspace13_shape,
-                max_workspace2_shape,
-                max_fused_out_shape,
-            ) = self.fused_experts.workspace_shapes(
-                envs.VLLM_FUSED_MOE_CHUNK_SIZE,
-                N,
-                K,
-                top_k,
-                global_num_experts,
-                local_num_experts,
-                None,  # Pass None to avoid using sampled token counts
-            )
-
-            current_workspace_manager().get_simultaneous(
-                (max_workspace13_shape, workspace_dtype),
-                (max_workspace2_shape, workspace_dtype),
-                (max_fused_out_shape, out_dtype),
-            )
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.

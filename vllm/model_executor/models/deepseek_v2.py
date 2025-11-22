@@ -622,12 +622,6 @@ def sparse_attn_indexer(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
-        # Reserve workspace for indexer during profiling run
-        current_workspace_manager().get_simultaneous(
-            ((total_seq_lens, head_dim), torch.float8_e4m3fn),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -665,7 +659,7 @@ def sparse_attn_indexer(
         # Get the full shared workspace buffers once (will allocate on first use)
         workspace_manager = current_workspace_manager()
         k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), torch.float8_e4m3fn),
+            ((total_seq_lens, head_dim), fp8_dtype),
             ((total_seq_lens, 4), torch.uint8),
         )
 
@@ -787,15 +781,11 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # profile run
-    # NOTE(Chen): create the max possible flattened_kv. So that
-    # profile_run can get correct memory usage.
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
+    # Reserve workspace for indexer during profiling run
+    current_workspace_manager().get_simultaneous(
+        ((total_seq_lens, head_dim), torch.float8_e4m3fn),
+        ((total_seq_lens, 4), torch.uint8),
     )
-    fp8_dtype = current_platform.fp8_dtype()
-    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
-    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
 
