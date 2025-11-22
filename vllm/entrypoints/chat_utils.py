@@ -1283,6 +1283,7 @@ MM_PARSER_MAP: dict[
     "text": lambda part: _TextParser(part).get("text", None),
     "thinking": lambda part: _ThinkParser(part).get("thinking", None),
     "input_text": lambda part: _TextParser(part).get("text", None),
+    "output_text": lambda part: _TextParser(part).get("text", None),
     "input_image": lambda part: _ResponsesInputImageParser(part).get("image_url", None),
     "image_url": lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds": lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
@@ -1463,7 +1464,7 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "refusal", "thinking"):
+    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
         str_content = cast(str, content)
         if wrap_dicts:
             return {"type": "text", "text": str_content}
