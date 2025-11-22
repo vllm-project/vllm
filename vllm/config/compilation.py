@@ -950,14 +950,18 @@ class CompilationConfig:
             )
         )
 
+        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
+            # if one valid but would be round_down use that
+            rounded_sizes = [multiple_of]
+
         if len(rounded_sizes) == 0:
-            logger.warning(
-                "No valid cudagraph sizes after rounding to multiple of "
-                " num_speculative_tokens + 1 (%d); please adjust num_speculative_tokens"
-                " or max_cudagraph_capture_size (or cudagraph_capture_sizes)",
-                multiple_of,
+            raise ValueError(
+                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
+                f"(num_speculative_tokens + 1 or tp if sequence parallelism is enabled)"
+                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
+                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
+                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
             )
-            return
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
