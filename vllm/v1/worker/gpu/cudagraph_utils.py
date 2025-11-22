@@ -58,9 +58,10 @@ class CudaGraphManager:
         if not self.cudagraph_mode.has_full_cudagraphs():
             # Full cuda graphs are not used.
             return {}
+        if not self.cudagraph_sizes:
+            return {}
 
         padded_sizes: dict[int, int] = {}
-        assert len(self.cudagraph_sizes) > 0
         for i in range(1, self.cudagraph_sizes[-1] + 1):
             for x in self.cudagraph_sizes:
                 if i <= x:
