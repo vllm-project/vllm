@@ -26,13 +26,16 @@ from openai import OpenAI
 
 
 def predict(message, history, client, model_name, temp, stop_token_ids):
-    history.insert(0, {"role": "system", "content": "You are a great AI assistant."})
-    history.append({"role": "user", "content": message})
+    messages = [
+        {"role": "system", "content": "You are a great AI assistant."},
+        *history,
+        {"role": "user", "content": message},
+    ]
 
     # Send request to OpenAI API (vLLM server)
     stream = client.chat.completions.create(
         model=model_name,
-        messages=history,
+        messages=messages,
         temperature=temp,
         stream=True,
         extra_body={
