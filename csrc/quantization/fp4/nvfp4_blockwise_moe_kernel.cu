@@ -344,11 +344,14 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
 
   auto can_implement_status = gemm_op.can_implement(args);
   TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM");
+              "Failed to implement GEMM: status=", (int)can_implement_status);
 
   // Run the GEMM
   auto status = gemm_op.initialize(args, workspace.data_ptr());
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to initialize GEMM");
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "Failed to initialize GEMM: status=", (int)status,
+              " workspace_size=", workspace_size, " num_experts=", num_experts,
+              " M=", M, " N=", N, " K=", K);
 
   status = gemm_op.run(args, workspace.data_ptr(), stream);
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
@@ -516,11 +519,14 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
 
   auto can_implement_status = gemm_op.can_implement(args);
   TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM");
+              "Failed to implement GEMM: status=", (int)can_implement_status);
 
   // Run the GEMM
   auto status = gemm_op.initialize(args, workspace.data_ptr());
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to initialize GEMM");
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "Failed to initialize GEMM: status=", (int)status,
+              " workspace_size=", workspace_size, " num_experts=", num_experts,
+              " M=", M, " N=", N, " K=", K);
 
   status = gemm_op.run(args, workspace.data_ptr(), stream);
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
