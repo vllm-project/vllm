@@ -105,7 +105,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config
 
-    
     def _inject_lora_into_fused_moe(self):
         moe_state_dict = {}
         top_k = self.base_layer.top_k
@@ -117,6 +116,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             from vllm.model_executor.layers.fused_moe.config import (
                 FUSED_MOE_UNQUANTIZED_CONFIG,
             )
+
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
         m_fused_moe_fn = (
