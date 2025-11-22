@@ -9,7 +9,7 @@ TL;DR:
 |----------|----------|-------------|
 | --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
 | -O.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -O.cudagraph_mode=NONE | compilation_config=CompilationConfig(mode=CompilationMode.NONE) |  Turn off CUDAGraphs only |
+| -O.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
 | -O.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
