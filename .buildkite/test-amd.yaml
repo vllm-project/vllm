@@ -757,6 +757,7 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
+  - vllm/transformers_utils/
   - tests/models/test_initialization.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
@@ -1322,7 +1323,10 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
+
+    # Disabled for now because MXFP4 backend on non-cuda platform 
+    # doesn't support LoRA yet
+    #- pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
