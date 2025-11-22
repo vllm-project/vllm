@@ -38,5 +38,4 @@ schemathesis==3.39.15
 mteb[bm25s]>=1.38.11, <2
 
 # Required for eval tests
-#lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@d021bf846218f1bb3bdc0603864789329476d464
