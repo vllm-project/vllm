@@ -253,6 +253,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 default = (
                     default.default
                     if default.default_factory is None
+                    # ????
                     else default.default_factory()
                 )
         elif field.default_factory is not MISSING:
@@ -1921,13 +1922,13 @@ class EngineArgs:
             self.enable_chunked_prefill = is_chunked_prefill_supported.value
 
             logger.debug(
-                "%s. %s chunked prefill by default. ",
+                "%s %s chunked prefill by default. ",
                 is_chunked_prefill_supported.reason,
                 "Enabling" if is_chunked_prefill_supported.value else "Disabling",
             )
         elif self.enable_chunked_prefill:
             is_chunked_prefill_supported.warning_if_false(
-                template="{reason}. Enabling this manually may cause the engine "
+                template="{reason} Enabling this manually may cause the engine "
                 "to crash or produce incorrect outputs."
             )
 
@@ -1935,13 +1936,13 @@ class EngineArgs:
             self.enable_prefix_caching = is_prefix_caching_supported.value
 
             logger.debug(
-                "%s prefix caching by default. %s",
+                "%s %s prefix caching by default.",
                 is_prefix_caching_supported.reason,
                 "Enabling" if is_prefix_caching_supported.value else "Disabling",
             )
         elif self.enable_prefix_caching:
             is_prefix_caching_supported.warning_if_false(
-                template="{reason}. Enabling this manually may cause the engine "
+                template="{reason} Enabling this manually may cause the engine "
                 "to crash or produce incorrect outputs."
             )
 
