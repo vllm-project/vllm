@@ -284,9 +284,11 @@ class KVCacheManager:
 
         if (
             num_blocks_to_allocate == 0
-            and new_computed_block_list is self.empty_kv_cache_blocks.blocks
+            and new_computed_blocks is None
+            and request.num_output_tokens > 0
         ):
-            # Early return: no new blocks needed to be allocated
+            # Early return: no new blocks needed to be allocated for decode steps
+            # (excluding the first decode steps).
             #
             # NOTE: This optimization may delay block cleanup (remove_skipped_blocks)
             # in rare edge cases, but the impact is negligible.
