@@ -691,6 +691,7 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
+  - vllm/transformers_utils/
   - tests/models/test_initialization.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large

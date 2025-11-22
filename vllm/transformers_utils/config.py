@@ -204,7 +204,19 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
+
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
         # to int and add the layer_types list[str] to make it HF compatible
