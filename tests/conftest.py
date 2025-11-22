@@ -748,6 +748,14 @@ class VllmRunner:
             # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
+            # Make sure we have atleast one cudagraph large enough for a single decode.
+            if (speculative_config := kwargs.get("speculative_config")) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
+            ):
+                kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
+                    num_speculative_tokens + 1
+                )
+
         with init_ctx:
             self.llm = LLM(
                 model=model_name,
