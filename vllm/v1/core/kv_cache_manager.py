@@ -288,7 +288,10 @@ class KVCacheManager:
             and request.num_output_tokens > 0
         ):
             # Early return: no new blocks needed to be allocated for decode steps
-            # (excluding the first decode steps).
+            # (excluding the first decode steps). DO NOT early return for
+            # - prefill steps: to ensure cache_blocks are running
+            # - first decode steps: to ensure remove_skipped_blocks remove
+            #   prompt token blocks slided out of the context window
             #
             # NOTE: This optimization may delay block cleanup (remove_skipped_blocks)
             # in rare edge cases, but the impact is negligible.
