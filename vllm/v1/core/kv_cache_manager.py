@@ -286,7 +286,16 @@ class KVCacheManager:
             num_blocks_to_allocate == 0
             and new_computed_block_list is self.empty_kv_cache_blocks.blocks
         ):
-            # Early return as no new blocks needed to be allocated
+            # Early return: no new blocks needed to be allocated
+            #
+            # NOTE: This optimization may delay block cleanup (remove_skipped_blocks)
+            # in rare edge cases, but the impact is negligible.
+            #
+            # Example: With sliding windows whose size is
+            # not divisible by block size, the first block
+            # may slide out of the window (becoming eligible for removal)
+            # even when no new blocks are allocated at the end. In the worst case,
+            # this delays removal of 1 block per request per single type manager.
             return self.empty_kv_cache_blocks
 
         # Free the blocks that are skipped during the attention computation
