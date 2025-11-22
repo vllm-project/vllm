@@ -162,10 +162,12 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
-        Get the KV connector stats collected during the last interval. 
+        Get the KV connector stats collected during the last interval.
         Get and clear LMCachestats from LMCStatsMonitor.
         """
-        serialized_lm_cache_stats = asdict(self._lmcache_engine._stats_monitor.get_stats_and_clear())
+        serialized_lm_cache_stats = asdict(
+            self._lmcache_engine._stats_monitor.get_stats_and_clear()
+        )
         return LMCacheKVConnectorStats().set_data(serialized_lm_cache_stats)
 
     # ==============================
@@ -259,11 +261,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
+
 @dataclass
 class LMCacheKVConnectorStats(KVConnectorStats):
     """
     Container for LMCache telemetry data serialized from LMCacheStats.
     """
+
     def reset(self):
         """Reset the stats, clear the state."""
         self.data = {}
@@ -273,8 +277,8 @@ class LMCacheKVConnectorStats(KVConnectorStats):
         Aggregate stats with another `KVConnectorStats` object.
 
         self: contains accumulated stats
-        other: contains latest stats 
-        
+        other: contains latest stats
+
         """
         if not other.data:
             return self
@@ -403,9 +407,7 @@ class LMCacheKVConnectorStats(KVConnectorStats):
             "active_memory_objs_count": data.get("active_memory_objs_count", 0),
             "pinned_memory_objs_count": data.get("pinned_memory_objs_count", 0),
             "p2p_requests": data.get("interval_p2p_requests", 0),
-            "p2p_transferred_tokens": data.get(
-                "interval_p2p_transferred_tokens", 0
-            ),
+            "p2p_transferred_tokens": data.get("interval_p2p_transferred_tokens", 0),
             "remote_ping_latency_ms": round(
                 data.get("interval_remote_ping_latency", 0) * 1.0, 3
             ),
@@ -441,9 +443,7 @@ class LMCacheKVConnectorStats(KVConnectorStats):
         return summary
 
     def is_empty(self) -> bool:
-        if not self.data:
-            return True
-        return False
+        return not self.data
 
     def set_data(self, data: dict[str, Any] | None) -> KVConnectorStats:
         if data:
@@ -456,7 +456,10 @@ class LMCacheKVConnectorStats(KVConnectorStats):
         lookup_tokens = self.data.get("interval_lookup_tokens", 0)
         lookup_hits = self.data.get("interval_lookup_hits", 0)
         self.data["retrieve_hit_rate"] = hit / requested if requested else 0
-        self.data["lookup_hit_rate"] = lookup_hits / lookup_tokens if lookup_tokens else 0
+        self.data["lookup_hit_rate"] = (
+            lookup_hits / lookup_tokens if lookup_tokens else 0
+        )
+
 
 class LMCachePromMetrics(KVConnectorPromMetrics):
     """
@@ -478,28 +481,36 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             documentation="Total number of retrieve requests sent to lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_retrieve_requests = self.make_per_engine(counter_num_retrieve_requests)
+        self.counter_num_retrieve_requests = self.make_per_engine(
+            counter_num_retrieve_requests
+        )
 
         counter_num_store_requests = self._counter_cls(
             name="lmcache:num_store_requests",
             documentation="Total number of store requests sent to lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_store_requests = self.make_per_engine(counter_num_store_requests)
+        self.counter_num_store_requests = self.make_per_engine(
+            counter_num_store_requests
+        )
 
         counter_num_lookup_requests = self._counter_cls(
             name="lmcache:num_lookup_requests",
             documentation="Total number of lookup requests sent to lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_lookup_requests = self.make_per_engine(counter_num_lookup_requests)
+        self.counter_num_lookup_requests = self.make_per_engine(
+            counter_num_lookup_requests
+        )
 
         counter_num_requested_tokens = self._counter_cls(
             name="lmcache:num_requested_tokens",
             documentation="Total number of tokens requested from lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_requested_tokens = self.make_per_engine(counter_num_requested_tokens)
+        self.counter_num_requested_tokens = self.make_per_engine(
+            counter_num_requested_tokens
+        )
 
         counter_num_hit_tokens = self._counter_cls(
             name="lmcache:num_hit_tokens",
@@ -536,7 +547,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             documentation="Number of hit tokens in vllm",
             labelnames=labelnames,
         )
-        self.counter_num_vllm_hit_tokens = self.make_per_engine(counter_num_vllm_hit_tokens)
+        self.counter_num_vllm_hit_tokens = self.make_per_engine(
+            counter_num_vllm_hit_tokens
+        )
 
         counter_num_prompt_tokens = self._counter_cls(
             name="lmcache:num_prompt_tokens",
@@ -551,14 +564,18 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             "remote backends in lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_remote_read_requests = self.make_per_engine(counter_num_remote_read_requests)
+        self.counter_num_remote_read_requests = self.make_per_engine(
+            counter_num_remote_read_requests
+        )
 
         counter_num_remote_read_bytes = self._counter_cls(
             name="lmcache:num_remote_read_bytes",
             documentation="Total number of bytes read from remote backends in lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_remote_read_bytes = self.make_per_engine(counter_num_remote_read_bytes)
+        self.counter_num_remote_read_bytes = self.make_per_engine(
+            counter_num_remote_read_bytes
+        )
 
         counter_num_remote_write_requests = self._counter_cls(
             name="lmcache:num_remote_write_requests",
@@ -566,42 +583,54 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             "remote backends in lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_remote_write_requests = self.make_per_engine(counter_num_remote_write_requests)
+        self.counter_num_remote_write_requests = self.make_per_engine(
+            counter_num_remote_write_requests
+        )
 
         counter_num_remote_write_bytes = self._counter_cls(
             name="lmcache:num_remote_write_bytes",
             documentation="Total number of bytes write to remote backends in lmcache",
             labelnames=labelnames,
         )
-        self.counter_num_remote_write_bytes = self.make_per_engine(counter_num_remote_write_bytes)
+        self.counter_num_remote_write_bytes = self.make_per_engine(
+            counter_num_remote_write_bytes
+        )
 
         counter_local_cpu_evict_count = self._counter_cls(
             name="lmcache:local_cpu_evict_count",
             documentation="Total number of evict in local cpu backend",
             labelnames=labelnames,
         )
-        self.counter_local_cpu_evict_count = self.make_per_engine(counter_local_cpu_evict_count)
+        self.counter_local_cpu_evict_count = self.make_per_engine(
+            counter_local_cpu_evict_count
+        )
 
         counter_local_cpu_evict_keys_count = self._counter_cls(
             name="lmcache:local_cpu_evict_keys_count",
             documentation="Total number of evict keys in local cpu backend",
             labelnames=labelnames,
         )
-        self.counter_local_cpu_evict_keys_count = self.make_per_engine(counter_local_cpu_evict_keys_count)
+        self.counter_local_cpu_evict_keys_count = self.make_per_engine(
+            counter_local_cpu_evict_keys_count
+        )
 
         counter_local_cpu_evict_failed_count = self._counter_cls(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
             labelnames=labelnames,
         )
-        self.counter_local_cpu_evict_failed_count = self.make_per_engine(counter_local_cpu_evict_failed_count)
+        self.counter_local_cpu_evict_failed_count = self.make_per_engine(
+            counter_local_cpu_evict_failed_count
+        )
 
         counter_lookup_0_hit_requests = self._counter_cls(
             name="lmcache:lookup_0_hit_requests",
             documentation="Total number of 0 hit lookup requests",
             labelnames=labelnames,
         )
-        self.counter_lookup_0_hit_requests = self.make_per_engine(counter_lookup_0_hit_requests)
+        self.counter_lookup_0_hit_requests = self.make_per_engine(
+            counter_lookup_0_hit_requests
+        )
 
         gauge_retrieve_hit_rate = self._gauge_cls(
             name="lmcache:retrieve_hit_rate",
@@ -649,7 +678,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             multiprocess_mode="sum",
         )
-        self.gauge_active_memory_objs_count = self.make_per_engine(gauge_active_memory_objs_count)
+        self.gauge_active_memory_objs_count = self.make_per_engine(
+            gauge_active_memory_objs_count
+        )
 
         gauge_pinned_memory_objs_count = self._gauge_cls(
             name="lmcache:pinned_memory_objs_count",
@@ -657,7 +688,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             multiprocess_mode="sum",
         )
-        self.gauge_pinned_memory_objs_count = self.make_per_engine(gauge_pinned_memory_objs_count)
+        self.gauge_pinned_memory_objs_count = self.make_per_engine(
+            gauge_pinned_memory_objs_count
+        )
 
         time_to_retrieve_buckets = [
             0.001,
@@ -683,7 +716,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=time_to_retrieve_buckets,
         )
-        self.histogram_time_to_retrieve = self.make_per_engine(histogram_time_to_retrieve)
+        self.histogram_time_to_retrieve = self.make_per_engine(
+            histogram_time_to_retrieve
+        )
 
         time_to_store_buckets = [
             0.001,
@@ -786,7 +821,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=p2p_time_buckets,
         )
-        self.histogram_p2p_time_to_transfer = self.make_per_engine(histogram_p2p_time_to_transfer)
+        self.histogram_p2p_time_to_transfer = self.make_per_engine(
+            histogram_p2p_time_to_transfer
+        )
 
         p2p_speed_buckets = [
             1,
@@ -811,7 +848,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=p2p_speed_buckets,
         )
-        self.histogram_p2p_transfer_speed = self.make_per_engine(histogram_p2p_transfer_speed)
+        self.histogram_p2p_transfer_speed = self.make_per_engine(
+            histogram_p2p_transfer_speed
+        )
 
         remote_time_to_get = [
             1,
@@ -837,7 +876,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=remote_time_to_get,
         )
-        self.histogram_remote_time_to_get = self.make_per_engine(histogram_remote_time_to_get)
+        self.histogram_remote_time_to_get = self.make_per_engine(
+            histogram_remote_time_to_get
+        )
 
         remote_time_to_put = [
             1,
@@ -863,7 +904,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=remote_time_to_put,
         )
-        self.histogram_remote_time_to_put = self.make_per_engine(histogram_remote_time_to_put)
+        self.histogram_remote_time_to_put = self.make_per_engine(
+            histogram_remote_time_to_put
+        )
 
         remote_time_to_get_sync = [
             1,
@@ -889,7 +932,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=remote_time_to_get_sync,
         )
-        self.histogram_remote_time_to_get_sync = self.make_per_engine(histogram_remote_time_to_get_sync)
+        self.histogram_remote_time_to_get_sync = self.make_per_engine(
+            histogram_remote_time_to_get_sync
+        )
 
         request_cache_hit_rate = [
             0.1,
@@ -909,7 +954,9 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             buckets=request_cache_hit_rate,
         )
-        self.histogram_request_cache_hit_rate = self.make_per_engine(histogram_request_cache_hit_rate)
+        self.histogram_request_cache_hit_rate = self.make_per_engine(
+            histogram_request_cache_hit_rate
+        )
 
         # Ping latency metrics: use a gauge to record the latest ping latency
         gauge_remote_ping_latency = self._gauge_cls(
@@ -924,20 +971,26 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             documentation="Number of ping errors to remote backends",
             labelnames=labelnames,
         )
-        self.counter_remote_ping_errors = self.make_per_engine(counter_remote_ping_errors)
+        self.counter_remote_ping_errors = self.make_per_engine(
+            counter_remote_ping_errors
+        )
         counter_remote_ping_successes = self._counter_cls(
             name="lmcache:remote_ping_successes",
             documentation="Number of ping successes to remote backends",
             labelnames=labelnames,
         )
-        self.counter_remote_ping_successes = self.make_per_engine(counter_remote_ping_successes)
+        self.counter_remote_ping_successes = self.make_per_engine(
+            counter_remote_ping_successes
+        )
         gauge_remote_ping_error_code = self._gauge_cls(
             name="lmcache:remote_ping_error_code",
             documentation="Latest ping error code to remote backends",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
-        self.gauge_remote_ping_error_code = self.make_per_engine(gauge_remote_ping_error_code)
+        self.gauge_remote_ping_error_code = self.make_per_engine(
+            gauge_remote_ping_error_code
+        )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
