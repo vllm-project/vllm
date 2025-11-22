@@ -18,6 +18,7 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+    download_gguf,
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator,
@@ -43,19 +44,8 @@ class GGUFModelLoader(BaseModelLoader):
                 f"load format {load_config.load_format}"
             )
 
-    def _get_model_path_for_download(self, model_config: ModelConfig) -> str:
-        """
-        Get the model path for downloading GGUF files.
-
-        If gguf_quant_type is set, construct the model:quant_type format.
-        Otherwise, use model_config.model.
-        """
-        if model_config.gguf_quant_type:
-            return f"{model_config.model}:{model_config.gguf_quant_type}"
-        return model_config.model
-
     def _prepare_weights(self, model_config: ModelConfig):
-        model_name_or_path = self._get_model_path_for_download(model_config)
+        model_name_or_path = model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
         # for raw HTTPS link
@@ -70,62 +60,19 @@ class GGUFModelLoader(BaseModelLoader):
         # repo_id:quant_type
         elif "/" in model_name_or_path and ":" in model_name_or_path:
             repo_id, quant_type = model_name_or_path.rsplit(":", 1)
-            return self.download_gguf(repo_id, quant_type, model_config.revision)
+            return download_gguf(
+                repo_id,
+                quant_type,
+                cache_dir=self.load_config.download_dir,
+                revision=model_config.revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
             "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
-
-    def download_gguf(
-        self, repo_id: str, quant_type: str, revision: str | None = None
-    ) -> str:
-        # Lazy import to avoid hard dependency
-        import glob
-
-        from vllm.model_executor.model_loader.weight_utils import (
-            download_weights_from_hf,
-        )
-
-        # Use patterns that snapshot_download can handle directly
-        # Patterns to match:
-        # - *-{quant_type}.gguf (root)
-        # - *-{quant_type}-*.gguf (root sharded)
-        # - */*-{quant_type}.gguf (subdir)
-        # - */*-{quant_type}-*.gguf (subdir sharded)
-        allow_patterns = [
-            f"*-{quant_type}.gguf",
-            f"*-{quant_type}-*.gguf",
-            f"*/*-{quant_type}.gguf",
-            f"*/*-{quant_type}-*.gguf",
-        ]
-
-        # Use download_weights_from_hf which handles caching and downloading
-        folder = download_weights_from_hf(
-            model_name_or_path=repo_id,
-            cache_dir=self.load_config.download_dir,
-            allow_patterns=allow_patterns,
-            revision=revision,
-            ignore_patterns=self.load_config.ignore_patterns,
-        )
-
-        # Find the downloaded file(s) in the folder
-        local_files = []
-        for pattern in allow_patterns:
-            # Convert pattern to glob pattern for local filesystem
-            glob_pattern = os.path.join(folder, pattern)
-            local_files.extend(glob.glob(glob_pattern))
-
-        if not local_files:
-            raise ValueError(
-                f"Downloaded GGUF files not found in {folder} "
-                f"for quant_type {quant_type}"
-            )
-
-        # Sort to ensure consistent ordering (prefer non-sharded files)
-        local_files.sort(key=lambda x: (x.count("-"), x))
-        return local_files[0]
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """

@@ -40,7 +40,9 @@ from vllm.transformers_utils.gguf_utils import (
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import (
     is_gguf,
+    is_remote_gguf,
     maybe_model_redirect,
+    split_remote_gguf,
 )
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
@@ -115,8 +117,6 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
-    gguf_quant_type: str | None = None
-    """The quant type of the GGUF model to use."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -444,9 +444,8 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            # Check if this is a GGUF model (either local file, remote GGUF, or
-            # has gguf_quant_type set)
-            if is_gguf(self.model, self.gguf_quant_type):
+            # Check if this is a GGUF model (either local file or remote GGUF)
+            if is_gguf(self.model):
                 raise ValueError(
                     "Using a tokenizer is mandatory when loading a GGUF model. "
                     "Please specify the tokenizer path or name using the "
@@ -509,7 +508,6 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
-            gguf_quant_type=self.gguf_quant_type,
         )
         hf_config = maybe_patch_hf_config_from_gguf(
             self.model,
@@ -829,7 +827,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
-        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+        model = self.model
+        if is_remote_gguf(model):
+            model, _ = split_remote_gguf(model)
+        return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -981,7 +982,7 @@ class ModelConfig:
         # GGUF quantization is handled separately
 
         # Parse quantization method from the HF model config, if available.
-        if self.quantization == "gguf" or is_gguf(self.model, self.gguf_quant_type):
+        if self.quantization == "gguf" or is_gguf(self.model):
             quant_cfg = None
         else:
             quant_cfg = self._parse_quant_hf_config(self.hf_config)

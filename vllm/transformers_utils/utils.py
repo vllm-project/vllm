@@ -9,6 +9,8 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+from gguf import GGMLQuantizationType
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 
@@ -47,29 +49,47 @@ def check_gguf_file(model: str | PathLike) -> bool:
 
 
 @cache
-def is_remote_gguf(model: str) -> bool:
+def is_remote_gguf(model: str | Path) -> bool:
     """Check if the model is a remote GGUF model."""
+    model = str(model)
     return (
         (not is_cloud_storage(model))
         and (not model.startswith(("http://", "https://")))
         and ("/" in model and ":" in model)
+        and is_valid_gguf_quant_type(model.rsplit(":", 1)[1])
     )
 
 
-def is_gguf(model: str | Path, gguf_quant_type: str | None = None) -> bool:
+def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
+    """Check if the quant type is a valid GGUF quant type."""
+    return getattr(GGMLQuantizationType, gguf_quant_type, None) is not None
+
+
+def split_remote_gguf(model: str | Path) -> tuple[str, str]:
+    """Split the model into repo_id and quant type."""
+    model = str(model)
+    if is_remote_gguf(model):
+        parts = model.rsplit(":", 1)
+        return (parts[0], parts[1])
+    raise ValueError(
+        "Wrong GGUF model or invalid GGUF quant type: %s.\n"
+        "- It should be in repo_id:quant_type format.\n"
+        "- Valid GGMLQuantizationType values: %s",
+        model,
+        GGMLQuantizationType._member_names_,
+    )
+
+
+def is_gguf(model: str | Path) -> bool:
     """Check if the model is a GGUF model.
 
     Args:
         model: Model name, path, or Path object to check.
-        gguf_quant_type: Optional quantization type for remote GGUF models.
 
     Returns:
         True if the model is a GGUF model, False otherwise.
     """
     model = str(model)
-    # If quant_type is explicitly provided, it's a GGUF model
-    if gguf_quant_type is not None:
-        return True
 
     # Check if it's a local GGUF file
     if check_gguf_file(model):
