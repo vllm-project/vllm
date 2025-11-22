@@ -797,7 +797,8 @@ def invoke_fused_moe_kernel(
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
-    assert sorted_token_ids.stride(0) == 1
+    if not use_unpermute:
+        assert sorted_token_ids.stride(0) == 1
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -817,9 +818,11 @@ def invoke_fused_moe_kernel(
 
     M = A.size(0)
     num_tokens = M * top_k
-
-    EM = sorted_token_ids.size(0)
-    if A.size(0) < config["BLOCK_SIZE_M"]:
+    if not use_unpermute:
+        EM = sorted_token_ids.size(0)
+    else:
+        EM = num_tokens_post_padded
+    if A.size(0) < config["BLOCK_SIZE_M"] and not use_unpermute:
         # optimize for small batch_size.
         # We assume that top_ids of each token is unique,
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
@@ -2160,7 +2163,7 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        use_unpermute = tokens_in_chunk <= 8 and not ((use_int8_w8a16 or use_int4_w4a16) and block_shape is not None and block_shape[1] > 0)
+        use_unpermute = tokens_in_chunk * top_k_num <= global_num_experts and not ((use_int8_w8a16 or use_int4_w4a16) and block_shape is not None and block_shape[1] > 0)
         
         if not use_unpermute:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
@@ -2170,9 +2173,7 @@ def fused_experts_impl(
             max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"] 
             expert_ids = topk_ids
             num_tokens_post_padded = max_num_tokens_padded
-            sorted_token_ids = torch.empty(
-                (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
-            )
+            sorted_token_ids = None
 
 
         invoke_fused_moe_kernel(
