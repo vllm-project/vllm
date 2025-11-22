@@ -4,6 +4,9 @@
 import pytest
 import pytest_asyncio
 from openai import OpenAI
+from openai_harmony import ToolDescription, ToolNamespaceConfig
+
+from vllm.entrypoints.tool_server import MCPToolServer
 
 from ...utils import RemoteOpenAIServer
 
@@ -159,3 +162,55 @@ async def test_mcp_tool_env_flag_disabled(mcp_disabled_client: OpenAI, model_nam
         assert message.get("author").get("role") != "developer", (
             "No developer messages should be present without a valid tool"
         )
+
+
+def test_get_tool_description():
+    pytest.importorskip("mcp")
+
+    server = MCPToolServer()
+    tool1 = ToolDescription.new(
+        name="tool1", description="First", parameters={"type": "object"}
+    )
+    tool2 = ToolDescription.new(
+        name="tool2", description="Second", parameters={"type": "object"}
+    )
+    tool3 = ToolDescription.new(
+        name="tool3", description="Third", parameters={"type": "object"}
+    )
+
+    server.harmony_tool_descriptions = {
+        "test_server": ToolNamespaceConfig(
+            name="test_server", description="test", tools=[tool1, tool2, tool3]
+        )
+    }
+
+    # nonexistent server
+    assert server.get_tool_description("nonexistent") is None
+
+    # no filter - get all tools
+    result = server.get_tool_description("test_server")
+    assert len(result.tools) == 3
+
+    # wildcard
+    result = server.get_tool_description("test_server", allowed_tools=["*"])
+    assert len(result.tools) == 3
+
+    # filter to specific tools
+    result = server.get_tool_description(
+        "test_server", allowed_tools=["tool1", "tool3"]
+    )
+    assert len(result.tools) == 2
+    assert result.tools[0].name == "tool1"
+    assert result.tools[1].name == "tool3"
+
+    # single tool
+    result = server.get_tool_description("test_server", allowed_tools=["tool2"])
+    assert len(result.tools) == 1
+    assert result.tools[0].name == "tool2"
+
+    # no matching tools
+    result = server.get_tool_description("test_server", allowed_tools=["nonexistent"])
+    assert result is None
+
+    # empty list
+    assert server.get_tool_description("test_server", allowed_tools=[]) is None

@@ -914,38 +914,57 @@ class OpenAIServingResponses(OpenAIServing):
         self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
     ) -> OpenAIHarmonyMessage:
         reasoning_effort = request.reasoning.effort if request.reasoning else None
-        enable_browser = (
-            "web_search_preview" in tool_types
+
+        # Extract allowed_tools from MCP tool requests
+        allowed_tools_map: dict[str, list[str] | None] = {}
+        for tool in request.tools:
+            if tool.type == "mcp":
+                # allowed_tools can be a list or an object with tool_names
+                # Extract the actual list of tool names
+                allowed_tools_val = None
+                if hasattr(tool, "allowed_tools") and tool.allowed_tools is not None:
+                    if isinstance(tool.allowed_tools, list):
+                        allowed_tools_val = tool.allowed_tools
+                    elif hasattr(tool.allowed_tools, "tool_names"):
+                        # It's an McpAllowedToolsMcpToolFilter object
+                        allowed_tools_val = tool.allowed_tools.tool_names
+                allowed_tools_map[tool.server_label] = allowed_tools_val
+
+        # Get filtered tool descriptions first.
+        # If get_tool_description returns None (due to filtering), the tool is disabled.
+        browser_description = (
+            self.tool_server.get_tool_description(
+                "browser", allowed_tools_map.get("web_search_preview")
+            )
+            if "web_search_preview" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("browser")
+            else None
         )
-        enable_code_interpreter = (
-            "code_interpreter" in tool_types
+        python_description = (
+            self.tool_server.get_tool_description(
+                "python", allowed_tools_map.get("code_interpreter")
+            )
+            if "code_interpreter" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("python")
+            else None
         )
-        enable_container = (
-            "container" in tool_types
+        container_description = (
+            self.tool_server.get_tool_description(
+                "container", allowed_tools_map.get("container")
+            )
+            if "container" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("container")
+            else None
         )
+
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
-            browser_description=(
-                self.tool_server.get_tool_description("browser")
-                if enable_browser and self.tool_server is not None
-                else None
-            ),
-            python_description=(
-                self.tool_server.get_tool_description("python")
-                if enable_code_interpreter and self.tool_server is not None
-                else None
-            ),
-            container_description=(
-                self.tool_server.get_tool_description("container")
-                if enable_container and self.tool_server is not None
-                else None
-            ),
+            browser_description=browser_description,
+            python_description=python_description,
+            container_description=container_description,
             instructions=request.instructions,
             with_custom_tools=with_custom_tools,
         )
