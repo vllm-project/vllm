@@ -1319,7 +1319,10 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
+
+    # Disabled for now because MXFP4 backend on non-cuda platform 
+    # doesn't support LoRA yet
+    #- pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
