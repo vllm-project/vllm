@@ -11,7 +11,10 @@ import random
 
 from vllm import LLM, SamplingParams
 
-# Enable batch invariance to get consistent results regardless of scheduling.
+# Either:
+## Turn off multiprocessing to make the scheduling deterministic, or
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+## Enable batch invariance to get consistent results regardless of scheduling.
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 prompts = [

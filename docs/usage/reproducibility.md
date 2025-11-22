@@ -1,10 +1,18 @@
 # Reproducibility
 
 vLLM does not guarantee the reproducibility of the results by default, for the sake of performance. To achieve
-reproducible results, consider enabling [batch invariance](../features/batch_invariance.md) as the scheduling
-cannot be made deterministic without using offline mode and setting `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+reproducible results:
+
+- In offline mode, you can either set `VLLM_ENABLE_V1_MULTIPROCESSING=0` which makes scheduling deterministic,
+  or enable [batch invariance](../features/batch_invariance.md) to make the outputs insensitive to scheduling.
+- In online mode, you can only enable [batch invariance](../features/batch_invariance.md).
 
 Example: [examples/offline_inference/reproducibility.py](../../examples/offline_inference/reproducibility.py)
+
+!!! warning
+
+    Setting `VLLM_ENABLE_V1_MULTIPROCESSING=0` will change the random state of user code 
+    (i.e. the code that constructs [LLM][vllm.LLM] class).
 
 !!! note
 

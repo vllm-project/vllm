@@ -58,7 +58,8 @@ Processed means the values after applying all processors, including temperature 
 
 #### Prompt Logprobs with Prefix Caching
 
-Logprobs are not cached. For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
+While V1 supports passing prompt logprobs with prefix caching enabled, it no longer caches the logprobs.
+For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
 ## Feature Support
 
