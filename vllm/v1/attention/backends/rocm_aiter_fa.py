@@ -13,8 +13,9 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -190,6 +191,18 @@ class AiterFlashAttentionPrefillMetadata:
 
 
 @dataclass
+class AiterChunkSlidingWindowMetadata:
+    swa_seqlens: list[torch.Tensor]
+    swa_cu_seqlens: list[torch.Tensor]
+    swa_seq_starts: list[torch.Tensor]
+    swa_token_to_batch: list[torch.Tensor]
+    swa_max_seqlens: list[int]
+    swa_total_tokens: list[int]
+    swa_chunk_starts: list[int]
+    swa_chunk_ends: list[int]
+
+
+@dataclass
 class AiterChunkContextMetadata:
     workspace: torch.Tensor
     cu_seq_lens_chunk: torch.Tensor
@@ -200,6 +213,7 @@ class AiterChunkContextMetadata:
     seq_lens: torch.Tensor
     num_chunks: int
     total_token_per_batch: list[int]
+    swa_metadata: AiterChunkSlidingWindowMetadata | None
 
 
 @dataclass
@@ -278,6 +292,20 @@ class AiterFlashAttentionMetadataBuilder(
         self.aot_sliding_window: tuple[int, int] | None = None
         self.total_tokens: int = 0
 
+        sliding_window_configs: set[tuple[int, int] | None] = set()
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer in layers.values():
+            assert isinstance(layer.impl, AiterFlashAttentionImpl)
+            sliding_window_configs.add(layer.impl.sliding_window)
+
+        while len(sliding_window_configs) > 0:
+            sliding_window_config = sliding_window_configs.pop()
+            if sliding_window_config is not None and sliding_window_config[0] != -1:
+                assert self.aot_sliding_window is None, (
+                    "Aiter Flash ATTENTION can only support one valid sliding window!"
+                )
+                self.aot_sliding_window = sliding_window_config
+
         self.extend_workspace = torch.empty(
             [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
             dtype=self.model_config.dtype,
@@ -349,6 +377,105 @@ class AiterFlashAttentionMetadataBuilder(
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
             seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
+            swa_metadata = None
+            if self.aot_sliding_window is not None:
+                # When sliding window attention have been activated, we chunking the
+                # query len dim rather than kv len dim to make sure our allocated
+                # workspace can fit in the exact kv len for each chunk. And all the
+                # other chunked metadata from `AiterChunkContextMetadata` will not
+                # be used during SWA calculation
+                swa_seqlens_for_extend = torch.minimum(
+                    query_lens_for_extend + self.aot_sliding_window[0] + 1,
+                    seq_lens_for_extend,
+                )
+                if torch.any(swa_seqlens_for_extend > _CP_TOKENS_PER_ITER_ROCM):
+                    raise RuntimeError(
+                        f"Each query length + sliding window size must be less than "
+                        f"{_CP_TOKENS_PER_ITER_ROCM} for ROCM AITER FLASH ATTENTION "
+                        f"backend, but got max(query_len + sliding_window_size) = "
+                        f"{swa_seqlens_for_extend.max().item()}. Pease try to increase "
+                        f"the `max-num-batched-tokens` or `_CP_TOKENS_PER_ITER_ROCM` "
+                        f"to make sure the funcitonality works fine."
+                    )
+                token_budgets = _CP_TOKENS_PER_ITER_ROCM
+                swa_seqlens = []
+                swa_cu_seqlens = []
+                swa_seq_starts = []
+                swa_token_to_batch = []
+                swa_total_tokens = []
+                swa_chunk_starts = []
+                swa_chunk_ends = []
+                swa_max_seqlens = []
+                swa_chunk_start = 0
+                chunk_swa_seqlens: list[int] = []
+                chunk_seqlens: list[int] = []
+                for i in range(num_extends):
+                    token_budgets -= swa_seqlens_for_extend[i].item()
+                    chunk_swa_seqlens.append(swa_seqlens_for_extend[i])
+                    chunk_seqlens.append(seq_lens_for_extend[i])
+                    if (
+                        i == num_extends - 1
+                        or token_budgets < swa_seqlens_for_extend[i + 1].item()
+                    ):
+                        chunk_swa_total_tokens = (
+                            _CP_TOKENS_PER_ITER_ROCM - token_budgets
+                        )
+                        chunk_batches = len(chunk_swa_seqlens)
+                        chunk_swa_seqlens_tensor = torch.tensor(chunk_swa_seqlens)
+                        chunk_seqlens_tensor = torch.tensor(chunk_seqlens)
+                        chunk_swa_seq_starts = torch.clamp(
+                            chunk_seqlens_tensor - chunk_swa_seqlens_tensor, min=0
+                        )
+                        chunk_swa_cu_seqlens = torch.zeros(
+                            chunk_batches + 1, dtype=torch.int
+                        )
+                        torch.cumsum(
+                            chunk_swa_seqlens_tensor,
+                            dim=0,
+                            out=chunk_swa_cu_seqlens[1:],
+                        )
+                        chunk_swa_max_seqlens = chunk_swa_seqlens_tensor.max().item()
+                        token_to_batch = torch.arange(
+                            swa_chunk_start,
+                            i + 1,
+                            dtype=torch.int,
+                            device=query_lens_for_extend.device,
+                        )
+                        token_to_batch = torch.repeat_interleave(
+                            token_to_batch, chunk_swa_seqlens_tensor
+                        )
+
+                        swa_seqlens.append(
+                            chunk_swa_seqlens_tensor.to(self.device, non_blocking=True)
+                        )
+                        swa_cu_seqlens.append(
+                            chunk_swa_cu_seqlens.to(self.device, non_blocking=True)
+                        )
+                        swa_seq_starts.append(
+                            chunk_swa_seq_starts.to(self.device, non_blocking=True)
+                        )
+                        swa_token_to_batch.append(
+                            token_to_batch.to(self.device, non_blocking=True)
+                        )
+                        swa_total_tokens.append(chunk_swa_total_tokens)
+                        swa_chunk_starts.append(swa_chunk_start)
+                        swa_chunk_ends.append(i + 1)
+                        swa_max_seqlens.append(chunk_swa_max_seqlens)
+                        swa_chunk_start = i + 1
+                        token_budgets = _CP_TOKENS_PER_ITER_ROCM
+                        chunk_swa_seqlens = []
+                        chunk_seqlens = []
+
+                swa_metadata = AiterChunkSlidingWindowMetadata(
+                    swa_seqlens=swa_seqlens,
+                    swa_cu_seqlens=swa_cu_seqlens,
+                    swa_seq_starts=swa_seq_starts,
+                    swa_token_to_batch=swa_token_to_batch,
+                    swa_max_seqlens=swa_max_seqlens,
+                    swa_total_tokens=swa_total_tokens,
+                    swa_chunk_starts=swa_chunk_starts,
+                    swa_chunk_ends=swa_chunk_ends,
+                )
 
             # allocate the equal amount of workspace for
             # each chunk prefill request
@@ -392,6 +519,7 @@ class AiterFlashAttentionMetadataBuilder(
                 token_to_batch=token_to_batch_tensor.to(self.device, non_blocking=True),
                 num_chunks=num_chunks,
                 total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
+                swa_metadata=swa_metadata,
             )
 
             query_start_loc_device = common_attn_metadata.query_start_loc[
@@ -504,9 +632,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
-            self.sliding_window = [-1, -1]
+            self.sliding_window = (-1, -1)
         else:
-            self.sliding_window = [sliding_window - 1, 0]
+            self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -520,6 +648,70 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
                 "Encoder self-attention is not implemented for FlashAttentionImpl"
+            )
+
+    def extend_for_sliding_window(
+        self,
+        attn_metadata: AiterFlashAttentionMetadata,
+        query: torch.Tensor,
+        key_cache,
+        value_cache,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        max_seqlen_q: int,
+        block_table: torch.Tensor,
+        k_scale: float,
+        v_scale: float,
+    ):
+        assert attn_metadata.extend_metadata is not None
+        assert attn_metadata.extend_metadata.chunk_context_metadata is not None
+        chunked_metadata = attn_metadata.extend_metadata.chunk_context_metadata
+        swa_metadata = chunked_metadata.swa_metadata
+        assert swa_metadata is not None
+        swa_cu_seqlens = swa_metadata.swa_cu_seqlens
+        swa_seq_starts = swa_metadata.swa_seq_starts
+        swa_token_to_batch = swa_metadata.swa_token_to_batch
+        swa_max_seqlens = swa_metadata.swa_max_seqlens
+        swa_total_tokens = swa_metadata.swa_total_tokens
+        swa_chunk_starts = swa_metadata.swa_chunk_starts
+        swa_chunk_ends = swa_metadata.swa_chunk_ends
+        key_fetched, value_fetched = (
+            chunked_metadata.workspace[0],
+            chunked_metadata.workspace[1],
+        )
+        for i in range(len(swa_chunk_starts)):
+            cp_mha_gather_cache(
+                key_cache=key_cache,
+                value_cache=value_cache,
+                key=key_fetched,
+                value=value_fetched,
+                block_tables=block_table,
+                k_scales=k_scale,
+                v_scales=v_scale,
+                cu_seqlens_kv=swa_cu_seqlens[i],
+                token_to_batch=swa_token_to_batch[i],
+                seq_starts=swa_seq_starts[i],
+                dequant=False,
+                kv_cache_layout="NHD",
+                total_tokens=swa_total_tokens[i],
+            )
+
+            aiter.flash_attn_varlen_func(
+                q=query[swa_chunk_starts[i] : swa_chunk_ends[i]],
+                k=key_fetched,
+                v=value_fetched,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=swa_cu_seqlens[i],
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=swa_max_seqlens[i],
+                min_seqlen_q=1,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+                causal=True,
+                window_size=self.sliding_window,
+                alibi_slopes=self.alibi_slopes,
+                return_lse=False,
+                out=output[swa_chunk_starts[i] : swa_chunk_ends[i]],
             )
 
     def extend_forward(
@@ -540,6 +732,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
         k_scale: float,
         v_scale: float,
     ):
+        if self.sliding_window[0] != -1:
+            return self.extend_for_sliding_window(
+                attn_metadata,
+                query,
+                key_cache,
+                value_cache,
+                output,
+                cu_seqlens_q,
+                max_seqlen_q,
+                block_table,
+                k_scale,
+                v_scale,
+            )
         out, lse = aiter.flash_attn_varlen_func(
             q=query,
             k=key,
@@ -782,6 +987,36 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for decodes
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
+                if self.sliding_window[0] != -1:
+                    from aiter.ops.triton.unified_attention import (
+                        unified_attention,
+                    )
+
+                    descale_shape = (
+                        attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
+                        key_cache.shape[2],
+                    )
+                    unified_attention(
+                        q=query[:num_decode_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_decode_tokens],
+                        cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
+                        max_seqlen_q=attn_metadata.decode_metadata.max_query_len,
+                        seqused_k=attn_metadata.seq_lens[:num_decodes],
+                        max_seqlen_k=attn_metadata.decode_metadata.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=self.sliding_window,
+                        block_table=attn_metadata.block_table[:num_decodes],
+                        softcap=self.logits_soft_cap,
+                        q_descale=None,
+                        k_descale=layer._k_scale.expand(descale_shape),
+                        v_descale=layer._v_scale.expand(descale_shape),
+                    )
+                    return
+                assert attn_metadata.decode_metadata is not None
                 _, num_heads, head_size = query.shape
                 nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
                 num_seqs = attn_metadata.seq_lens.shape[0]
@@ -807,7 +1042,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     attn_metadata.block_table[:num_decodes],
                     attn_metadata.query_start_loc[:num_decodes],
                     attn_metadata.seq_lens[:num_decodes],
-                    attn_metadata.max_seq_len,
+                    attn_metadata.decode_metadata.max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
                     "NHD",
