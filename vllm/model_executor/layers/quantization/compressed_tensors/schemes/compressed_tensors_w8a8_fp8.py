@@ -117,7 +117,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                     weight_loader,
                     name="weight",
                     wait_for_params=["weight"],
-                    wait_for_shards=layer.all_shards,
                 ),
             )
             return
@@ -223,11 +222,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
 
 def online_quantize(layer, weight_loader, name, wait_for_params, wait_for_shards):
-    wait_for_keys = [
-        (param_name, shard_id)
-        for param_name in wait_for_params
-        for shard_id in wait_for_shards
-    ]  # params are determined by quant method, shards are determined by layer
+    numel_loaded = 0
 
     def wrapped_weight_loader(param, loaded_weight, **kwargs):
         # (2) allocate unquantized buffer on GPU for loading
@@ -235,12 +230,12 @@ def online_quantize(layer, weight_loader, name, wait_for_params, wait_for_shards
             layer.register_parameter(name, param.to(torch.cuda.current_device()))
 
         # (3) load into unquantized GPU buffer
-        weight_loader(getattr(layer, name), loaded_weight, loaded_shard_id)
+        weight_loader(getattr(layer, name), loaded_weight, **kwargs)
 
         # check if all necessary weights and shards are loaded
-        loaded_shard_id = kwargs.get("loaded_shard_id", None)
-        wait_for_keys.remove((name, loaded_shard_id))
-        if len(wait_for_keys) <= 0:
+        nonlocal numel_loaded
+        numel_loaded += loaded_weight.numel()
+        if numel_loaded >= getattr(layer, name).numel():
             # (4) do quantization and allocate new quantized params
             layer.weight, layer.scale = fp8_quantize(layer.weight)
 
