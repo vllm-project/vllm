@@ -2,8 +2,8 @@
 set -ex
 
 # usage: ./build.sh [workspace_dir] [mode]
-#   mode: "wheel" (default) → build wheels into WORKSPACE/dist
-#         "install"         → install directly into current Python env
+#   mode: "install" (default) → install directly into current Python env
+#         "wheel"              → build wheels into WORKSPACE/dist
 
 WORKSPACE=${1:-$(pwd)/ep_kernels_workspace}
 MODE=${2:-install}
