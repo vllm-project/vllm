@@ -34,11 +34,36 @@ def build_access_log_path_filter(
     if not normalized_paths:
         return None
 
+    def _looks_like_request_line(value: str) -> bool:
+        """Quick heuristic to distinguish request lines from client addresses."""
+        return " HTTP/" in value and value.count(" ") >= 2
+
     def filter(record: logging.LogRecord) -> bool:
         args = record.args
-        if not isinstance(args, dict):
-            return True
-        request_line = args.get("request_line")
+        request_line: str | None = None
+
+        if isinstance(args, dict):
+            request_line = args.get("request_line")
+        elif isinstance(args, tuple):
+            for candidate in args:
+                if isinstance(candidate, dict):
+                    candidate_line = candidate.get("request_line")
+                    if isinstance(candidate_line, str):
+                        request_line = candidate_line
+                        break
+                elif isinstance(candidate, str) and _looks_like_request_line(candidate):
+                    request_line = candidate
+                    break
+
+        if not isinstance(request_line, str):
+            message = record.getMessage()
+            # message format: '127.0.0.1:12345 - "GET /metrics HTTP/1.1" 200 OK'
+            if '"' in message:
+                try:
+                    request_line = message.split('"')[1]
+                except IndexError:
+                    request_line = None
+
         if not isinstance(request_line, str):
             return True
         parts = request_line.split()
