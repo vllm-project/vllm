@@ -39,3 +39,6 @@ mteb[bm25s]>=1.38.11, <2
 
 # Required for eval tests
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
+
+# Plugins test
+terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
