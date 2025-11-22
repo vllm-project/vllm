@@ -1109,6 +1109,22 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
+        results = self.quant_method.process_weights_before_loading(
+            self, param, loaded_weight
+        )
+        scale = results.get("scale", None)
+        loaded_weight = results.get("quantized", loaded_weight)
+        if scale is not None and hasattr(param, "scale"):
+            # load scale
+            scale_param = self.get_parameter(param.scale)
+            scale_param.weight_loader(
+                scale_param,
+                scale,
+                weight_name + "_scale",
+                shard_id,
+                expert_id,
+                return_success,
+            )
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
