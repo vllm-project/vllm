@@ -61,7 +61,7 @@ for backend in BACKENDS_TO_TEST:
 
 BACKEND_BLOCK_SIZES = {}
 for backend in BACKENDS_TO_TEST:
-    supported_sizes = backend.get_class().supported_kernel_block_sizes
+    supported_sizes = backend.get_class().get_supported_kernel_block_sizes()
     if supported_sizes:
         default_size = supported_sizes[0]
         block_size = (
