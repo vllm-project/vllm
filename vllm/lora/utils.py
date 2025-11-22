@@ -290,10 +290,12 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-
-            packed_modules_mapping["experts"] = [
-                weight_name.rstrip(".") for _, weight_name, _, _ in moe_packed_mapping
-            ]
+            if not hasattr(model, "is_3d_moe_weight"):
+                # 3D MoE LoRA does not need `packed_modules_mapping`
+                packed_modules_mapping["experts"] = [
+                    weight_name.rstrip(".")
+                    for _, weight_name, _, _ in moe_packed_mapping
+                ]
 
             return packed_modules_mapping
         else:

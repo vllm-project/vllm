@@ -406,67 +406,70 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if module_lora:
-                # Note (gnovack) - If MOE lora weights are not split into
-                # num_experts chunks, we split them here
-                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
-                    module_lora.lora_a
-                ):
-                    # Handle FSDP file format where experts.base_layer is the
-                    # gate_up_proj and experts is the down_proj
-                    gate_up_proj_lora = self._get_lora_layer_weights(
-                        lora_model, module_name + ".base_layer"
+            if not module_lora:
+                module.reset_lora(index)
+                continue
+            # Note (gnovack) - If MOE lora weights are not split into
+            # num_experts chunks, we split them here
+            if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+                module_lora.lora_a
+            ):
+                # Handle PEFT file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                gate_up_proj_lora = self._get_lora_layer_weights(
+                    lora_model, module_name + ".base_layer"
+                )
+                down_proj_lora = module_lora
+                # FIXME Edge case where LoRA is not added to gate_up_proj
+                # or down_proj
+                assert gate_up_proj_lora is not None
+                assert down_proj_lora is not None
+                if self._is_3d_moe_model:
+                    module_lora.lora_a = [
+                        gate_up_proj_lora.lora_a,
+                        down_proj_lora.lora_a,
+                    ]
+                    module_lora.lora_b = [
+                        gate_up_proj_lora.lora_b,
+                        down_proj_lora.lora_b,
+                    ]
+                else:
+                    # Some 3D MoE models haven't added the `is_3d_moe_weight`
+                    # attribute yet, so fallback here
+                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                        num_experts, dim=-1
+                    )
+                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                        num_experts, dim=-1
                     )
 
-                    assert gate_up_proj_lora is not None
-                    assert module_lora is not None
-                    if not self._is_3d_moe_model:
-                        down_proj_lora = module_lora
-                        num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
 
-                        gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-                        up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    lora_a = []
+                    lora_b = []
+                    for i in range(num_experts):
+                        lora_a.append(gate_proj_a[i])
+                        lora_a.append(down_proj_a[i])
+                        lora_a.append(up_proj_a[i])
 
-                        gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
-                            num_experts, dim=-1
-                        )
-                        up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
-                            num_experts, dim=-1
-                        )
+                        lora_b.append(gate_proj_b[i])
+                        lora_b.append(down_proj_b[i])
+                        lora_b.append(up_proj_b[i])
 
-                        down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
-                        down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+                    module_lora.lora_a = lora_a
+                    module_lora.lora_b = lora_b
+            module.set_lora(
+                index,
+                module_lora.lora_a,
+                module_lora.lora_b,
+            )
 
-                        lora_a = []
-                        lora_b = []
-                        for i in range(num_experts):
-                            lora_a.append(gate_proj_a[i])
-                            lora_a.append(down_proj_a[i])
-                            lora_a.append(up_proj_a[i])
-
-                            lora_b.append(gate_proj_b[i])
-                            lora_b.append(down_proj_b[i])
-                            lora_b.append(up_proj_b[i])
-
-                        module_lora.lora_a = lora_a
-                        module_lora.lora_b = lora_b
-                    else:
-                        module_lora.lora_a = [
-                            gate_up_proj_lora.lora_a,
-                            down_proj_b.lora_a,
-                        ]
-                        module_lora.lora_b = [
-                            gate_up_proj_lora.lora_b,
-                            down_proj_b.lora_b,
-                        ]
-
-                module.set_lora(
-                    index,
-                    module_lora.lora_a,
-                    module_lora.lora_b,
-                )
-            else:
-                module.reset_lora(index)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -528,10 +531,11 @@ class LoRAModelManager:
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if isinstance(module, FusedMoE):
-                # packed_moduled_lst is used here to determine whether to
+                # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
                 # LoRA weights of w1 and w3 have already been fused on disk.
+
                 packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
             new_module = replace_submodule(
                 self.model,
@@ -627,6 +631,29 @@ class LoRAModelManager:
                         module.lora_a_stacked[0].dtype,
                         "cpu",
                     )
+                    model.loras[module_name] = lora
+                elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
+                    # Case for 3D moe model
+                    # w2
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w2_lora_a_stacked[0].shape[-1],
+                        module.w2_lora_b_stacked[0].shape[-2],
+                        rank * module.w2_lora_a_stacked[0].shape[1],
+                        module.w2_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name] = lora
+                    # w13
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w13_lora_a_stacked[0].shape[-1],
+                        module.w13_lora_b_stacked[0].shape[-2],
+                        rank * module.w13_lora_a_stacked[0].shape[1],
+                        module.w13_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name + ".base_layer"] = lora
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
@@ -636,6 +663,7 @@ class LoRAModelManager:
                         module.lora_a_stacked[0].dtype,
                         "cpu",
                     )
+                    model.loras[module_name] = lora
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -651,7 +679,7 @@ class LoRAModelManager:
                     )
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
-            model.loras[module_name] = lora
+                model.loras[module_name] = lora
         return model
 
     def _match_target_modules(self, module_name: str):

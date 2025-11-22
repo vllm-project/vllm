@@ -230,7 +230,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
-                max_lora_rank = self.w2_lora_a_stacked.shape[-2]
+                max_lora_rank = self.w2_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w2",
                     num_loras=self.max_loras,
@@ -258,8 +258,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.punica_wrapper.add_lora_fused_moe(
                     intermediate_cache3,
                     intermediate_cache2,
-                    (self.w2_lora_a_stacked,),
-                    (self.w2_lora_b_stacked,),
+                    self.w2_lora_a_stacked,
+                    self.w2_lora_b_stacked,
                     topk_weights,
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -292,20 +292,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.base_layer.quant_method, m_fused_moe_fn
         )
 
-    def create_lora_weights(
+    def _create_lora_a_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
-    ) -> None:
-        """Initializes lora matrices."""
-        self.max_loras = lora_config.max_loras
-        self.fully_sharded = lora_config.fully_sharded_loras
-
-        self.adapter_enabled = torch.tensor(
-            [0] * (max_loras + 1), dtype=torch.int, device=self.device
-        )
-
+    ):
         self.w13_lora_a_stacked = tuple(
             torch.zeros(
                 (
@@ -321,7 +312,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self._w13_slices)
         )
+        self.w2_lora_a_stacked = (
+            torch.zeros(
+                (
+                    max_loras,
+                    self.base_layer.local_num_experts,
+                    lora_config.max_lora_rank,
+                    self.base_layer.intermediate_size_per_partition,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
 
+    def _create_lora_b_weights(self, max_loras: int, lora_config: LoRAConfig):
         self.w13_lora_b_stacked = tuple(
             torch.zeros(
                 (
@@ -335,30 +339,37 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self._w13_slices)
         )
-
-        self.w2_lora_a_stacked = torch.zeros(
-            (
-                max_loras,
-                self.base_layer.local_num_experts,
-                lora_config.max_lora_rank,
-                self.base_layer.intermediate_size_per_partition,
+        self.w2_lora_b_stacked = (
+            torch.zeros(
+                (
+                    max_loras,
+                    self.base_layer.local_num_experts,
+                    self.base_layer.hidden_size
+                    if not self.fully_sharded
+                    else divide(self.base_layer.hidden_size, self.tp_size),
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
             ),
-            dtype=lora_config.lora_dtype,
-            device=self.device,
-        )
-        self.w2_lora_b_stacked = torch.zeros(
-            (
-                max_loras,
-                self.base_layer.local_num_experts,
-                self.base_layer.hidden_size
-                if not self.fully_sharded
-                else divide(self.base_layer.hidden_size, self.tp_size),
-                lora_config.max_lora_rank,
-            ),
-            dtype=lora_config.lora_dtype,
-            device=self.device,
         )
 
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PretrainedConfig | None = None,
+    ) -> None:
+        """Initializes lora matrices."""
+        self.max_loras = lora_config.max_loras
+        self.fully_sharded = lora_config.fully_sharded_loras
+
+        self.adapter_enabled = torch.tensor(
+            [0] * (max_loras + 1), dtype=torch.int, device=self.device
+        )
+
+        self._create_lora_a_weights(max_loras, lora_config)
+        self._create_lora_b_weights(max_loras, lora_config)
         # They will be used by 'LoRALayerWeights.create_dummy_lora_weights'
         # to create a dummy LoRA weights.
         # TODO Optimize this section
@@ -370,20 +381,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.lora_a_stacked.append(
                     self.w13_lora_a_stacked[0][lora_id][experts_id]
                 )
-                self.lora_a_stacked.append(self.w2_lora_a_stacked[lora_id][experts_id])
+                self.lora_a_stacked.append(
+                    self.w2_lora_a_stacked[0][lora_id][experts_id]
+                )
 
                 self.lora_b_stacked.append(
                     self.w13_lora_b_stacked[0][lora_id][experts_id]
                 )
-                self.lora_b_stacked.append(self.w2_lora_b_stacked[lora_id][experts_id])
+                self.lora_b_stacked.append(
+                    self.w2_lora_b_stacked[0][lora_id][experts_id]
+                )
 
-                if self._w13_slices > 1:
-                    self.lora_a_stacked.append(
-                        self.w13_lora_a_stacked[1][lora_id][experts_id]
-                    )
-                    self.lora_b_stacked.append(
-                        self.w13_lora_b_stacked[1][lora_id][experts_id]
-                    )
+                self.lora_a_stacked.append(
+                    self.w13_lora_a_stacked[1][lora_id][experts_id]
+                )
+                self.lora_b_stacked.append(
+                    self.w13_lora_b_stacked[1][lora_id][experts_id]
+                )
 
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
@@ -391,17 +405,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.w13_lora_a_stacked[pos][index] = 0
             self.w13_lora_b_stacked[pos][index] = 0
 
-        self.w2_lora_a_stacked[index] = 0
-        self.w2_lora_b_stacked[index] = 0
+        self.w2_lora_a_stacked[0][index] = 0
+        self.w2_lora_b_stacked[0][index] = 0
         self.adapter_enabled[index] = 0
 
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
+        assert isinstance(lora_a, list)
+        assert isinstance(lora_b, list)
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
         for eid in range(len(lora_a) // 3):
@@ -434,7 +450,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     w1_lora_a = w1_lora_a[w13_start_idx:w13_end_idx, :]
                     w3_lora_a = w3_lora_a[w13_start_idx:w13_end_idx, :]
 
-                    w2_shard_size = self.w2_lora_b_stacked[index, eid].shape[0]
+                    w2_shard_size = self.w2_lora_b_stacked[0][index, eid].shape[0]
                     w2_start_idx = self.tp_rank * w2_shard_size
                     w2_end_idx = (self.tp_rank + 1) * w2_shard_size
                     w2_lora_b = w2_lora_b[w2_start_idx:w2_end_idx, :]
@@ -456,11 +472,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 index, eid, : w3_lora_b.shape[0], : w3_lora_b.shape[1]
             ].copy_(w3_lora_b, non_blocking=True)
 
-            self.w2_lora_a_stacked[
+            self.w2_lora_a_stacked[0][
                 index, eid, : w2_lora_a.shape[0], : w2_lora_a.shape[1]
             ].copy_(w2_lora_a, non_blocking=True)
 
-            self.w2_lora_b_stacked[
+            self.w2_lora_b_stacked[0][
                 index, eid, : w2_lora_b.shape[0], : w2_lora_b.shape[1]
             ].copy_(w2_lora_b, non_blocking=True)
 
@@ -501,74 +517,91 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         super().__init__(base_layer)
         self._w13_slices = 1
 
+    def _create_lora_b_weights(self, max_loras, lora_config):
+        self.w13_lora_b_stacked = tuple(
+            torch.zeros(
+                (
+                    max_loras,
+                    self.base_layer.local_num_experts,
+                    self.base_layer.intermediate_size_per_partition * 2,
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for _ in range(self._w13_slices)
+        )
+        self.w2_lora_b_stacked = (
+            torch.zeros(
+                (
+                    max_loras,
+                    self.base_layer.local_num_experts,
+                    self.base_layer.hidden_size
+                    if not self.fully_sharded
+                    else divide(self.base_layer.hidden_size, self.tp_size),
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PretrainedConfig | None = None,
+    ) -> None:
+        """Initializes lora matrices."""
+        self.max_loras = lora_config.max_loras
+        self.fully_sharded = lora_config.fully_sharded_loras
+
+        self.adapter_enabled = torch.tensor(
+            [0] * (max_loras + 1), dtype=torch.int, device=self.device
+        )
+
+        self._create_lora_a_weights(max_loras, lora_config)
+        self._create_lora_b_weights(max_loras, lora_config)
+
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
+
+        assert isinstance(lora_a, list)
+        assert isinstance(lora_b, list)
+        assert len(lora_a) == len(lora_b) == 2
+
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
-        # for eid in range(len(lora_a) // 3):
-        #     w1_lora_a = lora_a[eid * 3]
-        #     w2_lora_a = lora_a[eid * 3 + 1]
-        #     w3_lora_a = lora_a[eid * 3 + 2]
-        #     w1_lora_b = lora_b[eid * 3]
-        #     w2_lora_b = lora_b[eid * 3 + 1]
-        #     w3_lora_b = lora_b[eid * 3 + 2]
 
-        #     # Handle the case of adding LoRA to only a subset of experts
-        #     if w1_lora_a is None or w2_lora_a is None or w3_lora_a is None:
-        #         continue
+        num_experts = self.w13_lora_a_stacked[0].shape[1]
+        w13_lora_a, w2_lora_a = lora_a
+        w13_lora_b, w2_lora_b = lora_b
+        w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
+        w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
+        self.w13_lora_a_stacked[0][
+            index, :, : w13_lora_a.shape[1], : w13_lora_a.shape[2]
+        ].copy_(w13_lora_a, non_blocking=True)
+        self.w2_lora_a_stacked[0][
+            index, :, : w2_lora_a.shape[1], : w2_lora_a.shape[2]
+        ].copy_(w2_lora_a, non_blocking=True)
 
-        #     if self.tp_size > 1:
-        #         shard_size = self.base_layer.intermediate_size_per_partition
-        #         start_idx = self.tp_rank * shard_size
-        #         end_idx = (self.tp_rank + 1) * shard_size
-
-        #         w1_lora_b = w1_lora_b[start_idx:end_idx, :]
-        #         w3_lora_b = w3_lora_b[start_idx:end_idx, :]
-        #         w2_lora_a = w2_lora_a[:, start_idx:end_idx]
-
-        #         if self.fully_sharded:
-        #             # Based on S-LoRA, we slice W1 and W3 A along the rank dim,
-        #             # and W2 B along the hidden_size dim.
-        #             w13_shard_size = self.w13_lora_a_stacked[0][index, eid].shape[0]
-        #             w13_start_idx = self.tp_rank * w13_shard_size
-        #             w13_end_idx = (self.tp_rank + 1) * w13_shard_size
-        #             w1_lora_a = w1_lora_a[w13_start_idx:w13_end_idx, :]
-        #             w3_lora_a = w3_lora_a[w13_start_idx:w13_end_idx, :]
-
-        #             w2_shard_size = self.w2_lora_b_stacked[index, eid].shape[0]
-        #             w2_start_idx = self.tp_rank * w2_shard_size
-        #             w2_end_idx = (self.tp_rank + 1) * w2_shard_size
-        #             w2_lora_b = w2_lora_b[w2_start_idx:w2_end_idx, :]
-        #     # w1 lora_a
-        #     self.w13_lora_a_stacked[0][
-        #         index, eid, : w1_lora_a.shape[0], : w1_lora_a.shape[1]
-        #     ].copy_(w1_lora_a, non_blocking=True)
-        #     # w3 lora_a
-        #     self.w13_lora_a_stacked[1][
-        #         index, eid, : w3_lora_a.shape[0], : w3_lora_a.shape[1]
-        #     ].copy_(w3_lora_a, non_blocking=True)
-
-        #     # w1 lora_b
-        #     self.w13_lora_b_stacked[0][
-        #         index, eid, : w1_lora_b.shape[0], : w1_lora_b.shape[1]
-        #     ].copy_(w1_lora_b, non_blocking=True)
-        #     # w3 lora_b
-        #     self.w13_lora_b_stacked[1][
-        #         index, eid, : w3_lora_b.shape[0], : w3_lora_b.shape[1]
-        #     ].copy_(w3_lora_b, non_blocking=True)
-
-        #     self.w2_lora_a_stacked[
-        #         index, eid, : w2_lora_a.shape[0], : w2_lora_a.shape[1]
-        #     ].copy_(w2_lora_a, non_blocking=True)
-
-        #     self.w2_lora_b_stacked[
-        #         index, eid, : w2_lora_b.shape[0], : w2_lora_b.shape[1]
-        #     ].copy_(w2_lora_b, non_blocking=True)
+        # (output_size,num_experts,rank)
+        w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
+        # (num_experts,output_size,rank)
+        w13_lora_b = w13_lora_b.permute(1, 0, 2) 
+        w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
+        w2_lora_b = w2_lora_b.permute(1, 0, 2)
+        self.w13_lora_b_stacked[0][
+            index, :, : w13_lora_b.shape[1], : w13_lora_b.shape[2]
+        ].copy_(w13_lora_b, non_blocking=True)
+        self.w2_lora_b_stacked[0][
+            index, :, : w2_lora_b.shape[1], : w2_lora_b.shape[2]
+        ].copy_(w2_lora_b, non_blocking=True)
 
     @classmethod
     def can_replace_layer(
