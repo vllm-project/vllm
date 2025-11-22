@@ -141,10 +141,11 @@ def triton_kernel_fused_experts(
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
     # Shape check, only check non-mxfp4
+    assert hidden_states.ndim == 2
     assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
-    batch_dim = hidden_states.shape[0] if hidden_states.ndim == 3 else 1
+    batch_dim = 1
     M, K = hidden_states.shape[-2:]
     E, _, N = w1.shape
 
@@ -182,10 +183,9 @@ def triton_kernel_fused_experts(
         fused_activation=act,
         y=intermediate_cache13,
     )
-    intermediate_cache13 = intermediate_cache13.view(M * topk, N // 2)
 
     matmul_ogs(
-        intermediate_cache13,
+        intermediate_cache13.view(M * topk, N // 2),
         w2,
         quant_config.w2_bias,
         routing_data,
@@ -248,6 +248,42 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        """
+        Extract the MoE problem size from the given tensor arguments:
+        - a: The hidden states, input to the MoE layer.
+        - w1: The first set of expert weights.
+        - w2: The second set of expert weights.
+        - topk_ids: The topk ids.
+        Note: extracting the problem shape from the weight and activation
+        tensors is not obvious.  It needs to be done this way specifically
+        due to subtle issues with particular kernels, e.g. the int4 kernels
+        divide the trailing dimension by two, so it's not "correct" to
+        extract N or K from the trailing dimension of w1 or w2.  Similarly,
+        some kernels transpose the weights, so this needs to be kept in mind.
+        Note: This implementation covers most cases. However, if experts
+        require a specialized implementation, like MarlinExperts, they are free
+        to override this function.
+        """
+        assert w1.dim() == 3 and w2.dim() == 3
+        E, _, N = w1.size()
+        K = a1.size(-1)
+
+        assert a1.dim() == 2
+        assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+        M = a1.size(0)
+
+        assert topk_ids.dim() == 2
+        topk = topk_ids.size(1)
+
+        return E, M, N, K, topk
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Weight application and reduction happens in the fused_experts kernel.
         return TopKWeightAndReduceNoOP()
@@ -278,49 +314,6 @@ class OAITritonExperts(BaseOAITritonExperts):
 
     def supports_chunking(self) -> bool:
         return True
-
-    def moe_problem_size(
-        self,
-        a1: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
-        - a: The hidden states, input to the MoE layer.
-        - w1: The first set of expert weights.
-        - w2: The second set of expert weights.
-        - topk_ids: The topk ids.
-
-        Note: extracting the problem shape from the weight and activation
-        tensors is not obvious.  It needs to be done this way specifically
-        due to subtle issues with particular kernels, e.g. the int4 kernels
-        divide the trailing dimension by two, so it's not "correct" to
-        extract N or K from the trailing dimension of w1 or w2.  Similarly,
-        some kernels transpose the weights, so this needs to be kept in mind.
-
-        Note: This implementation covers most cases. However, if experts
-        require a specialized implementation, like MarlinExperts, they are free
-        to override this function.
-        """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, _, N = w1.size()
-        K = a1.size(-1)
-
-        if a1.dim() == 2:
-            # Make sure we are using the correct a1 (pre-permute).
-            assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
-            M = a1.size(0)
-        else:
-            assert a1.dim() == 3
-            assert a1.size(0) == E, f"{a1.size(0)} == {E}"
-            M = a1.size(1)  # This is max_num_tokens
-
-        assert topk_ids.dim() == 2
-        topk = topk_ids.size(1)
-
-        return E, M, N, K, topk
 
     def workspace_shapes(
         self,
