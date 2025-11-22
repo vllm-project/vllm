@@ -853,6 +853,7 @@ class VllmRunner:
     @staticmethod
     def _final_steps_generate_w_logprobs(
         req_outputs: list[RequestOutput],
+        include_prompt_token_ids: bool = False,
     ) -> list[TokensTextLogprobsPromptLogprobs]:
         outputs: list[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
@@ -861,9 +862,26 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append(
-                (output_ids, output_str, output_logprobs, req_output.prompt_logprobs)
-            )
+            if include_prompt_token_ids:
+                outputs.append(
+                    (  # type: ignore[arg-type]
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_token_ids,
+                        req_output.prompt_logprobs,
+                    )
+                )
+            else:
+                outputs.append(
+                    (
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_logprobs,
+                    )
+                )
+
         return outputs
 
     def generate_w_logprobs(
@@ -873,6 +891,7 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        include_prompt_token_ids: bool = False,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs] | list[TokensTextLogprobsPromptLogprobs]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
@@ -882,7 +901,7 @@ class VllmRunner:
         )
 
         toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(
-            req_outputs
+            req_outputs, include_prompt_token_ids
         )
         # Omit prompt logprobs if not required by sampling params
         return (
