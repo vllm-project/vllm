@@ -19,6 +19,8 @@ import torch
 from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 else:
@@ -26,6 +28,8 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
+
+logger = init_logger(__name__)
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -296,9 +300,10 @@ def hash_factors(items: dict[str, object]) -> str:
 
 
 class BoolWithReason:
-    def __init__(self, value: bool, reason: str):
+    def __init__(self, value: bool, reason: str, soft_failed: bool = False):
         self.value = value
         self.reason = reason
+        self.soft_failed = soft_failed
 
     def __bool__(self):
         return self.value
@@ -306,6 +311,19 @@ class BoolWithReason:
     def __repr__(self):
         return f"value={self.value} reason={self.reason}"
 
-    def raise_if_false(self):
-        if not self.value:
-            raise ValueError(self.reason)
+    def raise_if_false(self, template: str | None = None):
+        if self.value:
+            return
+
+        if self.soft_failed:
+            return self.warning_if_false(template)
+
+        msg = self.reason if template is None else template.format(reason=self.reason)
+        raise ValueError(msg)
+
+    def warning_if_false(self, template: str | None = None):
+        if self.value:
+            return None
+
+        msg = self.reason if template is None else template.format(reason=self.reason)
+        logger.warning_once(msg, scope="local")

@@ -1926,7 +1926,10 @@ class EngineArgs:
                 "Enabling" if is_chunked_prefill_supported.value else "Disabling",
             )
         elif self.enable_chunked_prefill:
-            is_chunked_prefill_supported.raise_if_false()
+            is_chunked_prefill_supported.warning_if_false(
+                template="{reason}. Enabling this manually may cause the engine "
+                "to crash or produce incorrect outputs."
+            )
 
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = is_prefix_caching_supported.value
@@ -1937,7 +1940,10 @@ class EngineArgs:
                 "Enabling" if is_prefix_caching_supported.value else "Disabling",
             )
         elif self.enable_prefix_caching:
-            is_prefix_caching_supported.raise_if_false()
+            is_prefix_caching_supported.warning_if_false(
+                template="{reason}. Enabling this manually may cause the engine "
+                "to crash or produce incorrect outputs."
+            )
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
