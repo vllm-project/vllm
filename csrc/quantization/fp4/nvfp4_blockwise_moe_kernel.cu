@@ -406,7 +406,8 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
           LayoutB*, AlignmentB, ElementAccumulator, MmaTileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
+          cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong>::
+          CollectiveOp;
 
   using GemmKernel =
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop,
@@ -457,9 +458,11 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<UnderlyingProblemShape*>(problem_sizes.data_ptr());
 
-  // Set the Scheduler info - SM120 uses auto scheduler
+  // Set the Scheduler info
   cutlass::KernelHardwareInfo hw_info;
+  using RasterOrderOptions = cutlass::gemm::kernel::detail::RasterOrderOptions;
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
+  scheduler.raster_order = RasterOrderOptions::AlongM;
   hw_info.device_id = a.get_device();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
