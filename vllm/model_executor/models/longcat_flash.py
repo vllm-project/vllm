@@ -356,10 +356,11 @@ class LongcatMoe(nn.Module):
         )
 
         # Compute routing once and reuse for both zero expert and FusedMoE
-        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
+        # Use full router_logits (including zero experts) for routing selection
+        # so that zero experts can be properly identified in topk_ids
         topk_weights, topk_ids = self.experts.select_experts(
             hidden_states=hidden_states_padded,
-            router_logits=router_logits,
+            router_logits=router_logits_full,  # Use full logits (includes zero experts)
             use_grouped_topk=self.experts.use_grouped_topk,
             top_k=self.experts.top_k,
             renormalize=self.experts.renormalize,
@@ -368,7 +369,8 @@ class LongcatMoe(nn.Module):
             custom_routing_function=self.experts.custom_routing_function,
             scoring_func=self.experts.scoring_func,
             routed_scaling_factor=self.experts.routed_scaling_factor,
-            e_score_correction_bias=self.experts.e_score_correction_bias,
+            # Use full bias (includes zero experts)
+            e_score_correction_bias=self.router.e_score_correction_bias,
             indices_type=None,
             enable_eplb=False,
             expert_map=None,
@@ -377,6 +379,9 @@ class LongcatMoe(nn.Module):
             logical_replica_count=None,
             num_fused_shared_experts=self.experts.num_fused_shared_experts,
         )
+
+        # Slice router_logits for FusedMoE (only real experts)
+        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
 
         # Use pre-computed routing results for zero expert computation
         zero_expert_result = self._compute_zero_expert_result(
