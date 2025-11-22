@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -11,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
@@ -88,14 +92,17 @@ def triton_kernel_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
+    output = torch.empty_like(hidden_states)
+
     return triton_kernel_fused_experts(
-        None,
+        output,
         hidden_states,
         w1,
         w2,
         routing_data,
         gather_idx,
         scatter_idx,
+        topk=topk,
         activation=activation,
         quant_config=quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -113,6 +120,7 @@ def triton_kernel_fused_experts(
     routing_data,  # RoutingData
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
+    topk: int,
     activation: str = "silu",
     quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
@@ -120,6 +128,8 @@ def triton_kernel_fused_experts(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    intermediate_cache13: torch.Tensor | None = None,
+    intermediate_cache2: torch.Tensor | None = None,
     a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
@@ -134,10 +144,25 @@ def triton_kernel_fused_experts(
     assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
+    batch_dim = hidden_states.shape[0] if hidden_states.ndim == 3 else 1
+    M, K = hidden_states.shape[-2:]
     E, _, N = w1.shape
 
     if global_num_experts == -1:
         global_num_experts = E
+
+    if intermediate_cache13 is None:
+        intermediate_cache13 = torch.empty(
+            (batch_dim, M * topk, N // 2),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+
+    # Add batch_dim to output buffer because matmul_ogs expects 3D output
+    intermediate_cache13 = _resize_cache(
+        intermediate_cache13, (batch_dim, M * topk, N // 2)
+    )
+    output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
@@ -146,7 +171,7 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
-    intermediate_cache1 = matmul_ogs(
+    matmul_ogs(
         hidden_states,
         w1,
         quant_config.w1_bias,
@@ -155,10 +180,12 @@ def triton_kernel_fused_experts(
         precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
+        y=intermediate_cache13,
     )
+    intermediate_cache13 = intermediate_cache13.view(M * topk, N // 2)
 
-    intermediate_cache3 = matmul_ogs(
-        intermediate_cache1,
+    matmul_ogs(
+        intermediate_cache13,
         w2,
         quant_config.w2_bias,
         routing_data,
@@ -167,7 +194,7 @@ def triton_kernel_fused_experts(
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
-    return intermediate_cache3
+    return output_tensor.view(M, K)
 
 
 def make_routing_data(
@@ -252,6 +279,49 @@ class OAITritonExperts(BaseOAITritonExperts):
     def supports_chunking(self) -> bool:
         return True
 
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        """
+        Extract the MoE problem size from the given tensor arguments:
+        - a: The hidden states, input to the MoE layer.
+        - w1: The first set of expert weights.
+        - w2: The second set of expert weights.
+        - topk_ids: The topk ids.
+
+        Note: extracting the problem shape from the weight and activation
+        tensors is not obvious.  It needs to be done this way specifically
+        due to subtle issues with particular kernels, e.g. the int4 kernels
+        divide the trailing dimension by two, so it's not "correct" to
+        extract N or K from the trailing dimension of w1 or w2.  Similarly,
+        some kernels transpose the weights, so this needs to be kept in mind.
+
+        Note: This implementation covers most cases. However, if experts
+        require a specialized implementation, like MarlinExperts, they are free
+        to override this function.
+        """
+        assert w1.dim() == 3 and w2.dim() == 3
+        E, _, N = w1.size()
+        K = a1.size(-1)
+
+        if a1.dim() == 2:
+            # Make sure we are using the correct a1 (pre-permute).
+            assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+            M = a1.size(0)
+        else:
+            assert a1.dim() == 3
+            assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+            M = a1.size(1)  # This is max_num_tokens
+
+        assert topk_ids.dim() == 2
+        topk = topk_ids.size(1)
+
+        return E, M, N, K, topk
+
     def workspace_shapes(
         self,
         M: int,
@@ -263,7 +333,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M, K)
+        workspace1 = (M * topk, N // 2)
         workspace2 = (0, 0)
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -297,20 +367,22 @@ class OAITritonExperts(BaseOAITritonExperts):
             topk_ids, topk_weights, local_num_experts
         )
 
-        experts_output = triton_kernel_fused_experts(
-            None,
+        topk = topk_ids.size(1)
+        triton_kernel_fused_experts(
+            output,
             hidden_states,
             w1,
             w2,
             routing_data,
             gather_indx,
             scatter_indx,
+            topk=topk,
             activation=activation,
             quant_config=self.quant_config,
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
             expert_map=None,  # applied already
+            intermediate_cache13=workspace13,
+            intermediate_cache2=workspace2,
             a1q_scale=a1q_scale,
         )
-
-        output.copy_(experts_output, non_blocking=True)
