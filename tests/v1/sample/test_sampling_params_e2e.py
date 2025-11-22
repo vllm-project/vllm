@@ -119,6 +119,7 @@ def test_bad_words(llm):
     params = SamplingParams(temperature=0, bad_words=[bad_words_1, bad_words_2])
     output = llm.generate(PROMPT, params)
     new_text = output[0].outputs[0].text
+    print(f"new_text={new_text}")
     assert bad_words_1 not in new_text
     assert bad_words_2 not in new_text
 
