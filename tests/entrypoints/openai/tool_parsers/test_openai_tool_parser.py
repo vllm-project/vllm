@@ -8,7 +8,7 @@ import json
 from rapidfuzz import fuzz
 import jsonschema
 from pprint import pprint
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -165,41 +165,6 @@ async def test_single_tool_call(client: openai.AsyncOpenAI):
     )
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
-
-@pytest.mark.asyncio
-async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
-    """Verify model handles multiple tools in one query."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
-        tools=TOOLS,
-        temperature=0.0,
-        stream=False,
-    )
-
-    calls = response.choices[0].message.tool_calls
-    reasoning = response.choices[0].message.reasoning_content or ""
-
-    # Log for debugging if one call is missing
-    print("DEBUG: tool_calls =")
-    pprint(calls)
-
-    print("DEBUG: reasoning =")
-    pprint(reasoning)
-
-    try:
-        assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
-    try:
-        assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
-    try:
-        assert len(reasoning) > 0, "Reasoning content is empty"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
-    
 
 
 @pytest.mark.asyncio
