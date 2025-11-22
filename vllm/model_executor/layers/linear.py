@@ -863,6 +863,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             tp_rank=self.tp_rank,
         )
 
+    @property
+    def all_shards(self):
+        return range(len(self.output_sizes))
+
 
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
