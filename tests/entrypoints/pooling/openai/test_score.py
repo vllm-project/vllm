@@ -10,6 +10,12 @@ from torch import tensor
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import ScoreResponse
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODELS = [
     {"name": "BAAI/bge-reranker-v2-m3", "is_cross_encoder": True},
