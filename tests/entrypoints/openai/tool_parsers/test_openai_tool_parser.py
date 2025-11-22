@@ -7,6 +7,7 @@ import pytest_asyncio
 import json
 from rapidfuzz import fuzz
 import jsonschema
+import re
 from pprint import pprint
 from ....utils import RemoteOpenAIServer
 
@@ -167,6 +168,9 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     )
+    for arg in arguments:
+        print("Checking argument:", arg)
+
     assert len(reasoning) > 0, "Expected reasoning content missing"
     
 
@@ -188,10 +192,13 @@ async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
     # Validate that get_time was called
-    assert "get_time" in function_names, "get_time function not called"
+    assert FUNC_TIME in function_names, "get_time function not called"
     assert any("New York" in arg for arg in arguments), (
         f"Expected get_time arguments for New York not found in {arguments}"
     )
+    for arg in arguments:
+        print("Checking argument:", arg)
+
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
