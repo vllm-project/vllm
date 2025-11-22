@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
 from vllm.utils.platform_utils import is_pin_memory_available
 
@@ -173,6 +172,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
         as_seq_cls_model,
         try_create_mm_pooling_model_cls,
     )
+
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     model_cls, arch = model_config.registry.resolve_model_cls(
