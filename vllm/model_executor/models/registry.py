@@ -18,7 +18,7 @@ from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
@@ -32,6 +32,14 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttnTypeStr
+    from vllm.model_executor.layers.pooler import PoolingTypeStr
+else:
+    AttnTypeStr = Any
+    PoolingTypeStr = Any
+
 
 from .interfaces import (
     has_inner_state,
@@ -47,6 +55,7 @@ from .interfaces import (
     supports_transcription,
 )
 from .interfaces_base import (
+    get_attn_type,
     get_default_pooling_type,
     is_pooling_model,
     is_text_generation_model,
@@ -498,7 +507,8 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
-    default_pooling_type: str
+    attn_type: AttnTypeStr
+    default_pooling_type: PoolingTypeStr
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
@@ -519,6 +529,7 @@ class _ModelInfo:
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
             default_pooling_type=get_default_pooling_type(model),
+            attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(

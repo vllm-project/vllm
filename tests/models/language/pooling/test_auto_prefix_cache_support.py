@@ -106,7 +106,7 @@ def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(
-        model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
+        model, max_model_len=512, dtype=dtype
     ) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert not cache_config.enable_prefix_caching

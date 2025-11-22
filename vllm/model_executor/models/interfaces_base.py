@@ -18,11 +18,14 @@ from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.pooler import Pooler
+    from vllm.model_executor.layers.pooler import Pooler, PoolingTypeStr
 else:
     VllmConfig = Any
     Pooler = Any
+    PoolingTypeStr = Any
+    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
@@ -165,7 +168,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    default_pooling_type: ClassVar[str] = "LAST"
+    default_pooling_type: ClassVar[PoolingTypeStr] = "LAST"
     """
     Indicates the
     [vllm.model_executor.layers.pooler.PoolerConfig.pooling_type][]
@@ -173,6 +176,17 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
 
     You can use the
     [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    attn_type: ClassVar[AttnTypeStr] = "decoder"
+    """
+    Indicates the
+    [vllm.config.model.ModelConfig.attn_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.attn_type][]
     decorator to conveniently set this field.
     """
 
@@ -200,7 +214,7 @@ def is_pooling_model(
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def default_pooling_type(pooling_type: str):
+def default_pooling_type(pooling_type: PoolingTypeStr):
     """Decorator to set `VllmModelForPooling.default_pooling_type`."""
 
     def func(model: _T) -> _T:
@@ -210,5 +224,19 @@ def default_pooling_type(pooling_type: str):
     return func
 
 
-def get_default_pooling_type(model: type[object] | object) -> str:
+def get_default_pooling_type(model: type[object] | object) -> PoolingTypeStr:
     return getattr(model, "default_pooling_type", "LAST")
+
+
+def attn_type(attn_type: AttnTypeStr):
+    """Decorator to set `VllmModelForPooling.attn_type`."""
+
+    def func(model: _T) -> _T:
+        model.attn_type = attn_type  # type: ignore
+        return model
+
+    return func
+
+
+def get_attn_type(model: type[object] | object) -> AttnTypeStr:
+    return getattr(model, "attn_type", "decoder")
