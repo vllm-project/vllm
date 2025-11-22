@@ -16,7 +16,6 @@ from flashinfer import (
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
-from typing_extensions import override
 
 from vllm import envs
 from vllm.attention.backends.abstract import (
@@ -275,16 +274,18 @@ class BatchDCPPrefillWrapper:
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    # Note: Not sure for all platforms,
-    # but on Blackwell, only support a page size of
-    # 16, 32, 64
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Note: Not sure for all platforms, but on Blackwell,
+        # only support a page size of 16, 32, 64.
+        return [16, 32, 64]
 
     @staticmethod
     def get_name() -> str:
@@ -566,7 +567,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
 
     @classmethod
-    @override
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
         vllm_config: VllmConfig,

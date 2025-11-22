@@ -32,7 +32,7 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -56,11 +56,26 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    # NOTE(tdoublep): while in principle, FA supports
-    # MultipleOf(16), these are the block sizes that do not
-    # suffer from the NaN propagation problem described here:
-    # https://github.com/Dao-AILab/flash-attention/issues/1974
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        if (
+            model_config
+            and model_config.is_hybrid
+            and (
+                cache_config.mamba_ssm_cache_dtype == "float32"
+                or cache_config.mamba_cache_dtype == "float32"
+            )
+        ):
+            # NOTE(tdoublep): while in principle, FA supports
+            # MultipleOf(16), these are the block sizes that do not
+            # suffer from the NaN propagation problem described here:
+            # https://github.com/Dao-AILab/flash-attention/issues/1974
+            return [16, 32, 64]
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:

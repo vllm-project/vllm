@@ -46,8 +46,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -142,10 +145,11 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        if not cls.supported_kernel_block_sizes:
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
             return True
 
-        for supported_size in cls.supported_kernel_block_sizes:
+        for supported_size in supported_kernel_block_sizes:
             if isinstance(supported_size, MultipleOf):
                 supported_size = supported_size.base
             # With hybrid_blocks feature, the framework-level block size
