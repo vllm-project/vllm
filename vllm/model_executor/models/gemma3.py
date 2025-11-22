@@ -159,6 +159,17 @@ class Gemma3Attention(nn.Module):
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
+        # TODO: Remove before merging. Only for testing.
+        if True:
+            # HACK: force per-layer attention KV heads for testing.
+            # Original: full=1, sliding=1.
+            # Target: full=1, sliding=4.
+            self.attn_num_kv_heads = 4 if self.is_sliding else 1
+            print(
+                f"[HACK] {prefix}: sliding={self.is_sliding}, "
+                f"attn_num_kv_heads={self.attn_num_kv_heads}"
+            )
+
         # Initialize the rotary embedding.
         if layer_type in config.rope_parameters:
             # Transformers v5 rope config.
@@ -196,7 +207,9 @@ class Gemma3Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            num_kv_heads=self.num_kv_heads,
+            # TODO: Change this back before merging. Only for testing.
+            # num_kv_heads=self.num_kv_heads,
+            num_kv_heads=self.attn_num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             attn_type=attn_type,
@@ -222,6 +235,19 @@ class Gemma3Attention(nn.Module):
         k = k.flatten(-2, -1)
 
         q, k = self.rotary_emb(positions, q, k)
+
+        # TODO: Remove before merging. Only for testing.
+        if True:
+            # HACK: adjust K/V to match per-layer attention KV heads
+            if self.attn_num_kv_heads != self.num_kv_heads:  # 4 != 1
+                expand_factor = self.attn_num_kv_heads // self.num_kv_heads
+                k = k.view(-1, self.num_kv_heads, self.head_dim)
+                v = v.view(-1, self.num_kv_heads, self.head_dim)
+                k = k.repeat_interleave(expand_factor, dim=-2)
+                v = v.repeat_interleave(expand_factor, dim=-2)
+                k = k.flatten(-2, -1)
+                v = v.flatten(-2, -1)
+
         attn_output = self.attn(q, k, v)
 
         if not kwargs.get("has_images", False):
