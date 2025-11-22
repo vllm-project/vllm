@@ -390,15 +390,18 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
 
   using ClusterShape = Shape<_1, _1, _1>;
   using MmaTileShape = Shape<_128, _128, _128>;
-  using PerSmTileShape_MNK = Shape<_128, _128, _128>;
+
+  using FusionOperation = cutlass::epilogue::fusion::LinearCombination<
+      ElementD, ElementAccumulator, ElementC, ElementAccumulator>;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, PerSmTileShape_MNK, ClusterShape,
+          ArchTag, OperatorClass, MmaTileShape, ClusterShape,
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
           ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
           LayoutD*, AlignmentD,
-          cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+          cutlass::epilogue::collective::EpilogueScheduleAuto,
+          FusionOperation>::CollectiveOp;
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
@@ -494,6 +497,7 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   fusion_args.alpha_ptr_array =
       reinterpret_cast<float**>(alpha_ptrs.data_ptr());
   fusion_args.dAlpha = {_0{}, _0{}, 1};
+  fusion_args.beta = 0.0f;
 
   // Gemm Arguments
   typename GemmKernel::Arguments args{
