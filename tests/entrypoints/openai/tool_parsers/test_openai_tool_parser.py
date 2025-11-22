@@ -80,6 +80,10 @@ MESSAGES_CALC = [
     {"role": "user", "content": "Calculate 123 + 456 using the calculator."}
 ]
 
+MESSAGES_GET_TIME = [
+        {"role": "user", "content": "What is the current time in New York?"}
+    ]
+
 MESSAGES_MULTIPLE_CALLS = [
     {
         "role": "system",
@@ -147,7 +151,7 @@ def extract_reasoning_and_calls(chunks: list):
 # Test Scenarios
 # ==========================================================
 @pytest.mark.asyncio
-async def test_single_tool_call(client: openai.AsyncOpenAI):
+async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     """Verify single tool call reasoning with the calculator."""
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -164,7 +168,57 @@ async def test_single_tool_call(client: openai.AsyncOpenAI):
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     )
     assert len(reasoning) > 0, "Expected reasoning content missing"
+    
 
+@pytest.mark.asyncio
+async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
+    """Verify single tool call reasoning with get_time."""
+    
+    # Make the chat completion call
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_GET_TIME,
+        tools=TOOLS,
+        temperature=0.0,
+        stream=True,
+    )
+
+    # Collect the streamed chunks
+    chunks = [chunk async for chunk in stream]
+    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+
+    # Validate that get_time was called
+    assert "get_time" in function_names, "get_time function not called"
+    assert any("New York" in arg for arg in arguments), (
+        f"Expected get_time arguments for New York not found in {arguments}"
+    )
+    assert len(reasoning) > 0, "Expected reasoning content missing"
+
+
+@pytest.mark.asyncio
+async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
+    """Test streamed multi-tool response with reasoning."""
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_MULTIPLE_CALLS,
+        tools=TOOLS,
+        temperature=0.0,
+        stream=True,
+    )
+
+    chunks = [chunk async for chunk in stream]
+    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+    
+    print("DEBUG: function_names =", function_names)
+    print("DEBUG: reasoning =")
+    pprint(reasoning)
+
+    try:
+        assert FUNC_CALC in function_names, f"Calculator tool missing — found {function_names}"
+        assert FUNC_TIME in function_names, f"Time tool missing — found {function_names}"
+        assert len(reasoning) > 0, "Expected reasoning content in streamed response"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
 
 
 @pytest.mark.asyncio
@@ -193,40 +247,6 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
     assert not tool_calls, (
         f"Model unexpectedly attempted a tool call on invalid input: {tool_calls}"
     )
-
-
-
-
-@pytest.mark.asyncio
-async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
-    """Test streamed multi-tool response with reasoning."""
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
-        tools=TOOLS,
-        temperature=0.0,
-        stream=True,
-    )
-
-    chunks = [chunk async for chunk in stream]
-    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
-    
-    print("DEBUG: function_names =", function_names)
-    print("DEBUG: reasoning =")
-    pprint(reasoning)
-
-    try:
-        assert FUNC_CALC in function_names, f"Calculator tool missing — found {function_names}"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
-    try:
-        assert FUNC_TIME in function_names, f"Time tool missing — found {function_names}"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
-    try:
-        assert len(reasoning) > 0, "Expected reasoning content in streamed response"
-    except AssertionError as e:
-        print(f"ERROR: {e}")
 
 
 @pytest.mark.asyncio
