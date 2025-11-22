@@ -625,7 +625,7 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
             multiprocess_mode="sum",
         )
-        self.gauge_local_cache_usage = self.nake_per_engine(gauge_local_cache_usage)
+        self.gauge_local_cache_usage = self.make_per_engine(gauge_local_cache_usage)
 
         gauge_remote_cache_usage = self._gauge_cls(
             name="lmcache:remote_cache_usage",
