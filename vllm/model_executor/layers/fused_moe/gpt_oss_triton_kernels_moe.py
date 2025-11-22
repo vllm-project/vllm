@@ -333,8 +333,8 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M * topk, N // 2)
-        workspace2 = (0, 0)
+        workspace1 = (0, 0)
+        workspace2 = (M * topk, N // 2)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -382,7 +382,9 @@ class OAITritonExperts(BaseOAITritonExperts):
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
             expert_map=None,  # applied already
-            intermediate_cache13=workspace13,
-            intermediate_cache2=workspace2,
+            # Workspaces are swapped in workspace_shapes() to account for proper
+            # output buffer allocation.
+            intermediate_cache13=workspace2,
+            intermediate_cache2=workspace13,
             a1q_scale=a1q_scale,
         )
