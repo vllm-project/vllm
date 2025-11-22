@@ -7,7 +7,6 @@ import pytest_asyncio
 import json
 from rapidfuzz import fuzz
 import jsonschema
-import re
 from pprint import pprint
 from ....utils import RemoteOpenAIServer
 
@@ -168,17 +167,13 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     )
-    for arg in arguments:
-        print("Checking argument:", arg)
-
+    
     assert len(reasoning) > 0, "Expected reasoning content missing"
     
 
 @pytest.mark.asyncio
 async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
     """Verify single tool call reasoning with get_time."""
-    
-    # Make the chat completion call
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_GET_TIME,
@@ -187,18 +182,14 @@ async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
         stream=True,
     )
 
-    # Collect the streamed chunks
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
-    # Validate that get_time was called
     assert FUNC_TIME in function_names, "get_time function not called"
     assert any("New York" in arg for arg in arguments), (
         f"Expected get_time arguments for New York not found in {arguments}"
     )
-    for arg in arguments:
-        print("Checking argument:", arg)
-
+    
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
@@ -242,14 +233,11 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
         stream=False,
     )
 
-    # Extract the assistant's message
     message = response.choices[0].message
 
-    # Basic checks
     assert message is not None, "Expected message in response"
     assert hasattr(message, "content"), "Expected 'content' field in message"
 
-    # Ensure no tool calls occurred
     tool_calls = getattr(message, "tool_calls", [])
     assert not tool_calls, (
         f"Model unexpectedly attempted a tool call on invalid input: {tool_calls}"
