@@ -23,16 +23,23 @@ class TokenformerAdapter(nn.Module):
         self.dtype = next(layer.parameters()).dtype
 
         self.tokenformer_k = nn.Parameter(
-            torch.zeros(self.num_heads, self.hidden_size, device=device, dtype=self.dtype)
+            torch.zeros(
+                self.num_heads, self.hidden_size, device=device, dtype=self.dtype
+            )
         )
         self.tokenformer_v = nn.Parameter(
             torch.zeros(
-                self.num_heads, self.hidden_size * self.tokenformer_r, device=device, dtype=self.dtype
+                self.num_heads,
+                self.hidden_size * self.tokenformer_r,
+                device=device,
+                dtype=self.dtype,
             )
         )
 
         self.tokenformer_p = nn.Parameter(
-            torch.zeros(self.tokenformer_r, self.hidden_size, device=device, dtype=self.dtype)
+            torch.zeros(
+                self.tokenformer_r, self.hidden_size, device=device, dtype=self.dtype
+            )
         )
 
         self.reset_parameters()
@@ -53,21 +60,27 @@ class TokenformerAdapter(nn.Module):
         torch.nn.init.zeros_(p_init_tensor)
         self.tokenformer_p.data.copy_(p_init_tensor)
 
-    # Call layer with all inputs and kwargs
-    def forward(self, query: torch.Tensor):
-        base_layer_results = self.layer(query)
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        all_base_layer_results = self.layer(hidden_states, *args, **kwargs)
 
-        tokenformer_results = self.tokenformer_op_1(query)
+        tokenformer_results = self.tokenformer_op(hidden_states)
+
+        if isinstance(all_base_layer_results, tuple):
+            base_layer_results = all_base_layer_results[0]
+        else:
+            base_layer_results = all_base_layer_results
 
         # sum the two outputs
-        layer_and_adaptor_sum = base_layer_results + tokenformer_results
-        return layer_and_adaptor_sum
+        layer_and_adapter_sum = base_layer_results + tokenformer_results
 
-    def tokenformer_op(self, query):
+        if isinstance(all_base_layer_results, tuple):
+            results = (layer_and_adapter_sum,) + all_base_layer_results[1:]
+        else:
+            results = layer_and_adapter_sum
 
-        return query @ self.tokenformer_k.transpose(0, 1) @ self.tokenformer_v
+        return results
 
-    def tokenformer_op_1(self, query):
+    def tokenformer_op(self, query: torch.Tensor) -> torch.Tensor:
 
         q = query.view(
             -1, self.num_heads, self.hidden_size // self.num_heads
@@ -81,8 +94,8 @@ class TokenformerAdapter(nn.Module):
 
         result = torch.nn.functional.scaled_dot_product_attention(
             query=q,
-            key=k.to(q.dtype),
-            value=v.to(q.dtype),
+            key=k,
+            value=v,
             attn_mask=None,
             dropout_p=0.0,
             is_causal=False,  # should be false for tokenformer
@@ -100,7 +113,14 @@ class TokenformerAdapter(nn.Module):
 
         query_batch = query.view([-1, 1, self.hidden_size])
 
-        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p.to(q.dtype)
+        # logger.info(f"query shape: {query.shape}")
+        # logger.info(f"query batch shape: {query_batch.shape}")
+        # logger.info(f"proj_down shape: {proj_down.shape}")
+        # logger.info(f"tokenformer_p shape: {self.tokenformer_p.shape}")
+
+        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p
+
+        # logger.info(f"result shape: {result.shape}")
 
         return result.view(query.shape)
 
@@ -119,11 +139,13 @@ class TokenformerSurgeon(ABC):
         self.model = model
         self.device = device
 
-    def _is_attn_layer(self, layer_name):
-        return layer_name.split(".")[-1] == "attn"
-
-    def _is_mlp_layer(self, layer_name):
-        return "mlp" in layer_name.split(".")[-1]
+    def _is_adapter_layer(self, layer_name):
+        return (
+            "mlp" in layer_name.split(".")[-1]
+            or "q_proj" in layer_name.split(".")[-1]
+            or "k_proj" in layer_name.split(".")[-1]
+            or "v_proj" in layer_name.split(".")[-1]
+        )
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)
@@ -132,12 +154,12 @@ class TokenformerSurgeon(ABC):
         else:
             self._recursive_setattr(getattr(obj, attr[0]), attr[1], value)
 
-    def update_mlp(self, name, layer):
-        """Try to wrap the layer with a TokenformerAdaptor."""
-        if not self._is_mlp_layer(name):
+    def update_layer(self, name, layer):
+        """Try to wrap the layer with a TokenformerAdapter."""
+        if not self._is_adapter_layer(name):
             return
 
-        logger.info(f"Wrapping layer {name} with TokenformerAdaptor")
+        logger.info(f"Wrapping layer {name} with TokenformerAdapter")
 
         if hasattr(self.model, "config"):
             hidden_size = self.model.config.hidden_size
@@ -147,18 +169,16 @@ class TokenformerSurgeon(ABC):
             logger.error("Model does not have config or model_config attribute")
             return
 
-        # Wrap the layer with a Tokenformerdapter
+        # Wrap the layer with a TokenformerAdapter
         self._recursive_setattr(
             self.model,
             name,
-            TokenformerAdapter(
-                layer, hidden_size, device=self.device
-            ),
+            TokenformerAdapter(layer, hidden_size, device=self.device),
         )
 
     def insert_adapter_modules(self):
         # Add tokenformer adapters for mlp and attention
         for name, layer in self.model.named_modules():
-            self.update_mlp(name, layer)
+            self.update_layer(name, layer)
 
         return self.model
