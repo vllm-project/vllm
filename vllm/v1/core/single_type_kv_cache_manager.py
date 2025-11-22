@@ -213,9 +213,9 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
@@ -233,10 +233,11 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
+            alignment_tokens: The returned cache hit length (in tokens) should
+            be a multiple of this value (in tokens). By default, it should be
+            set to the block_size.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
-            alignment_tokens: The returned cache hit length (in tokens) should
-            be a multiple of this value (in tokens).
 
         Returns:
             A list of cached blocks with skipped blocks replaced by null block
@@ -310,9 +311,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
@@ -342,7 +343,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
-        while len(computed_blocks[0]) * block_size % alignment_tokens != 0:
+        while (
+            block_size != alignment_tokens  # Faster for common case.
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
@@ -375,9 +379,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
@@ -415,17 +419,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # Add the cached block to the computed blocks.
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed[i] = cached
                 # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`. But we still need to copy `cached` block above
-                # to keep its content.
+                # `alignment_tokens`.
                 if (
                     num_contiguous_blocks == 0
+                    and block_size != alignment_tokens  # Faster for common case.
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
+                # Add the cached block to the computed blocks.
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
                 num_contiguous_blocks += 1
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
@@ -442,11 +446,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
-            while len(computed_blocks[0]) * block_size % alignment_tokens != 0:
+            while (
+                block_size != alignment_tokens  # Faster for common case.
+                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            ):
                 for computed in computed_blocks:
                     computed.pop()
         if use_eagle and computed_blocks[0]:
-            assert kv_cache_spec.block_size % alignment_tokens == 0, (
+            assert kv_cache_spec.block_size == alignment_tokens, (
                 "aligned_length is not compatible with eagle now"
             )
             for computed in computed_blocks:
@@ -508,9 +515,9 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -556,7 +563,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
-        assert kv_cache_spec.block_size % alignment_tokens == 0, (
+        assert kv_cache_spec.block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
         )
@@ -654,9 +661,9 @@ class MambaManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
@@ -667,16 +674,20 @@ class MambaManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
 
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # For Mamba, a cache hit only depends on finding the cached
-                # state for an exact position (i). Positions that are not
-                # properly aligned are ignored.
-                if (i + 1) * kv_cache_spec.block_size % alignment_tokens != 0:
+                # When enable Mamba prefix caching, `block_size` will be aligned
+                # across full attention layers and Mamba layers to ensure the
+                # prefix hit length aligned at block
+                if (
+                    block_size != alignment_tokens  # Faster for common case.
+                    and (i + 1) * block_size % alignment_tokens != 0
+                ):
                     continue
                 for computed, cached in zip(computed_blocks, cached_block):
                     # the hit length logic later assumes:
@@ -756,9 +767,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        alignment_tokens: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
