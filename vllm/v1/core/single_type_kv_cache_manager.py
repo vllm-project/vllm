@@ -321,6 +321,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
         )
+        # TODO: Remove before merging. Only for testing.
+        print(
+            f"FullAttentionManager: alignment_tokens={alignment_tokens}, "
+            f"block_size={kv_cache_spec.block_size}"
+        )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
@@ -388,6 +393,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        # TODO: Remove before merging. Only for testing.
+        print(
+            f"SlidingWindowManager: alignment_tokens={alignment_tokens}, "
+            f"block_size={kv_cache_spec.block_size}"
+        )
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
