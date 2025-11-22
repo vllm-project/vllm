@@ -55,8 +55,7 @@ def assumes(obj, attr, is_callable=False, is_instance_of=None):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Requires libcudaart.so, not available on ROCm"
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
 )
 def test_multimodal_interface():
     # protect against interface changes
@@ -83,8 +82,7 @@ def test_multimodal_interface():
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Requires libcudaart.so, not available on ROCm"
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
 )
 def test_config_interface():
     # protect against interface changes
@@ -161,8 +159,7 @@ def test_config_interface():
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Requires libcudaart.so, not available on ROCm"
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
 )
 def test_request_interface():
     # protect against interface changes
