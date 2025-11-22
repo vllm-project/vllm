@@ -58,9 +58,11 @@ schemathesis==3.39.15
 
 # Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
-    # eval tests
+
+# Plugins test
+terratorch==1.1.1
+# MTEB Benchmark Test
 mteb[bm25s]>=1.38.11, <2
-    # MTEB Benchmark Test
 # Data processing
 multiprocess==0.70.16
     # Datasets and Evaluate Test
@@ -70,4 +72,3 @@ num2words==0.5.14
     # via lm-eval
 pqdm==0.2.0
     # via lm-eval
-terratorch==1.1.1
