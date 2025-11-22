@@ -18,7 +18,7 @@ pushd "$WORKSPACE"
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 
 # install dependencies if not installed
-uv pip install cmake torch ninja
+uv pip install --system cmake torch ninja
 
 # fetch nvshmem
 ARCH=$(uname -m)
