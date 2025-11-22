@@ -422,8 +422,7 @@ def ndarray_to_int_list(arr: np.ndarray) -> list[int]:
     return arr.astype(np.int64).tolist()
 
 
-# TODO(HelloWorldU): Add batch inference support
-class KimiAudioProcessor(ProcessorMixin):
+class KimiAudioProcessor:
     r"""
     Lightweight processor:
     - audio_tokenizer: has method `tokenize(audio_path=...)` ->
@@ -431,10 +430,6 @@ class KimiAudioProcessor(ProcessorMixin):
     - text_tokenizer: huggingface tokenizer-like,
     has `encode` or `encode_plus` and `convert_tokens_to_ids`
     """
-
-    attributes = ["audio_tokenizer", "text_tokenizer"]
-    audio_tokenizer_class = "Glm4Tokenizer"
-    text_tokenizer_class = "TikTokenTokenizer"
 
     def __init__(
         self,
