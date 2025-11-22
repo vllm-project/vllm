@@ -182,10 +182,9 @@ def triton_kernel_fused_experts(
         fused_activation=act,
         y=intermediate_cache13,
     )
-    intermediate_cache13 = intermediate_cache13.view(M * topk, N // 2)
 
     matmul_ogs(
-        intermediate_cache13,
+        intermediate_cache13.view(M * topk, N // 2),
         w2,
         quant_config.w2_bias,
         routing_data,
@@ -248,37 +247,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Weight application and reduction happens in the fused_experts kernel.
-        return TopKWeightAndReduceNoOP()
-
-    def _make_routing_data(
-        self,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        num_local_experts: int,
-    ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
-        return make_routing_data(topk_ids, topk_weights, num_local_experts)
-
-
-class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
-
-    def supports_chunking(self) -> bool:
-        return True
-
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -321,6 +289,37 @@ class OAITritonExperts(BaseOAITritonExperts):
         topk = topk_ids.size(1)
 
         return E, M, N, K, topk
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Weight application and reduction happens in the fused_experts kernel.
+        return TopKWeightAndReduceNoOP()
+
+    def _make_routing_data(
+        self,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_local_experts: int,
+    ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+        return make_routing_data(topk_ids, topk_weights, num_local_experts)
+
+
+class OAITritonExperts(BaseOAITritonExperts):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        # TODO (varun) : Enable activation quantization
+        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        super().__init__(quant_config)
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_chunking(self) -> bool:
+        return True
 
     def workspace_shapes(
         self,
