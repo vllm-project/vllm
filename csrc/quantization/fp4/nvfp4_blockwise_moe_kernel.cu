@@ -528,7 +528,7 @@ void run_fp4_blockwise_scaled_group_mm(
     int N, int K) {
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
-  if (version_num == 120) {
+  if (version_num >= 120 && version_num < 130) {
     run_fp4_blockwise_scaled_group_mm_sm120<OutType>(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
