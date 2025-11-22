@@ -9,14 +9,18 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def adapt_config_dict(config_dict: dict[str, Any], **kwargs) -> PretrainedConfig:
-    config_dict.update(kwargs)
+def adapt_config_dict(
+    config_dict: dict[str, Any],
+    defaults: dict[str, Any],
+) -> PretrainedConfig:
     config_dict = _remap_general_mistral_args(config_dict)
 
     if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
-    if bool(config_dict.get("moe")):
+    if config_dict.get("model_type") == "mamba":
+        config_dict["architectures"] = ["Mamba2ForCausalLM"]
+    elif bool(config_dict.get("moe")):
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
@@ -51,6 +55,9 @@ def adapt_config_dict(config_dict: dict[str, Any], **kwargs) -> PretrainedConfig
         config_dict = _remap_mistral_vision_args(config_dict)
     if is_audio:
         config_dict = _remap_mistral_audio_args(config_dict)
+
+    for k, v in defaults.items():
+        config_dict.setdefault(k, v)
 
     config = PretrainedConfig.from_dict(config_dict)
 
