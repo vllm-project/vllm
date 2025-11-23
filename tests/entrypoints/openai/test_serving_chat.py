@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
+import re
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -451,6 +453,80 @@ async def test_serving_chat_returns_correct_model_name():
     # Test that full name is returned when no model is specified
     req = ChatCompletionRequest(messages=messages)
     assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_tool_choice_required_streaming():
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    },
+                    "state": {
+                        "type": "string"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
+                },
+                "required": ["city", "state", "unit"],
+            },
+        },
+    }]
+
+    messages = [
+        {
+            "role": "system",
+            "content": "you are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": "What is the weather in Dallas, TX?"
+        },
+    ]
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=MockModelConfig())
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     MockModelConfig(),
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        stream=True,
+        tool_choice="required",
+        guided_decoding_backend="outlines",
+    )
+
+    resp = await serving_chat.create_chat_completion(req)
+
+    # Collect all response chunks for verification
+    async for chunk in resp:
+        if str(chunk) == "data: [DONE]\n\n":
+            continue
+        content_regex = r"data: (.*?)\n\n"
+        match = re.match(content_regex, str(chunk))
+        assert match
+        data = json.loads(match.group(1))
+        assert "error" not in data
 
 
 @pytest.mark.asyncio
