@@ -171,7 +171,7 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
         messages=MESSAGES_CALC,
         tools=TOOLS,
         temperature=0.0,
-        stream=False,  
+        stream=False,
     )
 
     message = response.choices[0].message
@@ -179,8 +179,12 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     tool_calls = getattr(message, "tool_calls", [])
     reasoning = getattr(message, "content", "")
 
-    function_names = [c.function.name for c in tool_calls if getattr(c, "function", None)]
-    arguments = [c.function.arguments for c in tool_calls if getattr(c, "function", None)]
+    function_names = [
+        c.function.name for c in tool_calls if getattr(c, "function", None)
+        ]
+    arguments = [
+        c.function.arguments for c in tool_calls if getattr(c, "function", None)
+        ]
 
     assert FUNC_CALC in function_names, "Calculator function not called"
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
