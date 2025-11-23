@@ -288,25 +288,33 @@ def _combine_sampled_and_draft_tokens_kernel(
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
 
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    if seq_len <= prefill_len:
-        # Handling prefill tokens.
-        return
-
     # Get the number of logits and draft tokens.
     cu_num_logits_start = tl.load(cu_num_logits_ptr + batch_idx)
     cu_num_logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
     num_logits = cu_num_logits_end - cu_num_logits_start
     num_draft_tokens = num_logits - 1
 
+    # Compute the logits indices.
+    block = tl.arange(0, BLOCK_SIZE)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    logits_start = query_end - num_logits
+    tl.store(
+        logits_indices_ptr + cu_num_logits_start + block,
+        logits_start + block,
+        mask=block < num_logits,
+    )
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
+    if seq_len <= prefill_len:
+        # Handling prefill tokens. No sampled or draft tokens.
+        return
+
     # Write the last sampled token ID to input_ids.
     last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
-    block = tl.arange(0, BLOCK_SIZE)
     if num_draft_tokens > 0:
         mask = block < num_draft_tokens
         draft_tokens = tl.load(
@@ -318,14 +326,6 @@ def _combine_sampled_and_draft_tokens_kernel(
             draft_tokens,
             mask=mask,
         )
-
-    # Compute the logits indices.
-    logits_start = query_end - num_logits
-    tl.store(
-        logits_indices_ptr + cu_num_logits_start + block,
-        logits_start + block,
-        mask=block < num_logits,
-    )
 
 
 def combine_sampled_and_draft_tokens(
