@@ -15,6 +15,8 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers.processing_utils import TextKwargs
+from typing_extensions import Unpack
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -429,6 +431,7 @@ class SkyworkR1VProcessor:
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
         return_tensors: str | TensorType | None = None,
+        **text_kwargs: Unpack[TextKwargs],
     ) -> BatchFeature:
         if text is None:
             text = []
@@ -463,7 +466,7 @@ class SkyworkR1VProcessor:
 
                 text = [t.replace("<image>", image_repl.full, 1) for t in text]
 
-        text_inputs = self.tokenizer(text)
+        text_inputs = self.tokenizer(text, **text_kwargs)
 
         combined_outputs = {**text_inputs, **image_inputs}
 

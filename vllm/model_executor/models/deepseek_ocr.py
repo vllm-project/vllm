@@ -270,20 +270,16 @@ class DeepseekOCRMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
+        if not mm_data:
+            tok_kwargs = dict(tok_kwargs)
+            tok_kwargs.setdefault("add_special_tokens", True)
+            return self._call_hf_tokenizer(prompt, tok_kwargs)
 
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
-
-        return processed_outputs
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(prompt=prompt, **mm_data),
+            dict(**mm_kwargs, **tok_kwargs),
+        )
 
     def _get_mm_fields_config(
         self,
