@@ -34,6 +34,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_node_count,
@@ -385,7 +386,9 @@ class EplbState:
             )
             self.expert_rearrangement_step = 0
 
-        self.model_states[model_config.compute_hash()] = EplbModelState(
+        model_factors = model_config.compile_factors() or {}
+        model_hash = hash_factors(model_factors)
+        self.model_states[model_hash] = EplbModelState(
             physical_to_logical_map,
             logical_to_physical_map,
             logical_replica_count,

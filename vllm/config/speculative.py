@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import hashlib
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -11,7 +10,7 @@ from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -146,7 +145,7 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -158,12 +157,15 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        factors: list[Any] = [
+            # Eagle3 affects the computation graph because it returns
+            # intermediate hidden states in addition to the final hidden state.
+            self.method == "eagle3"
+        ]
+        normalized = normalize_value(factors)
+        if not normalized:
+            return None
+        return {"factors": normalized}
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

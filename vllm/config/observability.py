@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from packaging.version import parse
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm import version
-from vllm.config.utils import config
+from vllm.config.utils import HashResult, config
 
 DetailedTraceModules = Literal["model", "worker", "all"]
 
@@ -63,7 +62,7 @@ class ObservabilityConfig:
             or "all" in self.collect_detailed_traces
         )
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> HashResult:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -77,9 +76,7 @@ class ObservabilityConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return None
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod
