@@ -8,18 +8,31 @@ from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Union
 
+from openai.types.chat.chat_completion_content_part_text_param import (
+    ChatCompletionContentPartTextParam,
+)
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
+    CustomChatCompletionMessageParam,
+)
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.openai.parser.parser import (
+    get_streamable_parser_for_simple_context,
+)
+from vllm.entrypoints.openai.protocol import FunctionCall, ResponsesRequest
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -178,6 +191,202 @@ class SimpleContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
+
+
+class ParsableContext(ConversationContext):
+    def __init__(
+        self,
+        *,
+        chat_completion_messages: list[CustomChatCompletionMessageParam],
+        tokenizer: AnyTokenizer,
+        reasoning_parser: ReasoningParser,
+        request: ResponsesRequest,
+        available_tools: list[str] | None,
+        tool_parser_cls,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        tool_dicts: list[dict] | None = None,
+    ):
+        self.last_output = None
+        self.num_prompt_tokens = 0
+        self.num_output_tokens = 0
+        self.num_cached_tokens = 0
+        # todo num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
+        # not implemented yet for SimpleContext
+        self.all_turn_metrics = []
+
+        self.parser = get_streamable_parser_for_simple_context(
+            tokenizer=tokenizer,
+            reasoning_parser=reasoning_parser,
+            chat_completion_messages=chat_completion_messages,
+            request=request,
+            tool_parser_cls=tool_parser_cls,
+        )
+        self.tool_parser_cls = tool_parser_cls
+        self.request = request
+        self.tokenizer = tokenizer
+        self.reasoning_parser = reasoning_parser
+
+        self.num_init_chat_completion_messages = len(chat_completion_messages)
+        self.chat_completion_messages = chat_completion_messages
+
+        self.available_tools = available_tools or []
+        self._tool_sessions: dict[str, ClientSession | Tool] = {}
+        self.called_tools: set[str] = set()
+
+        self.chat_template = chat_template
+        self.chat_template_content_format = chat_template_content_format
+        self.tool_dicts = tool_dicts
+
+    def append_output(self, output: RequestOutput) -> None:
+        self.last_output = output
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+
+        # output_token_ids = output.outputs[0].token_ids
+        # for token_id in output_token_ids:
+        #     self.parser.process(token_id)
+        self.parser.process(output.outputs[0])
+
+    def append_tool_output(
+        self, output: list[CustomChatCompletionMessageParam]
+    ) -> None:
+        self.parser.chat_completion_messages.extend(output)
+
+    def need_builtin_tool_call(self) -> bool:
+        """Return true if the last message is a MCP tool call"""
+        last_message = self.parser.chat_completion_messages[-1]["content"][-1]
+        if isinstance(last_message, FunctionCall):
+            # HACK: figure out which tools are MCP tools
+            if (
+                last_message.name == "code_interpreter"
+                or last_message.name == "python"
+                or last_message.name == "web_search_preview"
+            ):
+                return True
+
+        return False
+
+    async def call_python_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+    ) -> list[CustomChatCompletionMessageParam]:
+        self.called_tools.add("python")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result(self)
+        args = json.loads(last_msg.arguments)
+        param = {
+            "code": args["code"],
+        }
+        result = await tool_session.call_tool("python", param)
+        result_str = result.content[0].text
+
+        content = TextContent(text=result_str)
+        # author = Author(role=Role.TOOL, name="python")
+
+        message = CustomChatCompletionMessageParam(
+            role="tool",
+            content=[
+                ChatCompletionContentPartTextParam(text=content, type="text")
+            ],  # TODO: why is this nested?
+        )
+
+        return [message]
+
+    async def call_search_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+    ) -> list[Message]:
+        self.called_tools.add("browser")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result(self)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
+        result = await tool_session.call_tool("search", args)
+        result_str = result.content[0].text
+
+        content = TextContent(text=result_str)
+        # author = Author(role=Role.TOOL, name="python")
+
+        message = CustomChatCompletionMessageParam(
+            role="tool",
+            content=[
+                ChatCompletionContentPartTextParam(text=content, type="text")
+            ],  # TODO: why is this nested?
+        )
+
+        return [message]
+
+    async def call_tool(self) -> list[CustomChatCompletionMessageParam]:
+        if not self.parser.chat_completion_messages:
+            return []
+        last_msg = self.parser.chat_completion_messages[-1]
+        last_tool_request = last_msg["content"][-1]
+        if last_tool_request.name == "code_interpreter":
+            return await self.call_python_tool(
+                self._tool_sessions["python"], last_tool_request
+            )
+        elif last_tool_request.name == "web_search_preview":
+            return await self.call_search_tool(
+                self._tool_sessions["browser"], last_tool_request
+            )
+        # recipient = last_message.name == "code_interpreter"
+        # if recipient is not None and recipient.startswith("python"):
+        #     return await self.call_python_tool(self._tool_sessions["python"], last_tool_request)
+
+    def render_for_completion(self):
+        return [
+            self.request,
+            self.tokenizer,
+            self.parser.chat_completion_messages,
+            self.tool_dicts,
+            self.tool_parser_cls,
+            self.chat_template,
+            self.chat_template_content_format,
+        ]
+
+    async def init_tool_sessions(
+        self,
+        tool_server: ToolServer | None,
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ):
+        if tool_server:
+            for tool_name in self.available_tools:
+                if tool_name not in self._tool_sessions:
+                    tool_type = _map_tool_name_to_tool_type(tool_name)
+                    headers = (
+                        mcp_tools[tool_type].headers if tool_type in mcp_tools else None
+                    )
+                    tool_session = await exit_stack.enter_async_context(
+                        tool_server.new_session(tool_name, request_id, headers)
+                    )
+                    self._tool_sessions[tool_name] = tool_session
+                    exit_stack.push_async_exit(self.cleanup_session)
+
+    async def cleanup_session(self, *args, **kwargs) -> None:
+        """Can be used as coro to used in __aexit__"""
+
+        async def cleanup_tool_session(tool_session):
+            if not isinstance(tool_session, Tool):
+                logger.info(
+                    "Cleaning up tool session for %s", tool_session._client_info
+                )
+                with contextlib.suppress(Exception):
+                    await tool_session.call_tool("cleanup_session", {})
+
+        await asyncio.gather(
+            *(
+                cleanup_tool_session(self._tool_sessions[tool])
+                for tool in self.called_tools
+            )
+        )
 
 
 class HarmonyContext(ConversationContext):
