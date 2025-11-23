@@ -204,6 +204,7 @@ def main(
     # finishes early and destroys the process group while others are still working.
     if dist.is_initialized():
         from vllm.distributed import get_world_group
+
         get_world_group().barrier()
 
 
