@@ -82,8 +82,17 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     if not current_platform.is_cuda():
         return Mxfp4Backend.NONE
 
-    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
-    return Mxfp4Backend.MARLIN
+    if (
+        envs.VLLM_MXFP4_USE_MARLIN
+        or current_platform.get_device_capability()[0] < 9
+        or not has_triton_kernels()
+        or not is_torch_equal_or_newer("2.8.0")
+    ):
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+        return Mxfp4Backend.MARLIN
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+    return Mxfp4Backend.TRITON
 
 
 def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
