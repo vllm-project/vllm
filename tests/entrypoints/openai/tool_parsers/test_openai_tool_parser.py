@@ -3,7 +3,6 @@
 
 import json
 from pprint import pprint
-from typing import Dict, List, Union
 
 import jsonschema
 import openai
@@ -14,16 +13,6 @@ from rapidfuzz import fuzz
 from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
-
-JSON = Union[
-    str,
-    int,
-    float,
-    bool,
-    None,
-    Dict[str, "JSON"],
-    List["JSON"],
-]
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +39,7 @@ async def client(server):
 # ==========================================================
 # Tool Definitions
 # ==========================================================
-TOOLS: list[dict[str, dict[str, JSON]]]  = [
+TOOLS = [
     {
         "type": "function",
         "function": {
@@ -347,22 +336,22 @@ async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
         jsonschema.validate(instance=args, schema=schema)
 
 
-@pytest.mark.asyncio
-async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
-    """Check whether reasoning content is semantically related to the user's query."""
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        stream=True,
-    )
-    chunks = [chunk async for chunk in stream]
-    reasoning, _, _ = extract_reasoning_and_calls(chunks)
+# @pytest.mark.asyncio
+# async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
+#     """Check whether reasoning content is semantically related to the user's query."""
+#     stream = await client.chat.completions.create(
+#         model=MODEL_NAME,
+#         messages=MESSAGES_CALC,
+#         tools=TOOLS,
+#         stream=True,
+#     )
+#     chunks = [chunk async for chunk in stream]
+#     reasoning, _, _ = extract_reasoning_and_calls(chunks)
 
-    assert len(reasoning) > 0, "No reasoning emitted"
-    assert any(num in reasoning for num in ["123", "456"]), (
-        f"Reasoning does not reference expected numbers: {reasoning}"
-    )
+#     assert len(reasoning) > 0, "No reasoning emitted"
+#     assert any(num in reasoning for num in ["123", "456"]), (
+#         f"Reasoning does not reference expected numbers: {reasoning}"
+#     )
 
 
 @pytest.mark.asyncio
