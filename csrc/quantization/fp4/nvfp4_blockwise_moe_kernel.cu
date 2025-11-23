@@ -443,12 +443,17 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
   torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor c_strides1 =
+
+  // For SM120, A and B strides must be the same
+  TORCH_CHECK(a.stride(0) == b.stride(1),
+              "For SM120 NVFP4 MOE, A and B strides must be equal. "
+              "Got a.stride(0)=",
+              a.stride(0), " and b.stride(1)=", b.stride(1));
+
+  torch::Tensor ab_strides =
+      torch::full({num_experts}, a_stride_elements, options_int);
+  torch::Tensor c_strides =
       torch::full({num_experts}, output.stride(0), options_int);
-  torch::Tensor a_strides1 =
-      torch::full({num_experts}, a.stride(0) * 2, options_int);
-  torch::Tensor b_strides1 =
-      torch::full({num_experts}, b.stride(1) * 2, options_int);
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -479,9 +484,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   // Mainloop Arguments
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementType**>(a_ptrs.data_ptr()),
-      static_cast<StrideA*>(a_strides1.data_ptr()),
+      static_cast<StrideA*>(ab_strides.data_ptr()),
       static_cast<const ElementType**>(b_ptrs.data_ptr()),
-      static_cast<StrideB*>(b_strides1.data_ptr()),
+      static_cast<StrideB*>(ab_strides.data_ptr()),
       static_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),
       static_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
@@ -491,9 +496,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},  // epilogue.thread
       nullptr,
-      static_cast<StrideC*>(c_strides1.data_ptr()),
+      static_cast<StrideC*>(c_strides.data_ptr()),
       static_cast<ElementD**>(out_ptrs.data_ptr()),
-      static_cast<StrideC*>(c_strides1.data_ptr())};
+      static_cast<StrideC*>(c_strides.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
   fusion_args.alpha_ptr_array =
       reinterpret_cast<float**>(alpha_ptrs.data_ptr());
