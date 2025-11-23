@@ -48,7 +48,9 @@ def _get_cross_slot_mapping(
     # Find indices with non-zero encoder sequence lengths
     # The majority of parallel requests will be running the
     # decoder, so this list should be relatively small.
-    active_indices = np.nonzero(encoder_seq_lens)[0]
+    active_indices = np.nonzero(encoder_seq_lens)
+    # REMOVE
+    print(f"Active indices for cross-attention: {active_indices}, [0]: {active_indices[0]}, type: {type(active_indices)}, type of first element: {type(active_indices[0])}, type encoder_seq_lens: {type(encoder_seq_lens)}")
 
     for req_index in active_indices:
         encoder_seq_len = encoder_seq_lens[req_index].item()
@@ -93,23 +95,11 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
-            max_encoder_len = _get_max_encoder_len(self.vllm_config)
-            new_metadata.max_seq_len = max_encoder_len
-
-            new_metadata.seq_lens = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            new_metadata.seq_lens_cpu = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device="cpu",
-            )
+            new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
+            new_metadata.seq_lens_cpu = common_attn_metadata.encoder_seq_lens_cpu
+            new_metadata.max_seq_len = common_attn_metadata.max_encoder_seq_len
             new_metadata.slot_mapping = _get_cross_slot_mapping(
-                new_metadata.encoder_seq_lens,
+                new_metadata.encoder_seq_lens_cpu,
                 new_metadata.block_table_tensor,
                 self.kv_cache_spec,
                 self.device,

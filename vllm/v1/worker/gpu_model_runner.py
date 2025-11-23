@@ -467,6 +467,7 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -1166,21 +1167,41 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        scheduled_encoder_inputs: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
     ) -> np.ndarray | None:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
-            return None
+            return None, None, None
+
+        assert self.model_config.is_encoder_decoder, \
+                "Cross-attention as of now supports only encoder-decoder model."
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
+        self.encoder_seq_lens.np.fill(0)
         for req_id in scheduled_encoder_inputs:
             req_index = self.input_batch.req_id_to_index[req_id]
-            encoder_seq_lens[req_index] = self.max_encoder_len
+            req_state = self.requests[req_id]
+            encoder_input_tokens = sum(
+                feature.mm_position.length for feature in req_state.mm_features
+            )
+            self.encoder_seq_lens.np[req_index] = encoder_input_tokens
 
-        return encoder_seq_lens
+        # for req_id, req_index in self.input_batch.req_id_to_index.items():
+        #     req_state = self.requests[req_id]
+        #     encoder_input_tokens = sum(
+        #         feature.mm_position.length for feature in req_state.mm_features
+        #     )
+        #     self.encoder_seq_lens.np[req_index] = encoder_input_tokens
+
+        self.encoder_seq_lens.copy_to_gpu(num_reqs)
+        encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
+        encoder_seq_lens_cpu = self.encoder_seq_lens.cpu[:num_reqs]
+        max_encoder_seq_len = self.encoder_seq_lens.np[:num_reqs].max().item()
+
+        return encoder_seq_lens, encoder_seq_lens_cpu, max_encoder_seq_len
+ 
 
     def _prepare_inputs(
         self,
@@ -1495,12 +1516,19 @@ class GPUModelRunner(
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
+        # encoder_inputs = None
+        # scheduled_encoder_req_index = []
+        # if (self.model_config.is_encoder_decoder
+        #     and scheduler_output.scheduled_encoder_inputs):
+        #     encoder_inputs = self._extract_encoder_inputs(scheduler_output)
+        #     scheduled_encoder_req_index = [self.input_batch.req_id_to_index[req_id] for req_id in scheduler_output.scheduled_encoder_inputs.keys()]
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
+            encoder_seq_lens, encoder_seq_lens_cpu, max_encoder_seq_len = self._get_encoder_seq_lens(
                 scheduled_encoder_inputs or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs,
@@ -1544,6 +1572,8 @@ class GPUModelRunner(
                 num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
+                max_encoder_seq_len=max_encoder_seq_len,
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
