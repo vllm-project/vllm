@@ -4,7 +4,7 @@
 import json
 from pprint import pprint
 
-import jsonschema
+#import jsonschema
 import openai
 import pytest
 import pytest_asyncio
