@@ -471,9 +471,8 @@ def main(args):
             inputs["prompt"] = req_data.prompt
         else:
             inputs["prompt_token_ids"] = req_data.prompt_token_ids
-        
-        return inputs
 
+        return inputs
 
     # Batch inference
     if audio_count != 1:
