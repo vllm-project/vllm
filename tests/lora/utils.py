@@ -23,21 +23,36 @@ class DummyLoRAManager:
     def get_module_lora(self, module_name: str) -> LoRALayerWeights:
         return self._loras[module_name]
 
+    @staticmethod
+    def get_lora_mat(size, is_zero, **kwargs):
+        if is_zero:
+            return torch.zeros(size, **kwargs)
+        return torch.rand(size, **kwargs)
+
     def init_random_lora(
         self,
         module_name: str,
         weight: torch.Tensor,
         rank: int = 8,
+        use_zero_lora_a: bool = False,
+        use_zero_lora_b: bool = False,
     ):
         lora = LoRALayerWeights(
             module_name,
             rank=rank,
             lora_alpha=1,
-            lora_a=torch.rand(
-                [rank, weight.shape[1]], dtype=weight.dtype, device=self._device
+            # lora_a / lora_b are random unless we explicitly say to use 0 mats
+            lora_a=self.get_lora_mat(
+                [rank, weight.shape[1]],
+                is_zero=use_zero_lora_a,
+                dtype=weight.dtype,
+                device=self._device,
             ),
-            lora_b=torch.rand(
-                [weight.shape[0], rank], dtype=weight.dtype, device=self._device
+            lora_b=self.get_lora_mat(
+                [weight.shape[0], rank],
+                is_zero=use_zero_lora_b,
+                dtype=weight.dtype,
+                device=self._device,
             ),
         )
         self.set_module_lora(module_name, lora)
