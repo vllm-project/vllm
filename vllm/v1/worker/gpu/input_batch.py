@@ -64,6 +64,7 @@ class InputBatch:
     # sum(num_scheduled_tokens)
     num_tokens: int
     num_tokens_after_padding: int
+    num_draft_tokens: int
 
     # [num_reqs + 1]
     query_start_loc: torch.Tensor
@@ -80,8 +81,10 @@ class InputBatch:
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
 
-    # [num_reqs]
+    # [total_num_logits]
     logits_indices: torch.Tensor
+    # [num_reqs + 1]
+    cu_num_logits: torch.Tensor
 
     @classmethod
     def make_dummy(
@@ -118,6 +121,7 @@ class InputBatch:
         positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
+        cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -126,6 +130,7 @@ class InputBatch:
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
+            num_draft_tokens=0,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -134,6 +139,7 @@ class InputBatch:
             positions=positions,
             attn_metadata=None,  # type: ignore
             logits_indices=logits_indices,
+            cu_num_logits=cu_num_logits,
         )
 
 

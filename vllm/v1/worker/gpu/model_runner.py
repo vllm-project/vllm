@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.input_batch import (
     update_num_computed_tokens,
 )
 from vllm.v1.worker.gpu.sampler import Sampler, compute_prompt_logprobs
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
 from vllm.v1.worker.gpu.states import RequestState, SamplingMetadata
 from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -435,6 +436,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not scheduler_output.scheduled_spec_decode_tokens:
             # No draft token scheduled (common case).
             num_draft_tokens: torch.Tensor | None = None
+            total_num_draft_tokens = 0
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
@@ -536,6 +538,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
+            num_draft_tokens=total_num_draft_tokens,
             query_start_loc=query_start_loc_gpu,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -544,6 +547,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             positions=positions,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
+            cu_num_logits=cu_num_logits,
         )
 
     def sample(
@@ -567,12 +571,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.input_buffers,
                 )
 
+        # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(logits, sampling_metadata)
+
         # Get the number of sampled tokens.
         # 0 if chunked-prefilling, 1 if not.
         prefill_len = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
         is_chunked_prefilling = input_batch.seq_lens < prefill_len
-        num_sampled = (~is_chunked_prefilling).int()
+        if input_batch.num_draft_tokens == 0:
+            # No draft tokens (common case).
+            num_sampled = (~is_chunked_prefilling).int()
+        else:
+            # Draft tokens for spec decoding.
+            input_ids = input_batch.input_ids[input_batch.logits_indices]
+            num_sampled = rejection_sample(
+                sampler_output.sampled_token_ids,
+                input_ids,
+                input_batch.cu_num_logits,
+            )
+            num_sampled *= ~is_chunked_prefilling
+            # TODO(woosuk): Support logprobs with spec decoding.
         return sampler_output, num_sampled
 
     def compute_prompt_logprobs(
@@ -789,6 +807,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata = self.req_states.make_sampling_metadata(
                     input_batch.idx_mapping_np, pos
                 )
+                if input_batch.num_draft_tokens > 0:
+                    sampling_metadata = self.req_states.expand_sampling_metadata(
+                        sampling_metadata, input_batch.cu_num_logits
+                    )
 
                 if self.lora_config:
                     # Activate LoRA adapters.
