@@ -336,10 +336,8 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
     cuda-nvcc-${CUDA_VERSION_DASH} \
     cuda-cudart-${CUDA_VERSION_DASH} \
     cuda-nvrtc-${CUDA_VERSION_DASH} \
-    libcublas-${CUDA_VERSION_DASH} \
-    gcc-10 && \
+    libcublas-${CUDA_VERSION_DASH} && \
     rm -rf /var/lib/apt/lists/*
-ENV CC=/usr/bin/gcc-10
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
