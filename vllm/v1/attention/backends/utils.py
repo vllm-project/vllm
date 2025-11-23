@@ -92,6 +92,7 @@ class CommonAttentionMetadata:
     encoder_seq_lens: torch.Tensor | None = None
     encoder_seq_lens_cpu: np.ndarray | None = None
     max_encoder_seq_len: int | None = None
+    scheduled_encoder_req_index: list[int] | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None

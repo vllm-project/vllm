@@ -1167,22 +1167,30 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
-        scheduled_encoder_inputs: dict[str, int],
+        num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
+        scheduled_encoder_inputs: dict[str, list[int]],
         num_reqs: int,
     ) -> np.ndarray | None:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
-            return None, None, None
+            return None, None, None, None
 
-        assert self.model_config.is_encoder_decoder, \
-                "Cross-attention as of now supports only encoder-decoder model."
+        assert self.model_config.is_encoder_decoder, (
+            "Cross-attention as of now supports only encoder-decoder model."
+        )
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         self.encoder_seq_lens.np.fill(0)
-        for req_id in scheduled_encoder_inputs:
+        for req_id in num_scheduled_tokens:
             req_index = self.input_batch.req_id_to_index[req_id]
             req_state = self.requests[req_id]
+
+            if req_state.mm_features is None:
+                continue
+
+            # Get the total number of encoder input tokens for
+            # running encoder request whether encoding is finished or not.
             encoder_input_tokens = sum(
                 feature.mm_position.length for feature in req_state.mm_features
             )
@@ -1192,9 +1200,17 @@ class GPUModelRunner(
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
         encoder_seq_lens_cpu = self.encoder_seq_lens.cpu[:num_reqs]
         max_encoder_seq_len = self.encoder_seq_lens.np[:num_reqs].max().item()
+        scheduled_encoder_req_index = [
+            self.input_batch.req_id_to_index[req_id]
+            for req_id in scheduled_encoder_inputs
+        ]
 
-        return encoder_seq_lens, encoder_seq_lens_cpu, max_encoder_seq_len
- 
+        return (
+            encoder_seq_lens,
+            encoder_seq_lens_cpu,
+            max_encoder_seq_len,
+            scheduled_encoder_req_index,
+        )
 
     def _prepare_inputs(
         self,
@@ -1450,6 +1466,7 @@ class GPUModelRunner(
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         scheduled_encoder_inputs: dict[str, list[int]] | None = None,
+        num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -1514,9 +1531,15 @@ class GPUModelRunner(
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
-            encoder_seq_lens, encoder_seq_lens_cpu, max_encoder_seq_len = self._get_encoder_seq_lens(
-                scheduled_encoder_inputs or {},
+            (
+                encoder_seq_lens,
+                encoder_seq_lens_cpu,
+                max_encoder_seq_len,
+                scheduled_encoder_req_index,
+            ) = self._get_encoder_seq_lens(
+                num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
+                scheduled_encoder_inputs,
                 num_reqs,
             )
 
@@ -1560,6 +1583,7 @@ class GPUModelRunner(
                 encoder_seq_lens=encoder_seq_lens,
                 encoder_seq_lens_cpu=encoder_seq_lens_cpu,
                 max_encoder_seq_len=max_encoder_seq_len,
+                scheduled_encoder_req_index=scheduled_encoder_req_index,
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
@@ -2743,6 +2767,7 @@ class GPUModelRunner(
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
                         scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )

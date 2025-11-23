@@ -35,6 +35,7 @@ def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
 
 
 def _get_cross_slot_mapping(
+    scheduled_encoder_req_index: list[int],
     encoder_seq_lens: np.ndarray,
     block_table_tensor: torch.Tensor,
     kv_cache_spec: CrossAttentionSpec,
@@ -45,18 +46,7 @@ def _get_cross_slot_mapping(
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
-    # REMOVE
-    print(f"Encoder seq lens: {encoder_seq_lens}, type: {type(encoder_seq_lens)}")
-
-    # Find indices with non-zero encoder sequence lengths
-    # The majority of parallel requests will be running the
-    # decoder, so this list should be relatively small.
-    # active_indices = np.nonzero(encoder_seq_lens)[0]
-    active_indices = torch.nonzero(encoder_seq_lens, as_tuple=True)[0]
-    # # REMOVE
-    print(f"Active indices for cross-attention: {active_indices}, type: {type(active_indices)}")
-
-    for req_index in active_indices:
+    for req_index in scheduled_encoder_req_index:
         encoder_seq_len = encoder_seq_lens[req_index].item()
 
         # Calculate the number of blocks needed for this request
@@ -103,11 +93,13 @@ def create_cross_attention_backend(
             new_metadata.seq_lens_cpu = common_attn_metadata.encoder_seq_lens_cpu
             new_metadata.max_seq_len = common_attn_metadata.max_encoder_seq_len
             new_metadata.slot_mapping = _get_cross_slot_mapping(
+                new_metadata.scheduled_encoder_req_index,
                 new_metadata.encoder_seq_lens_cpu,
                 new_metadata.block_table_tensor,
                 self.kv_cache_spec,
                 self.device,
             )
+
             return super().build(common_prefix_len, new_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
