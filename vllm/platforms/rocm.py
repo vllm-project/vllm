@@ -233,10 +233,7 @@ class RocmPlatform(Platform):
                 "Sparse MLA backend on ROCm only supports block size 1 for now."
             )
             logger.info_once("Using Sparse MLA backend on V1 engine.")
-            return (
-                "vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse."
-                "ROCMAiterMLASparseBackend"
-            )
+            return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
         if use_mla:
             if selected_backend is None:
