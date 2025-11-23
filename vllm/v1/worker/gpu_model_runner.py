@@ -2440,7 +2440,7 @@ class GPUModelRunner(
                 # size is dynamic depending on the input multimodal items.
                 original_num_imgs = -1
                 padded_num_tokens = -1
-                if "pixel_values" in mm_kwargs_group:
+                if self.vit_cudagraph_batch_sizes and "pixel_values" in mm_kwargs_group:
                     pixel_values = mm_kwargs_group["pixel_values"]
                     num_tokens = pixel_values.shape[0]
 
@@ -2477,7 +2477,17 @@ class GPUModelRunner(
                             assert padding_amount % (merge_size * merge_size) == 0
                             h_patches = merge_size
                             w_patches = padding_amount // h_patches
-
+                            if num_images + 1 > self.image_grid_thw_buffer.shape[0]:
+                                new_size = max(
+                                    self.image_grid_thw_buffer.shape[0] * 2,
+                                    num_images + 1,
+                                )
+                                new_buffer = torch.zeros(
+                                    (new_size, 3),
+                                    dtype=torch.long,
+                                    device=self.device,
+                                )
+                                self.image_grid_thw_buffer = new_buffer
                             self.image_grid_thw_buffer[:num_images].copy_(
                                 image_grid_thw
                             )

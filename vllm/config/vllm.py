@@ -1402,7 +1402,15 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 vit_cudagraph_capture_sizes.sort()
             else:
-                max_vit_cudagraph_capture_size = 5120
+                from vllm.multimodal import MULTIMODAL_REGISTRY
+                from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+
+                encoder_compute_budget, _ = compute_encoder_budget(
+                    model_config=self.model_config,
+                    scheduler_config=self.scheduler_config,
+                    mm_registry=MULTIMODAL_REGISTRY,
+                )
+                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 32768)
                 vit_cudagraph_capture_sizes = [
                     i
                     for i in [16, 32, 64, 128, 256]
@@ -1416,7 +1424,12 @@ class VllmConfig:
                 if max_vit_cudagraph_capture_size >= 2048:
                     # Step size 128 for larger batch sizes
                     vit_cudagraph_capture_sizes += list(
-                        range(2048, max_vit_cudagraph_capture_size + 1, 128)
+                        range(2048, min(max_vit_cudagraph_capture_size + 1, 4096), 128)
+                    )
+                if max_vit_cudagraph_capture_size >= 4096:
+                    # Step size 256 for largest batch sizes
+                    vit_cudagraph_capture_sizes += list(
+                        range(4096, max_vit_cudagraph_capture_size + 1, 256)
                     )
             self.compilation_config.vit_cudagraph_capture_sizes = (
                 vit_cudagraph_capture_sizes
