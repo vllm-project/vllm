@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import overload
@@ -75,7 +74,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
         self,
         token_ids: list[int],
         logprobs: list[float],
-        ranks: itertools.chain[int],
+        ranks: list[int],
         decoded_tokens: Iterable[str | None],
     ) -> None:
         """
@@ -186,21 +185,16 @@ def append_logprobs_for_next_position(
     # We do not need a special case for the sampled token
     # being in the topk, since inserting duplicated data
     # into a dictionary twice is the same as doing it once.
-    topk_ranks = range(1, num_logprobs + 1)
-    ranks = itertools.chain((rank,), topk_ranks)
+    ranks = [rank] + list(range(1, num_logprobs + 1))
 
     if isinstance(request_logprobs, FlatLogprobs):
         request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
     else:
-        request_logprobs.append(
-            {
-                token_id: Logprob(
-                    logprob=logprob,
-                    rank=rank,
-                    decoded_token=token,
-                )
-                for token_id, logprob, rank, token in zip(
-                    token_ids, logprobs, ranks, decoded_tokens
-                )
-            }
-        )
+        logprobs_dict: dict[int, Logprob] = {}
+        for token_id, logprob, rank_val, token in zip(
+            token_ids, logprobs, ranks, decoded_tokens
+        ):
+            logprobs_dict[token_id] = Logprob(
+                logprob=logprob, rank=rank_val, decoded_token=token
+            )
+        request_logprobs.append(logprobs_dict)
