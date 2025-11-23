@@ -3,7 +3,6 @@
 
 import json
 from pprint import pprint
-from typing import Any, Dict, List, Tuple
 
 # Third-party libraries
 import jsonschema
@@ -181,7 +180,7 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     assert FUNC_CALC in function_names, "Calculator function not called"
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
-    )   
+    )
     assert len(reasoning) > 0, "Expected reasoning content missing"
     
 
@@ -198,11 +197,10 @@ async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
 
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
-
     assert FUNC_TIME in function_names, "get_time function not called"
     assert any("New York" in arg for arg in arguments), (
         f"Expected get_time arguments for New York not found in {arguments}"
-    )   
+    )
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
