@@ -151,6 +151,20 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class PerfStats:
+    num_flops: int = 0
+    num_read_bytes: int = 0
+    num_write_bytes: int = 0
+
+    def __add__(self, other: "PerfStats") -> "PerfStats":
+        return PerfStats(
+            self.num_flops + other.num_flops,
+            self.num_read_bytes + other.num_read_bytes,
+            self.num_write_bytes + other.num_write_bytes,
+        )
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -171,6 +185,8 @@ class SchedulerStats:
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
+    perf_stats: PerfStats | None = None
 
 
 @dataclass
