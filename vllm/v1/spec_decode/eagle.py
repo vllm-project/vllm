@@ -66,6 +66,7 @@ class EagleProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
@@ -269,21 +270,23 @@ class EagleProposer:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
+        )
+
         cudagraph_runtime_mode = CUDAGraphMode.NONE
         if (
             self.use_cuda_graph
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            and num_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            num_input_tokens = num_tokens
-
-        num_input_tokens, num_tokens_across_dp = self._pad_batch_across_dp(
-            num_tokens_unpadded=num_tokens,
-            num_tokens_padded=num_input_tokens,
-            allow_dp_padding=cudagraph_runtime_mode != CUDAGraphMode.NONE,
-        )
+            num_input_tokens = num_tokens_dp_padded
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
@@ -371,21 +374,23 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
+        batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=batch_size,
+            num_tokens_padded=batch_size,
+        )
+
         if (
             self.use_cuda_graph
-            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+            and batch_size_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            input_batch_size = batch_size
+            input_batch_size = batch_size_dp_padded
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-
-        input_batch_size, batch_size_across_dp = self._pad_batch_across_dp(
-            num_tokens_unpadded=batch_size,
-            num_tokens_padded=input_batch_size,
-            allow_dp_padding=cudagraph_runtime_mode != CUDAGraphMode.NONE,
-        )
+        if batch_size_across_dp is not None:
+            batch_size_across_dp[self.dp_rank] = input_batch_size
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -1133,13 +1138,6 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if (
-            cudagraphs_enabled
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
-        else:
-            num_tokens_padded = num_tokens
 
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
@@ -1147,14 +1145,23 @@ class EagleProposer:
             self.num_speculative_tokens if not is_graph_capturing else 1
         ):
             if fwd_idx <= 1:
-                num_input_tokens, num_tokens_across_dp = self._pad_batch_across_dp(
+                num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
-                    num_tokens_padded=num_tokens_padded,
-                    # We don't use 'cudagraphs_enabled' because a dummy batch runs
-                    # in eager mode although we want it to get padded to match the
-                    # cudagraph-enabled non-dummy dp batch size
-                    allow_dp_padding=self.use_cuda_graph,
+                    num_tokens_padded=num_tokens,
                 )
+                if (
+                    cudagraphs_enabled
+                    and num_tokens_dp_padded
+                    <= self.compilation_config.max_cudagraph_capture_size
+                ):
+                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                        num_tokens_dp_padded
+                    )
+                else:
+                    num_input_tokens = num_tokens_dp_padded
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
             with set_forward_context(
                 None,
                 self.vllm_config,
@@ -1230,24 +1237,23 @@ class EagleProposer:
         self,
         num_tokens_unpadded: int,
         num_tokens_padded: int,
-        allow_dp_padding: bool,
     ) -> tuple[int, torch.Tensor]:
         # TODO(Flechman): support DBO ubatching
         ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,
-            allow_dp_padding=allow_dp_padding,
+            allow_dp_padding=self.use_cuda_graph,
             num_tokens_padded=num_tokens_padded,
             uniform_decode=None,
             num_scheduled_tokens_per_request=None,
         )
         assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
 
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        num_tokens_dp_padded = num_tokens_padded
         if num_toks_across_dp is not None:
-            num_tokens_padded = int(num_toks_across_dp[dp_rank].item())
-        return num_tokens_padded, num_toks_across_dp
+            num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
+        return num_tokens_dp_padded, num_toks_across_dp
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
