@@ -58,7 +58,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         Ensure DP+EP without all2all still gets dispatch/combine via naive
         prepare/finalize.
         """
-        if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
+        if (
+            prepare_finalize is None
+            and not self.moe.moe_parallel_config.use_all2all_kernels
+            and self.moe.dp_size > 1
+            and self.moe.use_ep
+        ):
             from .naive_prepare_finalize import FusedMoENaivePrepareAndFinalize
 
             return FusedMoENaivePrepareAndFinalize()
