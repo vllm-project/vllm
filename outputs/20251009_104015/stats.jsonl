@@ -1,0 +1,16 @@
+{"input_tokens": 215}
+{"output_tokens": 363}
+{"input_time": 0.0724807079986931}
+{"output_time": 3.178420182000991}
+{"total_time": 3.2509008899996843}
+{"drafter_forward_time": 0.20065858600355568}
+{"target_forward_time": 1.5141977740004222}
+{"forward_ratio": 0.13251808280858016}
+{"input_throughput": 2966.306565381186}
+{"output_throughput": 114.20768155690209}
+{"total_throughput": 177.79686910112358}
+{"drafts": 232}
+{"draft_tokens": 464}
+{"draft_utilization_rate": 28.01724137931034}
+{"accepted_tokens": 130}
+{"mean_acceptance_length": 1.5603448275862069}

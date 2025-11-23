@@ -3,6 +3,8 @@
 
 from vllm.model_executor.parameter import BasevLLMParameter, PackedvLLMParameter
 from vllm.model_executor.utils import set_random_seed
+from icecream import install
+install()
 
 __all__ = [
     "set_random_seed",

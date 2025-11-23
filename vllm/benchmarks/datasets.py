@@ -1311,6 +1311,7 @@ class _ValidateDatasetArgs(argparse.Action):
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--request-id-prefix", type=str, default="", help="The prefix for the request id.")
     parser.add_argument(
         "--num-prompts",
         type=int,

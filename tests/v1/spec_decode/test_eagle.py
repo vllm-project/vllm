@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from unittest import mock
 
 import pytest
 import torch
 
 from tests.utils import get_attn_backend_list_based_on_platform
-from tests.v1.attention.utils import (
-    BatchSpec,
-    create_common_attn_metadata,
-    create_standard_kv_cache_spec,
-    try_get_attention_backend,
-)
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
+                                      create_standard_kv_cache_spec,
+                                      get_attention_backend, try_get_attention_backend)
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
@@ -24,21 +21,24 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+model_dir = "NousResearch/Meta-Llama-3-8B-Instruct" # "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
-
+vocab_freq_dir = "eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt"
+draft_vocab_frequency_keep_threshold = 0.5
 
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
-    speculative_token_tree: list[tuple[int, ...]] | None = None,
+    speculative_token_tree: list[tuple[int]] | None = None,
+    prune_vocab: bool = False,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
 
@@ -50,6 +50,10 @@ def _create_proposer(
         assert num_speculative_tokens == len(speculative_token_tree)
         spec_token_tree_str = str(speculative_token_tree)
 
+    draft_vocab_frequency_path = None
+    if prune_vocab:
+        draft_vocab_frequency_path = vocab_freq_dir
+
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
@@ -57,6 +61,8 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
+        draft_vocab_frequency_path=draft_vocab_frequency_path,
+        draft_vocab_frequency_keep_threshold=draft_vocab_frequency_keep_threshold,
     )
 
     vllm_config = VllmConfig(
@@ -321,21 +327,20 @@ def test_prepare_inputs_padded():
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
+@pytest.mark.parametrize("prune_vocab", [True, False])
 @pytest.mark.parametrize("use_distinct_lm_head", [True, False])
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
-def test_load_model(
-    mock_get_model,
-    mock_get_layers,
-    mock_get_pp_group,
-    method,
-    attn_backend,
-    pp_size,
-    use_distinct_embed_tokens,
-    use_distinct_lm_head,
-    monkeypatch,
-):
+@mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
+@mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
+@mock.patch('vllm.v1.spec_decode.eagle.get_model')
+@mock.patch('copy.deepcopy')
+def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_group, method,
+                    attn_backend, pp_size, use_distinct_embed_tokens, use_distinct_lm_head, prune_vocab,
+                    monkeypatch):
+
+    # Skip if prune_vocab=True and method != "eagle"
+    if prune_vocab and method != "eagle":
+        pytest.skip("prune_vocab only applies to eagle method")
+
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
     if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
@@ -357,6 +362,7 @@ def test_load_model(
     if use_distinct_lm_head:
         mock_model.lm_head = mock.MagicMock()
 
+    mock_model.lm_head.data.shape = (131072, 4096)
     mock_get_model.return_value = mock_model
 
     # Setup mocks for attention layers
@@ -397,16 +403,43 @@ def test_load_model(
     from vllm.model_executor.models import SupportsMultiModal
 
     assert not isinstance(target_model, SupportsMultiModal)
+    if method == "eagle":
+        # Setup the lm_head with data, device, and shape
+        target_model.lm_head = mock.MagicMock()
+        device = torch.device(current_platform.device_type)
+        target_model.lm_head.weight.device = device
+        target_model.lm_head.weight.shape = (131072, 4096)
+
+    # Create mock copy.deepcopy
+    if prune_vocab:
+        def my_deepcopy(obj, memo=None):
+            if hasattr(obj, 'data') and hasattr(obj.data, 'device'):
+                return mock.MagicMock(data=mock.MagicMock(device=obj.data.device, shape=obj.data.shape))
+            return obj
+        mock_deepcopy.side_effect = my_deepcopy
 
     # Create proposer using the helper function
-    proposer = _create_proposer(method, num_speculative_tokens=8)
+    proposer = _create_proposer(method, num_speculative_tokens=8, prune_vocab=prune_vocab)
 
     # Call the method under test
     proposer.load_model(target_model)
 
+    # # Manually set the pruned vocab size
+    # if method == "eagle" and prune_vocab:
+    #     proposer.model.lm_head.weight.data.shape = (32768, 4096)
+
     # Verify common interactions
     mock_get_model.assert_called_once()
 
+    if method == "eagle":
+        if prune_vocab:
+            # Verify that the vocab of EAGLE models is pruned to the correct ratio
+            pruned_vocab_size = proposer.model.lm_head.weight.data.shape[0]
+            original_vocab_size = target_model.lm_head.weight.data.shape[0]
+            assert pruned_vocab_size/original_vocab_size == 0.25, f"{pruned_vocab_size/original_vocab_size=}"
+        else:
+            # Verify that EAGLE models have the same lm head as the target model
+            assert proposer.model.lm_head == target_model.lm_head
     # Verify that the lm head is set correctly
     if use_distinct_lm_head:
         assert proposer.model.lm_head is not target_model.lm_head
@@ -424,7 +457,9 @@ def test_load_model(
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
+@pytest.mark.parametrize("prune_vocab", [True, False])
+def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monkeypatch):
+
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
     if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
@@ -454,13 +489,16 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer(method, num_speculative_tokens, prune_vocab=prune_vocab)
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
 
     # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids):
+    def create_deterministic_logits(token_ids:list[int], vocab_size:int):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        # simulate pruning the vocabulary of the draft model
+        if prune_vocab:
+            token_ids = [pruned_token_ids.index(token_id) for token_id in token_ids]
         for i, token_id in enumerate(token_ids):
             logits[i, token_id] = 100.0
         return logits
@@ -470,9 +508,21 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Sequence 2: 60, 61, 62, ...
     base_token_ids = [42, 60]
 
+    # prune the vocab of the draft model
+    if prune_vocab:
+        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will generate
+        pruned_token_ids = [i for base in base_token_ids for i in range(base, base + num_speculative_tokens + 1)]
+        pruned_vocab_size = len(pruned_token_ids)
+
+    # Set up the mock model with a custom class so that
+    # isinstance() checks match the expected type.
+    if method == "eagle3":
+        model_mock = mock.create_autospec(Eagle3LlamaForCausalLM, instance=True)
+        model_mock.combine_hidden_states.side_effect = lambda x: x
+    else:
+        model_mock = mock.MagicMock()
+
     # Skip loading the model and replace it with a mock directly
-    # Create the mock model with deterministic outputs
-    model_mock = mock.MagicMock()
 
     # Setup for model forward calls
     forward_returns = []
@@ -496,10 +546,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Setup for compute_logits calls
     logits_returns = []
+    logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
     for i in range(num_speculative_tokens):
         # For each call, increment the base token IDs
         current_tokens = [base_id + i for base_id in base_token_ids]
-        logits_returns.append(create_deterministic_logits(current_tokens))
+        logits_returns.append(create_deterministic_logits(current_tokens, logit_vocab_size))
 
     if num_speculative_tokens == 1:
         model_mock.compute_logits.return_value = logits_returns[0]
@@ -511,6 +562,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Assign draft attn_layer_names since load_model is not invoked
     proposer.attn_layer_names = ["layer.0"]
+
+    # Assign pruned token ids to the proposer
+    if prune_vocab:
+        proposer.pruned_token_ids = torch.tensor(pruned_token_ids, device=device)
 
     # Create input tensors
     batch_spec = BatchSpec(
@@ -598,17 +653,17 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
 
-
 @pytest.mark.parametrize(
     "spec_token_tree",
     [
-        [(0,)],  # A single token
-        [(0,), (0, 0), (0, 0, 0)],  # Chain
-        [(0,), (1,), (2,)],  # Parallel
-        [(0,), (1,), (2,), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)],  # Tree
-    ],
-)
-def test_propose_tree(spec_token_tree):
+        [(0, )],  # A single token
+        [(0, ), (0, 0), (0, 0, 0)],  # Chain
+        [(0, ), (1, ), (2, )],  # Parallel
+        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
+         (2, 1)],  # Tree
+    ])
+@pytest.mark.parametrize("prune_vocab", [True, False])
+def test_propose_tree(spec_token_tree, prune_vocab):
     # Get GPU device.
     device = torch.device(current_platform.device_type)
 
@@ -622,15 +677,18 @@ def test_propose_tree(spec_token_tree):
     num_speculative_tokens = len(spec_token_tree)
 
     # Create proposer first so we can use its actual hidden_size.
-    proposer = _create_proposer(
-        "eagle", num_speculative_tokens, speculative_token_tree=spec_token_tree
-    )
+    proposer = _create_proposer("eagle",
+                                num_speculative_tokens,
+                                speculative_token_tree=spec_token_tree,
+                                prune_vocab=prune_vocab)
     # Get the hidden_size from the proposer to ensure consistency.
     hidden_size = proposer.hidden_size
 
     # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids, k: int):
+    def create_deterministic_logits(token_ids:list[int], vocab_size:int, k: int):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        if prune_vocab:
+            token_ids = [pruned_token_ids.index(token_id) for token_id in token_ids]
         for i, token_id in enumerate(token_ids):
             # Assign decreasing values to the k, consecutive, tokens.
             for j in range(k):
@@ -639,6 +697,12 @@ def test_propose_tree(spec_token_tree):
 
     # Mock a model that returns deterministic logits.
     base_token_ids = torch.tensor([42, 60], dtype=torch.int64, device=device)
+
+    # prune the vocab of the draft model
+    if prune_vocab:
+        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will generate
+        pruned_token_ids = [i for base in base_token_ids for i in range(base, base + num_speculative_tokens + 1)]
+        pruned_vocab_size = len(pruned_token_ids)
 
     # Skip loading the model and replace it with a mock that returns
     # deterministic outputs.
@@ -662,14 +726,16 @@ def test_propose_tree(spec_token_tree):
         [0] + proposer.cu_drafts_per_level, dtype=torch.int32, device=device
     )
     logits_returns = []
+    logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
     for level, num_children in enumerate(proposer.child_drafts_per_level):
         token_ids = base_token_ids + cu_num_drafts_tensor[level]
         level_num_drafts = cu_num_drafts_tensor[level + 1] - cu_num_drafts_tensor[level]
         level_logits = []
         for i in range(level_num_drafts // num_children):
             level_logits.append(
-                create_deterministic_logits(token_ids + i * num_children, num_children)
-            )
+                create_deterministic_logits(token_ids + i * num_children,
+                                            logit_vocab_size,
+                                            num_children))
         logits_returns.append(torch.stack(level_logits, dim=1))
     model_mock.compute_logits.side_effect = logits_returns
 
@@ -678,6 +744,10 @@ def test_propose_tree(spec_token_tree):
 
     # Assign draft attn_layer_names since load_model is not invoked
     proposer.attn_layer_names = ["layer.0"]
+
+    # Assign pruned token ids to the proposer
+    if prune_vocab:
+        proposer.pruned_token_ids = torch.tensor(pruned_token_ids, device=device)
 
     # Get the tree attention metadata builder.
     attn_metadata_builder_cls, _ = try_get_attention_backend(

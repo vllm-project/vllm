@@ -4,6 +4,7 @@
 import gc
 import itertools
 import time
+import os
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -167,6 +168,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+def save_stats(forward_time, input_ids_shape, model_type):
+    import pathlib
+    outputs_dir = pathlib.Path("outputs/")
+    latest_dir = max([d for d in outputs_dir.iterdir() if d.is_dir()], key=lambda x: x.name, default=None)
+    with open(latest_dir / f"{model_type}.csv", 'a') as f:
+        print(f"{forward_time},{input_ids_shape}", file=f)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -2792,6 +2799,7 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            st = time.perf_counter()
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -2799,6 +2807,8 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            et = time.perf_counter()
+            save_stats(et - st, input_ids.shape, "target")
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:

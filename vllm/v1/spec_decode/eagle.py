@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import copy
+import time
 from dataclasses import replace
 from importlib.util import find_spec
 
 import numpy as np
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
 
 from vllm.config import (
     CompilationMode,
@@ -46,6 +49,12 @@ logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
+def save_stats(forward_time, input_ids_shape):
+    import pathlib
+    outputs_dir = pathlib.Path("outputs/")
+    latest_dir = max([d for d in outputs_dir.iterdir() if d.is_dir()], key=lambda x: x.name, default=None)
+    with open(latest_dir / "drafter.csv", 'a') as f:
+        print(f"{forward_time},{input_ids_shape}", file=f)
 
 class EagleProposer:
     def __init__(
@@ -72,6 +81,9 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        
+        # pruning the draft model vocabulary
+        self.pruned_vocab = None
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -302,12 +314,16 @@ class EagleProposer:
             num_tokens=num_input_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
+            st = time.perf_counter()
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            et = time.perf_counter()
+            save_stats(et - st, input_ids.shape)
+
             if self.method == "mtp":
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -344,10 +360,19 @@ class EagleProposer:
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
             )
+
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
+
+        # Early exit if there is only one draft token to be generated.
+        if self.num_speculative_tokens == 1:
+            # [batch_size, 1]
+            return draft_token_ids.view(-1, 1)
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -473,12 +498,16 @@ class EagleProposer:
                 num_tokens=input_batch_size,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
+                st = time.perf_counter()
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(input_batch_size),
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
+                et = time.perf_counter()
+                save_stats(et - st, input_ids.shape)
+
                 if self.method == "mtp":
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
@@ -487,6 +516,8 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
+            if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
@@ -677,8 +708,11 @@ class EagleProposer:
             draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
         else:
             draft_token_ids = torch.topk(logits, num_children, dim=-1).indices.view(
-                batch_size, -1
-            )
+              batch_size, -1)
+
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
+
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
@@ -792,12 +826,15 @@ class EagleProposer:
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
+                st = time.perf_counter()
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=None,
                 )
+                et = time.perf_counter()
+                save_stats(et - st, input_ids.shape)
 
             # Get the output hidden states for the draft tokens.
             draft_hidden_states = hidden_states[:num_tokens].view(
@@ -818,8 +855,11 @@ class EagleProposer:
                 draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
             else:
                 draft_token_ids = torch.topk(logits, num_children, dim=-1).indices.view(
-                    batch_size, -1
+                  batch_size, -1
                 )
+            if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
+
             draft_token_ids_list.append(draft_token_ids)
 
             # Update the # drafts counters for the next tree level.
@@ -1108,6 +1148,57 @@ class EagleProposer:
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
 
+        # Prune the draft model vocabulary
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+
+            vocab_freq_path = self.vllm_config.speculative_config.draft_vocab_frequency_path
+            keep_threshold = self.vllm_config.speculative_config.draft_vocab_frequency_keep_threshold
+
+            if keep_threshold is None:
+                raise ValueError(
+                    "When `draft_vocab_frequency_path` is set, "
+                    "`draft_vocab_frequency_keep_threshold` cannot be None."
+                )
+
+            logger.info(f"Loading draft model vocabulary scores from {vocab_freq_path}")
+            vocab_freq = load_vocab_freq(vocab_freq_path)
+
+            logger.info(f"Keep {keep_threshold}% of the draft vocabulary.")
+            self.pruned_vocab = prune_draft_vocab(vocab_freq, keep_threshold)
+            self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
+
+            # Update lm_head weights with pruned vocabulary
+            if hasattr(self.model, "lm_head"):
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                ic(torch.cuda.memory_summary())
+
+                # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
+                if self.model.lm_head == target_language_model.lm_head:
+                    self.model.lm_head = copy.deepcopy(self.model.lm_head)
+
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                ic(torch.cuda.memory_summary())
+
+                # Keep old weight reference to allow memory release
+                old_weight = self.model.lm_head.weight
+
+                # In-place pruning of the weight
+                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab].clone().detach()
+
+                # Free old memory
+                del old_weight
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                print(torch.cuda.memory_summary())
+
+
+            elif hasattr(self.model.model, "embed_tokens"):
+                logger.info("Assuming lm_head is tied to embed_tokens; skipping direct weight update.")
+            else:
+                logger.warning("No lm_head or embed_tokens found; pruned vocabulary not applied.")
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -1191,6 +1282,61 @@ class EagleProposer:
             )
             == 1
         ), "All eagle layers should belong to the same kv cache group"
+
+
+def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
+    """
+    Load vocabulary frequencies from a Hugging Face dataset file.
+
+    Args:
+        vocab_frequency_path: HF path in the form 'username/repo/file.pt'
+
+    Returns:
+        Tensor of integer vocabulary frequencies.
+    """
+    if not vocab_frequency_path:
+        raise ValueError("`vocab_frequency_path` must be provided.")
+
+    # Parse HF path
+    parts = vocab_frequency_path.split("/")
+    if len(parts) < 3:
+        raise ValueError("HF path must be at least 'username/repo/file.pt'")
+    repo_id = "/".join(parts[:2])
+    file_path_in_repo = "/".join(parts[2:])
+
+    # Download the file
+    try:
+        local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    except Exception as e:
+        local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo)
+
+    # Load as a tensor of integers
+    vocab_freq = torch.load(local_path, weights_only=True)
+    vocab_freq = torch.tensor(vocab_freq).to(torch.int64)
+    return vocab_freq
+
+
+def prune_draft_vocab(vocab_freq: torch.Tensor, keep_threshold: float) -> torch.Tensor:
+    """
+    Prune a draft vocabulary based on the keep threshold.
+
+    Args:
+        vocab_freq: Tensor of vocabulary frequencies.
+        keep_threshold: Fraction of cumulative mass to retain (0 < keep_threshold < 1).
+
+    Returns:
+        Tensor of indices representing the pruned vocabulary.
+    """
+    if not isinstance(vocab_freq, torch.Tensor):
+        raise TypeError("`vocab_freq` must be a torch.Tensor.")
+    if not (0 <= keep_threshold <= 1):
+        raise ValueError(f"`keep_threshold` must be in [0, 1], got {keep_threshold}")
+
+    # Sort frequencies descending
+    _, sorted_indices = torch.sort(vocab_freq, descending=True)
+    cutoff_idx = int(keep_threshold * len(sorted_indices))
+    pruned_vocab = sorted_indices[:cutoff_idx]
+    return pruned_vocab
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

@@ -1,18 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
+import json
+import pathlib
+import itertools
+
+from tqdm import tqdm
 
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter, Vector, Histogram
 
 try:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+# create output directory
+from datetime import datetime
+outputs_dir = pathlib.Path("outputs/") / datetime.now().strftime("%Y%m%d_%H%M%S")
+outputs_dir.mkdir(parents=True, exist_ok=True)
+(outputs_dir / "drafter.csv").touch()
+(outputs_dir / "target.csv").touch()
+
+def read_stats(path):
+    forward_times, shapes = [], []
+    with open(path, 'r') as f:
+        for line in f:
+            parts = line.strip().split(',')
+            forward_times.append(float(parts[0]))
+            shapes.append(parts[1])
+    return forward_times, shapes
+
+def print_dict(stats, file=None, newlines=[]):
+  if file is None:
+    for i, (k, v) in enumerate(stats.items()):
+        print(f"{k:<50}{v}")
+        if i in newlines: print()
+  else:
+    file.touch()
+    with open(file, 'a') as f:
+      for k, v in stats.items():
+        f.write(json.dumps({k: v}) + '\n')
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
@@ -45,6 +77,31 @@ def get_custom_mm_prompts(num_prompts):
 
     return [[{"role": "user", "content": prompt}] for prompt in prompts[:num_prompts]]
 
+def multiturn_inference(llm, sampling_params, num_prompts):
+    from datasets import load_dataset
+    ds = load_dataset("philschmid/mt-bench", split="train")
+
+    outputs = []
+    total_samples = min(sum([len(data["turns"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
+    print(f'Running on {total_samples} samples.')
+
+    for i, data in tqdm(enumerate(ds), total=total_samples):
+        if i >= total_samples: break
+        messages = [
+            {"role": "system",
+            "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+        ]
+        for i in range(len(data["turns"])):
+            qs = data["turns"][i]
+            messages.append({"role": "user", "content": qs})
+            output = llm.chat(messages, sampling_params=sampling_params, use_tqdm=False)[0]
+            outputs.append(output)
+            messages.append({
+                "role": "assistant",
+                "content": output.outputs[0].text
+            })
+    return outputs
+
 
 def parse_args():
     parser = FlexibleArgumentParser()
@@ -57,6 +114,9 @@ def parse_args():
         choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    parser.add_argument("--spec-token-tree", type=str, default=None)
+    parser.add_argument("--spec-token-tree-depth", type=int, default=None)
+    parser.add_argument("--spec-token-tree-branching", type=int, default=None)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -67,12 +127,15 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
+    parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--draft-vocab-frequency-path", type=str, default=None)
+    parser.add_argument("--draft-vocab-frequency-keep-threshold", type=str, default=None)
+    parser.add_argument("--compilation-config", type=str, default="")
     return parser.parse_args()
-
 
 def main(args):
     args.endpoint_type = "openai-chat"
@@ -89,28 +152,65 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     args.custom_skip_chat_template = True
 
-    if not args.custom_mm_prompts:
-        prompts = get_samples(args, tokenizer)
-        # add_special_tokens is False to avoid adding bos twice
-        # when using chat templates
-        prompt_ids = [
-            tokenizer.encode(prompt.prompt, add_special_tokens=False)
-            for prompt in prompts
-        ]
+
+    # if not args.custom_mm_prompts:
+    #     prompts = get_samples(args, tokenizer)
+    #     # add_special_tokens is False to avoid adding bos twice
+    #     # when using chat templates
+    #     prompt_ids = [
+    #         tokenizer.encode(prompt.prompt, add_special_tokens=False)
+    #         for prompt in prompts
+    #     ]
+    # else:
+    #     prompts = get_custom_mm_prompts(args.num_prompts)
+
+    # manually specify the speculative token tree
+    if args.spec_token_tree is not None:
+        assert args.spec_token_tree_depth is None and args.spec_token_tree_branching is None, \
+            "If using spec_token_tree, cannot also use spec token tree depth+branching"
+        spec_token_tree = ast.literal_eval(args.spec_token_tree)
+        assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
+        spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
+    # construct a complete speculative token tree from depth, branch args
+    elif args.spec_token_tree_depth is not None or args.spec_token_tree_branching is not None and not (args.spec_token_tree_depth is None and args.spec_token_tree_branching is None):
+        assert args.spec_token_tree is None, "If using spec token tree depth+branching, cannot also use spec_token_tree"
+        if args.spec_token_tree_depth is None: args.spec_token_tree_depth = 1
+        if args.spec_token_tree_branching is None: args.spec_token_tree_branching = 1
+        spec_token_tree = []
+        depth, branching = args.spec_token_tree_depth, args.spec_token_tree_branching
+        for d in range(1, depth + 1):
+            for path in itertools.product(range(branching), repeat=d):
+                spec_token_tree.append(path)
+        if args.num_spec_tokens is None:
+            args.num_spec_tokens = len(spec_token_tree)
+        print(spec_token_tree)
+        assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
+        spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
     else:
-        prompts = get_custom_mm_prompts(args.num_prompts)
+        spec_token_tree_str = None
+    ic(args.num_spec_tokens, spec_token_tree_str)
 
-    if args.method == "eagle" or args.method == "eagle3":
-        eagle_dir = args.eagle_dir
-        if args.method == "eagle" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-
-        elif args.method == "eagle3" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+    # vanilla inference if num_spec_tokens == 0
+    if args.num_spec_tokens == 0:
+        speculative_config = None
+        print('Ignore speculative decoding when `args.num_spec_tokens == 0`.')
+    elif args.method == "eagle":
+        eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "spec_token_tree": spec_token_tree_str,
+            "draft_vocab_frequency_path": args.draft_vocab_frequency_path,
+            "draft_vocab_frequency_keep_threshold": args.draft_vocab_frequency_keep_threshold,
+        }
+    elif args.method == "eagle3":
+        eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
+        speculative_config = {
+            "method": args.method,
+            "model": eagle_dir,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "spec_token_tree": spec_token_tree_str,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -127,6 +227,9 @@ def main(args):
     else:
         raise ValueError(f"unknown method: {args.method}")
 
+    # save args
+    print_dict({str(k): str(v) for k, v in vars(args).items()}, outputs_dir / "args.jsonl")
+
     llm = LLM(
         model=model_dir,
         trust_remote_code=True,
@@ -137,66 +240,122 @@ def main(args):
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
+        seed=0,
+        max_num_seqs=args.max_num_seqs,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        compilation_config=(
+            json.loads(args.compilation_config) if args.compilation_config else None
+        ),
     )
 
+    # print out batch size
+    scheduler_config = llm.llm_engine.vllm_config.scheduler_config
+    ic(scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens, scheduler_config.max_model_len)
+
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    if not args.custom_mm_prompts:
-        outputs = llm.generate(
-            [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
-            sampling_params=sampling_params,
-        )
-    else:
-        outputs = llm.chat(prompts, sampling_params=sampling_params)
+    # if not args.custom_mm_prompts:
+    #     outputs = llm.generate(
+    #         [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
+    #         sampling_params=sampling_params,
+    #     )
+    # else:
+    #     outputs = llm.chat(prompts, sampling_params=sampling_params)
+
+    # perform multi-turn inference with max-num-seqs=1
+    assert args.max_num_seqs == 1
+    outputs = multiturn_inference(llm, sampling_params, args.num_prompts)
+
+    # import Counter in the function b/c vllm has a seperate Counter object
+    def get_finish_reason_counts(outputs):
+        from collections import Counter
+        finish_reasons = [output.outputs[0].finish_reason for output in outputs]
+        return Counter(finish_reasons)
+    finish_reason_counts = get_finish_reason_counts(outputs)
+    print(f"Finish Reasons: {finish_reason_counts}")
 
     # print the generated text
     if args.print_output:
-        for output in outputs:
-            print("-" * 50)
-            print(f"prompt: {output.prompt}")
-            print(f"generated text: {output.outputs[0].text}")
-            print("-" * 50)
+        for i, output in enumerate(outputs):
+            prompt = tokenizer.decode(output.prompt_token_ids)
+            print("*" * 150)
+            print(f"Output {i}:")
+            print(f"---Finish reason---\n{output.outputs[0].finish_reason}")
+            print(f"---Prompt ({len(output.prompt_token_ids)} tokens)---\n{prompt}")
+            print(f"---Generated Text ({len(output.outputs[0].token_ids)})---\n{output.outputs[0].text}")
+            print("*" * 150 + '\n')
 
     metrics = llm.get_metrics()
 
-    total_num_output_tokens = sum(
-        len(output.outputs[0].token_ids) for output in outputs
-    )
-    num_drafts = 0
-    num_draft_tokens = 0
-    num_accepted_tokens = 0
+    output_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+    input_time = 0.0
+    output_time = 0.0
+    drafts = 0
+    draft_tokens = 0
+    accepted_tokens = 0
+    input_tokens = 0
+    requests = 0
     acceptance_counts = [0] * args.num_spec_tokens
+
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
-            num_drafts += metric.value
+            drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_draft_tokens":
             assert isinstance(metric, Counter)
-            num_draft_tokens += metric.value
+            draft_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
-            num_accepted_tokens += metric.value
+            accepted_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:prompt_tokens":
+            assert isinstance(metric, Counter)
+            input_tokens += metric.value
+        elif metric.name == "vllm:request_prefill_time_seconds":
+            assert isinstance(metric, Histogram)
+            input_time += metric.sum
+        elif metric.name == "vllm:request_decode_time_seconds":
+            assert isinstance(metric, Histogram)
+            output_time += metric.sum
+        elif metric.name == "vllm:request_success":
+            assert isinstance(metric, Counter)
+            requests += metric.value
 
-    print("-" * 50)
-    print(f"total_num_output_tokens: {total_num_output_tokens}")
-    print(f"num_drafts: {num_drafts}")
-    print(f"num_draft_tokens: {num_draft_tokens}")
-    print(f"num_accepted_tokens: {num_accepted_tokens}")
-    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
-    print(f"mean acceptance length: {acceptance_length:.2f}")
-    print("-" * 50)
+    # Calculate metrics
+    tokens = input_tokens + output_tokens
+    total_time = input_time + output_time # measured in seconds
 
-    # print acceptance at each token position
-    for i in range(len(acceptance_counts)):
-        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
+    input_throughput = input_tokens / input_time if input_time > 0 else 0
+    output_throughput = output_tokens / output_time if output_time > 0 else 0
+    total_throughput = tokens / total_time
 
-    return acceptance_length
+    mean_acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
+    draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
+
+    drafter_forward_times, _ = read_stats(outputs_dir / "drafter.csv")
+    target_forward_times, _ = read_stats(outputs_dir / "target.csv")
+
+    drafter_forward_time = sum(drafter_forward_times)
+    target_forward_time = sum(target_forward_times)
+    forward_ratio = drafter_forward_time / target_forward_time if target_forward_time > 0 else 0
+
+    stats = {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "input_time": input_time, "output_time": output_time, "total_time": total_time,
+        "drafter_forward_time": drafter_forward_time, "target_forward_time": target_forward_time, "forward_ratio": forward_ratio,
+        "input_throughput": input_throughput, "output_throughput": output_throughput, "total_throughput": total_throughput,
+        "drafts": drafts, "draft_tokens": draft_tokens, "draft_utilization_rate": draft_utilization_rate,
+        "accepted_tokens": accepted_tokens, "mean_acceptance_length": mean_acceptance_length
+    }
+
+    # print stats to stdout and save to file
+    print_dict(stats, newlines=[1, 4, 7, 10, 13, 16])
+    print_dict(stats, file=outputs_dir / "stats.jsonl")
+
+    return mean_acceptance_length
 
 
 if __name__ == "__main__":
