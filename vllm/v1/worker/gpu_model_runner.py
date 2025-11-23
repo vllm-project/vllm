@@ -1202,7 +1202,7 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
     ) -> np.ndarray | None:
@@ -1212,9 +1212,23 @@ class GPUModelRunner(
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id in scheduled_encoder_inputs:
-            req_index = self.input_batch.req_id_to_index[req_id]
-            encoder_seq_lens[req_index] = self.max_encoder_len
+        for req_id in num_scheduled_tokens:
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+
+            req_state = self.requests.get(req_id)
+            if req_state is None or not req_state.mm_features:
+                continue
+
+            # All encoder inputs are processed together in the first step, then
+            # all are cached for decode. Count all mm_features so that
+            # cross-attention knows how many cached encoder tokens to attend to
+            encoder_len = sum(
+                feature.mm_position.length for feature in req_state.mm_features
+            )
+
+            encoder_seq_lens[req_index] = encoder_len
 
         return encoder_seq_lens
 
@@ -1482,7 +1496,7 @@ class GPUModelRunner(
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
-        scheduled_encoder_inputs: dict[str, list[int]] | None = None,
+        num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -1548,7 +1562,7 @@ class GPUModelRunner(
             self.kv_cache_config.kv_cache_groups
         ):
             encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduled_encoder_inputs or {},
+                num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs,
             )
@@ -2828,7 +2842,7 @@ class GPUModelRunner(
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
-                        scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
