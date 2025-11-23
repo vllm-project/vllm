@@ -451,7 +451,7 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
               a.stride(0), " and b.stride(1)=", b.stride(1));
 
   torch::Tensor ab_strides =
-      torch::full({num_experts}, a_stride_elements, options_int);
+      torch::full({num_experts}, a.stride(0) * 2, options_int);
   torch::Tensor c_strides =
       torch::full({num_experts}, output.stride(0), options_int);
 
