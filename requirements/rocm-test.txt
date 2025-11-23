@@ -59,6 +59,9 @@ schemathesis==3.39.15
 # Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
 
+# Required for multiprocessed tests that use spawn method
+multiprocess==0.70.16
+
 # Plugins test
 terratorch==1.1.1
 # MTEB Benchmark Test
