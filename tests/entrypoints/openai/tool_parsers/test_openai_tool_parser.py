@@ -23,7 +23,7 @@ def server():
         "--enforce-eager",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
-        "openai"
+        "openai",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -106,7 +106,8 @@ MESSAGES_MULTIPLE_CALLS = [
 
 MESSAGES_INVALID_CALL = [
     {
-        "role": "user", "content": "Can you help with something, but don’t actually perform any calculation?"
+        "role": "user", 
+        "content": "Can you help with something, but don’t actually perform any calculation?"
     }
 ]
 
@@ -125,7 +126,7 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 def extract_reasoning_and_calls(chunks: list):
     """Extract accumulated reasoning text and tool call arguments from streaming chunks."""
     reasoning_content = ""
-    tool_calls = {}
+    tool_calls: dict[int, dict[str, str]] = {}
 
     for chunk in chunks:
         choice = getattr(chunk.choices[0], "delta", None)
