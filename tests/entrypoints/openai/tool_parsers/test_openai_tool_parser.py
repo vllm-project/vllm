@@ -181,7 +181,7 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     )
     assert len(reasoning) > 0, "Expected reasoning content missing"
-    
+
 
 @pytest.mark.asyncio
 async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
@@ -216,7 +216,7 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
 
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
-    
+
     print("DEBUG: function_names =", function_names)
     print("DEBUG: reasoning =")
     pprint(reasoning)
