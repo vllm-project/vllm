@@ -45,12 +45,16 @@ def _get_cross_slot_mapping(
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
+    # REMOVE
+    # print(f"Encoder seq lens: {encoder_seq_lens}, type: {type(encoder_seq_lens)}")
+
     # Find indices with non-zero encoder sequence lengths
     # The majority of parallel requests will be running the
     # decoder, so this list should be relatively small.
-    active_indices = np.nonzero(encoder_seq_lens)
-    # REMOVE
-    print(f"Active indices for cross-attention: {active_indices}, [0]: {active_indices[0]}, type: {type(active_indices)}, type of first element: {type(active_indices[0])}, type encoder_seq_lens: {type(encoder_seq_lens)}")
+    # active_indices = np.nonzero(encoder_seq_lens)[0]
+    active_indices = torch.nonzero(encoder_seq_lens, as_tuple=True)[0]
+    # # REMOVE
+    # print(f"Active indices for cross-attention: {active_indices}, [0]: {active_indices[0]}, type: {type(active_indices)}, type of first element: {type(active_indices[0])}, type encoder_seq_lens: {type(encoder_seq_lens)}")
 
     for req_index in active_indices:
         encoder_seq_len = encoder_seq_lens[req_index].item()
