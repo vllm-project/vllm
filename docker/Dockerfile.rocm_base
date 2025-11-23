@@ -22,6 +22,10 @@ ENV AITER_ROCM_ARCH=gfx942;gfx950
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
+# max jobs used by Ninja to build extensions
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
 ARG PYTHON_VERSION=3.12
 
 RUN mkdir -p /app
