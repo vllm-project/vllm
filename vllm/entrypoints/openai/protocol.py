@@ -2964,13 +2964,13 @@ class TranscriptionSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float
+    avg_logprob: float | None = None
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float
+    compression_ratio: float | None = None
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
@@ -2979,7 +2979,7 @@ class TranscriptionSegment(OpenAIBaseModel):
     end: float
     """End time of the segment in seconds."""
 
-    no_speech_prob: float
+    no_speech_prob: float | None = None
     """Probability of no speech in the segment.
 
     If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
@@ -3017,6 +3017,11 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: list[TranscriptionWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+TranscriptionResponseVariant: TypeAlias = (
+    TranscriptionResponse | TranscriptionResponseVerbose
+)
 
 
 class TranslationResponseStreamChoice(OpenAIBaseModel):
@@ -3163,13 +3168,13 @@ class TranslationSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float
+    avg_logprob: float | None = None
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float
+    compression_ratio: float | None = None
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
@@ -3178,7 +3183,7 @@ class TranslationSegment(OpenAIBaseModel):
     end: float
     """End time of the segment in seconds."""
 
-    no_speech_prob: float
+    no_speech_prob: float | None = None
     """Probability of no speech in the segment.
 
     If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
@@ -3216,6 +3221,9 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+TranslationResponseVariant: TypeAlias = TranslationResponse | TranslationResponseVerbose
 
 
 ####### Tokens IN <> Tokens OUT #######
