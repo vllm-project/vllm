@@ -19,10 +19,10 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.layer import MLAAttention
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
@@ -258,35 +258,6 @@ def create_and_prepopulate_kv_cache(
     return kv_cache
 
 
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
-
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-    def forward(self, *_args, **_kwargs):
-        raise NotImplementedError
-
-
-class MockMLAAttentionLayer(AttentionLayerBase):
-    """A mock MLA attention layer for populating static_forward_context."""
-
-    def __init__(self, impl):
-        self.impl = impl
-
-    def get_attn_backend(self):
-        raise NotImplementedError
-
-    def get_kv_cache_spec(self, vllm_config):
-        raise NotImplementedError
-
-
 def run_attention_backend(
     backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
@@ -311,7 +282,7 @@ def run_attention_backend(
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
     with set_current_vllm_config(vllm_config):
-        # Instantiate MLA implementation
+        # MLA implementation
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
@@ -320,7 +291,27 @@ def run_attention_backend(
         )
         head_size = vllm_config.model_config.get_head_size()
         scale = 1.0 / (head_size**0.5)
-        impl = impl_cls(
+
+        # Set the default dtype to match model config before creating layer
+        # MLAAttention uses torch.get_default_dtype() during init
+        model_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+        torch.set_default_dtype(model_dtype)
+
+        layer = MLAAttention(
+            num_heads=num_heads,
+            scale=scale,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=mock_kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="mla",
+            use_sparse=backend.get_class().is_sparse(),
+        ).to(device=device, dtype=model_dtype)
+
+        layer.impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -340,15 +331,9 @@ def run_attention_backend(
             kv_b_proj=mock_kv_b_proj,
         )
 
-        # Process weights to create W_UK_T and W_UV attributes needed by MLA
+        # Process weights on the layer to create W_UK_T and W_UV
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
-        impl.process_weights_after_loading(act_dtype)
-
-        # Populate static_forward_context with mock attention layers
-        for layer_name in layer_names:
-            vllm_config.compilation_config.static_forward_context[layer_name] = (
-                MockMLAAttentionLayer(impl)
-            )
+        layer.process_weights_after_loading(act_dtype)
 
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
@@ -356,19 +341,14 @@ def run_attention_backend(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
-
-        # Create mock layer and output buffer
-        mock_layer = MockAttentionLayer(device)
-        num_tokens = query.shape[0]
-        output = torch.empty(
-            num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
-        )
-
         # Run forward pass
-        # NOTE: The query, key, and value are already shaped correctly
-        # in the calling test function.
-        output = impl.forward(
-            mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+        output = layer.forward_impl(
+            q=query,
+            kv_c_normed=kv_c,
+            k_pe=k_pe,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            allow_compiled_split=True,
         )
 
         return output
@@ -451,6 +431,7 @@ def test_backend_correctness(
         max_model_len=max(batch_spec.seq_lens),
         num_gpu_blocks=num_gpu_blocks,
         block_size=default_block_size,
+        dtype="float16",
         hf_config_override=hf_config_override,
     )
 

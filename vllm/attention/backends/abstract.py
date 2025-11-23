@@ -392,6 +392,8 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+    is_aiter_triton_fp8_bmm_enabled: bool = False
+
     @abstractmethod
     def __init__(
         self,
@@ -417,7 +419,6 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
     def forward(
         self,
         layer: AttentionLayer,
@@ -430,7 +431,37 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Forward pass - orchestration is handled in the layer."""
         raise NotImplementedError
+
+    def forward_prefill(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        """Prefill path orchestration - handled in the layer."""
+        raise NotImplementedError
+
+    def forward_decode(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+    ) -> torch.Tensor:
+        """Decode path orchestration - handled in the layer."""
+        raise NotImplementedError
+
+    def supports_compiled_split(self) -> bool:
+        """Whether this implementation supports prefill/decode split entrypoints.
+
+        Default False; backends should override when ready.
+        """
+        return False
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:

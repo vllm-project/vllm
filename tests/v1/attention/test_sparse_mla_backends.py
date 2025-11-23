@@ -12,7 +12,6 @@ import torch
 from tests.v1.attention.test_mla_backends import (
     BATCH_SPECS,
     BatchSpec,
-    MockAttentionLayer,
     create_and_prepopulate_kv_cache,
 )
 from tests.v1.attention.utils import (
@@ -26,6 +25,13 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 from vllm.v1.attention.backends.mla.indexer import split_prefill_chunks
+
+
+# Simple mock for AttentionLayer since we only pass it to impl.forward
+class MockAttentionLayer:
+    def __init__(self, device):
+        self.device = device
+
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
