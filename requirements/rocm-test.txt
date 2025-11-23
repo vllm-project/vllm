@@ -62,7 +62,7 @@ lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7
 # Plugins test
 terratorch==1.1.1
 # MTEB Benchmark Test
-mteb[bm25s]>=1.38.11, <2
+mteb==2.1.2
 # Data processing
 multiprocess==0.70.16
     # Datasets and Evaluate Test

@@ -29,11 +29,6 @@ from vllm.utils.serial_utils import (
     decode_pooling_output,
 )
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
@@ -54,7 +49,14 @@ def server():
         DUMMY_CHAT_TEMPLATE,
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 
