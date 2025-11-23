@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -643,7 +644,6 @@ class Qwen2VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
@@ -724,13 +724,8 @@ class Qwen2VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        cos_h = cos[pos_ids[:, 0]]  # (num_tokens, rotary_dim // 2)
-        cos_w = cos[pos_ids[:, 1]]
-        sin_h = sin[pos_ids[:, 0]]
-        sin_w = sin[pos_ids[:, 1]]
-
-        cos_combined = torch.cat([cos_h, cos_w], dim=-1)
-        sin_combined = torch.cat([sin_h, sin_w], dim=-1)
+        cos_combined = cos[pos_ids].flatten(1)
+        sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined
 
     def compute_attn_mask_seqlen(
@@ -757,25 +752,27 @@ class Qwen2VisionTransformer(nn.Module):
 
         if isinstance(grid_thw, list):
             grid_thw_list = grid_thw
-            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+            grid_thw = np.array(grid_thw, dtype=np.int32)
         else:
             grid_thw_list = grid_thw.tolist()
+            grid_thw = grid_thw.numpy()
 
         # compute position embedding
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
 
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(dim=0, dtype=torch.int32)
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            axis=0, dtype=np.int32
+        )
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        cu_seqlens = torch.from_numpy(cu_seqlens)
 
         # transformers
         x = x.unsqueeze(1)
 
         # pre-compute seqlens for attn mask to reduce cuMemcpy operations
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         for blk in self.blocks:
             x = blk(
                 x,
