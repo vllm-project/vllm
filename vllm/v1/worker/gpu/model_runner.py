@@ -101,10 +101,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_prep_event = None
             self.structured_outputs_event = None
 
-        self.do_spec_decode = self.speculative_config is not None
-        if self.do_spec_decode:
+        if self.speculative_config is not None:
+            self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         else:
+            self.do_spec_decode = False
             self.num_speculative_steps = 0
 
         self.req_states = RequestState(
