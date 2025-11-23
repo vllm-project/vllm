@@ -1171,7 +1171,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
-    ) -> np.ndarray | None:
+    ) -> tuple[torch.Tensor | None, np.ndarray | None, int | None, list[int] | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
             return None, None, None, None
 
