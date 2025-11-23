@@ -504,6 +504,22 @@ class GPUModelRunner(
                 max_num_tokens,
                 dtype=torch.int64
             )
+            self.q_head_indices = self._make_buffer(
+                max_num_tokens,
+                dtype=torch.int64
+            )
+            self.q_tail_indices = self._make_buffer(
+                max_num_tokens,
+                dtype=torch.int64
+            )
+            self.kv_for_head_indices = self._make_buffer(
+                max_num_tokens,
+                dtype=torch.int64
+            )
+            self.kv_for_tail_indices = self._make_buffer(
+                max_num_tokens,
+                dtype=torch.int64
+            )
             self.pcp_padded_slot_mapping = torch.empty(
                 (max_num_tokens,),
                 dtype=torch.int64,
@@ -517,6 +533,18 @@ class GPUModelRunner(
                 (max_num_tokens,), device="cpu", dtype=torch.bool, pin_memory=True
             )
             self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
+            self.q_indptr_cpu_tensor = torch.zeros(
+                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+            )
+            self.q_indptr_cpu = self.q_indptr_cpu_tensor.numpy()
+            self.kv_for_head_indptr_cpu_tensor = torch.zeros(
+                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+            )
+            self.kv_for_head_indptr_cpu = self.kv_for_head_indptr_cpu_tensor.numpy()
+            self.kv_for_tail_indptr_cpu_tensor = torch.zeros(
+                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+            )
+            self.kv_for_tail_indptr_cpu = self.kv_for_tail_indptr_cpu_tensor.numpy()
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1064,69 +1092,59 @@ class GPUModelRunner(
                 allgather_restore_idx=allgather_restore_idx,
             )
 
-        def _get_partial_kv_idx(kv_len_per_pcp_chunk):
-            kv_partial_len = pcp_chunk_sizes * kv_len_per_pcp_chunk
-            kv_partial_indptr = np.zeros(len(kv_partial_len) + 1)
-            kv_partial_indptr[1:], kv_partial_arange = self._get_cumsum_and_arange(kv_partial_len)
-            kv_parial_indices = kv_partial_arange + np.repeat(
+        def _get_partial_kv_idx(kv_partial_len, kv_partial_indptr, kv_parial_indices):
+            kv_partial_indptr[1 : len(kv_partial_len) + 1], kv_partial_arange = self._get_cumsum_and_arange(kv_partial_len)
+            kv_parial_indices.np[: kv_partial_arange.shape[0]] = kv_partial_arange + np.repeat(
                 kv_start_loc,
                 kv_partial_len,
             )
-            return kv_partial_indptr, kv_parial_indices
+            return kv_partial_arange.shape[0]
 
-        def _to_tensor(data, **kwargs):
-            return {k: torch.from_numpy(v).to(**kwargs) for k, v in data.items()}
-
-        pcp_chunk_sizes = q_lens // 2  
-        q_indptr = np.zeros(len(pcp_chunk_sizes) + 1)
-        q_indptr[1:], q_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
+        pcp_chunk_sizes = q_lens // 2
+        self.q_indptr_cpu[1 : len(pcp_chunk_sizes) + 1], q_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
 
         q_head_start_loc = np.roll(np.cumsum(q_lens), 1)
         q_head_start_loc[0] = 0
-        q_head_indices = q_chunk_arange + np.repeat(
+        self.q_head_indices.np[: q_chunk_arange.shape[0]] = q_chunk_arange + np.repeat(
             q_head_start_loc,
             pcp_chunk_sizes,
         )
+        self.q_head_indices.copy_to_gpu(q_chunk_arange.shape[0])
 
         q_tail_start_loc = q_head_start_loc + pcp_chunk_sizes
-        q_tail_indices = q_chunk_arange + np.repeat(
+        self.q_tail_indices.np[: q_chunk_arange.shape[0]] = q_chunk_arange + np.repeat(
             q_tail_start_loc,
             pcp_chunk_sizes,
         )
+        self.q_tail_indices.copy_to_gpu(q_chunk_arange.shape[0])
 
         kv_start_loc = np.roll(np.cumsum(kv_lens), 1)
         kv_start_loc[0] = 0
         # kv_for_q_head
-        kv_for_head_indptr, kv_for_head_indices = _get_partial_kv_idx(self.pcp_rank + 1)
+        kv_for_head_len = (self.pcp_rank + 1) * pcp_chunk_sizes
+        kv_head_tokens_sum = _get_partial_kv_idx(kv_for_head_len, self.kv_for_head_indptr_cpu, self.kv_for_head_indices)
+        self.kv_for_head_indices.copy_to_gpu(kv_head_tokens_sum)
         # kv_for_q_tail
-        kv_for_tail_indptr, kv_for_tail_indices = _get_partial_kv_idx(
-            2 * self.pcp_world_size - self.pcp_rank
-        )
+        kv_for_tail_len = (2 * self.pcp_world_size - self.pcp_rank) * pcp_chunk_sizes
+        kv_tail_tokens_sum = _get_partial_kv_idx(kv_for_tail_len, self.kv_for_tail_indptr_cpu, self.kv_for_tail_indices)
+        self.kv_for_tail_indices.copy_to_gpu(kv_tail_tokens_sum)
 
-        head_tail_indices = _to_tensor({
-            "q_head": q_head_indices,
-            "q_tail": q_tail_indices,
-            "kv_head": kv_for_head_indices, 
-            "kv_tail": kv_for_tail_indices,
-        }, device=self.device, dtype=torch.int64, non_blocking=True)
-        head_tail_indptr = _to_tensor({
-            "q": q_indptr,
-            "kv_head": kv_for_head_indptr,
-            "kv_tail": kv_for_tail_indptr
-        }, dtype=torch.int64)
-
-        q_full_indices = torch.cat([head_tail_indices["q_head"], head_tail_indices["q_tail"]])
-        q_full_indices = q_full_indices.to(torch.float32).argsort().to(torch.int32)
+        q_full_indices = torch.cat(
+            [
+                self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
+                self.q_tail_indices.gpu[: q_chunk_arange.shape[0]]
+            ]
+        ).argsort()
 
         return PrefillContextParallelMetadata(
             allgather_restore_idx=allgather_restore_idx,
-            q_head_indices=head_tail_indices["q_head"],
-            q_tail_indices=head_tail_indices["q_tail"],
-            q_head_start_loc=head_tail_indptr["q"],
-            kv_for_head_indices=head_tail_indices["kv_head"],
-            kv_for_tail_indices=head_tail_indices["kv_tail"],
-            kv_for_head_indptr=head_tail_indptr["kv_head"],
-            kv_for_tail_indptr=head_tail_indptr["kv_tail"],
+            q_head_indices=self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
+            q_tail_indices=self.q_tail_indices.gpu[: q_chunk_arange.shape[0]],
+            q_head_start_loc=self.q_indptr_cpu_tensor[: len(pcp_chunk_sizes) + 1],
+            kv_for_head_indices=self.kv_for_head_indices.gpu[: kv_head_tokens_sum],
+            kv_for_tail_indices=self.kv_for_tail_indices.gpu[: kv_tail_tokens_sum],
+            kv_for_head_indptr=self.kv_for_head_indptr_cpu_tensor[: len(kv_for_head_len) + 1],
+            kv_for_tail_indptr=self.kv_for_tail_indptr_cpu_tensor[: len(kv_for_tail_len) + 1],
             q_full_indices=q_full_indices,
         )
         
@@ -3068,6 +3086,12 @@ class GPUModelRunner(
                     self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
                 elif num_tokens_across_dp is not None:
                     num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                elif self.pcp_world_size > 1:
+                    # NOTE(qcs): For PCP, we pad num_scheduled_tokens_np but
+                    # do not update total_num_scheduled_tokens in scheduler_output
+                    num_input_tokens = self._get_num_input_tokens(
+                        sum(num_scheduled_tokens_np)
+                    )
                 else:
                     num_input_tokens = self._get_num_input_tokens(
                         scheduler_output.total_num_scheduled_tokens
