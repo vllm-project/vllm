@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-from collections.abc import Callable
 from enum import Enum
 
 import torch
@@ -511,62 +510,36 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsW4A4MoeMethod` yet."
-            )
-        assert activation == "silu", "Only SiLU activation is supported."
+        assert layer.activation == "silu", "Only SiLU activation is supported."
 
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
+            if layer.enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `CompressedTensorsW4A4MoeMethod` yet."
+                )
+
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
                 router_logits=router_logits,
-                top_k=top_k,
-                global_num_experts=global_num_experts,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                custom_routing_function=custom_routing_function,
-                e_score_correction_bias=e_score_correction_bias,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                custom_routing_function=layer.custom_routing_function,
+                e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if self.use_marlin:
@@ -584,9 +557,9 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 global_scale1=layer.w13_weight_scale_2,
                 global_scale2=layer.w2_weight_scale_2,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 workspace=layer.workspace,
             )
 
@@ -610,15 +583,15 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
                 inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 
-            assert expert_map is None, (
+            assert layer.expert_map is None, (
                 "Expert Parallelism / expert_map "
                 "is currently not supported for "
                 "CompressedTensorsW4A4MoeMethod."
@@ -634,7 +607,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 # TODO(bnell): derive these from arguments
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,
@@ -1109,59 +1082,22 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-            assert isinstance(layer, FusedMoE)
-
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
         )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
         per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
 
         if self.use_marlin:
-            assert activation == "silu", f"{activation} not supported for Marlin MoE."
+            assert layer.activation == "silu", (
+                f"{layer.activation} not supported for Marlin MoE."
+            )
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1174,9 +1110,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 workspace=layer.workspace,
             )
 
@@ -1193,9 +1129,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -1215,10 +1151,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     inplace=True,
-                    activation=activation,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                    global_num_experts=global_num_experts,
-                    expert_map=None if self.disable_expert_map else expert_map,
+                    activation=layer.activation,
+                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                    global_num_experts=layer.global_num_experts,
+                    expert_map=None
+                    if self.disable_expert_map
+                    else layer.expert_map,  # ???
                     quant_config=self.moe_quant_config,
                 )
             else:
@@ -1235,9 +1173,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     topk_weights,
                     topk_ids,
                     quant_config=self.moe_quant_config,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=None if self.disable_expert_map else expert_map,
+                    activation=layer.activation,
+                    global_num_experts=layer.global_num_experts,
+                    expert_map=None if self.disable_expert_map else layer.expert_map,
                     ab_strides1=self.ab_strides1_c_strides2,
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
@@ -1256,10 +1194,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -1377,47 +1315,15 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsW8A8Int8MoEMethod` yet."
-            )
-
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         return fused_experts(
@@ -1427,10 +1333,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
         )
 
@@ -1738,47 +1644,17 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsWNA16MarlinMoEMethod` yet."
-            )
+        assert layer.activation == "silu", (
+            f"{layer.activation} not supported for Marlin MoE."
+        )
 
-        assert activation == "silu", f"{activation} not supported for Marlin MoE."
-
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         return fused_marlin_moe(
@@ -1793,9 +1669,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             g_idx1=layer.w13_weight_g_idx,
             g_idx2=layer.w2_weight_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
@@ -2001,64 +1877,15 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            if expert_load_view is None:
-                raise ValueError("enable_eplb=True requiere expert_load_view != None")
-            if logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requiere logical_to_physical_map != None"
-                )
-            if logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requiere logical_replica_count != None"
-                )
-            if not isinstance(layer, FusedMoE):
-                raise TypeError(
-                    "EPLB is only supported when `layer` is a instance of FusedMoE."
-                )
-
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            num_fused_shared_experts=getattr(layer, "num_fused_shared_experts", 0),
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
         )
 
         return fused_experts(
@@ -2068,10 +1895,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
         )
 
@@ -2348,29 +2175,12 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert not enable_eplb, "EPLB not supported for W4A8-int MoE yet."
-        assert activation in ("silu", "swigluoai", "swiglu"), (
+        assert not layer.enable_eplb, "EPLB not supported for W4A8-int MoE yet."
+        assert layer.activation in ("silu", "swigluoai", "swiglu"), (
             "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
         )
-        assert expert_map is None, """expert_map/EP not implemented
+        assert layer.expert_map is None, """expert_map/EP not implemented
         for CPU dyn-4bit MoE."""
 
         def _act_kind(s: str) -> int:
@@ -2387,15 +2197,15 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
+            use_grouped_topk=layer.use_grouped_topk,
+            top_k=layer.top_k,
+            renormalize=layer.renormalize,
+            topk_group=layer.topk_group,
+            num_expert_group=layer.num_expert_group,
+            custom_routing_function=layer.custom_routing_function,
+            scoring_func=layer.scoring_func,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            e_score_correction_bias=layer.e_score_correction_bias,
         )
 
         return torch.ops._C.dynamic_4bit_int_moe(
@@ -2408,6 +2218,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_in_features,
             layer.w13_out_features,
             layer.group_size,
-            apply_router_weight_on_input,
-            int(_act_kind(activation)),
+            layer.apply_router_weight_on_input,
+            int(_act_kind(layer.activation)),
         )

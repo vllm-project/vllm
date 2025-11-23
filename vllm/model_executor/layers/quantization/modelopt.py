@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -15,6 +14,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
@@ -696,69 +696,45 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `ModelOptFp8MoEMethod` yet."
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            if layer.enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `ModelOptFp8MoEMethod` yet."
+                )
+            assert layer.activation == "silu", (
+                f"Expected 'silu' activation but got {layer.activation}"
+            )
+            assert layer.routing_method_type == RoutingMethodType.Llama4, (
+                "FusedMoE flashinfer kernels are only supported for Llama4"
             )
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
-            )
-            assert not renormalize
+            assert not layer.renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
                 layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,
-                routing_bias=e_score_correction_bias,
-                global_num_experts=global_num_experts,
-                top_k=top_k,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                routing_bias=layer.e_score_correction_bias,
+                global_num_experts=layer.global_num_experts,
+                top_k=layer.top_k,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert activation in ("silu", "relu2_no_mul"), (
+            assert layer.activation in ("silu", "relu2_no_mul"), (
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                f"but got {activation}"
+                f"but got {layer.activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
@@ -766,10 +742,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 topk_weights,
                 topk_ids,
                 inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -783,11 +759,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
+                activation=layer.activation,
                 quant_config=self.moe_quant_config,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
 
 
@@ -1459,62 +1435,35 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-            )
-        assert activation == "silu", "Only SiLU activation is supported."
+        assert layer.activation == "silu", "Only SiLU activation is supported."
 
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
+            if layer.enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
+                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
                 router_logits=router_logits,
-                top_k=top_k,
-                global_num_experts=global_num_experts,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                custom_routing_function=custom_routing_function,
-                e_score_correction_bias=e_score_correction_bias,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                custom_routing_function=layer.custom_routing_function,
+                e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if self.use_marlin:
@@ -1532,9 +1481,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_scale1=layer.w13_weight_scale_2,
                 global_scale2=layer.w2_weight_scale_2,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 workspace=layer.workspace,
             )
 
@@ -1565,10 +1514,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
                 inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
@@ -1583,8 +1532,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 # TODO: derive from arguments
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,
