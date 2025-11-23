@@ -8,7 +8,6 @@ from collections.abc import Callable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
@@ -120,7 +119,7 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_server: ToolServer | None,
+        tool_names: set[str] | None = None,
     ) -> str:
         """
         Instance method that is implemented for preparing the structured tag
