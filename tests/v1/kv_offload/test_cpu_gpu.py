@@ -149,7 +149,7 @@ def test_transfer(
 
     # call transfer function
     assert handler.transfer_async(1, (src_spec, dst_spec))
-    assert set(handler.transfer_events.keys()) == {1}
+    assert set(handler.transfers.keys()) == {1}
 
     # wait for transfer to complete
     end_time = time.time() + 10

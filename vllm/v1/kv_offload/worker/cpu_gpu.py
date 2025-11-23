@@ -63,14 +63,12 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         assert cpu_block_size % gpu_block_size == 0
         self.block_size_factor = cpu_block_size // gpu_block_size
 
-        # cuda streams for gpu->cpu and cpu->gpu
-        self.d2h_stream = torch.cuda.Stream()
-        self.h2d_stream = torch.cuda.Stream()
-
-        # job_id -> transfer cuda event
-        self.transfer_events: dict[int, torch.Event] = {}
+        # job_id -> (cuda stream, cuda event)
+        self.transfers: dict[int, tuple[torch.cuda.Stream, torch.Event]] = {}
         # list of cuda events available for re-use
         self.events_pool: list[torch.Event] = []
+        # list of cuda streams available for re-use
+        self.streams_pool: list[torch.cuda.Stream] = []
 
         pin_memory = is_pin_memory_available()
 
@@ -124,7 +122,6 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         src_spec, dst_spec = spec
         if isinstance(src_spec, CPULoadStoreSpec):
             assert isinstance(dst_spec, GPULoadStoreSpec)
-            stream = self.h2d_stream
             src_tensors = self.cpu_tensors
             dst_tensors = self.gpu_tensors
             src_block_size_factor = self.block_size_factor
@@ -132,7 +129,6 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         else:
             assert isinstance(src_spec, GPULoadStoreSpec)
             assert isinstance(dst_spec, CPULoadStoreSpec)
-            stream = self.d2h_stream
             src_tensors = self.gpu_tensors
             dst_tensors = self.cpu_tensors
             src_block_size_factor = 1
@@ -159,6 +155,7 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         expand_block_ids(dst_blocks, dst_block_size_factor, src_to_dst[:, 1])
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
+        stream = self.streams_pool.pop() if self.streams_pool else torch.cuda.Stream()
         event = self.events_pool.pop() if self.events_pool else torch.Event()
         with torch.cuda.stream(stream):
             for src_tensor, dst_tensor, kv_dim in zip(
@@ -175,17 +172,18 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
                     ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
             event.record(stream)
 
-        self.transfer_events[job_id] = event
+        self.transfers[job_id] = (stream, event)
 
         # success
         return True
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        for job_id, event in self.transfer_events.items():
+        for job_id, (stream, event) in self.transfers.items():
             if event.query():
                 results.append((job_id, True))
+                self.streams_pool.append(stream)
                 self.events_pool.append(event)
         for job_id, _ in results:
-            del self.transfer_events[job_id]
+            del self.transfers[job_id]
         return results
