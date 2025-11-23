@@ -7,6 +7,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -63,6 +64,7 @@ class RequestState:
         max_num_reqs: int,
         max_model_len: int,
         max_num_batched_tokens: int,
+        num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
         pin_memory: bool,
@@ -70,6 +72,7 @@ class RequestState:
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
         self.pin_memory = pin_memory
@@ -96,6 +99,14 @@ class RequestState:
         self.last_sampled_tokens = torch.zeros(
             self.max_num_reqs,
             1,
+            dtype=torch.int64,
+            device=device,
+        )
+
+        # Draft tokens.
+        self.draft_tokens = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
             dtype=torch.int64,
             device=device,
         )
@@ -226,6 +237,17 @@ class RequestState:
             max_num_logprobs=max_num_logprobs,
         )
 
+    def expand_sampling_metadata(
+        self,
+        sampling_metadata: SamplingMetadata,
+        cu_num_logits: torch.Tensor,
+    ) -> SamplingMetadata:
+        # For draft tokens, we need to expand the sampling param tensors as
+        # each request samples multiple tokens in each step.
+        return expand_sampling_metadata(
+            sampling_metadata, cu_num_logits, self.num_speculative_steps
+        )
+
     def make_lora_inputs(
         self,
         req_ids: list[str],
@@ -270,3 +292,75 @@ class Param:
 class ExtraData:
     lora_request: LoRARequest | None
     in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
+
+
+# NOTE(woosuk): Re-compilation can happen at runtime since top_p and top_k can be None.
+@triton.jit
+def _expand_sampling_metadata_kernel(
+    temp_ptr,
+    expanded_temp_ptr,
+    top_p_ptr,
+    expanded_top_p_ptr,
+    top_k_ptr,
+    expanded_top_k_ptr,
+    seeds_ptr,
+    expanded_seeds_ptr,
+    cu_num_logits_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_tokens = end_idx - start_idx
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < num_tokens
+
+    temp = tl.load(temp_ptr + req_idx)
+    tl.store(expanded_temp_ptr + start_idx + block, temp, mask=mask)
+
+    if top_p_ptr is not None:
+        top_p = tl.load(top_p_ptr + req_idx)
+        tl.store(expanded_top_p_ptr + start_idx + block, top_p, mask=mask)
+
+    if top_k_ptr is not None:
+        top_k = tl.load(top_k_ptr + req_idx)
+        tl.store(expanded_top_k_ptr + start_idx + block, top_k, mask=mask)
+
+    seed = tl.load(seeds_ptr + req_idx)
+    tl.store(expanded_seeds_ptr + start_idx + block, seed, mask=mask)
+
+
+def expand_sampling_metadata(
+    sampling_metadata: SamplingMetadata,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+) -> SamplingMetadata:
+    total_num_logits = sampling_metadata.pos.shape[0]
+    create_empty = lambda x: x.new_empty(total_num_logits) if x is not None else None
+    expanded_temp = create_empty(sampling_metadata.temperature)
+    expanded_top_p = create_empty(sampling_metadata.top_p)
+    expanded_top_k = create_empty(sampling_metadata.top_k)
+    expanded_seeds = create_empty(sampling_metadata.seeds)
+
+    num_reqs = cu_num_logits.shape[0] - 1
+    _expand_sampling_metadata_kernel[(num_reqs,)](
+        sampling_metadata.temperature,
+        expanded_temp,
+        sampling_metadata.top_p,
+        expanded_top_p,
+        sampling_metadata.top_k,
+        expanded_top_k,
+        sampling_metadata.seeds,
+        expanded_seeds,
+        cu_num_logits,
+        BLOCK_SIZE=triton.next_power_of_2(num_speculative_steps + 1),
+    )
+    return SamplingMetadata(
+        temperature=expanded_temp,
+        top_p=expanded_top_p,
+        top_k=expanded_top_k,
+        seeds=expanded_seeds,
+        pos=sampling_metadata.pos,
+        max_num_logprobs=sampling_metadata.max_num_logprobs,
+    )
