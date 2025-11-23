@@ -171,12 +171,10 @@ class MatcherRMSNorm(MatcherCustomOp):
             return RMS_OP(input, weight, self.epsilon)
         else:
             result = torch.empty_like(input)
-            # TODO: support non-contiguous input for RMSNorm and remove this
-            input_contiguous = input.contiguous()
             _, result = auto_functionalized(
                 RMS_OP,
                 result=result,
-                input=input_contiguous,
+                input=input,
                 weight=weight,
                 epsilon=self.epsilon,
             )

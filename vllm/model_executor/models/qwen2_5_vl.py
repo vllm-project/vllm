@@ -230,6 +230,9 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         - hidden_size must match the hidden size of language model backbone.
         - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
           format
+        - second_per_grid_ts: The video time interval (in seconds) for each
+          grid along the temporal dimension in the 3D position IDs. Returned
+          when `videos` is not `None`.
     """
 
     type: Literal["video_embeds"]
@@ -243,6 +246,11 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         torch.Tensor,
         TensorShape("nv", 3),
     ]
+
+    second_per_grid_ts: Annotated[
+        torch.Tensor | None,
+        TensorShape("nv"),
+    ] = None
 
 
 Qwen2_5_VLVideoInputs: TypeAlias = (
@@ -641,7 +649,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             head_size=head_dim,
             rotary_dim=head_dim // 2,
             max_position=8192,
-            base=10000.0,
             is_neox_style=True,
         )
 
@@ -738,13 +745,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
 
-        cos_h = cos[pos_ids[:, 0]]  # (num_tokens, rotary_dim // 2)
-        cos_w = cos[pos_ids[:, 1]]
-        sin_h = sin[pos_ids[:, 0]]
-        sin_w = sin[pos_ids[:, 1]]
-
-        cos_combined = torch.cat([cos_h, cos_w], dim=-1)
-        sin_combined = torch.cat([sin_h, sin_w], dim=-1)
+        cos_combined = cos[pos_ids].flatten(1)
+        sin_combined = sin[pos_ids].flatten(1)
 
         cos_combined = cos_combined.reshape(
             cos_combined.shape[0] // self.spatial_merge_unit,
@@ -1317,6 +1319,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 type="video_embeds",
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
             )
 
     def _process_image_input(
@@ -1428,7 +1431,13 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Cast to long to match the original code
         # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
-        second_per_grid_ts = video_input["second_per_grid_ts"].long()
+        second_per_grid_ts = video_input.get("second_per_grid_ts")
+        if second_per_grid_ts is None:
+            raise ValueError(
+                "second_per_grid_ts is required when video_pruning_rate > 0 "
+                "is enabled for video inputs, including the video_embeds path."
+            )
+        second_per_grid_ts = second_per_grid_ts.long()
         tokens_per_second = self.config.vision_config.tokens_per_second
 
         video_embeds_out = []
