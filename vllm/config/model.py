@@ -38,7 +38,12 @@ from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    is_gguf,
+    is_remote_gguf,
+    maybe_model_redirect,
+    split_remote_gguf,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -439,7 +444,8 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            if check_gguf_file(self.model):
+            # Check if this is a GGUF model (either local file or remote GGUF)
+            if is_gguf(self.model):
                 raise ValueError(
                     "Using a tokenizer is mandatory when loading a GGUF model. "
                     "Please specify the tokenizer path or name using the "
@@ -821,7 +827,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
-        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+        model = self.model
+        if is_remote_gguf(model):
+            model, _ = split_remote_gguf(model)
+        return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -969,13 +978,19 @@ class ModelConfig:
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
 
+        # For GGUF models, ignore quantization info from HF config
+        # GGUF quantization is handled separately
+
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = self._parse_quant_hf_config(self.hf_config)
-        if quant_cfg is None and (
-            text_config := getattr(self.hf_config, "text_config", None)
-        ):
-            # Check the text config as well for multi-modal models.
-            quant_cfg = self._parse_quant_hf_config(text_config)
+        if self.quantization == "gguf" or is_gguf(self.model):
+            quant_cfg = None
+        else:
+            quant_cfg = self._parse_quant_hf_config(self.hf_config)
+            if quant_cfg is None and (
+                text_config := getattr(self.hf_config, "text_config", None)
+            ):
+                # Check the text config as well for multi-modal models.
+                quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'

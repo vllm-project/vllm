@@ -42,7 +42,10 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
     parse_safetensors_file_metadata,
+    split_remote_gguf,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -611,10 +614,12 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    if check_gguf_file(model):
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+    elif is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        gguf_model_repo = Path(repo_id)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -660,10 +665,17 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        model = Path(model).parent
+    _is_gguf = is_gguf(model)
+    if _is_gguf:
+        if check_gguf_file(model):
+            # Local GGUF file
+            kwargs["gguf_file"] = Path(model).name
+            model = Path(model).parent
+        elif is_remote_gguf(model):
+            # Remote GGUF - extract repo_id from repo_id:quant_type format
+            # The actual GGUF file will be downloaded later by GGUFModelLoader
+            # Keep model as repo_id:quant_type for download, but use repo_id for config
+            model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
@@ -671,7 +683,7 @@ def get_config(
             # Transformers implementation.
             if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
-            elif is_gguf or file_or_path_exists(
+            elif _is_gguf or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
             ):
                 config_format = "hf"
@@ -695,9 +707,6 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
-                "   Loading GGUF from a remote repo directly is not yet "
-                "supported.\n"
             ).format(model=model)
 
             raise ValueError(error_message) from e
@@ -711,7 +720,7 @@ def get_config(
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
-    if is_gguf:
+    if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
@@ -871,6 +880,8 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
     """
+    if is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
 
     modules_file_name = "modules.json"
 
@@ -1090,6 +1101,8 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
+    elif is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
