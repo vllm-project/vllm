@@ -40,7 +40,7 @@ async def client(server):
 # ==========================================================
 # Tool Definitions
 # ==========================================================
-TOOLS: list[dict[str, object]] = [
+TOOLS: list[dict[str, dict]] = [
     {
         "type": "function",
         "function": {
