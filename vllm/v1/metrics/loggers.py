@@ -589,6 +589,52 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         #
+        # Multi-modal processor timing
+        #
+        # Use fine-grained buckets for processor timing (milliseconds to seconds)
+        mm_processor_buckets = [
+            0.0001,  # 0.1ms
+            0.0005,  # 0.5ms
+            0.001,  # 1ms
+            0.005,  # 5ms
+            0.01,  # 10ms
+            0.025,  # 25ms
+            0.05,  # 50ms
+            0.1,  # 100ms
+            0.25,  # 250ms
+            0.5,  # 500ms
+            1.0,  # 1s
+            2.5,  # 2.5s
+            5.0,  # 5s
+        ]
+        histogram_mm_processor_time = self._histogram_cls(
+            name="vllm:mm_processor_time_seconds",
+            documentation=(
+                "Histogram of multimodal processor stage timing in seconds. "
+                "Labeled by stage: hf_processor, hashing, cache_lookup, prompt_update."
+            ),
+            buckets=mm_processor_buckets,
+            labelnames=labelnames + ["stage"],
+        )
+        # Create per-engine, per-stage histograms
+        self.histogram_mm_processor_time: dict[int, dict[str, Histogram]] = {}
+        for engine_idx in engine_indexes:
+            self.histogram_mm_processor_time[engine_idx] = {
+                "hf_processor": histogram_mm_processor_time.labels(
+                    model_name, str(engine_idx), "hf_processor"
+                ),
+                "hashing": histogram_mm_processor_time.labels(
+                    model_name, str(engine_idx), "hashing"
+                ),
+                "cache_lookup": histogram_mm_processor_time.labels(
+                    model_name, str(engine_idx), "cache_lookup"
+                ),
+                "prompt_update": histogram_mm_processor_time.labels(
+                    model_name, str(engine_idx), "prompt_update"
+                ),
+            }
+
+        #
         # Counters
         #
         counter_num_preempted_reqs = self._counter_cls(
