@@ -494,7 +494,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 num_heads // self.tp_size,
                 head_dim,
                 ssm_state_size,
-                dtype=torch.float32,  # Will be cast to correct dtype in forward
+                dtype=torch.bfloat16,  # Will be cast to correct dtype in forward
             )
             
         else:
@@ -979,7 +979,7 @@ class MambaMixer2(MambaBase, CustomOp):
                         
                         
                         # Ensure temp cache is on correct device and dtype
-                        if self.spec_temp_cache.device != ssm_state.device:
+                        if self.spec_temp_cache.device != ssm_state.device or self.spec_temp_cache.dtype != ssm_state.dtype:
                             self.spec_temp_cache = torch.zeros(
                                 self.spec_temp_cache.shape[0],
                                 self.num_heads // self.tp_size,
