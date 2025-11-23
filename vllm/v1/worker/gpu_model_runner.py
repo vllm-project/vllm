@@ -1188,13 +1188,6 @@ class GPUModelRunner(
             )
             self.encoder_seq_lens.np[req_index] = encoder_input_tokens
 
-        # for req_id, req_index in self.input_batch.req_id_to_index.items():
-        #     req_state = self.requests[req_id]
-        #     encoder_input_tokens = sum(
-        #         feature.mm_position.length for feature in req_state.mm_features
-        #     )
-        #     self.encoder_seq_lens.np[req_index] = encoder_input_tokens
-
         self.encoder_seq_lens.copy_to_gpu(num_reqs)
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
         encoder_seq_lens_cpu = self.encoder_seq_lens.cpu[:num_reqs]
@@ -1515,13 +1508,6 @@ class GPUModelRunner(
             )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
-
-        # encoder_inputs = None
-        # scheduled_encoder_req_index = []
-        # if (self.model_config.is_encoder_decoder
-        #     and scheduler_output.scheduled_encoder_inputs):
-        #     encoder_inputs = self._extract_encoder_inputs(scheduler_output)
-        #     scheduled_encoder_req_index = [self.input_batch.req_id_to_index[req_id] for req_id in scheduler_output.scheduled_encoder_inputs.keys()]
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
