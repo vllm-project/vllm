@@ -659,7 +659,7 @@ class VllmConfig:
             # TODO: https://github.com/vllm-project/vllm/issues/27894
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops) == 0
+                or self.compilation_config.splitting_ops == []
             )
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
