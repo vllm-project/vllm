@@ -388,7 +388,6 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
 
   // Architecture definitions
   using ArchTag = cutlass::arch::Sm120;
-  // Both mainloop and epilogue use BlockScaledTensorOp on SM120
   using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
   using ClusterShape = Shape<_1, _1, _1>;
@@ -412,8 +411,7 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
           LayoutB*, AlignmentB, ElementAccumulator, MmaTileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong>::
-          CollectiveOp;
+          cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 
   using GemmKernel =
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop,
