@@ -1031,11 +1031,9 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    and torch.allclose(
+                    and torch.equal(
                         target_embed_tokens.weight.cpu(),
                         self.model.model.embed_tokens.weight.cpu(),
-                        rtol=1e-5,
-                        atol=1e-7,
                     )
                 ):
                     share_embeddings = True
@@ -1082,7 +1080,8 @@ class EagleProposer:
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
                 and torch.equal(
-                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                    target_language_model.lm_head.weight.cpu(),
+                    self.model.lm_head.weight.cpu(),
                 )
             ):
                 share_lm_head = True
