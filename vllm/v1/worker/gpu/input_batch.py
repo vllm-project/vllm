@@ -32,9 +32,9 @@ class InputBuffers:
 
         self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
         self.input_ids = self._make_buffer(max_num_tokens, dtype=torch.int32)
-        self.positions = self._make_buffer(max_num_tokens, dtype=torch.int64)
+        self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
-        self.seq_lens = self._make_buffer(max_num_reqs, dtype=torch.int32)
+        self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
 
         # Structured outputs.
         self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
@@ -107,13 +107,15 @@ class InputBatch:
         query_start_loc_np = input_buffers.query_start_loc.np[: num_reqs + 1]
         query_start_loc = input_buffers.query_start_loc.copy_to_gpu()[: num_reqs + 1]
         # seq_len equals to query_len
-        input_buffers.seq_lens.np[:num_reqs] = num_scheduled_tokens
-        input_buffers.seq_lens.np[num_reqs:] = 0
-        seq_lens_np = input_buffers.seq_lens.np[:num_reqs]
-        seq_lens = input_buffers.seq_lens.copy_to_gpu()[:num_reqs]
+        seq_lens_np = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
+        seq_lens_np[-1] += num_tokens % num_reqs
+        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
+        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[num_reqs:] = 0
+        seq_lens = input_buffers.seq_lens[:num_reqs]
 
         input_ids = input_buffers.input_ids.copy_to_gpu(num_tokens)
-        positions = input_buffers.positions.copy_to_gpu(num_tokens)
+        positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         return cls(
@@ -141,27 +143,25 @@ class InputBatch:
     [
         types.none(
             types.int32[:],  # idx_mapping
-            types.int32[:, :],  # token_ids
-            types.int32[:],  # num_computed_tokens
             types.int32[:],  # num_scheduled_tokens
+            types.int32[:, :],  # prefill_token_ids
+            types.int32[:],  # num_computed_prefill_tokens
+            types.int32[:],  # prefill_len
             types.int32[:],  # input_ids
-            types.int64[:],  # positions
             types.int32[:],  # query_start_loc
-            types.int32[:],  # seq_lens
         )
     ],
     nopython=True,
     cache=True,
 )
-def _prepare_inputs(
+def _prepare_prefill_inputs(
     idx_mapping: np.ndarray,  # batch_idx -> req_idx
-    token_ids: np.ndarray,  # [N, max_model_len]
-    num_computed_tokens: np.ndarray,  # [N]
     num_scheduled_tokens: np.ndarray,  # [B]
+    prefill_token_ids: np.ndarray,  # [N, max_model_len]
+    num_computed_prefill_tokens: np.ndarray,  # [N]
+    prefill_len: np.ndarray,  # [N]
     input_ids: np.ndarray,  # [num_input_tokens]
-    positions: np.ndarray,  # [num_input_tokens]
     query_start_loc: np.ndarray,  # [B + 1]
-    seq_lens: np.ndarray,  # [B]
 ) -> None:
     num_reqs = num_scheduled_tokens.shape[0]
     query_start_loc[0] = 0
@@ -170,62 +170,112 @@ def _prepare_inputs(
     for i in range(num_reqs):
         req_idx = idx_mapping[i]
         query_len = num_scheduled_tokens[i]
-        start = num_computed_tokens[req_idx]
-        end = start + query_len
-        seq_lens[i] = end
+
+        start = num_computed_prefill_tokens[req_idx]
+        end = min(start + query_len, prefill_len[req_idx])
+        n = end - start
 
         start_idx = cu_num_tokens
-        end_idx = start_idx + query_len
-        input_ids[start_idx:end_idx] = token_ids[req_idx, start:end]
-        positions[start_idx:end_idx] = np.arange(start, end, dtype=np.int64)
+        input_ids[start_idx : start_idx + n] = prefill_token_ids[req_idx, start:end]
 
-        cu_num_tokens = end_idx
+        cu_num_tokens = start_idx + query_len
         query_start_loc[i + 1] = cu_num_tokens
 
     # Pad the inputs for CUDA graphs.
     # Note: pad query_start_loc to be non-decreasing, as kernels
     # like FlashAttention requires that
     query_start_loc[num_reqs + 1 :].fill(cu_num_tokens)
-    # Fill unused with 0 for full cuda graph mode.
-    seq_lens[num_reqs:].fill(0)
 
 
-def prepare_inputs(
+def prepare_prefill_inputs(
     idx_mapping: np.ndarray,
-    prefill_token_ids: np.ndarray,
-    num_computed_tokens: np.ndarray,
     num_scheduled_tokens: np.ndarray,
+    total_num_tokens: int,
+    prefill_token_ids: np.ndarray,
+    num_computed_prefill_tokens: np.ndarray,
+    prefill_len: np.ndarray,
     input_ids: CpuGpuBuffer,
-    positions: CpuGpuBuffer,
     query_start_loc: CpuGpuBuffer,
-    seq_lens: CpuGpuBuffer,
-    num_tokens: int,
 ) -> None:
-    _prepare_inputs(
+    _prepare_prefill_inputs(
         idx_mapping,
-        prefill_token_ids,
-        num_computed_tokens,
         num_scheduled_tokens,
+        prefill_token_ids,
+        num_computed_prefill_tokens,
+        prefill_len,
         input_ids.np,
-        positions.np,
         query_start_loc.np,
-        seq_lens.np,
     )
-    input_ids.copy_to_gpu(num_tokens)
-    positions.copy_to_gpu(num_tokens)
+    input_ids.copy_to_gpu(total_num_tokens)
     # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
     # tensors from CPU to GPU, because they may include paddings needed
     # for full CUDA graph mode.
     query_start_loc.copy_to_gpu()
-    seq_lens.copy_to_gpu()
-    return
 
 
 @triton.jit
-def _combine_last_token_ids_kernel(
+def _prepare_pos_seq_lens_kernel(
+    pos_ptr,
+    seq_lens_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    num_computed_tokens_ptr,
+    max_num_reqs,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_id = tl.program_id(0)
+    num_reqs = tl.num_programs(0) - 1
+    if req_id == num_reqs:
+        # Pad unused seq_lens as 0 for full CUDA graphs.
+        for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(seq_lens_ptr + block, 0, mask=mask)
+        return
+
+    req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
+
+    start = tl.load(query_start_loc_ptr + req_id)
+    end = tl.load(query_start_loc_ptr + req_id + 1)
+    query_len = end - start
+
+    seq_len = num_computed_tokens + query_len
+    tl.store(seq_lens_ptr + req_id, seq_len)
+
+    for i in tl.range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        pos = num_computed_tokens + block
+        tl.store(pos_ptr + start + block, pos, mask=mask)
+
+
+def prepare_pos_seq_lens(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    # NOTE(woosuk): We do +1 because the last thread block is used
+    # to pad unused seq_lens as 0 for full CUDA graphs.
+    _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
+        pos,
+        seq_lens,
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        seq_lens.shape[0],
+        BLOCK_SIZE=1024,
+    )
+
+
+@triton.jit
+def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
     idx_mapping_ptr,
-    last_token_ids_ptr,
+    last_sampled_tokens_ptr,
     query_start_loc_ptr,
     seq_lens_ptr,
     prefill_len_ptr,
@@ -239,26 +289,56 @@ def _combine_last_token_ids_kernel(
         # Handling prefill tokens.
         return
 
-    last_token_id = tl.load(last_token_ids_ptr + req_state_idx)
+    last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
     end = tl.load(query_start_loc_ptr + batch_idx + 1)
     tl.store(input_ids_ptr + end - 1, last_token_id)
 
 
-def combine_last_token_ids(
+def combine_sampled_and_draft_tokens(
     input_ids: torch.Tensor,
     idx_mapping: torch.Tensor,
-    last_token_ids: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     prefill_len: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = seq_lens.shape[0]
-    _combine_last_token_ids_kernel[(num_reqs,)](
+    _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
-        last_token_ids,
+        last_sampled_tokens,
         query_start_loc,
         seq_lens,
         prefill_len,
     )
     return input_ids
+
+
+@triton.jit
+def _update_num_computed_tokens_kernel(
+    idx_mapping_ptr,
+    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+):
+    req_id = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_id)
+
+    start = tl.load(query_start_loc_ptr + req_id)
+    end = tl.load(query_start_loc_ptr + req_id + 1)
+    query_len = end - start
+
+    n = tl.load(num_computed_tokens_ptr + req_state_idx)
+    tl.store(num_computed_tokens_ptr + req_state_idx, n + query_len)
+
+
+def update_num_computed_tokens(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    _update_num_computed_tokens_kernel[(num_reqs,)](
+        idx_mapping,
+        num_computed_tokens,
+        query_start_loc,
+    )
