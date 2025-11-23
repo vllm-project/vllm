@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from contextlib import suppress
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -26,7 +27,14 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
+# Import Helion kernel definitions to ensure ops are registered
+# This import has side effects - it registers the custom ops
+# Helion may not be available in all environments
+with suppress(ImportError):
+    import vllm.compilation.helion.silu_mul_fp8  # noqa: F401
+
 logger = init_logger(__name__)
+
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -82,9 +90,10 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
     Fusion for SiluMul+Fp8StaticQuant Pattern
     """
 
-    def __init__(self):
+    def __init__(self, use_helion: bool = False):
         super().__init__(kFp8StaticTensorSym)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
+        self.use_helion = use_helion
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -99,15 +108,18 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
-            d = input.shape[-1] // 2
-            output_shape = input.shape[:-1] + (d,)
-            result = torch.empty(
-                output_shape, device=input.device, dtype=self.quant_dtype
-            )
-            at = auto_functionalized(
-                self.FUSED_OP, result=result, input=input, scale=scale
-            )
-            return at[1]
+            if self.use_helion:
+                return torch.ops.my_helion_lib.silu_mul_fp8(input, scale)
+            else:
+                d = input.shape[-1] // 2
+                output_shape = input.shape[:-1] + (d,)
+                result = torch.empty(
+                    output_shape, device=input.device, dtype=self.quant_dtype
+                )
+                at = auto_functionalized(
+                    self.FUSED_OP, result=result, input=input, scale=scale
+                )
+                return at[1]
 
         inputs = [
             *self.silu_and_mul_matcher.inputs(),  # input
@@ -179,14 +191,15 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
 
     @enable_fake_mode
-    def __init__(self, config: VllmConfig):
+    def __init__(self, config: VllmConfig, use_helion: bool):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="activation_quant_fusion_pass"
         )
 
-        pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
+        # TODO(gmagogsfm): Add a global flag to enable Helion kernels.
+        pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern(use_helion)
         pattern_silu_mul_fp8.register(self.patterns)
 
         if silu_and_mul_nvfp4_quant_supported:
