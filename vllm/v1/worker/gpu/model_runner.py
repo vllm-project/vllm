@@ -100,10 +100,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_prep_event = None
             self.structured_outputs_event = None
 
+        self.do_spec_decode = self.speculative_config is not None
+        if self.do_spec_decode:
+            self.num_speculative_steps = self.speculative_config.num_speculative_tokens
+        else:
+            self.num_speculative_steps = 0
+
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -424,6 +431,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         idx_mapping_np = idx_mapping.np[:num_reqs]
         idx_mapping = idx_mapping.copy_to_gpu(num_reqs)
 
+        # Get the number of draft tokens for each request.
+        if not scheduler_output.scheduled_spec_decode_tokens:
+            # No draft token scheduled (common case).
+            num_draft_tokens: torch.Tensor | None = None
+            cu_num_logits = torch.arange(
+                num_reqs + 1, device=self.device, dtype=torch.int32
+            )
+            total_num_logits = num_reqs
+        else:
+            t = scheduler_output.scheduled_spec_decode_tokens
+            num_draft_tokens_np = np.array(
+                [len(t[req_id]) if req_id in t else 0 for req_id in req_ids],
+                dtype=np.int32,
+            )
+            # TODO(woosuk): Make this non-blocking.
+            num_draft_tokens = torch.from_numpy(num_draft_tokens_np).to(self.device)
+
+            cu_num_logits = torch.empty(
+                num_reqs + 1, device=self.device, dtype=torch.int32
+            )
+            cu_num_logits[0] = 0
+            torch.cumsum(num_draft_tokens + 1, dim=0, out=cu_num_logits[1:])
+            total_num_draft_tokens = int(num_draft_tokens_np.sum())
+            total_num_logits = num_reqs + total_num_draft_tokens
+
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
@@ -453,23 +485,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
         # Some input token ids are directly read from the last sampled tokens
-        # and draft tokens.
-        combine_sampled_and_draft_tokens(
+        # and draft tokens. Also, get the logits indices to sample tokens from.
+        logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids.gpu,
             idx_mapping,
             self.req_states.last_sampled_tokens,
             query_start_loc_gpu,
             seq_lens,
             self.req_states.prefill_len.gpu,
+            self.req_states.draft_tokens,
+            cu_num_logits,
+            total_num_logits,
         )
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
             query_start_loc_gpu, self.input_buffers.positions[:num_tokens]
         )
-
-        # Logits indices to sample next token from.
-        logits_indices = query_start_loc_gpu[1:] - 1
 
         # Get num_computed_tokens.
         # HACK(woosuk): Here, we use num_computed_tokens on GPU instead of

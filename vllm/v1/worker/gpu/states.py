@@ -63,6 +63,7 @@ class RequestState:
         max_num_reqs: int,
         max_model_len: int,
         max_num_batched_tokens: int,
+        num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
         pin_memory: bool,
@@ -70,6 +71,7 @@ class RequestState:
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
         self.pin_memory = pin_memory
@@ -96,6 +98,14 @@ class RequestState:
         self.last_sampled_tokens = torch.zeros(
             self.max_num_reqs,
             1,
+            dtype=torch.int64,
+            device=device,
+        )
+
+        # Draft tokens.
+        self.draft_tokens = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
             dtype=torch.int64,
             device=device,
         )
