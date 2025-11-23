@@ -4,7 +4,6 @@
 import json
 from pprint import pprint
 
-#import jsonschema
 import openai
 import pytest
 import pytest_asyncio
@@ -313,27 +312,27 @@ async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
     assert similarity > 90, f"Expression mismatch (similarity={similarity}%)"
 
 
-# @pytest.mark.asyncio
-# async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
-#     """Validate that tool call arguments adhere to their declared JSON schema."""
-#     response = await client.chat.completions.create(
-#         model=MODEL_NAME,
-#         messages=MESSAGES_MULTIPLE_CALLS,
-#         tools=TOOLS,
-#         temperature=0.0,
-#     )
+@pytest.mark.asyncio
+async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
+    """Validate that tool call arguments adhere to their declared JSON schema."""
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_MULTIPLE_CALLS,
+        tools=TOOLS,
+        temperature=0.0,
+    )
 
-#     calls = response.choices[0].message.tool_calls
-#     assert calls, "No tool calls produced"
+    calls = response.choices[0].message.tool_calls
+    assert calls, "No tool calls produced"
 
-#     for call in calls:
-#         func_name = call.function.name
-#         args = json.loads(call.function.arguments)
+    for call in calls:
+        func_name = call.function.name
+        args = json.loads(call.function.arguments)
 
-#         tool = next(t for t in TOOLS if t["function"]["name"] == func_name)
-#         schema = tool["function"]["parameters"]
+        tool = next(t for t in TOOLS if t["function"]["name"] == func_name)
+        schema = tool["function"]["parameters"]
 
-#         jsonschema.validate(instance=args, schema=schema)
+        jsonschema.validate(instance=args, schema=schema)
 
 
 @pytest.mark.asyncio
