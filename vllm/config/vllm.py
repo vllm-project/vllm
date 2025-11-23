@@ -26,6 +26,7 @@ from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
+from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -78,6 +79,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
+    """Attention configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -158,6 +161,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.load_config:
             vllm_factors.append(self.load_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.attention_config:
+            vllm_factors.append(self.attention_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.lora_config:
