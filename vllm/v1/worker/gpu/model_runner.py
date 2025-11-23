@@ -313,6 +313,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return 0
 
         start_time = time.perf_counter()
+        gc.collect()
         torch.cuda.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
