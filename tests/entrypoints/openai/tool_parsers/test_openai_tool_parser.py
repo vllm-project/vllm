@@ -50,7 +50,9 @@ TOOLS = [
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "Arithmetic expression to evaluate, e.g. '123 + 456'.",
+                        "description": (
+                            "Arithmetic expression to evaluate, e.g. '123 + 456'."
+                        ),
                     }
                 },
                 "required": ["expression"],
@@ -93,21 +95,23 @@ MESSAGES_MULTIPLE_CALLS = [
         "role": "system",
         "content": (
             "You can call multiple tools. "
-            "When using more than one, return a single JSON object with a 'tool_calls' array "
+            "When using more than one, return single JSON object with tool_calls array"
             "containing each tool call with its function name and arguments. "
             "Do not output multiple JSON objects separately."
         ),
     },
     {
         "role": "user",
-        "content": "First, calculate 7 * 8 using the calculator. Then, use get_time to tell me the current time in New York.",
+        "content": "First, calculate 7 * 8 using the calculator. "
+        "Then, use get_time to tell me the current time in New York.",
     },
 ]
 
 MESSAGES_INVALID_CALL = [
     {
         "role": "user",
-        "content": "Can you help with something, but don’t actually perform any calculation?",
+        "content": "Can you help with something, "
+        "but don’t actually perform any calculation?",
     }
 ]
 
@@ -124,7 +128,10 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 # Utility to extract reasoning and tool calls
 # ==========================================================
 def extract_reasoning_and_calls(chunks: list):
-    """Extract accumulated reasoning text and tool call arguments from streaming chunks."""
+    """
+    Extract accumulated reasoning text and tool call arguments 
+    from streaming chunks.
+    """
     reasoning_content = ""
     tool_calls: dict[int, dict[str, str]] = {}
 
@@ -254,7 +261,10 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
-    """Verify model produces valid tool or text output under non-deterministic sampling."""
+    """
+    Verify model produces valid tool or text output
+    under non-deterministic sampling.
+    """
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
@@ -278,7 +288,10 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
 # ==========================================================
 @pytest.mark.asyncio
 async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
-    """Ensure the calculator tool arguments closely match the expected arithmetic expression."""
+    """
+    Ensure the calculator tool arguments closely match 
+    the expected arithmetic expression.
+    """
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
