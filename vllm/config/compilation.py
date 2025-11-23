@@ -736,7 +736,7 @@ class CompilationConfig:
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
-            logger.info("Using oot custom backend for compilation.")
+            logger.info("Using OOT custom backend for compilation.")
 
         from vllm.compilation.backends import VllmBackend
 
