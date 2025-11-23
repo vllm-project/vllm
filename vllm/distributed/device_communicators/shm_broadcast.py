@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
+# Constants for cancellation debouncing
+_CONSECUTIVE_CANCEL_CHECKS_THRESHOLD = 5
+_CANCEL_CHECK_SLEEP_S = 0.01
+
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
 
@@ -470,6 +474,7 @@ class MessageQueue:
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
+        consecutive_cancel_checks = 0
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
@@ -487,7 +492,15 @@ class MessageQueue:
                     self._read_spin_timer.spin()
 
                     if cancel is not None and cancel.is_set():
-                        raise RuntimeError("cancelled")
+                        consecutive_cancel_checks += 1
+                        if (
+                            consecutive_cancel_checks
+                            > _CONSECUTIVE_CANCEL_CHECKS_THRESHOLD
+                        ):
+                            raise RuntimeError("cancelled")
+                        time.sleep(_CANCEL_CHECK_SLEEP_S)
+                    else:
+                        consecutive_cancel_checks = 0
 
                     # if we time out, raise an exception
                     elapsed = time.monotonic() - start_time
