@@ -67,6 +67,17 @@ class AllBlocksCleared(KVCacheEvent):
 class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
+    def combine_unique_ordered_events(self, other: "KVEventBatch") -> "KVEventBatch":
+        """
+        Combine non duplicated events with another `KVEventBatch` object.
+        """
+        checked_events = set(self.events)
+        for item in other.events:
+            if item not in checked_events:
+                self.events.append(item)
+                checked_events.add(item)
+        return self
+
 
 class EventPublisher(ABC):
     """Lightweight publisher for EventBatch batches with data parallelism
