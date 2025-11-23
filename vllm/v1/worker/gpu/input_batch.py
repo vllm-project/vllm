@@ -372,30 +372,68 @@ def combine_sampled_and_draft_tokens(
 
 
 @triton.jit
-def _update_num_computed_tokens_kernel(
+def _post_update_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
+    last_sampled_tokens_ptr,
+    sampled_tokens_ptr,
+    sampled_tokens_stride,
+    num_sampled_ptr,
     query_start_loc_ptr,
+    cu_num_logits_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
 
-    start = tl.load(query_start_loc_ptr + req_id)
-    end = tl.load(query_start_loc_ptr + req_id + 1)
-    query_len = end - start
+    num_sampled = tl.load(num_sampled_ptr + req_id)
+    if num_sampled > 0:
+        token_id = tl.load(
+            sampled_tokens_ptr + req_id * sampled_tokens_stride + num_sampled - 1
+        )
+        tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
 
-    n = tl.load(num_computed_tokens_ptr + req_state_idx)
-    tl.store(num_computed_tokens_ptr + req_state_idx, n + query_len)
+    query_start = tl.load(query_start_loc_ptr + req_id)
+    query_end = tl.load(query_start_loc_ptr + req_id + 1)
+    query_len = query_end - query_start
+
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    num_computed += query_len
+    # Consider the rejected tokens in spec decoding.
+    if num_sampled > 0:
+        # NOTE(woosuk): We need this condition to account for chunked prefills.
+        logits_start = tl.load(cu_num_logits_ptr + req_id)
+        logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
+        num_logits = logits_end - logits_start
+        num_rejected = num_logits - num_sampled
+        num_computed -= num_rejected
+    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
-def update_num_computed_tokens(
+def post_update(
+    # [num_reqs]
     idx_mapping: torch.Tensor,
+    # [max_num_reqs]
     num_computed_tokens: torch.Tensor,
+    # [max_num_reqs]
+    last_sampled_tokens: torch.Tensor,
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_tokens: torch.Tensor,
+    # [num_reqs]
+    num_sampled: torch.Tensor,
+    # [num_reqs + 1]
     query_start_loc: torch.Tensor,
+    # [num_reqs + 1]
+    cu_num_logits: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _update_num_computed_tokens_kernel[(num_reqs,)](
+    _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
+        last_sampled_tokens,
+        sampled_tokens,
+        sampled_tokens.stride(0),
+        num_sampled,
         query_start_loc,
+        cu_num_logits,
+        num_warps=1,
     )

@@ -40,9 +40,9 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
+    post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
-    update_num_computed_tokens,
 )
 from vllm.v1.worker.gpu.sampler import Sampler, compute_prompt_logprobs
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
@@ -435,28 +435,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the number of draft tokens for each request.
         if not scheduler_output.scheduled_spec_decode_tokens:
             # No draft token scheduled (common case).
-            num_draft_tokens: torch.Tensor | None = None
             total_num_draft_tokens = 0
+            total_num_logits = num_reqs
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
-            total_num_logits = num_reqs
         else:
             t = scheduler_output.scheduled_spec_decode_tokens
-            num_draft_tokens_np = np.array(
+            num_draft_tokens = np.array(
                 [len(t[req_id]) if req_id in t else 0 for req_id in req_ids],
                 dtype=np.int32,
             )
-            # TODO(woosuk): Make this non-blocking.
-            num_draft_tokens = torch.from_numpy(num_draft_tokens_np).to(self.device)
-
-            cu_num_logits = torch.empty(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
-            cu_num_logits[0] = 0
-            torch.cumsum(num_draft_tokens + 1, dim=0, out=cu_num_logits[1:])
-            total_num_draft_tokens = int(num_draft_tokens_np.sum())
+            total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
+
+            cu_num_logits_np = np.zeros(num_reqs + 1, dtype=np.int32)
+            np.cumsum(num_draft_tokens + 1, out=cu_num_logits_np[1:])
+            # TODO(woosuk): Make this non-blocking.
+            cu_num_logits = torch.from_numpy(cu_num_logits_np).to(self.device)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
@@ -700,11 +696,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_sampled: torch.Tensor,
     ) -> None:
         # Update the number of computed tokens.
-        update_num_computed_tokens(
+        post_update(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens,
+            self.req_states.last_sampled_tokens,
+            sampled_tokens,
+            num_sampled,
             input_batch.query_start_loc,
+            input_batch.cu_num_logits,
         )
+
+        # Update the number of computed prefill tokens.
         idx_mapping_np = input_batch.idx_mapping_np
         computed_prefill = self.req_states.num_computed_prefill_tokens
         # TODO(woosuk): Simplify this.
@@ -712,10 +714,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             computed_prefill[idx_mapping_np] + input_batch.num_scheduled_tokens,
             self.req_states.prefill_len.np[idx_mapping_np],
         )
-
-        # Store the last sampled token ids.
-        last_sampled = sampled_tokens
-        self.req_states.last_sampled_tokens[input_batch.idx_mapping] = last_sampled
 
     def get_cudagraph_and_dp_padding(
         self,
