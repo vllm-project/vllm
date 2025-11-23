@@ -203,7 +203,8 @@ def main(
     # This prevents the "Connection reset by peer" error when one process
     # finishes early and destroys the process group while others are still working.
     if dist.is_initialized():
-        dist.barrier()
+        from vllm.distributed import get_world_group
+        get_world_group().barrier()
 
 
 if __name__ == "__main__":
