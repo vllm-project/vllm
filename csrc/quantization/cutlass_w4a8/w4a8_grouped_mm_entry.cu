@@ -188,28 +188,21 @@ uint64_t seed = 2020;
     int n = static_cast<int>(b_tensors.size(1));
     int k = static_cast<int>(b_tensors.size(2)) * 8; // int4 -> int32 pack factor
 
-    // reconstruct b and S stride
+    // reconstruct b layout
     // TODO: need some way to serialize this info to torch so we don't have to rebuild each time
-    // perhaps through the pack methods
+    // perhaps through the pack methods?
     cutlass::DeviceAllocation<LayoutB_Reordered> layout_B_reordered_local;
-    cutlass::DeviceAllocation<StrideS> stride_S_local;
     std::vector<LayoutB_Reordered> layout_B_reordered_host(num_experts);
-    std::vector<StrideS> stride_S_host_local;
-    int const scale_k = cutlass::ceil_div(k, b_group_size);
     // for building this we only use n and k
     for (int32_t i = 0; i < num_experts; ++i) {
       // this happens after initialize (problem shape transposed) so we need to swap it, gets logical N, K
       auto shape_B = cute::make_shape(n, k, Int<1>{});
       // Repeat the reorder layout atom to tile the whole tensor shape 
       layout_B_reordered_host[i] = tile_to_shape(LayoutAtomQuant{}, shape_B);
-      // logical N, scale_k
-      stride_S_host_local.push_back(cutlass::make_cute_packed_stride(StrideS{}, {n, scale_k, 1}));
     }
     // copy to device
     layout_B_reordered_local.reset(num_experts);
     layout_B_reordered_local.copy_from_host(layout_B_reordered_host.data());
-    stride_S_local.reset(num_experts);
-    stride_S_local.copy_from_host(stride_S_host_local.data());
 
     auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(device);
@@ -241,7 +234,7 @@ uint64_t seed = 2020;
         static_cast<const QuantType**>(b_ptrs.data_ptr()), layout_B_reordered_local.get(),
         static_cast<const MmaType**>(a_ptrs.data_ptr()), static_cast<StrideA*>(a_strides.data_ptr()),
         static_cast<const cutlass::Array<ElementScale, 8> **>(b_group_scales_ptrs.data_ptr()),
-        stride_S_local.get(),
+        static_cast<StrideS*>(group_scale_strides.data_ptr()),
         static_cast<int>(b_group_size)
     };
 

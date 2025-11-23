@@ -2451,8 +2451,22 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer_name: str | None = None,
     ):
         super().__init__(moe)
-        # need bunch of validation and stuff
-    
+        self.quant_config = quant_config
+        self.moe_quant_config = quant_config
+        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
+        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
+            "input_activations"
+        )
+        self.group_size = self.weight_quant.group_size
+        self.num_bits = self.weight_quant.num_bits
+        self.packed_factor = 32 // self.num_bits
+
+        assert self.weight_quant.symmetric, "Only symmetric quantization is supported for W4A8 MoE"
+        assert self.weight_quant.actorder != "group"
+        assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
+        
+        self.disable_expert_map = False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -2463,9 +2477,120 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         **extra_weight_attrs,
     ):
         # implement weight creation
-        pass
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # storage type
+        params_dtype = torch.int32
+
+        # WEIGHTS
+        w13_weight_packed = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.packed_factor,
+                dtype=params_dtype
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_packed", w13_weight_packed)
+        set_weight_attrs(w13_weight_packed, extra_weight_attrs)
+
+        w2_weight_packed = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.packed_factor,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_packed", w2_weight_packed)
+        set_weight_attrs(w2_weight_packed, extra_weight_attrs)
+
+        # TODO(czhu): for both types of scales (and weights) assume TP1 for now
+        # GROUP_SCALES
+        # stored as (n, k // group_size)
+        # at runtime it's all packed
+        # logically before packed it would be (num_experts, n, )
+        # the name needs to be *weight_scale otherwise may be skipped
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.group_size,
+                dtype=torch.float8_e4m3fn
+            ),
+            requires_grad=False
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.group_size,
+                dtype=torch.float8_e4m3fn
+            ),
+            requires_grad=False
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        # Add PER-GROUP quantization for FusedMoE.weight_loader.
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # CHANNEL_SCALES
+        w13_weight_chan_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    1,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+        layer.register_parameter("w13_weight_chan_scale", w13_weight_chan_scale)
+        w2_weight_chan_scale = torch.nn.Parameter(
+            torch.ones(num_experts, hidden_size, 1, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_chan_scale", w2_weight_chan_scale)
+        # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+        )
+        set_weight_attrs(w13_weight_chan_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_chan_scale, extra_weight_attrs)
+
+        # weight shapes
+        # TODO czhu: dont believe it matters the quant method here
+        w2_weight_shape = torch.nn.Parameter(
+            torch.empty(num_experts, 2), requires_grad=False
+        )
+        layer.register_parameter("w2_weight_shape", w2_weight_shape)
+        set_weight_attrs(w2_weight_shape, extra_weight_attrs)
+        w13_weight_shape = torch.nn.Parameter(
+            torch.empty(num_experts, 2), requires_grad=False
+        )
+
+        layer.register_parameter("w13_weight_shape", w13_weight_shape)
+        set_weight_attrs(w13_weight_shape, extra_weight_attrs)
+
+        # don't use input scales
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
+        # encode and reorder weights
+        # pack scales
+        # define the a/b/c strides
+        # do i have to rename weight_packed -> weight? dont think so
         pass
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
@@ -2476,17 +2601,18 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         # should be like dense w4a8; input is token, weights are per-chan but also per group
-        per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
-        per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-        # TODO: we gotta add per-channel but also per-group scales for the weights
+        # TODO: need to have both per-chan and per-group weights for this stuff
+        # but dont actually know what it is needed for? should figure this out
+        # before adding a bunch of fields
         return int4_w4afp8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale, # shouldnt this be dynamic
-            a2_scale=layer.w2_input_scale,
-            per_act_token_quant=per_act_token,
-            per_out_ch_quant=per_channel_quant,
-            block_shape=layer.weight_block_size,
+            w1_scale=layer.w13_weight_scale, # group scale
+            w2_scale=layer.w2_weight_scale, # group scale
+            a1_scale=layer.w13_input_scale, # none
+            a2_scale=layer.w2_input_scale, # none
+            per_act_token_quant=True, # always use dynamc per-tok
+            per_out_ch_quant=True, # always use per-chan
+            block_shape=layer.weight_block_size, # should it be [0, group_size] ? 
+            # need int4 dtype? fp8 activations?
         )
 
     def apply(
@@ -2516,9 +2642,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
             )
-        assert activation == "silu", "Only SiLU activation is supported."
+        
 
     @property
     def supports_eplb(self) -> bool:
-        # dont support it for now
         return False

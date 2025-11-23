@@ -1302,6 +1302,7 @@ class FusedMoE(CustomOp):
             return True if return_success else None
 
         # Case weight scales, zero_points and offset, weight/input global scales
+        # TODO czhu: I think we need to add logic for both group/channel scale loading here
         if "scale" in weight_name or "zero" in weight_name or "offset" in weight_name:
             # load the weight scales and zp based on the quantization scheme
             # supported weight scales/zp can be found in

@@ -74,7 +74,6 @@ def cutlass_preprocess(
 
 GROUP_SIZE = 128
 NUM_EXPERTS = [8, 64]
-# NUM_EXPERTS = [4]
 Ks = [512, 256] # need divisible by gorup size
 Ns = [2048, 1024]
 ALIGNMENT = 16 # torch scaled mm alignment for M, needed for reference check
@@ -122,8 +121,10 @@ if __name__ == '__main__':
 
                 # doesnt matter for now, we are constructing layout at runtime
                 b_strides = torch.tensor(1.0).cuda() 
-                # ignored since causes illegal mem access
-                group_scale_strides = torch.full((num_experts,), N, dtype=torch.int64).cuda() 
+                # since stride is like `(_1,2048,0)` it takes 2xint64 = 16 bytes 
+                # we neeed to have each entry be like (2048, 0) in int64 to make the bytes align
+                group_scale_strides = torch.zeros((num_experts, 2), dtype=torch.int64).cuda()
+                group_scale_strides[:, 0] = N # set first column to N
                 ops.cutlass_w4a8_moe_mm(
                     out,
                     a,
@@ -139,7 +140,7 @@ if __name__ == '__main__':
                     c_strides,
                     group_scale_strides
                 )
-
+                torch.cuda.synchronize()
                 # check result
                 ends = torch.cumsum(torch.tensor(Ms), 0).tolist()
                 starts = expert_offsets.cpu().tolist()

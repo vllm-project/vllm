@@ -152,6 +152,9 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
+    # Per-channel scales when per-group scales are also used (W4A8)
+    chan_scale: torch.Tensor | None = None
+
 
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
@@ -424,6 +427,8 @@ class FusedMoEQuantConfig:
         w2_bias: torch.Tensor | None = None,
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
+        w1_chan_scale: torch.Tensor | None = None,
+        w2_chan_scale: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
     ) -> "FusedMoEQuantConfig":
         """
@@ -449,6 +454,8 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
+        - w1_chan_scale: Optional per-channel scale to be used for w1
+        - w2_chan_scale: Optional per-channel scale to be used for w1
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -473,10 +480,12 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias,
+                w1_chan_scale
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias,
+                w2_chan_scale
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -679,16 +688,12 @@ def int4_w4afp8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
-    a1_gscale: torch.Tensor | None = None,
-    a2_gscale: torch.Tensor | None = None,
-    g1_alphas: torch.Tensor | None = None,
-    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and int4 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn,
+        torch.float8_e4m3fn, # this is...incorrect?
         w1_scale=w1_scale,
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
