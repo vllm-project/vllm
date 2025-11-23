@@ -815,7 +815,7 @@ class GPUModelRunner(
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if not is_last_rank:
+            if req_data.new_token_ids and req_data.new_token_ids[i]:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
@@ -2341,7 +2341,7 @@ class GPUModelRunner(
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
 
-            input_ids = None
+            input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             model_kwargs = {
                 **self._init_model_kwargs(num_scheduled_tokens),
@@ -3804,7 +3804,7 @@ class GPUModelRunner(
             assert num_tokens_after_padding <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
-                input_ids = None
+                input_ids = self.input_ids.gpu[:num_tokens]
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_after_padding]
                 model_kwargs = {
                     **model_kwargs,
