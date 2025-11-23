@@ -94,6 +94,7 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=8,
+        max_num_seqs=16,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM

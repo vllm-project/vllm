@@ -297,7 +297,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         max_loras: int,
         lora_config: LoRAConfig,
     ):
-        self.w13_lora_a_stacked = tuple(
+        self.w13_lora_a_stacked: tuple[torch.Tensor, ...] = tuple(
             torch.zeros(
                 (
                     max_loras,
@@ -312,7 +312,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self._w13_slices)
         )
-        self.w2_lora_a_stacked = (
+        self.w2_lora_a_stacked: tuple[torch.Tensor, ...] = (
             torch.zeros(
                 (
                     max_loras,
@@ -326,7 +326,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
 
     def _create_lora_b_weights(self, max_loras: int, lora_config: LoRAConfig):
-        self.w13_lora_b_stacked = tuple(
+        self.w13_lora_b_stacked: tuple[torch.Tensor, ...] = tuple(
             torch.zeros(
                 (
                     max_loras,
@@ -339,7 +339,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self._w13_slices)
         )
-        self.w2_lora_b_stacked = (
+        self.w2_lora_b_stacked: tuple[torch.Tensor, ...] = (
             torch.zeros(
                 (
                     max_loras,
@@ -518,7 +518,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._w13_slices = 1
 
     def _create_lora_b_weights(self, max_loras, lora_config):
-        self.w13_lora_b_stacked = tuple(
+        self.w13_lora_b_stacked: tuple[torch.Tensor] = tuple(
             torch.zeros(
                 (
                     max_loras,
@@ -531,7 +531,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             )
             for _ in range(self._w13_slices)
         )
-        self.w2_lora_b_stacked = (
+        self.w2_lora_b_stacked: tuple[torch.Tensor] = (
             torch.zeros(
                 (
                     max_loras,
