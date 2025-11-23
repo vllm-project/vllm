@@ -106,7 +106,7 @@ MESSAGES_MULTIPLE_CALLS = [
 
 MESSAGES_INVALID_CALL = [
     {
-        "role": "user", 
+        "role": "user",
         "content": "Can you help with something, but don’t actually perform any calculation?",
     }
 ]
@@ -362,5 +362,3 @@ async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI)
     assert low_mid_sim > 60, (
         f"Semantic drift too large between T=0.0 and T=0.5 ({low_mid_sim}%)"
     )
-
-
