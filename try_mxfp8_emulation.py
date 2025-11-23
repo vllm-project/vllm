@@ -5,6 +5,7 @@ from triton_scaled_matmul_tut import block_scaled_matmul_kernel
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import mxfp8_fake_w8a8_moe_quant_config
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import mxfp8_e4m3_quantize, dequant_mxfp8_to_bf16
+from flashinfer import mxfp8_quantize as flashinfer_mxfp8_e4m3_quantize
 
 
 def _cast_mxfp8_scales_to_fp32(scales: torch.Tensor) -> torch.Tensor:
@@ -34,7 +35,7 @@ def dequant_mxfp8_to_fp32(
     return x.to(torch.float32) * scales_expanded
 
 
-def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxfp8"):
+def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxfp8", is_swizzled=False):
     assert block_scale_type in ["mxfp4", "mxfp8", "mixed"], f"Invalid block scale type: {block_scale_type}"
 
     M = a.shape[0]
@@ -65,21 +66,26 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
     a_scale_block_shape = [1, rep_m, rep_k, 2, 256]
     b_scale_block_shape = [1, rep_n, rep_k, 2, 256]
 
-    def pack_scale(unpacked, scale_shape):
-        # input: [M, K//VEC_SIZE]
-        # transformations:
-        # [M, K//VEC_SIZE] -> [1, M//128, 4, 32, K//VEC_SIZE//4, 4] -> [1, M//128, K//VEC_SIZE//4, 32, 4, 4] -> [1, M//128, K//VEC_SIZE//4, 2, 256]
-        return unpacked.view(
-            1,
-            unpacked.shape[0]//128,
-            4,
-            32,
-            unpacked.shape[1]//4,
-            4
-        ).permute(0, 1, 4, 3, 2, 5).reshape(scale_shape)
+    if is_swizzled:
+        a_scale = a_scale.view(a_scale_shape)
+        b_scale = b_scale.view(b_scale_shape)
+    else:
+        def pack_scale(unpacked, scale_shape):
+            # input: [M, K//VEC_SIZE]
+            # transformations:
+            # [M, K//VEC_SIZE] -> [1, M//128, 4, 32, K//VEC_SIZE//4, 4] -> [1, M//128, K//VEC_SIZE//4, 32, 4, 4] -> [1, M//128, K//VEC_SIZE//4, 2, 256]
+            return unpacked.view(
+                1,
+                unpacked.shape[0]//128,
+                4,
+                32,
+                unpacked.shape[1]//4,
+                4
+            ).permute(0, 1, 4, 3, 2, 5).reshape(scale_shape)
+        
+        a_scale = pack_scale(a_scale, a_scale_shape)
+        b_scale = pack_scale(b_scale, b_scale_shape)
 
-    a_scale = pack_scale(a_scale, a_scale_shape)        # TODO: Can use a plain view if scales are swizzled
-    b_scale = pack_scale(b_scale, b_scale_shape)
     a_scale_desc = TensorDescriptor.from_tensor(a_scale, block_shape=a_scale_block_shape)
     b_scale_desc = TensorDescriptor.from_tensor(b_scale, block_shape=b_scale_block_shape)
 
@@ -163,8 +169,10 @@ def games():
     print(f"{torch.max(torch.abs(B_dq_bf16 - B))=}")
     print(f"{torch.max(torch.abs(C_q_dq_bf16 - C))=}")
 
-    C_mxfp8_fp32 = block_scaled_matmul(A_q, A_scales, B_q, B_scales, torch.float32, "mxfp8")
-    C_mxfp8_bf16 = block_scaled_matmul(A_q, A_scales, B_q, B_scales, torch.bfloat16, "mxfp8")
+    A_q, A_scales_swz = flashinfer_mxfp8_e4m3_quantize(A, is_sf_swizzled_layout=True)
+    B_q, B_scales_swz = flashinfer_mxfp8_e4m3_quantize(B, is_sf_swizzled_layout=True)
+    C_mxfp8_fp32 = block_scaled_matmul(A_q, A_scales_swz, B_q, B_scales_swz, torch.float32, "mxfp8", is_swizzled=True)
+    C_mxfp8_bf16 = block_scaled_matmul(A_q, A_scales_swz, B_q, B_scales_swz, torch.bfloat16, "mxfp8", is_swizzled=True)
     print(f"{torch.max(torch.abs(C_mxfp8_fp32 - C_q_dq_fp32))=}")
     print(f"{torch.max(torch.abs(C_mxfp8_bf16 - C_q_dq_bf16))=}")
     print(f"{torch.max(torch.abs(C_mxfp8_fp32.to(torch.bfloat16) - C_mxfp8_bf16))=}")
