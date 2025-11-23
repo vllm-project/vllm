@@ -64,10 +64,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             return FusedMoENaivePrepareAndFinalize()
         return prepare_finalize
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        prepare_finalize = maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        prepare_finalize = maybe_make_prepare_finalize(
+            self.moe, self.moe_quant_config, routing_tables
+        )
 
         return self._maybe_add_dp_ep_naive_fallback(prepare_finalize)
 
