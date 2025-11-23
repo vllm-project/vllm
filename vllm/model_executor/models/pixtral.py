@@ -74,6 +74,7 @@ from .vision import (
 )
 
 try:
+    # Note: vLLM does not install xformers by default.
     from xformers import ops as xops
 
     if current_platform.is_cuda() and current_platform.has_device_capability(100):
