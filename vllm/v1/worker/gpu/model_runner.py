@@ -562,6 +562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             # TODO(woosuk): Make compatible with spec decoding.
+            assert input_batch.num_draft_tokens == 0
             with async_barrier(self.structured_outputs_event):
                 apply_grammar_bitmask(
                     logits,
