@@ -1285,17 +1285,17 @@ class FlashInferImpl(AttentionImpl):
             assert pcp_allgather_restore_idx is not None
             # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
             # ignores the padding from CUDA Graph. To be optimized for performance!
-            key_across_pcp = get_pcp_group().all_gather(key[:num_actual_tokens].contiguous(), dim=0)
-            value_across_pcp = get_pcp_group().all_gather(value[:num_actual_tokens].contiguous(), dim=0)
+            key_across_pcp = get_pcp_group().all_gather(
+                key[:num_actual_tokens].contiguous(), dim=0
+            )
+            value_across_pcp = get_pcp_group().all_gather(
+                value[:num_actual_tokens].contiguous(), dim=0
+            )
             # Reorder kv after pcp allgather.
             # Note that there are duplicate decoding tokens,
             # but we only save the first one in kvcache.
-            key = torch.index_select(
-                key_across_pcp, 0, pcp_allgather_restore_idx
-            )
-            value = torch.index_select(
-                value_across_pcp, 0, pcp_allgather_restore_idx
-            )
+            key = torch.index_select(key_across_pcp, 0, pcp_allgather_restore_idx)
+            value = torch.index_select(value_across_pcp, 0, pcp_allgather_restore_idx)
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -1356,7 +1356,7 @@ class FlashInferImpl(AttentionImpl):
                 if self.total_cp_world_size > 1:
                     assert isinstance(prefill_wrapper, BatchCPPrefillWrapper)
                     expected_logits_soft_cap = self.logits_soft_cap or 0.0
-                    
+
                     wrappers_to_check = [(prefill_wrapper._context, False)]
                     if self.pcp_world_size > 1:
                         wrappers_to_check.extend(
@@ -1367,7 +1367,7 @@ class FlashInferImpl(AttentionImpl):
                         )
                     else:
                         wrappers_to_check.append((prefill_wrapper._new_tokens, True))
-                    
+
                     for wrapper, expected_causal in wrappers_to_check:
                         assert wrapper._window_left == self.window_left
                         assert wrapper._logits_soft_cap == expected_logits_soft_cap
@@ -1497,9 +1497,7 @@ class FlashInferImpl(AttentionImpl):
                             return_lse=True,
                         )
                     if self.pcp_world_size > 1:
-                        out = cp_lse_ag_out_ar(
-                            out, lse, get_pcp_group()
-                        )
+                        out = cp_lse_ag_out_ar(out, lse, get_pcp_group())
                     output[:num_decode_tokens] = out
                 else:
                     decode_wrapper.run(

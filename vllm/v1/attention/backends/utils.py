@@ -48,11 +48,13 @@ PAD_SLOT_ID = -1
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
+
 @dataclass
 class PrefillContextParallelMetadata:
     """
     Attention metadata for prefill context parallel
     """
+
     allgather_restore_idx: torch.Tensor
     """
     We split and concatenate the sequence in a head-tail style,
@@ -62,10 +64,11 @@ class PrefillContextParallelMetadata:
     q_tail_indices: torch.Tensor | None = None
     q_head_start_loc: torch.Tensor | None = None
     kv_for_head_indices: torch.Tensor | None = None
-    kv_for_tail_indices : torch.Tensor | None = None
+    kv_for_tail_indices: torch.Tensor | None = None
     kv_for_head_indptr: torch.Tensor | None = None
     kv_for_tail_indptr: torch.Tensor | None = None
     q_full_indices: torch.Tensor | None = None
+
 
 @dataclass
 class CommonAttentionMetadata:
@@ -114,6 +117,7 @@ class CommonAttentionMetadata:
     """Sequence lengths of the local rank in prefill/decode context parallelism world"""
 
     pcp_metadata: PrefillContextParallelMetadata | None = None
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,

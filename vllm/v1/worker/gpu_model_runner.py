@@ -93,9 +93,9 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    PrefillContextParallelMetadata,
     create_fast_prefill_custom_backend,
     get_cp_local_seq_lens,
-    PrefillContextParallelMetadata,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -461,7 +461,9 @@ class GPUModelRunner(
         if self.pcp_world_size > 1:
             # Note(qcs): we will pad the tokens of each request
             # to a multiple of 2 * pcp_size.
-            max_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size 
+            max_num_tokens = (
+                self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size
+            )
         else:
             max_num_tokens = self.max_num_tokens
         # Persistent buffers for CUDA graphs.
@@ -501,24 +503,15 @@ class GPUModelRunner(
         # Persistent buffers for Prefill Context Parallism
         if self.pcp_world_size > 1:
             self.pcp_allgather_restore_idx = self._make_buffer(
-                max_num_tokens,
-                dtype=torch.int64
+                max_num_tokens, dtype=torch.int64
             )
-            self.q_head_indices = self._make_buffer(
-                max_num_tokens,
-                dtype=torch.int64
-            )
-            self.q_tail_indices = self._make_buffer(
-                max_num_tokens,
-                dtype=torch.int64
-            )
+            self.q_head_indices = self._make_buffer(max_num_tokens, dtype=torch.int64)
+            self.q_tail_indices = self._make_buffer(max_num_tokens, dtype=torch.int64)
             self.kv_for_head_indices = self._make_buffer(
-                max_num_tokens,
-                dtype=torch.int64
+                max_num_tokens, dtype=torch.int64
             )
             self.kv_for_tail_indices = self._make_buffer(
-                max_num_tokens,
-                dtype=torch.int64
+                max_num_tokens, dtype=torch.int64
             )
             self.pcp_padded_slot_mapping = torch.empty(
                 (max_num_tokens,),
@@ -534,15 +527,24 @@ class GPUModelRunner(
             )
             self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
             self.q_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+                (self.max_num_reqs + 1,),
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=True,
             )
             self.q_indptr_cpu = self.q_indptr_cpu_tensor.numpy()
             self.kv_for_head_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+                (self.max_num_reqs + 1,),
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=True,
             )
             self.kv_for_head_indptr_cpu = self.kv_for_head_indptr_cpu_tensor.numpy()
             self.kv_for_tail_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,), device="cpu", dtype=torch.int64, pin_memory=True
+                (self.max_num_reqs + 1,),
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=True,
             )
             self.kv_for_tail_indptr_cpu = self.kv_for_tail_indptr_cpu_tensor.numpy()
 
@@ -1070,22 +1072,22 @@ class GPUModelRunner(
     ) -> PrefillContextParallelMetadata:
         """
         During the prefill phrase, the attention computation is divided into
-        two parts: q_head and q_tail. Here, we calculate the kv indices 
-        corresponding to q_head or q_tail. Meawhile, the q and kv indptr are 
+        two parts: q_head and q_tail. Here, we calculate the kv indices
+        corresponding to q_head or q_tail. Meawhile, the q and kv indptr are
         also computed to build the attention wrapper.
         If the pcp_size is 2, the variables are following:
         >>> q_lens [4, 8]  kv_lens [8, 16]
         >>> pcp_chunk_sizes[2, 4]
-        >>> q_indptr [0, 2, 4]
+        >>> q_indptr[0, 2, 4]
         >>> q_head_indices [0, 1, 4, 5, 6, 7] q_tail_indices [2, 3, 8, 9, 10, 11]
         >>> kv_head_len r0 [2, 4] / r1 [4, 8]
         >>> kv_for_head_indptr r0 [0, 2, 6] / r1 [0, 4, 12]
         >>> kv_for_head_indices r0 [0, 1, 8, 9, 10, 11]
-        >>> r1 [0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15]
+        >>> r1[0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15]
         >>> kv_tail_len r0 [8, 16] / r1 [6, 12]
         >>> kv_for_tail_indptr r0 [0, 8, 24] / r1 [0, 6, 18]
         >>> kv_for_tail_indices r0 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ..., 23]
-        >>> r1 [0, 1, 2, 3, 4, 5, 8, 9, ..., 19]
+        >>> r1[0, 1, 2, 3, 4, 5, 8, 9, ..., 19]
         """
         if len(q_lens) == 0:
             return PrefillContextParallelMetadata(
@@ -1093,15 +1095,22 @@ class GPUModelRunner(
             )
 
         def _get_partial_kv_idx(kv_partial_len, kv_partial_indptr, kv_parial_indices):
-            kv_partial_indptr[1 : len(kv_partial_len) + 1], kv_partial_arange = self._get_cumsum_and_arange(kv_partial_len)
-            kv_parial_indices.np[: kv_partial_arange.shape[0]] = kv_partial_arange + np.repeat(
-                kv_start_loc,
-                kv_partial_len,
+            kv_partial_indptr[1 : len(kv_partial_len) + 1], kv_partial_arange = (
+                self._get_cumsum_and_arange(kv_partial_len)
+            )
+            kv_parial_indices.np[: kv_partial_arange.shape[0]] = (
+                kv_partial_arange
+                + np.repeat(
+                    kv_start_loc,
+                    kv_partial_len,
+                )
             )
             return kv_partial_arange.shape[0]
 
         pcp_chunk_sizes = q_lens // 2
-        self.q_indptr_cpu[1 : len(pcp_chunk_sizes) + 1], q_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
+        self.q_indptr_cpu[1 : len(pcp_chunk_sizes) + 1], q_chunk_arange = (
+            self._get_cumsum_and_arange(pcp_chunk_sizes)
+        )
 
         q_head_start_loc = np.roll(np.cumsum(q_lens), 1)
         q_head_start_loc[0] = 0
@@ -1109,6 +1118,7 @@ class GPUModelRunner(
             q_head_start_loc,
             pcp_chunk_sizes,
         )
+
         self.q_head_indices.copy_to_gpu(q_chunk_arange.shape[0])
 
         q_tail_start_loc = q_head_start_loc + pcp_chunk_sizes
@@ -1122,17 +1132,25 @@ class GPUModelRunner(
         kv_start_loc[0] = 0
         # kv_for_q_head
         kv_for_head_len = (self.pcp_rank + 1) * pcp_chunk_sizes
-        kv_head_tokens_sum = _get_partial_kv_idx(kv_for_head_len, self.kv_for_head_indptr_cpu, self.kv_for_head_indices)
+        kv_head_tokens_sum = _get_partial_kv_idx(
+            kv_for_head_len,
+            self.kv_for_head_indptr_cpu,
+            self.kv_for_head_indices,
+        )
         self.kv_for_head_indices.copy_to_gpu(kv_head_tokens_sum)
         # kv_for_q_tail
         kv_for_tail_len = (2 * self.pcp_world_size - self.pcp_rank) * pcp_chunk_sizes
-        kv_tail_tokens_sum = _get_partial_kv_idx(kv_for_tail_len, self.kv_for_tail_indptr_cpu, self.kv_for_tail_indices)
+        kv_tail_tokens_sum = _get_partial_kv_idx(
+            kv_for_tail_len,
+            self.kv_for_tail_indptr_cpu,
+            self.kv_for_tail_indices,
+        )
         self.kv_for_tail_indices.copy_to_gpu(kv_tail_tokens_sum)
 
         q_full_indices = torch.cat(
             [
                 self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
-                self.q_tail_indices.gpu[: q_chunk_arange.shape[0]]
+                self.q_tail_indices.gpu[: q_chunk_arange.shape[0]],
             ]
         ).argsort()
 
@@ -1141,13 +1159,17 @@ class GPUModelRunner(
             q_head_indices=self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
             q_tail_indices=self.q_tail_indices.gpu[: q_chunk_arange.shape[0]],
             q_head_start_loc=self.q_indptr_cpu_tensor[: len(pcp_chunk_sizes) + 1],
-            kv_for_head_indices=self.kv_for_head_indices.gpu[: kv_head_tokens_sum],
-            kv_for_tail_indices=self.kv_for_tail_indices.gpu[: kv_tail_tokens_sum],
-            kv_for_head_indptr=self.kv_for_head_indptr_cpu_tensor[: len(kv_for_head_len) + 1],
-            kv_for_tail_indptr=self.kv_for_tail_indptr_cpu_tensor[: len(kv_for_tail_len) + 1],
+            kv_for_head_indices=self.kv_for_head_indices.gpu[:kv_head_tokens_sum],
+            kv_for_tail_indices=self.kv_for_tail_indices.gpu[:kv_tail_tokens_sum],
+            kv_for_head_indptr=(
+                self.kv_for_head_indptr_cpu_tensor[: len(kv_for_head_len) + 1]
+            ),
+            kv_for_tail_indptr=(
+                self.kv_for_tail_indptr_cpu_tensor[: len(kv_for_tail_len) + 1]
+            ),
             q_full_indices=q_full_indices,
         )
-        
+
     def _update_tokens_for_pcp(
         self,
         tokens: np.ndarray,
@@ -1189,8 +1211,15 @@ class GPUModelRunner(
                 self.input_batch.num_computed_tokens_cpu[:num_reqs]
                 >= self.input_batch.num_prompt_tokens[:num_reqs]
             )
+        else:
+            if num_reqs is None or num_decode_reqs is None:
+                raise ValueError(
+                    "num_reqs and num_decode_reqs must be provided for dummy input"
+                )
+        assert num_reqs is not None
+        assert num_decode_reqs is not None
         self.num_pcp_pads_cpu[:num_reqs] = 0
-        
+
         num_decode_tokens = sum(tokens[:num_decode_reqs])
 
         num_padded_scheduled_tokens = np.ceil(
@@ -1259,8 +1288,8 @@ class GPUModelRunner(
             self._get_pcp_metadata(
                 pcp_tokens[num_decode_reqs:],
                 num_padded_scheduled_tokens[num_decode_reqs:],
-                self.pcp_allgather_restore_idx.gpu[: all_positions.shape[0]]
-            )
+                self.pcp_allgather_restore_idx.gpu[: all_positions.shape[0]],
+            ),
         )
 
     def _get_cumsum_and_arange(
@@ -1471,10 +1500,9 @@ class GPUModelRunner(
 
         pcp_metadata = None
         if self.pcp_world_size > 1:
-            num_scheduled_tokens[:num_reqs], pcp_positions, pcp_metadata = \
-                self._update_tokens_for_pcp(
-                    num_scheduled_tokens[:num_reqs]
-                )
+            num_scheduled_tokens[:num_reqs], pcp_positions, pcp_metadata = (
+                self._update_tokens_for_pcp(num_scheduled_tokens[:num_reqs])
+            )
 
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
@@ -1605,7 +1633,7 @@ class GPUModelRunner(
         if self.pcp_world_size > 1:
             discard_requests_mask = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                + num_scheduled_tokens * self.pcp_world_size 
+                + num_scheduled_tokens * self.pcp_world_size
                 - self.num_pcp_pads_cpu[:num_reqs]
             ) < num_tokens_np
         else:
@@ -3167,7 +3195,7 @@ class GPUModelRunner(
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = get_pcp_group().all_gather(
-                    hidden_states[:num_scheduled_tokens_np.sum()],
+                    hidden_states[: num_scheduled_tokens_np.sum()],
                     0,
                 )
                 hidden_states = torch.index_select(
@@ -4077,13 +4105,14 @@ class GPUModelRunner(
         pcp_metadata = None
         if self.pcp_world_size > 1 and force_attention:
             num_decode_reqs = sum(num_scheduled_tokens == 1)
-            num_scheduled_tokens[:num_reqs], _, pcp_metadata = \
+            num_scheduled_tokens[:num_reqs], _, pcp_metadata = (
                 self._update_tokens_for_pcp(
                     num_scheduled_tokens[:num_reqs],
                     dummy_input=True,
                     num_reqs=num_reqs,
                     num_decode_reqs=num_decode_reqs,
                 )
+            )
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
