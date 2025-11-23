@@ -83,6 +83,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
+        self.has_bias = self.moe.has_bias
 
         self.weight_qscheme = self.weight_quant.get("qscheme")
         self.input_qscheme = self.input_quant.get("qscheme")
@@ -219,6 +220,20 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, 2 * intermediate_size_per_partition // OCP_MX_BLOCK_SIZE, dtype=params_dtype), requires_grad=False
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
@@ -437,6 +452,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
+        self.has_bias = self.moe.has_bias
 
         weight_qscheme = self.weight_quant.get("qscheme")
         input_qscheme = self.input_quant.get("qscheme")
@@ -560,6 +576,20 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, 2 * intermediate_size_per_partition // OCP_MX_BLOCK_SIZE, dtype=params_dtype), requires_grad=False
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
         if self.emulate:
