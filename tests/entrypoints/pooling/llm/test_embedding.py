@@ -9,6 +9,12 @@ import torch.nn.functional as F
 
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 

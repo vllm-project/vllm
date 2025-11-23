@@ -6,6 +6,7 @@ import random
 import pytest
 import torch
 
+from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.platforms import current_platform
 
 skip_unsupported = pytest.mark.skipif(
@@ -18,7 +19,7 @@ BACKENDS: list[str] = [
     "FLASHINFER",
 ]
 
-if current_platform.is_cuda() and current_platform.is_device_capability(90):
+if flash_attn_supports_mla():
     BACKENDS.append("FLASH_ATTN_MLA")
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
