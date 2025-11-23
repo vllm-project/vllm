@@ -181,10 +181,10 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
 
     function_names = [
         c.function.name for c in tool_calls if getattr(c, "function", None)
-        ]
+    ]
     arguments = [
         c.function.arguments for c in tool_calls if getattr(c, "function", None)
-        ]
+    ]
 
     assert FUNC_CALC in function_names, "Calculator function not called"
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
@@ -194,7 +194,7 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
+async def test_streaming_tool_call_get_time(client: openai.AsyncOpenAI):
     """Verify single tool call reasoning with get_time."""
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
