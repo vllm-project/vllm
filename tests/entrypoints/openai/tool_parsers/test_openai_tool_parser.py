@@ -3,8 +3,9 @@
 
 import json
 from pprint import pprint
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple
 
+# Third-party libraries
 import jsonschema
 import openai
 import pytest
@@ -128,13 +129,13 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 # ==========================================================
 # Utility to extract reasoning and tool calls
 # ==========================================================
-def extract_reasoning_and_calls(chunks: list) -> Tuple[str, List[str], List[str]]:
+def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]]:
     """
     Extract accumulated reasoning text and tool call arguments
     from streaming chunks.
     """
     reasoning_content: str = ""
-    tool_calls: Dict[int, Dict[str, str]] = {}
+    tool_calls: dict[int, dict[str, str]] = {}
 
     for chunk in chunks:
         choice = getattr(chunk.choices[0], "delta", None)
@@ -155,8 +156,8 @@ def extract_reasoning_and_calls(chunks: list) -> Tuple[str, List[str], List[str]
                 if getattr(func, "arguments", None):
                     tool_entry["arguments"] += func.arguments
 
-    function_names: List[str] = [v["name"] for _, v in sorted(tool_calls.items())]
-    arguments: List[str] = [v["arguments"] for _, v in sorted(tool_calls.items())]
+    function_names: list[str] = [v["name"] for _, v in sorted(tool_calls.items())]
+    arguments: list[str] = [v["arguments"] for _, v in sorted(tool_calls.items())]
 
     return reasoning_content, arguments, function_names
 
