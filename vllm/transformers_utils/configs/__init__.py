@@ -5,7 +5,12 @@ Model configs may be defined in this directory for the following reasons:
 
 - There is no configuration file defined by HF Hub or Transformers library.
 - There is a need to override the existing config to support vLLM.
+- The HF model_type isn't recognized by the Transformers library but can
+  be mapped to an existing Transformers config, such as
+  deepseek-ai/DeepSeek-V3.2-Exp.
 """
+
+from transformers import DeepseekV3Config
 
 from vllm.transformers_utils.configs.afmoe import AfmoeConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
@@ -44,6 +49,7 @@ __all__ = [
     "AfmoeConfig",
     "ChatGLMConfig",
     "DeepseekVLV2Config",
+    "DeepseekV3Config",
     "DotsOCRConfig",
     "EAGLEConfig",
     "FlexOlmoConfig",
