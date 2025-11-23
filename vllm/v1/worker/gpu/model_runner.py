@@ -441,18 +441,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
         else:
-            t = scheduler_output.scheduled_spec_decode_tokens
+            draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
-                [len(t[req_id]) if req_id in t else 0 for req_id in req_ids],
+                [
+                    len(draft_tokens[req_id]) if req_id in draft_tokens else 0
+                    for req_id in req_ids
+                ],
                 dtype=np.int32,
             )
             total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            cu_num_logits_np = np.zeros(num_reqs + 1, dtype=np.int32)
-            np.cumsum(num_draft_tokens + 1, out=cu_num_logits_np[1:])
-            # TODO(woosuk): Make this non-blocking.
-            cu_num_logits = torch.from_numpy(cu_num_logits_np).to(self.device)
+            np.cumsum(
+                num_draft_tokens + 1,
+                out=self.input_buffers.cu_num_logits.np[1 : num_reqs + 1],
+            )
+            cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(num_reqs + 1)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
