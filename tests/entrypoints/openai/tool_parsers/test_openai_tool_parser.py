@@ -165,16 +165,22 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
 # ==========================================================
 @pytest.mark.asyncio
 async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
-    """Verify single tool call reasoning with the calculator."""
-    stream = await client.chat.completions.create(
+    """Verify single tool call reasoning with the calculator (non-streaming)."""
+    response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
         tools=TOOLS,
         temperature=0.0,
-        stream=True,
+        stream=False,  
     )
-    chunks = [chunk async for chunk in stream]
-    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+
+    message = response.choices[0].message
+
+    tool_calls = getattr(message, "tool_calls", [])
+    reasoning = getattr(message, "content", "")
+
+    function_names = [c.function.name for c in tool_calls if getattr(c, "function", None)]
+    arguments = [c.function.arguments for c in tool_calls if getattr(c, "function", None)]
 
     assert FUNC_CALC in function_names, "Calculator function not called"
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
