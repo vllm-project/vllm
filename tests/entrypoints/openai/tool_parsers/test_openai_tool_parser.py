@@ -3,6 +3,7 @@
 
 import json
 from pprint import pprint
+from typing import List, Tuple
 
 import jsonschema
 import openai
@@ -154,8 +155,8 @@ def extract_reasoning_and_calls(chunks: list):
                 if getattr(func, "arguments", None):
                     tool_entry["arguments"] += func.arguments
 
-    function_names = [v["name"] for _, v in sorted(tool_calls.items())]
-    arguments = [v["arguments"] for _, v in sorted(tool_calls.items())]
+    function_names: List[str] = [v["name"] for _, v in sorted(tool_calls.items())]
+    arguments: List[str] = [v["arguments"] for _, v in sorted(tool_calls.items())]
 
     return reasoning_content, arguments, function_names
 
