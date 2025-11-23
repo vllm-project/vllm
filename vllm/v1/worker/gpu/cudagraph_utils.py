@@ -106,7 +106,10 @@ class CudaGraphManager:
         input_buffers.query_start_loc.np[: batch_size + 1] = np.arange(batch_size + 1)
         input_buffers.query_start_loc.np[batch_size:] = batch_size
         input_buffers.query_start_loc.copy_to_gpu()
-        input_buffers.seq_lens[:batch_size] = self.max_model_len
+        # HACK(woosuk): To optimize warmup time, we use 1 (instead of max_model_len)
+        # for seq_lens. This leads to a mismatch between seq_lens (GPU) and
+        # seq_lens_np (CPU), which might cause issues in some attention backends.
+        input_buffers.seq_lens[:batch_size] = 1
         input_buffers.seq_lens[batch_size:] = 0
 
         input_block_tables = [x[:batch_size] for x in block_tables.input_block_tables]
