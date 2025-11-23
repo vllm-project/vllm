@@ -29,7 +29,7 @@ from vllm.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_pcp_group, get_dcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -54,12 +54,12 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     KVCacheLayoutType,
+    PrefillContextParallelMetadata,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
-    PrefillContextParallelMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -267,7 +267,7 @@ class BatchCPPrefillWrapper:
                 causal=True,  # This is newtokens run
                 **common_kwargs,
             )
-    
+
     def _attention_with_head_and_tail(
         self,
         query: torch.Tensor,
@@ -279,7 +279,7 @@ class BatchCPPrefillWrapper:
         """
         For prompt with tokens [T0, T1, T2, T3], the query on PCP0 is [Q0, Q3]
         and we all-gather full K as [K0, K1, K2, K3].
-        There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is 
+        There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is
         [Q3]x[K0, K1, K2, K3].
         """
         q_head_indices = metadata.q_head_indices
@@ -581,7 +581,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+            self.cp_kv_cache_interleave_size = (
+                vllm_config.parallel_config.cp_kv_cache_interleave_size
+            )
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
@@ -590,8 +592,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
 
-        self.num_qo_heads = (
-            self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
         )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
@@ -880,7 +882,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.num_kv_heads,
             num_prefill_tokens,
             max_seq_len,
-            self.dcp_world_size,
+            self.total_cp_world_size,
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
@@ -1007,7 +1009,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             kv_cache_dtype=self.kv_cache_dtype,
                             prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
-                            pcp_metadata=common_attn_metadata.pcp_metadata if self.pcp_world_size > 1 else None,
+                            pcp_metadata=common_attn_metadata.pcp_metadata
+                            if self.pcp_world_size > 1
+                            else None,
                         )
                     else:
                         assert isinstance(
@@ -1275,18 +1279,14 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if (self.pcp_world_size > 1):
+        if self.pcp_world_size > 1:
             assert attn_metadata.pcp_metadata is not None
             pcp_allgather_restore_idx = attn_metadata.pcp_metadata.allgather_restore_idx
             assert pcp_allgather_restore_idx is not None
             # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
             # ignores the padding from CUDA Graph. To be optimized for performance!
-            key_across_pcp = get_pcp_group().all_gather(
-                key[:num_actual_tokens].contiguous(), dim=0
-            )
-            value_across_pcp = get_pcp_group().all_gather(
-                value[:num_actual_tokens].contiguous(), dim=0
-            )
+            key_across_pcp = get_pcp_group().all_gather(key[:num_actual_tokens].contiguous(), dim=0)
+            value_across_pcp = get_pcp_group().all_gather(value[:num_actual_tokens].contiguous(), dim=0)
             # Reorder kv after pcp allgather.
             # Note that there are duplicate decoding tokens,
             # but we only save the first one in kvcache.
@@ -1325,8 +1325,8 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens*self.pcp_world_size]
-        value = value[:num_actual_tokens*self.pcp_world_size]
+        key = key[: num_actual_tokens * self.pcp_world_size]
+        value = value[: num_actual_tokens * self.pcp_world_size]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1359,10 +1359,12 @@ class FlashInferImpl(AttentionImpl):
                     
                     wrappers_to_check = [(prefill_wrapper._context, False)]
                     if self.pcp_world_size > 1:
-                        wrappers_to_check.extend([
-                            (prefill_wrapper._new_tokens_head, True),
-                            (prefill_wrapper._new_tokens_tail, True)
-                        ])
+                        wrappers_to_check.extend(
+                            [
+                                (prefill_wrapper._new_tokens_head, True),
+                                (prefill_wrapper._new_tokens_tail, True),
+                            ]
+                        )
                     else:
                         wrappers_to_check.append((prefill_wrapper._new_tokens, True))
                     
@@ -1376,10 +1378,12 @@ class FlashInferImpl(AttentionImpl):
                         layer,
                         prefill_query,
                         kv_cache_permute,
-                        key[num_decode_tokens * self.pcp_world_size:],
-                        value[num_decode_tokens * self.pcp_world_size:],
+                        key[num_decode_tokens * self.pcp_world_size :],
+                        value[num_decode_tokens * self.pcp_world_size :],
                         out=output[num_decode_tokens:],
-                        pcp_metadata=attn_metadata.pcp_metadata if self.pcp_world_size > 1 else None,
+                        pcp_metadata=attn_metadata.pcp_metadata
+                        if self.pcp_world_size > 1
+                        else None,
                     )
                 else:
                     assert isinstance(
@@ -1487,18 +1491,16 @@ class FlashInferImpl(AttentionImpl):
                     )
                     if self.dcp_world_size > 1:
                         out, lse = cp_lse_ag_out_rs(
-                            out, lse, get_dcp_group(),
+                            out,
+                            lse,
+                            get_dcp_group(),
                             return_lse=True,
                         )
-                    else:
-                        output[:num_decode_tokens] = out
-                    
                     if self.pcp_world_size > 1:
-                        output[:num_decode_tokens] = cp_lse_ag_out_ar(
+                        out = cp_lse_ag_out_ar(
                             out, lse, get_pcp_group()
                         )
-                    else:
-                        output[:num_decode_tokens] = out
+                    output[:num_decode_tokens] = out
                 else:
                     decode_wrapper.run(
                         decode_query,
