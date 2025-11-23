@@ -175,8 +175,8 @@ class MultiModalConfig:
 
         if isinstance(value, str) and value.upper() == "XFORMERS":
             raise ValueError(
-                "The XFORMERS attention backend has been deprecated in v0.11.3. "
-                "Please choose a supported backend (e.g., FLASH_ATTN or FLASHINFER)."
+                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+                "details). Please select a supported attention backend."
             )
 
         if value is None or isinstance(value, AttentionBackendEnum):

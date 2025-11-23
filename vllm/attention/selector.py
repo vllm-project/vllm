@@ -40,8 +40,8 @@ def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
         return None
     if backend_name == "XFORMERS":
         raise ValueError(
-            "The XFORMERS attention backend has been deprecated in v0.11.3. "
-            "Please choose a supported backend (e.g., FLASH_ATTN or FLASHINFER)."
+            "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+            "details). Please select a supported attention backend."
         )
     return AttentionBackendEnum[backend_name]
 
