@@ -58,6 +58,15 @@ class GDNAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
+def mamba_gather_indices(common_attn_metadata: CommonAttentionMetadata,
+                         block_size: int,
+                         num_blocks: int):
+    block_table_tensor = common_attn_metadata.block_table_tensor
+    start_indices = common_attn_metadata.seq_lens // block_size
+    offsets = torch.arange(num_blocks, device=block_table_tensor.device)
+    indices_to_gather = start_indices.unsqueeze(1) + offsets
+    return torch.gather(block_table_tensor, 1, indices_to_gather)
+
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
@@ -146,6 +155,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens = m.num_computed_tokens_cpu
         context_lens_tensor = context_lens.to(query_start_loc.device)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            block_table_tensor = mamba_gather_indices(common_attn_metadata,
+                                                      self.kv_cache_spec.block_size,
+                                                      1 + self.num_spec)
+        else:
+            block_table_tensor = m.block_table_tensor
 
         if (
             not self.use_spec_decode
@@ -175,7 +190,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = m.block_table_tensor[:, 0]
+            non_spec_state_indices_tensor = block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
@@ -204,7 +219,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = torch.empty(
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
-                spec_state_indices_tensor = m.block_table_tensor[:, : self.num_spec + 1]
+                spec_state_indices_tensor = block_table_tensor[:, : self.num_spec + 1]
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc
                 non_spec_query_start_loc = None
@@ -217,10 +232,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
-                spec_state_indices_tensor = m.block_table_tensor[
+                spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks, : self.num_spec + 1
                 ]
-                non_spec_state_indices_tensor = m.block_table_tensor[
+                non_spec_state_indices_tensor = block_table_tensor[
                     ~spec_sequence_masks, 0
                 ]
 
@@ -338,15 +353,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            # NOTE: With Mamba prefix-caching support, a request can consist of
-            # multiple blocks. This makes the state_indices non-contiguous, so
-            # we must explicitly make them contiguous here.
-            if spec_state_indices_tensor is not None:
-                spec_state_indices_tensor = spec_state_indices_tensor.contiguous()
-            if non_spec_state_indices_tensor is not None:
-                non_spec_state_indices_tensor = \
-                    non_spec_state_indices_tensor.contiguous()
+        # if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        #     # NOTE: With Mamba prefix-caching support, a request can consist of
+        #     # multiple blocks. This makes the state_indices non-contiguous, so
+        #     # we must explicitly make them contiguous here.
+        #     if spec_state_indices_tensor is not None:
+        #         spec_state_indices_tensor = spec_state_indices_tensor.contiguous()
+        #     if non_spec_state_indices_tensor is not None:
+        #         non_spec_state_indices_tensor = \
+        #             non_spec_state_indices_tensor.contiguous()
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
