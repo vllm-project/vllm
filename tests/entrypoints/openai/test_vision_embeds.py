@@ -52,6 +52,7 @@ def _terratorch_dummy_inputs(model_name: str):
     }
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_request(model_name: str):
     args = [

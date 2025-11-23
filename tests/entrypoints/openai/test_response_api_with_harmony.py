@@ -499,11 +499,15 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    response = await client.responses.create(
+    # Code interpreter needs more time for container init + code execution
+    # Extend timeout especially for ROCm
+    from vllm.platforms import current_platform
+
+    timeout_value = client.timeout * 3 if current_platform.is_rocm() else client.timeout
+    client_with_timeout = client.with_options(timeout=timeout_value)
+
+    response = await client_with_timeout.responses.create(
         model=model_name,
-        # TODO: Ideally should be able to set max tool calls
-        # to prevent multi-turn, but it is not currently supported
-        # would speed up the test
         input=(
             "What's the first 4 digits after the decimal point of "
             "cube root of `19910212 * 20250910`? "

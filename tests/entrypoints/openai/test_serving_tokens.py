@@ -16,10 +16,18 @@ GEN_ENDPOINT = "/inference/v1/generate"
 
 
 def get_vocab_size(model_name):
+    # ROCm/AMD specific configuration:
+    # 1. Use float16 to ensure compatibility with MI3XX where
+    #       bfloat16 might behave differently in tests.
+    # 2. Use an explicit non-zero seed (42) because seed=0 can
+    #       be interpreted inconsistently
+    #    (as 'default' vs 'explicit 0') on ROCm backends, affecting initialization.
+    from vllm.platforms import current_platform
+
     config = ModelConfig(
         model=model_name,
-        seed=0,
-        dtype="bfloat16",
+        seed=42 if current_platform.is_rocm else 0,
+        dtype="float16" if current_platform.is_rocm else "bfloat16",
     )
     return config.get_vocab_size()
 
@@ -39,9 +47,12 @@ def messages():
 
 @pytest.fixture(scope="module")
 def server(request):
+    # ROCm requires float16 for this test setup, while upstream defaults to bfloat16.
+    from vllm.platforms import current_platform
+
     args = [
         "--dtype",
-        "bfloat16",
+        "float16" if current_platform.is_rocm else "bfloat16",
         "--max-model-len",
         "1024",
         "--enforce-eager",
@@ -93,6 +104,17 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
     )
+
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes deterministically on ROCm, we inject
+    # a specific non-zero seed (42). We DO NOT apply this to other
+    # platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
+    rocm_seed_params = {}
+    if current_platform.is_rocm():
+        rocm_seed_params["seed"] = 42
+
     for ignore_eos in [True, False]:
         payload = {
             "model": MODEL_NAME,
@@ -103,6 +125,7 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
                 # NOTE coordinator will set this to skip detokenization
                 "detokenize": False,
                 "ignore_eos": ignore_eos,
+                **rocm_seed_params,
             },
             "stream": False,
         }
@@ -119,7 +142,8 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             "temperature": 0.0,
             "stream": False,
             "ignore_eos": ignore_eos,
-            "chat_template_kwargs": dict(enable_thinking=False),
+            "chat_template_kwargs": {"enable_thinking": False},
+            **rocm_seed_params,
         }
         completions_resp = await client.post("/v1/chat/completions", json=payload)
         completions_data = completions_resp.json()
