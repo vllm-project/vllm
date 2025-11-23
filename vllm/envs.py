@@ -176,6 +176,7 @@ if TYPE_CHECKING:
         "pplx",
         "deepep_high_throughput",
         "deepep_low_latency",
+        "mori",
         "allgather_reducescatter",
         "flashinfer_all2allv",
     ] = "allgather_reducescatter"
@@ -972,7 +973,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter fusion shared experts ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -1243,6 +1244,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
+    # - "mori", use MoRI kernels
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND": env_with_choices(
         "VLLM_ALL2ALL_BACKEND",
@@ -1252,6 +1254,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "pplx",
             "deepep_high_throughput",
             "deepep_low_latency",
+            "mori",
             "allgather_reducescatter",
             "flashinfer_all2allv",
         ],

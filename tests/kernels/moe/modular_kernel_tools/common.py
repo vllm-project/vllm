@@ -27,7 +27,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -203,6 +209,13 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend == "pplx"
 
+    def needs_aiter(self):
+        return self.fused_experts_type.__name__ == "AiterExperts"
+
+    def needs_mori(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "mori"
+
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return (
@@ -275,8 +288,12 @@ class Config:
             return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
             return False, "Needs DeepGEMM, but DeepGEMM not available."
-        if self.needs_pplx() and not has_pplx():  # noqa: SIM103
+        if self.needs_pplx() and not has_pplx():
             return False, "Needs PPLX, but PPLX not available."
+        if self.needs_aiter() and not has_aiter():
+            return False, "Needs Aiter, but Aiter not available."
+        if self.needs_mori() and not has_mori():  # noqa: SIM103
+            return False, "Needs MoRI, but MoRI not available."
 
         return True, None
 
