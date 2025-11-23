@@ -380,7 +380,10 @@ class StreamingXMLToolCallParser:
                 # check if starts with <tool_call> or <function=
                 if self.current_call_id is None:
                     # Check if might be start of <tool_call>
-                    if (buffer == self.tool_call_start_token[: len(buffer)] or buffer == self.qwen_tool_call_start_token[: len(buffer)]):
+                    if (
+                        buffer == self.tool_call_start_token[: len(buffer)]
+                        or buffer == self.qwen_tool_call_start_token[: len(buffer)]
+                    ):
                         # Might be start of <tool_call>, wait for more data
                         return None, start_pos
                     elif (
@@ -486,7 +489,9 @@ class StreamingXMLToolCallParser:
             Processed XML chunk
         """
 
-        chunk = chunk.replace(self.qwen_tool_call_start_token, self.tool_call_start_token)
+        chunk = chunk.replace(
+            self.qwen_tool_call_start_token, self.tool_call_start_token
+        )
         chunk = chunk.replace(self.qwen_tool_call_end_token, self.tool_call_end_token)
 
         # Check if this is a tool_call related element
@@ -1188,6 +1193,31 @@ class Qwen3XMLToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
+        if "<tools>" in model_output and "</tools>" in model_output:
+            try:
+                pattern = r"<tools>\s*(\{.*?\})\s*</tools>"
+                matches = re.findall(pattern, model_output, re.DOTALL)
+                if matches:
+                    tool_calls = []
+                    for match in matches:
+                        data = json.loads(match)
+                        tool_calls.append(
+                            ToolCall(
+                                type="function",
+                                function=FunctionCall(
+                                    name=data.get("name"),
+                                    arguments=json.dumps(data.get("arguments")),
+                                ),
+                            )
+                        )
+                    return ExtractedToolCallInformation(
+                        tool_calls=tool_calls,
+                        tools_called=True,
+                        content=model_output,
+                    )
+            except Exception as e:
+                logger.warning("Failed to extract Qwen 2.5 tool calls via regex: %s", e)
+
         self.parser.reset_streaming_state()
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
