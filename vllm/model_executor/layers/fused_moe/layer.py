@@ -40,6 +40,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -435,6 +438,11 @@ class FusedMoE(CustomOp):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        self.layer_id = extract_layer_index(self.layer_name)
+
         self.enable_eplb = enable_eplb
         self.expert_load_view: torch.Tensor | None = None
         self.logical_to_physical_map: torch.Tensor | None = None
@@ -672,6 +680,10 @@ class FusedMoE(CustomOp):
     @property
     def shared_experts(self) -> torch.nn.Module | None:
         return None
+
+    @property
+    def get_layer_id(self):
+        return self.layer_id
 
     @property
     def gate(self) -> torch.nn.Module | None:
@@ -1533,6 +1545,7 @@ class FusedMoE(CustomOp):
         zero_expert_num: int | None = None,
         zero_expert_type: str | None = None,
         num_fused_shared_experts: int = 0,
+        layer_id: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1647,6 +1660,14 @@ class FusedMoE(CustomOp):
             )
         else:
             zero_expert_result = None
+
+        capturer = RoutedExpertsCapturer.get_instance()
+        if capturer is not None:
+            capturer.capture(  # noqa
+                layer_id=layer_id,
+                topk_ids=topk_ids,
+            )
+
         return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:
