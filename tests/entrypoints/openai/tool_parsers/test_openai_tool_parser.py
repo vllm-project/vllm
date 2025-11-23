@@ -3,14 +3,13 @@
 
 import json
 from pprint import pprint
+from typing import Dict, List, Union
 
-# Third-party libraries
 import jsonschema
 import openai
 import pytest
 import pytest_asyncio
 from rapidfuzz import fuzz
-from typing import Dict, List, Union
 
 from ....utils import RemoteOpenAIServer
 
@@ -51,7 +50,7 @@ async def client(server):
 # ==========================================================
 # Tool Definitions
 # ==========================================================
-TOOLS: List[Dict[str, JSON]] = [
+TOOLS: list[dict[str, dict[str, JSON]]]  = [
     {
         "type": "function",
         "function": {
