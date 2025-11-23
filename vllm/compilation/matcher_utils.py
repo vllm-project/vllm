@@ -6,6 +6,7 @@ import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -21,8 +22,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
+_USE_AITER_RMS_NORM = current_platform.is_rocm() and rocm_aiter_ops.is_rmsnorm_enabled()
+
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+if _USE_AITER_RMS_NORM:
+    RMS_OP = rocm_aiter_ops.rms_norm
+    RMS_ADD_OP = rocm_aiter_ops.rms_norm2d_with_add
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
@@ -161,18 +167,21 @@ class MatcherRMSNorm(MatcherCustomOp):
         input: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        result = torch.empty_like(input)
-        # TODO: support non-contiguous input for RMSNorm and remove this
-        input_contiguous = input.contiguous()
-        _, result = auto_functionalized(
-            RMS_OP,
-            result=result,
-            input=input_contiguous,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
+        if _USE_AITER_RMS_NORM:
+            return RMS_OP(input, weight, self.epsilon)
+        else:
+            result = torch.empty_like(input)
+            # TODO: support non-contiguous input for RMSNorm and remove this
+            input_contiguous = input.contiguous()
+            _, result = auto_functionalized(
+                RMS_OP,
+                result=result,
+                input=input_contiguous,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
 
-        return result
+            return result
 
     def forward_native(
         self,
@@ -204,15 +213,18 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        _, result, residual = auto_functionalized(
-            RMS_ADD_OP,
-            input=input,
-            residual=residual,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
+        if _USE_AITER_RMS_NORM:
+            return RMS_ADD_OP(input, residual, weight, self.epsilon)
+        else:
+            _, result, residual = auto_functionalized(
+                RMS_ADD_OP,
+                input=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
 
-        return result, residual
+            return result, residual
 
     def forward_native(
         self,
