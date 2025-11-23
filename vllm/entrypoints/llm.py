@@ -263,13 +263,12 @@ class LLM:
                     mode=CompilationMode(compilation_config)
                 )
             elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
+                filtered_dict = {
+                    k: v
+                    for k, v in compilation_config.items()
+                    if is_init_field(CompilationConfig, k)
+                }
+                compilation_config_instance = CompilationConfig(**filtered_dict)
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -277,13 +276,12 @@ class LLM:
 
         if structured_outputs_config is not None:
             if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
+                filtered_dict = {
+                    k: v
+                    for k, v in structured_outputs_config.items()
+                    if is_init_field(StructuredOutputsConfig, k)
+                }
+                structured_outputs_instance = StructuredOutputsConfig(**filtered_dict)
             else:
                 structured_outputs_instance = structured_outputs_config
         else:
