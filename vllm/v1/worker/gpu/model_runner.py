@@ -580,11 +580,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         sampler_output = self.sampler(logits, sampling_metadata)
 
         # Get the number of sampled tokens.
-        # 0 if chunked-prefilling, 1 if not.
         prefill_len = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
         is_chunked_prefilling = input_batch.seq_lens < prefill_len
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
+            # 0 if chunked-prefilling, 1 if not.
             num_sampled = (~is_chunked_prefilling).int()
         else:
             # Draft tokens for spec decoding.

@@ -401,7 +401,7 @@ def _post_update_kernel(
     num_computed += query_len
     # Consider the rejected tokens in spec decoding.
     if num_sampled > 0:
-        # NOTE(woosuk): We need this condition to account for chunked prefills.
+        # NOTE(woosuk): We must skip num_sampled == 0 to account for chunked prefills.
         logits_start = tl.load(cu_num_logits_ptr + req_id)
         logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
         num_logits = logits_end - logits_start
