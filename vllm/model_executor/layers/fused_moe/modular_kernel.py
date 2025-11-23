@@ -198,6 +198,14 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def preprocess_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return hidden_states, router_logits
+
     def supports_async(self) -> bool:
         """
         Indicates whether or not this class implements prepare_async and
@@ -319,6 +327,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         obj.finalize(output, ...)
         """
         raise NotImplementedError
+
+    def postprocess_tensor(
+        self,
+        output: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        return output
 
     @property
     @abstractmethod
