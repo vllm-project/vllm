@@ -334,8 +334,8 @@ async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
         for tool_entry in TOOLS:
             function_def = tool_entry.get("function")
             if (
-                function_def 
-                and isinstance(function_def, dict) 
+                function_def
+                and isinstance(function_def, dict)
                 and function_def.get("name") == func_name
             ):
                 schema = function_def.get("parameters")
