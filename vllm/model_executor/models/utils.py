@@ -584,8 +584,15 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
+    if device.type == "xpu":
+        logger.warning(
+            "UVA offloading is not supported on Intel XPU. "
+            "Falling back to standard CPU offloading."
+        )
+        uva_offloading = False
+    else:
+        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+        uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -618,14 +625,33 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if offloaded_parameters and not uva_offloading:
         original_forward = module.forward
 
+        def get_device_state(module, device, memo=None):
+            if memo is None:
+                memo = set()
+            if module in memo:
+                return {}
+            memo.add(module)
+            module_device_state = {}
+            for name, param in module.named_parameters(recurse=False):
+                module_device_state[name] = param.to(device, non_blocking=True)
+
+            for name, buf in module.named_buffers(recurse=False):
+                if (
+                    not hasattr(module, "_non_persistent_buffers_set")
+                    or name not in module._non_persistent_buffers_set
+                ):
+                    module_device_state[name] = buf.to(device, non_blocking=True)
+
+            for child_name, child_module in module.named_children():
+                child_module_device_state = get_device_state(child_module, device, memo)
+                for k, v in child_module_device_state.items():
+                    module_device_state[f"{child_name}.{k}"] = v
+            return module_device_state
+
         def forward(*args, **kwargs):
             module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
+
+            device_state = get_device_state(module, device)
             output = functional_call(module, device_state, args=args, kwargs=kwargs)
             module.forward = forward
             return output
