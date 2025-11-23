@@ -2087,8 +2087,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            self.moe_align_block_size(
+                topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            )
         )
 
         invoke_fused_moe_kernel(
@@ -2158,6 +2160,15 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
+
+    def moe_align_block_size(
+        self,
+        topk_ids: torch.Tensor,
+        block_size: int,
+        num_experts: int,
+        expert_map: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return moe_align_block_size(topk_ids, block_size, num_experts, expert_map)
 
 
 def modular_triton_fused_moe(

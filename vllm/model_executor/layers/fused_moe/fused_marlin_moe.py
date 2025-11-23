@@ -683,13 +683,13 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
-            moe_align=self.moe_align,
+            moe_align=self.moe_align_block_size,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
 
-    def moe_align(
+    def moe_align_block_size(
         self,
         topk_ids: torch.Tensor,
         block_size_m: int,

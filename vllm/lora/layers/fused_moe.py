@@ -327,8 +327,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.base_layer, fused_experts.moe_sum
         )
 
-        fused_experts.moe_align = moe_align_decorator(
-            self.base_layer, fused_experts.moe_align
+        fused_experts.moe_align_block_size = moe_align_decorator(
+            self.base_layer, fused_experts.moe_align_block_size
         )
 
         self.base_layer.quant_method = FusedMoEModularMethod(
