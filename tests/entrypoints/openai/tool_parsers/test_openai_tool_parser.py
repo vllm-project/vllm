@@ -107,7 +107,7 @@ MESSAGES_MULTIPLE_CALLS = [
 MESSAGES_INVALID_CALL = [
     {
         "role": "user", 
-        "content": "Can you help with something, but don’t actually perform any calculation?"
+        "content": "Can you help with something, but don’t actually perform any calculation?",
     }
 ]
 
@@ -173,8 +173,7 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     assert FUNC_CALC in function_names, "Calculator function not called"
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
-    )
-    
+    )   
     assert len(reasoning) > 0, "Expected reasoning content missing"
     
 
@@ -195,8 +194,7 @@ async def test_single_tool_call_get_time(client: openai.AsyncOpenAI):
     assert FUNC_TIME in function_names, "get_time function not called"
     assert any("New York" in arg for arg in arguments), (
         f"Expected get_time arguments for New York not found in {arguments}"
-    )
-    
+    )   
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
@@ -364,6 +362,5 @@ async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI)
     assert low_mid_sim > 60, (
         f"Semantic drift too large between T=0.0 and T=0.5 ({low_mid_sim}%)"
     )
-    
 
 
