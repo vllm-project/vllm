@@ -804,6 +804,43 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Lfm2-VL
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "LiquidAI/LFM2-VL-1.6B"
+    # model_name = os.path.expanduser("~/models/lfm2_vl")
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<image>"
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
+    prompts = [
+        (
+            "<|startoftext|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|startoftext|>user\n<|image_start|>{placeholder}<|image_end|>"
+            f"{question}<|im_end|>\n"
+            "<|startoftext|>assistant\n"
+        )
+        for question in questions
+    ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LightOnOCR
 def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1827,6 +1864,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "lfm2_vl": run_lfm2_vl,
     "lightonocr": run_lightonocr,
     "llama4": run_llama4,
     "llava": run_llava,
