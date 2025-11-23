@@ -120,7 +120,7 @@ class ClassificationMixin(OpenAIServing):
 
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
     def _build_response(
         self,
