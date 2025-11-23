@@ -30,7 +30,8 @@ Multi-node:
 """
 
 import os
-from time import sleep
+
+import torch.distributed as dist
 
 from vllm import LLM, SamplingParams
 from vllm.utils.network_utils import get_open_port
@@ -198,8 +199,11 @@ def main(
             f"Generated text: {generated_text!r}"
         )
 
-    # Give engines time to pause their processing loops before exiting.
-    sleep(1)
+    # Use a barrier to ensure all processes finish generating before exiting.
+    # This prevents the "Connection reset by peer" error when one process
+    # finishes early and destroys the process group while others are still working.
+    if dist.is_initialized():
+        dist.barrier()
 
 
 if __name__ == "__main__":
