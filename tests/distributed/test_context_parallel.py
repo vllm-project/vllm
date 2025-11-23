@@ -196,7 +196,7 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
-        "--dcp-kv-cache-interleave-size",
+        "--cp-kv-cache-interleave-size",
         str(cp_kv_cache_interleave_size),
         "--distributed-executor-backend",
         distributed_backend,
