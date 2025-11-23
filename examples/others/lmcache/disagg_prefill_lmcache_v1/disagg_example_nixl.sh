@@ -113,9 +113,15 @@ main() {
         --host localhost \
         --port 9000 \
         --prefiller-host localhost \
-        --prefiller-port 8100 \
+		--prefiller-port 8100 \
+		--num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 8200  \
+		--num-decoders 1 \
+		--decoder-init-port 7300 \
+		--decoder-alloc-port 7400 \
+		--proxy-host localhost \
+		--proxy-port 7500 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
@@ -131,7 +137,7 @@ main() {
     vllm bench serve --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
+        --num-prompts 30 --burstiness 100 --request-rate 1 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
