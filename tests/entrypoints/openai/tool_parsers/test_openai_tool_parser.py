@@ -153,7 +153,6 @@ def extract_reasoning_and_calls(chunks: list):
     return reasoning_content, arguments, function_names
 
 
-
 # ==========================================================
 # Test Scenarios
 # ==========================================================
