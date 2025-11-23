@@ -39,6 +39,16 @@ def get_pass_context() -> PassContext:
     return _pass_context
 
 
+def try_get_pass_context() -> PassContext | None:
+    """
+    Try to get the current pass context.
+    Return None if the pass context is not set.
+    The pass context can be not set if it compilation config is re-used
+    for multiple model compilations which is only used in the tests.
+    """
+    return _pass_context
+
+
 @contextmanager
 def pass_context(compile_range: Range):
     """A context manager that stores the current pass context,

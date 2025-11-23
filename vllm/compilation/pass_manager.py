@@ -24,7 +24,12 @@ if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
 from .fix_functionalization import FixFunctionalizationPass
-from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
+from .inductor_pass import (
+    CustomGraphPass,
+    InductorPass,
+    get_pass_context,
+    try_get_pass_context,
+)
 from .noop_elimination import NoOpEliminationPass
 
 logger = init_logger(__name__)
@@ -131,9 +136,14 @@ class PostGradPassManager(CustomGraphPass):
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
-        compile_range = get_pass_context().compile_range
-        # Include the compile range in the uuid to ensure that inductor
-        # recompiles the graph for the new dynamic compile range.
-        state["compile_range"] = str(compile_range)
+
+        # If there is no pass context, we are likely re-using compilation config
+        # In this case uuid() is called not at compilation time,
+        # we don't have the compile range information.
+        pass_context = try_get_pass_context()
+        if pass_context is not None:
+            # Include the compile range in the uuid to ensure that inductor
+            # recompiles the graph for the new dynamic compile range.
+            state["compile_range"] = str(pass_context.compile_range)
 
         return InductorPass.hash_dict(state)
