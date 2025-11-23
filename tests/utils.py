@@ -1075,6 +1075,25 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     )
 
 
+def _check_fp8_support():
+    """Helper to check for FP8 support."""
+    if not current_platform.is_cuda():
+        return False
+    try:
+        major, minor = torch.cuda.get_device_capability()
+        # FP8 is supported on Hopper (9.0) and Ada (8.9)
+        return (major, minor) >= (8, 9)
+    except (RuntimeError, AttributeError):
+        return False
+
+
+requires_fp8 = pytest.mark.skipif(
+    not _check_fp8_support(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
+
+
 def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
