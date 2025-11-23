@@ -10,10 +10,21 @@ import openai
 import pytest
 import pytest_asyncio
 from rapidfuzz import fuzz
+from typing import Dict, List, Union
 
 from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
+
+JSON = Union[
+    str,
+    int,
+    float,
+    bool,
+    None,
+    Dict[str, "JSON"],
+    List["JSON"],
+]
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +51,7 @@ async def client(server):
 # ==========================================================
 # Tool Definitions
 # ==========================================================
-TOOLS: list[dict[str, dict]] = [
+TOOLS: List[Dict[str, JSON]] = [
     {
         "type": "function",
         "function": {
