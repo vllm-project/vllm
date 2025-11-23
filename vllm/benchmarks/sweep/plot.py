@@ -62,7 +62,23 @@ class PlotEqualTo(PlotFilterBase):
         except ValueError:
             target = self.target
 
-        return df[df[self.var] == target]
+        # If the target is a float but present as a string in the dataframe
+        # For example, request_rate=inf gets parsed as a string
+        return df[(df[self.var] == target) | (df[self.var] == self.target)]
+
+
+@dataclass
+class PlotNotEqualTo(PlotFilterBase):
+    @override
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        try:
+            target = float(self.target)
+        except ValueError:
+            target = self.target
+
+        # If the target is a float but present as a string in the dataframe
+        # For example, request_rate=inf gets parsed as a string
+        return df[(df[self.var] != target) & (df[self.var] != self.target)]
 
 
 @dataclass
@@ -96,6 +112,7 @@ class PlotGreaterThanOrEqualTo(PlotFilterBase):
 # NOTE: The ordering is important! Match longer op_keys first
 PLOT_FILTERS: dict[str, type[PlotFilterBase]] = {
     "==": PlotEqualTo,
+    "!=": PlotNotEqualTo,
     "<=": PlotLessThanOrEqualTo,
     ">=": PlotGreaterThanOrEqualTo,
     "<": PlotLessThan,
@@ -178,12 +195,15 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
     return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
 
 
-def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...]):
+def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str = "FIGURE"):
     parts = list[str]()
+    
+    # Start with figure name (always provided, defaults to "FIGURE")
+    parts.append(fig_name)
+    
+    # Always append group data if present
     if group:
-        parts.extend(("FIGURE-", *(f"{k}={v}" for k, v in group)))
-    else:
-        parts.append("figure")
+        parts.extend(f"{k}={v}" for k, v in group)
 
     return fig_dir / sanitize_filename("-".join(parts) + ".png")
 
@@ -217,6 +237,7 @@ def _plot_fig(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
+    fig_name: str = "FIGURE",
 ):
     fig_group, fig_data = fig_group_data
 
@@ -230,7 +251,7 @@ def _plot_fig(
         for _, row_data in row_groups
     )
 
-    fig_path = _get_fig_path(fig_dir, fig_group)
+    fig_path = _get_fig_path(fig_dir, fig_group, fig_name)
 
     print("[BEGIN FIGURE]")
     print(f"Group: {dict(fig_group)}")
@@ -364,6 +385,7 @@ def plot(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
+    fig_name: str = "FIGURE",
 ):
     all_data = [
         run_data
@@ -398,6 +420,7 @@ def plot(
                     scale_x=scale_x,
                     scale_y=scale_y,
                     dry_run=dry_run,
+                    fig_name=fig_name,
                 ),
                 fig_groups,
             )
@@ -419,6 +442,7 @@ class SweepPlotArgs:
     scale_x: str | None
     scale_y: str | None
     dry_run: bool
+    fig_name: str = "FIGURE"
 
     parser_name: ClassVar[str] = "plot"
     parser_help: ClassVar[str] = "Plot performance curves from parameter sweep results."
@@ -448,6 +472,7 @@ class SweepPlotArgs:
             scale_x=args.scale_x,
             scale_y=args.scale_y,
             dry_run=args.dry_run,
+            fig_name=args.fig_name,
         )
 
     @classmethod
@@ -542,6 +567,14 @@ class SweepPlotArgs:
             "See also: https://seaborn.pydata.org/generated/seaborn.objects.Plot.scale.html",
         )
         parser.add_argument(
+            "--fig-name",
+            type=str,
+            default="FIGURE",
+            help="Name prefix for the output figure file. "
+            "Group data is always appended when present. "
+            "Default: 'FIGURE'. Example: --fig-name my_performance_plot",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the information about each figure to plot, "
@@ -566,6 +599,7 @@ def run_main(args: SweepPlotArgs):
         scale_x=args.scale_x,
         scale_y=args.scale_y,
         dry_run=args.dry_run,
+        fig_name=args.fig_name,
     )
 
 
