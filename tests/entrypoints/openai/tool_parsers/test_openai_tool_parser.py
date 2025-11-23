@@ -3,7 +3,7 @@
 
 import json
 from pprint import pprint
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 import jsonschema
 import openai
@@ -128,13 +128,13 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 # ==========================================================
 # Utility to extract reasoning and tool calls
 # ==========================================================
-def extract_reasoning_and_calls(chunks: list):
+def extract_reasoning_and_calls(chunks: list) -> Tuple[str, List[str], List[str]]:
     """
-    Extract accumulated reasoning text and tool call arguments 
+    Extract accumulated reasoning text and tool call arguments
     from streaming chunks.
     """
-    reasoning_content = ""
-    tool_calls: dict[int, dict[str, str]] = {}
+    reasoning_content: str = ""
+    tool_calls: Dict[int, Dict[str, str]] = {}
 
     for chunk in chunks:
         choice = getattr(chunk.choices[0], "delta", None)
@@ -290,7 +290,7 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
     """
-    Ensure the calculator tool arguments closely match 
+    Ensure the calculator tool arguments closely match
     the expected arithmetic expression.
     """
     response = await client.chat.completions.create(
