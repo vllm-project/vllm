@@ -5,6 +5,8 @@
 Run `pytest tests/kernels/moe/test_moe_align_block_size.py`.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -226,6 +228,73 @@ def test_moe_align_block_size(
     )
     assert (actual_expert_ids >= 0).all() and (actual_expert_ids < num_experts).all(), (
         "expert_ids should contain valid expert indices"
+    )
+
+
+@pytest.mark.parametrize(
+    "num_experts, shape, block_size",
+    [
+        (16, (4, 4), 8),
+        (80, (130, 2), 16),
+    ],
+)
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+def test_moe_align_block_size_handles_invalid_expert_ids(
+    num_experts: int, shape, block_size: int
+):
+    if not torch.cuda.is_available():  # pragma: no cover - defensive
+        pytest.skip("requires CUDA")
+
+    num_entries = math.prod(shape)
+    base_values = torch.tensor(
+        [0, num_experts - 1, num_experts, num_experts + 5, -1, 3],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    repeats = (num_entries + base_values.numel() - 1) // base_values.numel()
+    topk_flat = base_values.repeat(repeats)[:num_entries]
+    topk_ids = topk_flat.view(*shape)
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+    )
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+        )
+    )
+
+    torch.testing.assert_close(actual_num_tokens, golden_num_tokens, atol=0, rtol=0)
+    torch.testing.assert_close(actual_expert_ids, golden_expert_ids, atol=0, rtol=0)
+
+    _verify_expert_level_sorting(
+        actual_sorted_ids,
+        golden_sorted_ids,
+        actual_expert_ids,
+        block_size,
+        actual_num_tokens.item(),
+        topk_ids.numel(),
+    )
+
+    valid_mask = (topk_flat >= 0) & (topk_flat < num_experts)
+    expected_valid_tokens = torch.arange(
+        topk_ids.numel(), device="cuda", dtype=torch.int32
+    )[valid_mask]
+    actual_valid_tokens = actual_sorted_ids[actual_sorted_ids < topk_ids.numel()]
+    torch.testing.assert_close(
+        torch.sort(actual_valid_tokens).values,
+        torch.sort(expected_valid_tokens).values,
+        atol=0,
+        rtol=0,
+    )
+
+    padded_length = actual_num_tokens.item()
+    assert torch.all(actual_sorted_ids[padded_length:] == topk_ids.numel()), (
+        "Entries beyond the padded region should remain as padding sentinels"
     )
 
 
