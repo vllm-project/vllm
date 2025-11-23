@@ -265,7 +265,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--api-server-count",
         "-asc",
         type=int,
-        default=1,
+        default=4,
         help="How many API server processes to run.",
     )
     parser.add_argument(
