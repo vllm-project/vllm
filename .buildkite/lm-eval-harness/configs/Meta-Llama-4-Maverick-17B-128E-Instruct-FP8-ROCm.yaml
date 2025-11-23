@@ -1,0 +1,22 @@
+# For hf script, without -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-mmlupro-vllm-baseline.sh -m meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 -l 250 -t 8 -f 5
+model_name: "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+tasks:
+- name: "mmlu_pro"
+  metrics:
+  - name: "exact_match,custom-extract"
+    value: 0.80
+limit: 250 # will run on 250 * 14 subjects = 3500 samples
+num_fewshot: 5
+rtol: 0.05
+
+batch_size: 16
+max_model_len: 131072
+vllm_args:
+  gpu_memory_utilization: 0.80
+env_vars:
+  SAFETENSORS_FAST_GPU: 1
+  VLLM_FUSED_MOE_CHUNK_SIZE: 32768
+  VLLM_GPU_MEMORY_UTILIZATION: 0.8
+  VLLM_ROCM_USE_AITER: 1
+  VLLM_FP8_PADDING: 1
