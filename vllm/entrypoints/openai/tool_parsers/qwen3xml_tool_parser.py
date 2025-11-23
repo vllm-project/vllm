@@ -318,6 +318,7 @@ class StreamingXMLToolCallParser:
         # If it's a tool_call XML tag, don't skip
         if (
             element.startswith(self.tool_call_start_token)
+            or element.startswith("<tools>")
             or element.startswith(self.function_start_token)
             or element.startswith(self.parameter_start_token)
         ):
@@ -377,7 +378,7 @@ class StreamingXMLToolCallParser:
                 # check if starts with <tool_call> or <function=
                 if self.current_call_id is None:
                     # Check if might be start of <tool_call>
-                    if buffer == "<tool_call>"[: len(buffer)]:
+                    if (buffer == self.tool_call_start_token[: len(buffer)] or buffer == "<tools>"[: len(buffer)]):
                         # Might be start of <tool_call>, wait for more data
                         return None, start_pos
                     elif (
@@ -482,6 +483,8 @@ class StreamingXMLToolCallParser:
         Returns:
             Processed XML chunk
         """
+        chunk = chunk.replace("<tools>", self.tool_call_start_token)
+        chunk = chunk.replace("</tools>", self.tool_call_end_token)
 
         # Check if this is a tool_call related element
         is_tool_call = False
