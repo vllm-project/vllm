@@ -101,14 +101,13 @@ class CudaGraphManager:
 
         # Prepare dummy inputs.
         input_ids = input_buffers.input_ids.gpu[:batch_size]
-        positions = input_buffers.positions.gpu[:batch_size]
+        positions = input_buffers.positions[:batch_size]
 
         input_buffers.query_start_loc.np[: batch_size + 1] = np.arange(batch_size + 1)
         input_buffers.query_start_loc.np[batch_size:] = batch_size
         input_buffers.query_start_loc.copy_to_gpu()
-        input_buffers.seq_lens.np[:batch_size] = self.max_model_len
-        input_buffers.seq_lens.np[batch_size:] = 0
-        input_buffers.seq_lens.copy_to_gpu()
+        input_buffers.seq_lens[:batch_size] = self.max_model_len
+        input_buffers.seq_lens[batch_size:] = 0
 
         input_block_tables = [x[:batch_size] for x in block_tables.input_block_tables]
         slot_mappings = block_tables.slot_mappings[:, :batch_size]
@@ -119,6 +118,7 @@ class CudaGraphManager:
             num_tokens=batch_size,
             query_start_loc=input_buffers.query_start_loc,
             seq_lens=input_buffers.seq_lens,
+            seq_lens_np=np.full(batch_size, self.max_model_len, dtype=np.int32),
             num_computed_tokens_cpu=None,  # FIXME
             block_tables=input_block_tables,
             slot_mappings=slot_mappings,

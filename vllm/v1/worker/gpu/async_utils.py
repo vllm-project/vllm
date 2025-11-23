@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 
 from vllm.v1.outputs import (
@@ -18,7 +17,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self,
         model_runner_output: ModelRunnerOutput,
         sampler_output: SamplerOutput,
-        num_sampled_tokens: np.ndarray,
+        num_sampled_tokens: torch.Tensor,
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
     ):
@@ -52,6 +51,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             else:
                 self.logprobs_tensors = None
+            self.num_sampled_tokens = num_sampled_tokens.to("cpu", non_blocking=True)
             self.prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
@@ -63,6 +63,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        num_sampled_tokens_np = self.num_sampled_tokens.numpy()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -71,7 +72,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
         num_reqs = len(sampled_token_ids)
         for i in range(num_reqs):
-            del sampled_token_ids[i][self.num_sampled_tokens[i] :]
+            del sampled_token_ids[i][num_sampled_tokens_np[i] :]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.logprobs_tensors is not None:
