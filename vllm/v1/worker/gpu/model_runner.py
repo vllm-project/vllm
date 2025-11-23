@@ -181,6 +181,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.vllm_config,
             self.device,
         )
+        # TODO(woosuk): Support other backends.
+        if not all(b.get_name() == "FLASH_ATTN" for b in self.attn_backends.values()):
+            raise NotImplementedError("Only FLASH_ATTN backend is supported currently.")
 
         self.kv_caches: list[torch.Tensor] = []
         init_kv_cache(
@@ -478,6 +481,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # HACK(woosuk): Only GPU has the exact seq_lens because at this point
         # CPU does not know how many draft tokens are accepted/rejected in the
         # previous step. Therefore, we use max_model_len to be safe.
+        # NOTE(woosuk): This only works for FA3 backend.
         seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
 
         # Layer name -> attention metadata.
