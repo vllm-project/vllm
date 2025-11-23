@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+EPLBPolicyOption = Literal["default"]
 
 
 @config
@@ -60,6 +61,9 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+
+    policy: EPLBPolicyOption = "default"
+    """The policy type for expert parallel load balancing (EPLB)."""
 
 
 @config
