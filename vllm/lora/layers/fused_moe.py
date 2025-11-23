@@ -563,6 +563,69 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._create_lora_a_weights(max_loras, lora_config)
         self._create_lora_b_weights(max_loras, lora_config)
 
+    def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w13_lora_a
+
+        # w13_lora_a shape (num_experts,rank,input_size)
+        current_lora_rank = w13_lora_a.shape[1]
+        assert current_lora_rank % self.tp_size == 0
+
+        sliced_rank = current_lora_rank // self.tp_size
+        start_idx = self.tp_rank * sliced_rank
+        end_idx = (self.tp_rank + 1) * sliced_rank
+        return w13_lora_a[:, start_idx:end_idx, :]
+
+    def _slice_w13_b(self, w13_lora_b: torch.Tensor, is_interleave: bool = True):
+        if self.tp_size == 1:
+            return w13_lora_b
+
+        # w13_lora_b shape (num_experts,output_size,rank)
+        shard_size = self.base_layer.intermediate_size_per_partition
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+        if is_interleave:
+            # For models like GPT-OSS, the weights of w1 (gate_proj) and w3 (up_proj)
+            # in the interleaved order, and corresponding LoRA need to be processed.
+            w1_lora_b = w13_lora_b[:, ::2, :]
+            w3_lora_b = w13_lora_b[:, 1::2, :]
+            sliced_w1_lora_b = w1_lora_b[:, start_idx:end_idx, :]
+            sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
+
+            return torch.stack([sliced_w1_lora_b, sliced_w3_lora_b], dim=2).flatten(
+                1, 2
+            )
+        else:
+            slice_size = w13_lora_b.shape[1] // 2
+            w1_lora_b = w13_lora_b[:, :slice_size, :]
+            w3_lora_b = w13_lora_b[:, slice_size:, :]
+            sliced_w1_lora_b = w1_lora_b[:, start_idx:end_idx, :]
+            sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
+
+            return torch.cat([sliced_w1_lora_b, sliced_w3_lora_b], dim=1)
+
+    def _slice_w2_a(self, w2_lora_a: torch.Tensor) -> torch.Tensor:
+        if self.tp_size == 1:
+            return w2_lora_a
+        # w2_lora_a shape (num_experts,rank,input_size)
+        shard_size = self.base_layer.intermediate_size_per_partition
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+
+        return w2_lora_a[:, :, start_idx:end_idx]
+
+    def _slice_w2_b(self, w2_lora_b: torch.Tensor) -> torch.Tensor:
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w2_lora_b
+        # Based on S-LoRA, we slice W2 B along the hidden_size dim.
+        # w2_lora_b shape (num_experts,output_size,rank)
+        current_lora_size = w2_lora_b.shape[1]
+
+        sliced_size = current_lora_size // self.tp_size
+        start_idx = self.tp_rank * sliced_size
+        end_idx = (self.tp_rank + 1) * sliced_size
+        return w2_lora_b[:, start_idx:end_idx, :]
+
     def set_lora(
         self,
         index: int,
@@ -570,7 +633,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
-
+        # Make mypy happy
         assert isinstance(lora_a, list)
         assert isinstance(lora_b, list)
         assert len(lora_a) == len(lora_b) == 2
@@ -581,27 +644,64 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         num_experts = self.w13_lora_a_stacked[0].shape[1]
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+
+        # (num_experts,rank,input_size)
         w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
         w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
-        self.w13_lora_a_stacked[0][
-            index, :, : w13_lora_a.shape[1], : w13_lora_a.shape[2]
-        ].copy_(w13_lora_a, non_blocking=True)
-        self.w2_lora_a_stacked[0][
-            index, :, : w2_lora_a.shape[1], : w2_lora_a.shape[2]
-        ].copy_(w2_lora_a, non_blocking=True)
-
         # (output_size,num_experts,rank)
         w13_lora_b = w13_lora_b.reshape(w13_lora_b.shape[0], num_experts, -1)
-        # (num_experts,output_size,rank)
-        w13_lora_b = w13_lora_b.permute(1, 0, 2) 
         w2_lora_b = w2_lora_b.reshape(w2_lora_b.shape[0], num_experts, -1)
+        # (num_experts,output_size,rank)
+        w13_lora_b = w13_lora_b.permute(1, 0, 2)
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
+
+        sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
+        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b, is_interleave=True)
+
+        sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
+        sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
+
+        self.w13_lora_a_stacked[0][
+            index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
+        ].copy_(sliced_w13_lora_a, non_blocking=True)
+        self.w2_lora_a_stacked[0][
+            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+        ].copy_(sliced_w2_lora_a, non_blocking=True)
+
         self.w13_lora_b_stacked[0][
-            index, :, : w13_lora_b.shape[1], : w13_lora_b.shape[2]
-        ].copy_(w13_lora_b, non_blocking=True)
+            index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
+        ].copy_(sliced_w13_lora_b, non_blocking=True)
         self.w2_lora_b_stacked[0][
-            index, :, : w2_lora_b.shape[1], : w2_lora_b.shape[2]
-        ].copy_(w2_lora_b, non_blocking=True)
+            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+        ].copy_(sliced_w2_lora_b, non_blocking=True)
+
+    @property
+    def w13_input_size(self):
+        """
+        Full size
+        """
+        return self.w13_lora_a_stacked[0].shape[-1]
+
+    @property
+    def w13_output_size(self):
+        """
+        Full size
+        """
+        return self.w13_lora_b_stacked[0].shape[-2] * self.tp_size
+
+    @property
+    def w2_input_size(self):
+        """
+        Full size
+        """
+        return self.w2_lora_a_stacked[0].shape[-1] * self.tp_size
+
+    @property
+    def w2_output_size(self):
+        """
+        Full size
+        """
+        return self.w2_lora_a_stacked[0].shape[-2]
 
     @classmethod
     def can_replace_layer(
