@@ -474,6 +474,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self, local_num_experts: int, device: torch.device
     ) -> W2GemmOverlapArgs:
         w2_gemm_overlap_args = None
+        self.combine_overlap_args = None
         if envs.VLLM_EP_USE_SBO:
             total_num_sms = torch.cuda.get_device_properties(
                 device="cuda"
