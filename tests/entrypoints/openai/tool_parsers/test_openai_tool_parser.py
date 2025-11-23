@@ -333,12 +333,13 @@ async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
         schema: dict[str, object] | None = None
         for tool_entry in TOOLS:
             function_def = tool_entry.get("function")
-            if function_def and isinstance(function_def, dict):
-                if function_def.get("name") == func_name:
-                    schema = function_def.get("parameters")
-                    break
+            if function_def and isinstance(function_def, dict) and function_def.get("name") == func_name:
+                schema: dict[str, object] | None = function_def.get("parameters")
+                break
 
-        assert schema is not None, f"No matching tool schema found for {func_name}"
+        assert schema is not None, (
+            f"No matching tool schema found for {func_name}"
+        )
 
         jsonschema.validate(instance=args, schema=schema)
 
