@@ -35,7 +35,7 @@ blobfile==3.0.0
 schemathesis==3.39.15
 
 # Required for mteb test
-mteb[bm25s]>=1.38.11, <2
+mteb[bm25s]>=2, <3 # required for mteb test
 
 # Required for eval tests
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
