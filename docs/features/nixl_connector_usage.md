@@ -146,6 +146,8 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8000 8000
 ```
 
+For multi-host DP deployment, only need to provide the host/port of the head instances.
+
 ### KV Role Options
 
 - **kv_producer**: For prefiller instances that generate KV caches
