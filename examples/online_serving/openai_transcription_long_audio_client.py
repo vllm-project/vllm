@@ -26,8 +26,6 @@ def async_process(line):
 
     choice = data["choices"][0]
     delta = choice["delta"]["content"]
-
-    # import pdb; pdb.set_trace()
     
     if choice.get("finish_reason") and choice["finish_reason"] != "stop":
         print(f"\n[Stream finished reason: {choice['finish_reason']}] != stop")
