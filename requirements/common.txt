@@ -28,6 +28,7 @@ xgrammar == 0.1.27; platform_machine == "x86_64" or platform_machine == "aarch64
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
+tinyquant  # TinyQuant integration for custom quantization methods
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.17.0
