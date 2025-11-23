@@ -298,7 +298,9 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
-    assert len(log_matches) == 2, log_holder.text
+    # 2 for 2 compile ranges
+    # (global compile range is split due to enable_fi_allreduce_fusion)
+    assert len(log_matches) == 4, log_holder.text
 
     assert int(log_matches[0]) == matches.attention_fusion
     assert int(log_matches[1]) == matches.attention_fusion
