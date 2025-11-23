@@ -682,8 +682,8 @@ void persistent_masked_m_silu_mul_quant(
       static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;                     \
       LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
                   CEIL_UE8M0);                                                 \
-    } else if (num_sms == 144) {                                               \
-      static constexpr int SILU_V2_BLOCK_COUNT = 144 * 32;                     \
+    } else if (num_sms == 148) {                                               \
+      static constexpr int SILU_V2_BLOCK_COUNT = 148 * 8;                      \
       LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, STRIDE_YS_P, \
                   CEIL_UE8M0);                                                 \
     } else if (num_sms == 108) {                                               \
@@ -692,7 +692,7 @@ void persistent_masked_m_silu_mul_quant(
                   CEIL_UE8M0);                                                 \
     } else {                                                                   \
       TORCH_CHECK(false, "Unsupported num_sms: ", num_sms,                     \
-                  ". Only 108, 132 and 144 are supported.");                   \
+                  ". Only 108, 132 and 148 are supported.");                   \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);
