@@ -283,7 +283,7 @@ Currently, vLLM supports multiple backends for efficient Attention computation a
 
 If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options:
 
-- On NVIDIA CUDA: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
+- On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
 - On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA` or `ROCM_AITER_UNIFIED_ATTN`.
 
 For AMD ROCm, you can further control the specific Attention implementation using the following variables:
