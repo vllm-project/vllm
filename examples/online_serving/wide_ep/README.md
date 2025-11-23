@@ -54,3 +54,16 @@ export GLOO_SOCKET_IFNAME=eth0
 export START_RANK=<0|8|16|24>
 ./launch_server.sh
 ```
+
+## Benchmark Driver
+
+Use `run_benchmark.sh` to recreate the load sweep used in the repo:
+
+```bash
+cd examples/online_serving/wide_ep
+./run_benchmark.sh dpep32
+```
+
+- Hits the coordinator endpoint at `http://127.0.0.1:8000` (change `HOST_URL` if your API server is elsewhere).
+- Issues 4096 concurrent requests with input length 2 / output length 256; results land in `results/<tag>/`.
+- Repeat on each of the four nodes in cluster to saturate deployment
