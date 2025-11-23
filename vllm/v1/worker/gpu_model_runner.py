@@ -159,6 +159,7 @@ from .utils import (
     gather_mm_placeholders,
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
+    unbind_kv_cache,
 )
 
 if TYPE_CHECKING:
@@ -5071,6 +5072,11 @@ class GPUModelRunner(
                     f"{layer_impl.__class__.__name__} "
                     "does not return the softmax lse for decode."
                 )
+
+    def free_kv_cache(self) -> None:
+        if not self.kv_caches:
+            return
+        unbind_kv_cache(self.compilation_config.static_forward_context, self.kv_caches)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
