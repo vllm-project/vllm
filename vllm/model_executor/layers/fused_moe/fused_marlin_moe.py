@@ -122,13 +122,13 @@ def _fused_marlin_moe(
         hidden_states.dtype == torch.half
         or torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
     )
-    print('printing stuff before moe 1')
-    print_args_info(
-        hidden_states,
-        w1,
-        w1_scale,
-        intermediate_cache1
-    )
+    # print('printing stuff before moe 1')
+    # print_args_info(
+    #     hidden_states,
+    #     w1,
+    #     w1_scale,
+    #     intermediate_cache1
+    # )
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         hidden_states,
         intermediate_cache1,
