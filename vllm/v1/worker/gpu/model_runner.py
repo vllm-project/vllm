@@ -585,12 +585,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             # Draft tokens for spec decoding.
             input_ids = input_batch.input_ids[input_batch.logits_indices]
-            num_sampled = rejection_sample(
+            sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
                 input_ids,
                 input_batch.cu_num_logits,
+                self.num_speculative_steps,
             )
             num_sampled *= ~is_chunked_prefilling
+            sampler_output.sampled_token_ids = sampled_tokens
             # TODO(woosuk): Support logprobs with spec decoding.
         return sampler_output, num_sampled
 

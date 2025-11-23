@@ -7,6 +7,8 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _rejection_sample_kernel(
+    sampled_ptr,  # [num_reqs, num_speculative_steps + 1]
+    sampled_stride,
     num_sampled_ptr,  # [num_reqs]
     target_sampled_ptr,  # [num_draft_tokens + num_reqs]
     input_ids_ptr,  # [num_draft_tokens + num_reqs]
@@ -25,6 +27,7 @@ def _rejection_sample_kernel(
             draft_sampled = tl.load(
                 input_ids_ptr + start_idx + i + 1, mask=i < num_tokens - 1, other=0
             )
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, target_sampled)
             num_sampled += 1
             if target_sampled != draft_sampled:
                 rejected = True
@@ -38,18 +41,27 @@ def rejection_sample(
     input_ids: torch.Tensor,
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor,
-) -> torch.Tensor:
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
+    sampled = torch.empty(
+        num_reqs,
+        num_speculative_steps + 1,
+        dtype=target_sampled.dtype,
+        device=target_sampled.device,
+    )
     num_sampled = torch.empty(
         num_reqs,
         dtype=torch.int32,
         device=target_sampled.device,
     )
     _rejection_sample_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
         num_sampled,
         target_sampled,
         input_ids,
         cu_num_logits,
         num_warps=1,
     )
-    return num_sampled
+    return sampled, num_sampled
