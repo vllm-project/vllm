@@ -1889,6 +1889,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
+        self.cache_config.kv_bytes_per_block = kv_cache_config.kv_bytes_per_block
+
         # Set up cross-layer KV cache sharing if needed
         self.maybe_setup_cross_layer_kv_sharing(kv_caches, kv_cache_config)
 
