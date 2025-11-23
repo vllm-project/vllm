@@ -76,6 +76,10 @@ def apply_penalties(
     frequency_penalties: The frequency penalties of shape (num_seqs, )
     repetition_penalties: The repetition penalties of shape (num_seqs, )
     """
+    if prompt_tokens_tensor is None or output_tokens_tensor is None:
+        # If either tensor is None, return logits unchanged
+        # (cannot apply penalties without token information)
+        return logits
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask(
         prompt_tokens_tensor, vocab_size, num_seqs
