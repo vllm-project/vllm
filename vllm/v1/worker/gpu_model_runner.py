@@ -1167,9 +1167,9 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
+        scheduled_encoder_inputs: dict[str, list[int]],
         num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
-        scheduled_encoder_inputs: dict[str, list[int]],
         num_reqs: int,
     ) -> np.ndarray | None:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
@@ -1537,9 +1537,9 @@ class GPUModelRunner(
                 max_encoder_seq_len,
                 scheduled_encoder_req_index,
             ) = self._get_encoder_seq_lens(
+                scheduled_encoder_inputs or {},
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
-                scheduled_encoder_inputs,
                 num_reqs,
             )
 

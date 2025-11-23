@@ -25,15 +25,6 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 logger = init_logger(__name__)
 
 
-def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
-    """Gets the max number of encoder input tokens from the config."""
-    sc = vllm_config.scheduler_config
-    assert sc and isinstance(sc.max_num_encoder_input_tokens, int), (
-        "max_num_encoder_input_tokens must be int for enc-dec models"
-    )
-    return sc.max_num_encoder_input_tokens
-
-
 def _get_cross_slot_mapping(
     scheduled_encoder_req_index: list[int],
     encoder_seq_lens: np.ndarray,
