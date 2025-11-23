@@ -614,8 +614,9 @@ class MambaManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: MambaSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            self._req_to_computed_tokens: dict[str, int] = {}
-            self._req_to_new_tokens: dict[str, int] = {}
+            self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+            self._allocated_reqs: set[str] = set()
+            self._req_to_last_computed: dict[str, int] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -657,36 +658,25 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
+        assert isinstance(self.kv_cache_spec, MambaSpec)
         if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
             # Here unused blocks may be freed up for running requests.
             # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
             #  (for which find_longest_cache_hit returns block_pool.null_block)
             pass
         else:
-            assert isinstance(self.kv_cache_spec, MambaSpec)
-            self._req_to_computed_tokens[request_id] = num_computed_tokens
-            # Each request will always have 1 block at this moment, so no need to
-            # remove blocks.
-            if not self.kv_cache_spec.enable_caching:
-                return
             blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
-            num_blocks = len(blocks)
-            if num_blocks > 0:
-                prefix_block: KVCacheBlock = blocks[0]
-                assert self._req_to_computed_tokens[request_id] != 0
-                if not prefix_block.is_null:
-                    self.block_pool.free_blocks([prefix_block])
-                    blocks[0] = self.block_pool.null_block
-            
-            if num_blocks > 2 + self.kv_cache_spec.num_speculative_blocks:
-                assert num_blocks == 3 + self.kv_cache_spec.num_speculative_blocks
-                last_new_tokens = self._req_to_new_tokens[request_id]
-                assert last_new_tokens % self.block_size == 0
-                assert last_new_tokens >= self.block_size
-                self.block_pool.free_blocks(blocks[-1:])
-                blocks.pop()
-            else:
-                assert num_blocks == 0 or num_blocks == 2 + self.kv_cache_spec.num_speculative_blocks
+            if request_id in self._req_to_last_computed:
+                # TODO what if in decoding phase and enabled sps when accepted 
+                # token is not a multiple of block size
+                # NOTE: pre block should not be freed becasue it may be used to copy
+                last_computed_tokens = self._req_to_last_computed[request_id]
+                target_idx = last_computed_tokens // self.block_size - 1
+                if target_idx >= 0 and blocks[target_idx] != self._null_block:
+                    self.block_pool.free_blocks([blocks[target_idx]])
+                    blocks[target_idx] = self._null_block
+
+            self._req_to_last_computed[request_id] = num_computed_tokens
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -713,22 +703,18 @@ class MambaManager(SingleTypeKVCacheManager):
                 request_id, num_tokens, new_computed_blocks
             )
         else:
-            num_computed_tokens = self._req_to_computed_tokens.get(request_id, 0)
-            if num_computed_tokens == 0:
-                num_new_blocks = 1 + (self.kv_cache_spec.num_speculative_blocks 
-                                        if self.kv_cache_spec.num_speculative_blocks > 0 else 0)
-            else:
-                num_new_blocks = 0
-
-            if self.kv_cache_spec.enable_caching:
-                num_new_tokens = num_tokens - num_computed_tokens - len(new_computed_blocks) * self.block_size
-                if num_computed_tokens != 0:
-                    num_new_tokens -= self.kv_cache_spec.num_speculative_blocks
-                self._req_to_new_tokens[request_id] = num_new_tokens
-                # NOTE: last chunk may larger than block_size when using eagle.
-                if num_new_tokens >= self.block_size and num_new_tokens % self.block_size == 0:
-                    num_new_blocks += 1
-
+            num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
+                              len(self.req_to_blocks[request_id]))
+            num_new_alloc_blocks = 0
+            if num_new_blocks > 0:
+                # first prefill
+                if request_id not in self._allocated_reqs:
+                # if len(self.req_to_blocks[request_id]) == 0:
+                    num_new_alloc_blocks = 1 + self.num_speculative_blocks
+                else:
+                    num_new_alloc_blocks = 1
+            
             # If a computed block of a request is an eviction candidate (in the
             # free queue and ref_cnt == 0), it will be changed from a free block
             # to a computed block when the request is allocated, so we also count
@@ -736,22 +722,23 @@ class MambaManager(SingleTypeKVCacheManager):
             num_evictable_computed_blocks = sum(
                 blk.ref_cnt == 0 and not blk.is_null
                 for blk in new_computed_blocks)
-            return num_new_blocks + num_evictable_computed_blocks
+            
+            return num_new_alloc_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            if not self.kv_cache_spec.enable_caching:
-                return
-            if request_id not in self.num_cached_block:
-                if new_computed_blocks:
-                    assert len(new_computed_blocks) == 1 or new_computed_blocks[-2].is_null
-                    new_computed_blocks = new_computed_blocks[-1:]
-                else:
-                    new_computed_blocks = [self.block_pool.null_block]
-        super().save_new_computed_blocks(request_id, new_computed_blocks)
+        # if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        #     if not self.kv_cache_spec.enable_caching:
+        #         return
+        #     if request_id not in self.num_cached_block:
+        #         if new_computed_blocks:
+        #             assert len(new_computed_blocks) == 1 or new_computed_blocks[-2].is_null
+        #             new_computed_blocks = new_computed_blocks[-1:]
+        #         else:
+        #             new_computed_blocks = [self.block_pool.null_block]
+        # super().save_new_computed_blocks(request_id, new_computed_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int
@@ -767,54 +754,66 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
             return super().allocate_new_blocks(request_id, num_tokens)
         else:
-            num_computed_tokens = self._req_to_computed_tokens.get(request_id, 0)
-            if num_computed_tokens == 0:
-                num_new_blocks = 1 + (self.kv_cache_spec.num_speculative_blocks
-                                        if self.kv_cache_spec.num_speculative_blocks > 0 else 0)
-            else:
-                assert num_tokens >= num_computed_tokens
-                num_new_blocks = 0
-
-            if self.kv_cache_spec.enable_caching:
-                num_new_tokens = self._req_to_new_tokens[request_id]
-                if num_new_tokens >= self.block_size and num_new_tokens % self.block_size == 0:
-                    num_new_blocks += 1
-
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            num_new_blocks = (num_required_blocks - len(self.req_to_blocks[request_id]))
             if num_new_blocks <= 0:
                 return []
-            else:
-                new_blocks: list[KVCacheBlock] = self.block_pool.get_new_blocks(num_new_blocks)
+            else: 
+                # first prefill chunk
+                # TODO: for mamba num_cached_block including null-blocks
+                new_blocks = []
+                if request_id not in self._allocated_reqs:
+                    self._allocated_reqs.add(request_id)
+                    num_new_alloc_blocks = 1 + self.num_speculative_blocks
+                    new_blocks.extend([self._null_block 
+                                    for _ in range(num_new_blocks - num_new_alloc_blocks)])
+                    # new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
+                else:
+                    num_new_alloc_blocks = 1
+                    new_blocks.extend([self._null_block for _ in range(num_new_blocks - num_new_alloc_blocks)])
+                    if self.num_speculative_blocks > 0:
+                        # step i:            [0, 0, 0, a, sps_i_0, sps_i_1]
+                        # step i+1(i.e. j):  [0, 0, 0, a, 0, 0, 0, b, sps_j_0, sps_j_1]
+                        # reuse blocks sps_i_0 and sps_i_1 as b and sps_j_0
+                        # new_alloc_blocks: [sps_j_1]
+                        # new_blocks: [0, 0, 0, b, sps_j_0, sps_j_1]
+                        req_blocks = req_blocks[:-self.num_speculative_blocks]
+                        # TODO: reuse blocks 是否需要清除内存?尤其是decode
+                        reuse_blocks = req_blocks[-self.num_speculative_blocks:]
+                        new_blocks.extend(reuse_blocks)
+                new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
+                new_blocks.extend(new_alloc_blocks)
                 req_blocks.extend(new_blocks)
                 return new_blocks
             
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            num_computed_tokens = request.num_computed_tokens
-            num_new_tokens = self._req_to_new_tokens[request.request_id]
-            # NOTE:For sps, an extra block may be allocated but not cached
-            if (num_new_tokens >= self.block_size 
-                and num_new_tokens % self.block_size == 0
-                and num_tokens % self.block_size == 0):
-                assert num_new_tokens % self.block_size == 0
-                assert num_computed_tokens % self.block_size == 0
-                assert len(self.req_to_blocks[request.request_id]) == 3 + self.kv_cache_spec.num_speculative_blocks
-                self.block_pool.cache_full_block(
-                    request=request,
-                    block=self.req_to_blocks[request.request_id][-1],
-                    cached_block_index=(num_tokens // self.block_size - 1),
-                    block_size=self.block_size,
-                    kv_cache_group_id=self.kv_cache_group_id
-                )
-                self.num_cached_block[request.request_id] += 1 
-        else:
-            super().cache_blocks(request, num_tokens)
+        # if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        #     num_computed_tokens = request.num_computed_tokens
+        #     num_new_tokens = self._req_to_new_tokens[request.request_id]
+        #     # NOTE:For sps, an extra block may be allocated but not cached
+        #     if (num_new_tokens >= self.block_size 
+        #         and num_new_tokens % self.block_size == 0
+        #         and num_tokens % self.block_size == 0):
+        #         assert num_new_tokens % self.block_size == 0
+        #         assert num_computed_tokens % self.block_size == 0
+        #         assert len(self.req_to_blocks[request.request_id]) == 3 + self.kv_cache_spec.num_speculative_blocks
+        #         self.block_pool.cache_full_block(
+        #             request=request,
+        #             block=self.req_to_blocks[request.request_id][-1],
+        #             cached_block_index=(num_tokens // self.block_size - 1),
+        #             block_size=self.block_size,
+        #             kv_cache_group_id=self.kv_cache_group_id
+        #         )
+        #         self.num_cached_block[request.request_id] += 1 
+        # else:
+        #     super().cache_blocks(request, num_tokens)
 
     def free(self, request_id: str) -> None:
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            self._req_to_computed_tokens.pop(request_id, None)
-            self._req_to_new_tokens.pop(request_id, None)
+            self._allocated_reqs.discard(request_id)
+            self._req_to_last_computed.pop(request_id, None)
         super().free(request_id)
 
 class CrossAttentionManager(SingleTypeKVCacheManager):

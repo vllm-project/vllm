@@ -1533,8 +1533,7 @@ class GPUModelRunner(
                     and self.cache_config.enable_prefix_caching
                     and isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
                 ):
-                    blk_table_tensor = blk_table_tensor[:, 1:]
-                    self._preprocess_mamba_prefix(scheduler_output, kv_cache_group_id, kv_cache_group_spec)
+                    self._preprocess_mamba(scheduler_output, kv_cache_group_id, kv_cache_group_spec)
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -2632,6 +2631,8 @@ class GPUModelRunner(
 
     def _mamba_copy_block(self, kv_cache_group_spec: KVCacheGroupSpec,
                           src_block_id: int, dest_block_id: int):
+        if src_block_id == dest_block_id:
+            return
         forward_context = self.compilation_config.static_forward_context
         for layer_name in kv_cache_group_spec.layer_names:
             kv_caches: list[list[torch.Tensor]] = forward_context[layer_name].kv_cache
@@ -2642,70 +2643,115 @@ class GPUModelRunner(
                     for kv_cache_part in kv_cache:
                         kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
 
-    def _preprocess_mamba_prefix(self, scheduler_output: "SchedulerOutput", 
-                                 kv_cache_group_id: int,
-                                 kv_cache_group_spec: KVCacheGroupSpec,
-                                 ):
+    def _preprocess_mamba(self, scheduler_output: "SchedulerOutput", 
+                          kv_cache_group_id: int,
+                          kv_cache_group_spec: KVCacheGroupSpec,
+                          ):
         assert isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
         assert self.cache_config.enable_prefix_caching
+        block_size = kv_cache_group_spec.kv_cache_spec.block_size
+        num_speculative_blocks = kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
         new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
         for new_req in new_reqs:
             if new_req.num_computed_tokens == 0:
                 continue
             block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
-            assert block_ids[0] != 0, f'{block_ids=}'
-            prefix_block_id, dest_block_id = block_ids[0], block_ids[1]
+            prefix_block_idx = cdiv(new_req.num_computed_tokens, block_size) - 1
+            dest_block_idx = len(block_ids) - 1 - num_speculative_blocks
+            prefix_block_id, dest_block_id = block_ids[prefix_block_idx], block_ids[dest_block_idx]
             self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)
+        
         cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
         for i, resumed in enumerate(cached_reqs.resumed_from_preemption):
-            if not resumed:
-                continue
             group_block_ids: Optional[tuple[list[int], ...]] = cached_reqs.new_block_ids[i]
-            assert group_block_ids is not None
-            new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
-            assert len(new_block_ids) >= 2 + kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
-            if cached_reqs.num_computed_tokens[i] == 0:
-                continue
-            assert new_block_ids[0] != 0, f'{new_block_ids=}'
-            prefix_block_id, dest_block_id = new_block_ids[0], new_block_ids[1]
-            self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)     
-
-
-    def _postprocess_mamba_cache(self, scheduler_output: "SchedulerOutput"):
-        assert self.cache_config.enable_prefix_caching
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups):
-            if not isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec):
-                continue
-            new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
-            num_speculative_blocks = kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
-            for new_req in new_reqs:
-                block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
-                if len(block_ids) <= 2 + num_speculative_blocks:
-                    continue
-                assert len(block_ids) == 3 + num_speculative_blocks
-                src_block_id, dest_block_id = block_ids[1], block_ids[-1]
-                self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
-            cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
-            for i, req_id in enumerate(cached_reqs.req_ids):
-                group_block_ids: Optional[tuple[list[int], ...]] = cached_reqs.new_block_ids[i]
+            num_compute_tokens = cached_reqs.num_computed_tokens[i]
+            if not resumed:
+                assert num_compute_tokens > 0
                 if group_block_ids is None:
-                    assert not cached_reqs.resumed_from_preemption[i]
                     continue
                 new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
                 if not new_block_ids:
-                    assert not cached_reqs.resumed_from_preemption[i]
                     continue
-                if not cached_reqs.resumed_from_preemption[i]:
-                    assert len(new_block_ids) == 1
-                    block_ids: list[int] = self.requests[req_id].block_ids[kv_cache_group_id]
-                    src_block_id, dest_block_id = block_ids[1], new_block_ids[0]
-                else:
-                    if len(new_block_ids) == 2 + num_speculative_blocks:
-                        continue
-                    assert len(new_block_ids) == 3 + num_speculative_blocks
-                    src_block_id, dest_block_id = new_block_ids[1], new_block_ids[-1]
+                assert len(new_block_ids) >= 1 + num_speculative_blocks
+                block_ids: list[int] = self.requests[cached_reqs.req_ids[i]].block_ids[kv_cache_group_id]
+                src_block_idx = cdiv(num_compute_tokens, block_size) - 1
+                dest_block_idx = len(new_block_ids) - 1 - num_speculative_blocks
+                src_block_id, dest_block_id = block_ids[src_block_idx], new_block_ids[dest_block_idx]
                 self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
+            else:
+                assert group_block_ids is not None
+                new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
+                if num_compute_tokens == 0:
+                    continue
+                prefix_block_idx = cdiv(num_compute_tokens, block_size) - 1
+                dest_block_idx = len(new_block_ids) - 1 - num_speculative_blocks
+                prefix_block_id, dest_block_id = new_block_ids[prefix_block_idx], new_block_ids[dest_block_idx]
+                self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)  
+
+    # def _preprocess_mamba_prefix(self, scheduler_output: "SchedulerOutput", 
+    #                              kv_cache_group_id: int,
+    #                              kv_cache_group_spec: KVCacheGroupSpec,
+    #                              ):
+    #     assert isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
+    #     assert self.cache_config.enable_prefix_caching
+    #     new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
+    #     for new_req in new_reqs:
+    #         if new_req.num_computed_tokens == 0:
+    #             continue
+    #         block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
+    #         assert block_ids[0] != 0, f'{block_ids=}'
+    #         prefix_block_id, dest_block_id = block_ids[0], block_ids[1]
+    #         self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)
+    #     cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
+    #     for i, resumed in enumerate(cached_reqs.resumed_from_preemption):
+    #         if not resumed:
+    #             continue
+    #         group_block_ids: Optional[tuple[list[int], ...]] = cached_reqs.new_block_ids[i]
+    #         assert group_block_ids is not None
+    #         new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
+    #         assert len(new_block_ids) >= 2 + kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
+    #         if cached_reqs.num_computed_tokens[i] == 0:
+    #             continue
+    #         assert new_block_ids[0] != 0, f'{new_block_ids=}'
+    #         prefix_block_id, dest_block_id = new_block_ids[0], new_block_ids[1]
+    #         self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)     
+
+
+    # def _postprocess_mamba_cache(self, scheduler_output: "SchedulerOutput"):
+    #     assert self.cache_config.enable_prefix_caching
+    #     for kv_cache_group_id, kv_cache_group_spec in enumerate(
+    #             self.kv_cache_config.kv_cache_groups):
+    #         if not isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec):
+    #             continue
+    #         new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
+    #         num_speculative_blocks = kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
+    #         for new_req in new_reqs:
+    #             block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
+    #             if len(block_ids) <= 2 + num_speculative_blocks:
+    #                 continue
+    #             assert len(block_ids) == 3 + num_speculative_blocks
+    #             src_block_id, dest_block_id = block_ids[1], block_ids[-1]
+    #             self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
+    #         cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
+    #         for i, req_id in enumerate(cached_reqs.req_ids):
+    #             group_block_ids: Optional[tuple[list[int], ...]] = cached_reqs.new_block_ids[i]
+    #             if group_block_ids is None:
+    #                 assert not cached_reqs.resumed_from_preemption[i]
+    #                 continue
+    #             new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
+    #             if not new_block_ids:
+    #                 assert not cached_reqs.resumed_from_preemption[i]
+    #                 continue
+    #             if not cached_reqs.resumed_from_preemption[i]:
+    #                 assert len(new_block_ids) == 1
+    #                 block_ids: list[int] = self.requests[req_id].block_ids[kv_cache_group_id]
+    #                 src_block_id, dest_block_id = block_ids[1], new_block_ids[0]
+    #             else:
+    #                 if len(new_block_ids) == 2 + num_speculative_blocks:
+    #                     continue
+    #                 assert len(new_block_ids) == 3 + num_speculative_blocks
+    #                 src_block_id, dest_block_id = new_block_ids[1], new_block_ids[-1]
+    #             self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
 
 
     @torch.inference_mode()
@@ -2998,10 +3044,10 @@ class GPUModelRunner(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
-            if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                and self.cache_config.enable_prefix_caching
-            ):
-                self._postprocess_mamba_cache(scheduler_output)
+            # if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            #     and self.cache_config.enable_prefix_caching
+            # ):
+            #     self._postprocess_mamba_cache(scheduler_output)
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
