@@ -188,20 +188,21 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     the server in the core process (=P1). The data flow is as follows:
 
     ```
-                  is_cached() x N    get_and_update()
+                  peek() x N         get_and_update()
     P0: From API -----------------> -----------------> To P1
 
                  get_and_update()
     P1: From P0 -----------------> To model
     ```
 
-    `is_cached()` can be called any number of times in P0. However,
+    `peek()` can be called any number of times in P0. However,
     `get_and_update()` must be called in P0 and P1 one after another
     so that their cache eviction order remains the same.
 
     This ensures that the keys in P0 and P1 caches are mirrored,
     allowing us to determine whether a key is cached in P1 by looking
     up the P0 cache, without having to communicate with P1.
+    This ensures that the keys in P0 and P1 caches are mirrored.
     """
 
     @abstractmethod
@@ -272,35 +273,43 @@ class BaseMultiModalProcessorCache(
     """The required interface for caches on P0."""
 
     @abstractmethod
-    def is_cached_item(self, mm_hash: str) -> bool:
+    def peek_item(
+        self,
+        mm_hash: str,
+    ) -> _O | None:
         """
-        Check whether a multi-modal item is
-        in the underlying cache.
+        Get a multi-modal item from the cache, if it exists.
+        This should be used to check for the existence of an item in the cache,
+        as the cache can be changed by other threads.
 
         This **DOES NOT** update the cache eviction order.
 
         Args:
-            mm_hash: The hash of the item to check.
+            mm_hash: The hash of the item to fetch.
 
         Returns:
-            `True` if the item is cached, otherwise `False`.
+            The multi-modal item, if it is cached, otherwise None.
         """
         raise NotImplementedError
 
-    def is_cached(self, mm_hashes: list[str]) -> list[bool]:
+    def peek(
+        self,
+        mm_hashes: list[str],
+    ) -> list[_O | None]:
         """
-        Check whether a sequence of multi-modal items are
-        in the underlying cache.
+        Get a sequence of multi-modal items from the cache, if they exist.
+        This should be used to check for the existence of items in the cache,
+        as the cache can be changed by other threads.
 
         This **DOES NOT** update the cache eviction order.
 
         Args:
-            mm_hashes: The hash of each item to check.
+            mm_hash: The hash of the item to fetch.
 
         Returns:
-            For each item, `True` if the item is cached, otherwise `False`.
+            For each item, the multi-modal item if it is cached, otherwise None.
         """
-        return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
+        return [self.peek_item(mm_hash) for mm_hash in mm_hashes]
 
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
@@ -335,8 +344,11 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
+            return cached_item.item, cached_item.prompt_updates
+
+        return None
 
     @override
     def get_and_update_item(
@@ -389,8 +401,11 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
+            return None, cached_item.prompt_updates
+
+        return None
 
     @override
     def get_and_update_item(
@@ -463,8 +478,20 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return info
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return self._shm_cache.is_cached(mm_hash)
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        # SHM cache is FIFO, so calling the standard get_cached method will not
+        # change the cache eviction order
+
+        if self._shm_cache.is_cached(mm_hash):
+            self._hits += 1
+            self._total += 1
+
+            address, monotonic_id = self._shm_cache.get_cached(mm_hash)
+            prompt_updates, modality = self._p0_cache[mm_hash]
+            return self.address_as_item(address, monotonic_id, modality), prompt_updates
+
+        self._total += 1
+        return None
 
     @override
     def get_and_update_item(
