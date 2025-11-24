@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
-from contextlib import contextmanager
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -102,14 +101,16 @@ class CudaGraphManager:
 
         # Prepare dummy inputs.
         input_ids = input_buffers.input_ids.gpu[:batch_size]
-        positions = input_buffers.positions.gpu[:batch_size]
+        positions = input_buffers.positions[:batch_size]
 
         input_buffers.query_start_loc.np[: batch_size + 1] = np.arange(batch_size + 1)
         input_buffers.query_start_loc.np[batch_size:] = batch_size
         input_buffers.query_start_loc.copy_to_gpu()
-        input_buffers.seq_lens.np[:batch_size] = self.max_model_len
-        input_buffers.seq_lens.np[batch_size:] = 0
-        input_buffers.seq_lens.copy_to_gpu()
+        # HACK(woosuk): To optimize warmup time, we use 1 (instead of max_model_len)
+        # for seq_lens. This leads to a mismatch between seq_lens (GPU) and
+        # seq_lens_np (CPU), which might cause issues in some attention backends.
+        input_buffers.seq_lens[:batch_size] = 1
+        input_buffers.seq_lens[batch_size:] = 0
 
         input_block_tables = [x[:batch_size] for x in block_tables.input_block_tables]
         slot_mappings = block_tables.slot_mappings[:, :batch_size]
@@ -120,6 +121,7 @@ class CudaGraphManager:
             num_tokens=batch_size,
             query_start_loc=input_buffers.query_start_loc,
             seq_lens=input_buffers.seq_lens,
+            seq_lens_np=np.full(batch_size, self.max_model_len, dtype=np.int32),
             num_computed_tokens_cpu=None,  # FIXME
             block_tables=input_block_tables,
             slot_mappings=slot_mappings,
@@ -140,6 +142,7 @@ class CudaGraphManager:
             attn_metadata,
             self.vllm_config,
             num_tokens=batch_size,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
         ):
             hidden_states = model(
@@ -148,15 +151,16 @@ class CudaGraphManager:
             )
             if self.hidden_states is None:
                 self.hidden_states = torch.empty_like(hidden_states)
-        torch.cuda.synchronize()
 
         # Capture the graph.
         graph = torch.cuda.CUDAGraph()
         with (
+            patch("torch.cuda.empty_cache", lambda: None),
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=batch_size,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
             ),
             torch.cuda.graph(graph, self.pool),
@@ -183,7 +187,7 @@ class CudaGraphManager:
         if is_global_first_rank():
             sizes_to_capture = tqdm(sizes_to_capture, desc="Capturing CUDA graphs")
 
-        with freeze_gc(), graph_capture(device=self.device):
+        with graph_capture(device=self.device):
             for batch_size in sizes_to_capture:
                 self.capture_graph(
                     batch_size,
@@ -199,13 +203,3 @@ class CudaGraphManager:
         self.graphs[batch_size].replay()
         assert self.hidden_states is not None
         return self.hidden_states[:batch_size]
-
-
-@contextmanager
-def freeze_gc():
-    gc.collect()
-    gc.freeze()
-    try:
-        yield
-    finally:
-        gc.unfreeze()
