@@ -543,7 +543,7 @@ class Worker(WorkerBase):
         if (
             parallel_config.pipeline_parallel_size > 1
             and compilation_config.pass_config.enable_sequence_parallelism
-            and scheduler_output.num_scheduled_tokens
+            and forward_pass
         ):
             num_scheduled_tokens_np = np.array(
                 list(scheduler_output.num_scheduled_tokens.values()),
