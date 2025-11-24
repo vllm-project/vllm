@@ -1009,6 +1009,9 @@ class GPUModelRunner(
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         xdrope_model = cast(SupportsXDRoPE, model)
+        assert req_state.prompt_token_ids is not None, (
+            "XD-RoPE requires prompt_token_ids to be available."
+        )
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
 
         req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
