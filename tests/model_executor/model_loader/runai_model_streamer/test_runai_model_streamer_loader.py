@@ -64,9 +64,9 @@ VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
     mock_streamer_class,
     mock_list_safetensors,
-    mock_pull_files, # Mocks are passed LIFO
+    mock_pull_files,
     vllm_runner,
-    tmp_path: Path
+    tmp_path: Path,
 ):
     """
     Tests loading a model from a mocked S3 path using unittest.mock.patch decorators.
