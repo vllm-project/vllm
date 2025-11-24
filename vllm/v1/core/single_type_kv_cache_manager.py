@@ -764,7 +764,7 @@ class MambaManager(SingleTypeKVCacheManager):
                         # new_alloc_blocks: [sps_j_1]
                         # new_blocks: [0, 0, 0, b, sps_j_0, sps_j_1]
                         req_blocks = req_blocks[:-self.num_speculative_blocks]
-                        # TODO: reuse blocks 是否需要清除内存?尤其是decode
+                        # TODO: reuse blocks. if we need clean? especially in decode
                         reuse_blocks = req_blocks[-self.num_speculative_blocks:]
                         new_blocks.extend(reuse_blocks)
                 new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)

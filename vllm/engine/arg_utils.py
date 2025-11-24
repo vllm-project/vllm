@@ -1434,8 +1434,6 @@ class EngineArgs:
             and self.enable_prefix_caching 
             and model_config.is_hybrid
         ):
-            assert envs.VLLM_USE_V1, (
-                "Prefix caching for hybrid models requires the V1 engine.")
             assert self.enable_chunked_prefill, (
                 "Prefix caching for hybrid models requires chunked prefill.")
 
