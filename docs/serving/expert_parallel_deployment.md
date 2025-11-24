@@ -191,7 +191,6 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 - **Dual Batch Overlap**: Use `--enable-dbo` to overlap all-to-all communication with compute. See [Dual Batch Overlap](../design/dbo.md) for more details.
 - **Async scheduling (experimental)**: Try `--async-scheduling` to overlap scheduling with model execution.
 
-
 ### Troubleshooting
 
 - **`non-zero status: 7 cannot register cq buf`**: When using Infiniband/RoCE, make sure host VM and pods show `ulimit -l` "unlimited".
@@ -203,7 +202,6 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 - Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
 
 - Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
-
 
 ## Disaggregated Serving (Prefill/Decode Split)
 
@@ -297,6 +295,8 @@ except Exception as e:
 ```
 
 ### Benchmarking
+
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation.
 
 - **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+
