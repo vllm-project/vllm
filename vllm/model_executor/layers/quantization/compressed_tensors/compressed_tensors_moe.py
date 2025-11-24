@@ -208,13 +208,9 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
                 " for CompressedTensorsW4A4Nvfp4MoeMethod."
             )
         elif self.use_marlin:
-            logger.info_once(
-                "Using Marlin for CompressedTensorsW4A4Nvfp4MoeMethod."
-            )
+            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoeMethod.")
         else:
-            logger.info_once(
-                "Using Cutlass for CompressedTensorsW4A4Nvfp4MoeMethod."
-            )
+            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoeMethod.")
 
     def create_weights(
         self,

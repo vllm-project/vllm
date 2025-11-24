@@ -618,15 +618,14 @@ void cutlass_fp4_group_mm(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
   } else {
-#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+  #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
     int32_t version_num = get_sm_version_num();
     if (version_num >= 120 && version_num < 130) {
       TORCH_CHECK_NOT_IMPLEMENTED(
-          false,
-          "SM120 NVFP4 MOE only supports bfloat16 output, got: ",
+          false, "SM120 NVFP4 MOE only supports bfloat16 output, got: ",
           output.scalar_type());
     }
-#endif
+  #endif
     run_fp4_blockwise_scaled_group_mm<cutlass::half_t>(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
