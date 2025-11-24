@@ -60,6 +60,8 @@ class EagleSpeculator:
         aux_hidden_states: list[torch.Tensor] | None,
         # [num_reqs]
         num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
         # [max_num_reqs, 1]
         last_sampled: torch.Tensor,
         # [num_reqs]
@@ -84,6 +86,7 @@ class EagleSpeculator:
             self.input_ids,
             input_batch,
             num_sampled,
+            num_rejected,
             last_sampled,
             next_prefill_tokens,
         )
@@ -139,8 +142,8 @@ def _prepare_eagle_inputs_kernel(
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     num_sampled_ptr,
+    num_rejected_ptr,
     query_start_loc_ptr,
-    cu_num_logits_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
@@ -149,17 +152,13 @@ def _prepare_eagle_inputs_kernel(
     query_len = query_end - query_start
 
     # Get the true query length and next token after accounting for rejected tokens.
+    num_rejected = tl.load(num_rejected_ptr + batch_idx)
+    query_len -= num_rejected
+
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     if num_sampled > 0:
         req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
         next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-
-        logits_start = tl.load(cu_num_logits_ptr + batch_idx)
-        logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
-        num_logits = logits_end - logits_start
-
-        num_rejected = num_logits - num_sampled
-        query_len -= num_rejected
     else:
         # Chunked prefilling.
         # Get the next prefill token.
@@ -182,6 +181,8 @@ def prepare_eagle_inputs(
     input_batch: InputBatch,
     # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
+    num_rejected: torch.Tensor,
     # [max_num_reqs, 1]
     last_sampled: torch.Tensor,
     # [max_num_reqs]
@@ -201,8 +202,8 @@ def prepare_eagle_inputs(
         last_sampled,
         next_prefill_tokens,
         num_sampled,
+        num_rejected,
         input_batch.query_start_loc,
-        input_batch.cu_num_logits,
         BLOCK_SIZE=1024,
     )
     return last_token_indices
