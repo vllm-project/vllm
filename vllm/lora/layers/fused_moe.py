@@ -358,7 +358,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PretrainedConfig,
     ) -> None:
         """Initializes lora matrices."""
         self.max_loras = lora_config.max_loras
@@ -550,9 +550,10 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PretrainedConfig,
     ) -> None:
         """Initializes lora matrices."""
+        self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -570,13 +571,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         # w13_lora_a shape (num_experts,rank,input_size)
         current_lora_rank = w13_lora_a.shape[1]
         assert current_lora_rank % self.tp_size == 0
-
+        # Based on S-LoRA, we slice W13 B along the rank dim.
         sliced_rank = current_lora_rank // self.tp_size
         start_idx = self.tp_rank * sliced_rank
         end_idx = (self.tp_rank + 1) * sliced_rank
         return w13_lora_a[:, start_idx:end_idx, :]
 
-    def _slice_w13_b(self, w13_lora_b: torch.Tensor, is_interleave: bool = True):
+    def _slice_w13_b(self, w13_lora_b: torch.Tensor):
         if self.tp_size == 1:
             return w13_lora_b
 
@@ -584,7 +585,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         shard_size = self.base_layer.intermediate_size_per_partition
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        if is_interleave:
+        # HACK: Currently, only GPT-OSS is in interleaved order
+        if self._base_model == "GptOssForCausalLM":
             # For models like GPT-OSS, the weights of w1 (gate_proj) and w3 (up_proj)
             # in the interleaved order, and corresponding LoRA need to be processed.
             w1_lora_b = w13_lora_b[:, ::2, :]
@@ -656,7 +658,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
-        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b, is_interleave=True)
+        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)

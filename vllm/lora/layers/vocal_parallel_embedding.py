@@ -25,7 +25,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PretrainedConfig,
     ) -> None:
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights

@@ -30,7 +30,7 @@ class BaseLayerWithLoRA(nn.Module):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PretrainedConfig,
     ) -> None:
         """Initializes lora matrices."""
         ...

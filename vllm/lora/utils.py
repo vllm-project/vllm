@@ -80,7 +80,7 @@ def from_layer(
     max_loras: int,
     lora_config: LoRAConfig,
     packed_modules_list: list,
-    model_config: PretrainedConfig | None = None,
+    model_config: PretrainedConfig,
 ) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -101,7 +101,7 @@ def from_layer_logits_processor(
     lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: PretrainedConfig | None = None,
+    model_config: PretrainedConfig,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(
         layer,
