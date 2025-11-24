@@ -563,7 +563,7 @@ def marlin_moe_generate_valid_test_cases():
     m_list = [1, 123, 666]
     n_list = [128, 1024]
     k_list = [256, 2048]
-    e_list = [4, 12]
+    e_list = [5, 12]
     topk_list = [2, 3]
     ep_size_list = [1, 4]
     act_order_list = [True, False]
