@@ -1171,12 +1171,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if layer.enable_eplb:
-            assert layer.expert_load_view is not None
-            assert layer.logical_to_physical_map is not None
-            assert layer.logical_replica_count is not None
-
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            if layer.enable_eplb:
+                raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"
             )
