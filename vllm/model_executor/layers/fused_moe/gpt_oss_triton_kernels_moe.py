@@ -413,6 +413,9 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         output = (M, K)
         return (workspace1, workspace2, output)
 
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
+        ops.moe_sum(input, output)
+
     def apply(
         self,
         output: torch.Tensor,
@@ -469,8 +472,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         if global_num_experts == -1:
             global_num_experts = E
 
-        # Add batch_dim to output buffer because matmul_ogs expects 3D output
-        # Note that the output tensor might be in workspace1
+        # Note that the output tensor might be in workspace13
         intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
         intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
         intermediate_cache2 = _resize_cache(workspace13, (M * topk, N // 2))
@@ -511,6 +513,3 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
         # Set the original n_expts_act back
         routing_data.n_expts_act = n_expts_act
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
-        ops.moe_sum(input, output)

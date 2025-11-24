@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Test modular triton kernel
+Test modular OAI Triton MoE
 """
 
 import pytest
-import torch.distributed
+import torch
 
 from vllm.utils.import_utils import has_triton_kernels
 
@@ -45,7 +45,7 @@ MNK = [
 ]
 
 
-def deshuffle_weight(w: torch.Tensor):
+def unshuffle_weight(w: torch.Tensor):
     first = w[..., ::2]
     second = w[..., 1::2]
     return torch.concat((first, second), dim=-1)
@@ -73,7 +73,7 @@ def make_weights(dtype, k, n, e):
     # quant triton_weights
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
     w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, dtype, axis=1)
-    w1 = deshuffle_weight(w1)
+    w1 = unshuffle_weight(w1)
 
     w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
     w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, dtype, axis=1)
@@ -194,6 +194,9 @@ def oai_triton_moe_impl(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
 @pytest.mark.parametrize("num_experts", [32, 128])
