@@ -273,6 +273,9 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 prompt_text, _, _ = self._get_prompt_components(request_prompts[i])
+                sub_request_id = (
+                    request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+                )
 
                 if self.default_sampling_params is None:
                     self.default_sampling_params = {}
@@ -301,7 +304,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 self._log_inputs(
-                    request_id,
+                    sub_request_id,
                     request_prompts[i],
                     params=sampling_params,
                     lora_request=lora_request,
@@ -316,14 +319,14 @@ class OpenAIServingChat(OpenAIServing):
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
                         prompt=engine_prompt,
-                        request_id=request_id,
+                        request_id=sub_request_id,
                         params=sampling_params,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                     )
                 else:
                     engine_request, tokenization_kwargs = await self._process_inputs(
-                        request_id,
+                        sub_request_id,
                         engine_prompt,
                         sampling_params,
                         lora_request=lora_request,
@@ -334,7 +337,7 @@ class OpenAIServingChat(OpenAIServing):
                     generator = self.engine_client.generate(
                         engine_request,
                         sampling_params,
-                        request_id,
+                        sub_request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
