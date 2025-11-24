@@ -627,7 +627,6 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
-        assert self.policy is not None, "AbstractEplbPolicy must be initialized"
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
