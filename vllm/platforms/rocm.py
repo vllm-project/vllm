@@ -284,6 +284,10 @@ class RocmPlatform(Platform):
             logger.info("Using Aiter Unified Attention backend on V1 engine.")
             return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
+        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend on V1 engine.")
+            return AttentionBackendEnum.FLEX_ATTENTION.get_path()
+
         # Handle automatic backend selection based on environment variables
         if selected_backend is None:
             # Priority 1: Check for AITER Unified Attention (must check before MHA)
@@ -374,6 +378,8 @@ class RocmPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.attention.selector import get_env_variable_attn_backend
         from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
@@ -384,7 +390,17 @@ class RocmPlatform(Platform):
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
 
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            if (
+                os.environ.get("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION")
+                or get_env_variable_attn_backend()
+                == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+            ):
+                cache_config.block_size = 64
+                logger.warning(
+                    "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+                )
+            else:
+                cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
