@@ -508,15 +508,13 @@ class GPUModelRunner(
         # Only relevant for multimodal models
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(
-                max_buffer_num_tokens,
-                dtype=torch.bool
+                max_buffer_num_tokens, dtype=torch.bool
             )
 
         # Persistent buffers for Prefill Context Parallism
         if self.pcp_world_size > 1:
             self.pcp_allgather_restore_idx = self._make_buffer(
-                max_buffer_num_tokens,
-                dtype=torch.int64
+                max_buffer_num_tokens, dtype=torch.int64
             )
             self.pcp_padded_slot_mapping = torch.empty(
                 (max_buffer_num_tokens,),
@@ -528,7 +526,10 @@ class GPUModelRunner(
             )
             self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
             self.pcp_unpad_mask_cpu_tensor = torch.zeros(
-                (max_buffer_num_tokens,), device="cpu", dtype=torch.bool, pin_memory=True
+                (max_buffer_num_tokens,),
+                device="cpu",
+                dtype=torch.bool,
+                pin_memory=True,
             )
             self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
 
@@ -1099,7 +1100,7 @@ class GPUModelRunner(
         num_decode_reqs = sum(tokens <= self.reorder_batch_threshold)
 
         self.num_pcp_pads_cpu[:num_reqs] = 0
-        
+
         num_decode_tokens = sum(tokens[:num_decode_reqs])
 
         num_padded_scheduled_tokens = np.ceil(
@@ -1374,9 +1375,7 @@ class GPUModelRunner(
 
         if self.pcp_world_size > 1:
             num_scheduled_tokens[:num_reqs], pcp_positions = (
-                self._update_tokens_for_pcp(
-                    num_scheduled_tokens[:num_reqs]
-                )
+                self._update_tokens_for_pcp(num_scheduled_tokens[:num_reqs])
             )
 
             # Re-update after PCP split sequences.
@@ -1508,7 +1507,7 @@ class GPUModelRunner(
         if self.pcp_world_size > 1:
             discard_requests_mask = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                + num_scheduled_tokens * self.pcp_world_size 
+                + num_scheduled_tokens * self.pcp_world_size
                 - self.num_pcp_pads_cpu[:num_reqs]
             ) < num_tokens_np
         else:
@@ -1749,7 +1748,9 @@ class GPUModelRunner(
                 cp_local_seq_lens_cpu=cp_local_seq_lens_cpu,
                 pcp_allgather_restore_idx=self.pcp_allgather_restore_idx.gpu[
                     : total_num_scheduled_tokens * self.pcp_world_size
-                ] if self.pcp_world_size > 1 else None,
+                ]
+                if self.pcp_world_size > 1
+                else None,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -3027,7 +3028,7 @@ class GPUModelRunner(
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = get_pcp_group().all_gather(
-                    hidden_states[:num_scheduled_tokens_np.sum()],
+                    hidden_states[: num_scheduled_tokens_np.sum()],
                     0,
                 )
                 hidden_states = torch.index_select(

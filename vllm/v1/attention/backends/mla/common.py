@@ -2051,7 +2051,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             else:
                 # NOTE(yyj) Skip unnecessary kv all-gather when there are only decode
-                # requests, but token duplication is still required to align with 
+                # requests, but token duplication is still required to align with
                 # the padding in slot mapping.
                 k_c_normed = k_c_normed.repeat_interleave(self.pcp_world_size, dim=0)
                 k_pe = k_pe.repeat_interleave(self.pcp_world_size, dim=0)
