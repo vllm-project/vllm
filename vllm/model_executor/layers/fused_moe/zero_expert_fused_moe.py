@@ -113,9 +113,13 @@ class ZeroExpertFusedMoE(FusedMoE):
         """
         # Temporarily override e_score_correction_bias to use full bias
         # (including zero experts) for routing computation
+        # Use object.__setattr__ to bypass nn.Module.__setattr__ which causes
+        # Dynamo tracing issues
         original_bias = self.e_score_correction_bias
         if self._router is not None:
-            self.e_score_correction_bias = self._router.e_score_correction_bias
+            object.__setattr__(
+                self, "e_score_correction_bias", self._router.e_score_correction_bias
+            )
 
         # Compute routing once (using full logits to include zero experts)
         # This ensures zero experts can be properly identified in topk_ids
@@ -126,7 +130,7 @@ class ZeroExpertFusedMoE(FusedMoE):
         )
 
         # Restore original bias
-        self.e_score_correction_bias = original_bias
+        object.__setattr__(self, "e_score_correction_bias", original_bias)
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
