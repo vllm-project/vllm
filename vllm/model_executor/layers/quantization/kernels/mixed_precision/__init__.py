@@ -26,6 +26,9 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete imp
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (  # noqa: E501
     MarlinLinearKernel,
 )
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.ipex import (  # noqa: E501
+    IPEXwNA16LinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import (  # noqa: E501
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -42,6 +45,7 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     BitBLASLinearKernel,
     ConchLinearKernel,
     ExllamaLinearKernel,
+    IPEXwNA16LinearKernel,
 ]
 
 
