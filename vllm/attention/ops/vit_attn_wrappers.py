@@ -3,7 +3,7 @@
 """
 This file contains ops for ViT attention to be compatible with torch.compile
 as there are operations here not supported by torch.compile (for instance,
-`to_list` in xformers attn, or `.item()` in flash attention)
+`.item()` in flash attention)
 
 Using these ops and wrapping vision blocks with `torch.compile` can speed up
 throughput in vision models by ~5% relative on H100, and improve token
@@ -17,42 +17,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm.utils.torch_utils import direct_register_custom_op
-
-
-def xformers_attn_seqlens_wrapper(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqlens: torch.Tensor
-) -> torch.Tensor:
-    from xformers import ops as xops
-    from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-    attn_bias = BlockDiagonalMask.from_seqlens(
-        q_seqlen=seqlens.tolist(), kv_seqlen=None, device=q.device
-    )
-    context_layer = xops.memory_efficient_attention_forward(
-        q, k, v, attn_bias=attn_bias, p=0, scale=None
-    )
-    context_layer = einops.rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
-    return context_layer
-
-
-def xformers_attn_seqlens_wrapper_fake(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqlens: torch.Tensor
-) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
-
-
-direct_register_custom_op(
-    op_name="xformers_attn_seqlens_wrapper",
-    op_func=xformers_attn_seqlens_wrapper,
-    fake_impl=xformers_attn_seqlens_wrapper_fake,
-)
-
-
-def vit_xformers_attn_wrapper(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqlens: torch.Tensor
-) -> torch.Tensor:
-    return torch.ops.vllm.xformers_attn_seqlens_wrapper(q, k, v, seqlens)
 
 
 def flash_attn_maxseqlen_wrapper(
