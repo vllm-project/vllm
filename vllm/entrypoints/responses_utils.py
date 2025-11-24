@@ -10,6 +10,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
@@ -37,6 +38,18 @@ def construct_chat_message_with_tool_call(
                 )
             ],
         )
+    elif isinstance(item, ResponseReasoningItem):
+        reasoning_content = ""
+        if item.encrypted_content:
+            raise ValueError("Encrypted content is not supported.")
+        if len(item.summary) == 1:
+            reasoning_content = item.summary[0].text
+        elif item.content and len(item.content) == 1:
+            reasoning_content = item.content[0].text
+        return {
+            "role": "assistant",
+            "reasoning": reasoning_content,
+        }
     elif item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
