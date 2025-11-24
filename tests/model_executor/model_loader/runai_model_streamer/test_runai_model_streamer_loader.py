@@ -65,31 +65,19 @@ VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
 @patch(f"{STREAMER_MODULE_PATH}.SafetensorsStreamer")
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
     mock_streamer_class, mock_list_safetensors, mock_pull_files, # Mocks are passed LIFO
-    vllm_runner, tmp_path: Path, request: pytest.FixtureRequest
+    vllm_runner, tmp_path: Path
 ):
     """
     Tests loading a model from a mocked S3 path using unittest.mock.patch decorators.
     """
-
-    def cleanup_temp_dir():
-        """Ensure the temporary directory is removed."""
-        if tmp_path.exists():
-            try:
-                # Use the root of the pytest session's temp dir
-                shutil.rmtree(tmp_path)
-            except OSError as e:
-                pass
-
-    # Schedule the cleanup function to run regardless of test success/failure
-    request.addfinalizer(cleanup_temp_dir)
-
+ 
     test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
 
     # Download model from HF
     mock_model_dir = f"{tmp_path}/gpt2"
-    real_model_cache_path = snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
+    snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
 
-    # Initialize the Patcher and configure mocks to replace the S3 path with the local path
+    # Initialize the Patcher to replace the S3 path with the local path
     local_bucket_root = str(tmp_path)
     patcher = StreamerPatcher(local_bucket_root)
 
