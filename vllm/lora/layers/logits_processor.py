@@ -128,9 +128,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
         self.reset_lora(index)
         self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
             lora_a, non_blocking=True
