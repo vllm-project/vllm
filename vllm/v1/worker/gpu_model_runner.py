@@ -58,6 +58,7 @@ from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsXDRoPE,
     is_mixture_of_experts,
     supports_eagle3,
     supports_mrope,
@@ -1007,9 +1008,10 @@ class GPUModelRunner(
 
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
+        xdrope_model = cast(SupportsXDRoPE, model)
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
 
-        req_state.xdrope_positions = model.get_xdrope_input_positions(
+        req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
             req_state.prompt_token_ids,
             req_state.mm_features,
         )
