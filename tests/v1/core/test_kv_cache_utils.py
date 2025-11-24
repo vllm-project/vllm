@@ -1436,6 +1436,65 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
+    # 6 full + 5 sliding, pad to 6 full + 6 sliding. This is a typical case for gpt-oss
+    # eagle where there is only one more full attention layer than sliding window layers
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+        "layer_3": new_kv_cache_spec(),
+        "layer_4": new_kv_cache_spec(),
+        "layer_5": new_kv_cache_spec(),
+        "layer_6": new_kv_cache_spec(),
+        "layer_7": new_sliding_window_spec(),
+        "layer_8": new_sliding_window_spec(),
+        "layer_9": new_sliding_window_spec(),
+        "layer_10": new_sliding_window_spec(),
+        "layer_11": new_sliding_window_spec(),
+    }
+
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 6 * 32]
+    )[0]
+    print(kv_cache_config_hybrid)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_7"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_8"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_3", "layer_9"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_4", "layer_10"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_5", "layer_11"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_6"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2", "layer_3", "layer_4", "layer_5", "layer_6"],
+                new_kv_cache_spec(),
+            ),
+            KVCacheGroupSpec(
+                ["layer_7", "layer_8", "layer_9", "layer_10", "layer_11"],
+                new_sliding_window_spec(),
+            ),
+        ],
+    )
     # different hidden size
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=128),
