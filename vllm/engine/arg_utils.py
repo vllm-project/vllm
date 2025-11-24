@@ -922,6 +922,7 @@ class EngineArgs:
         cache_group.add_argument(
             "--num-gpu-blocks-override", **cache_kwargs["num_gpu_blocks_override"]
         )
+        cache_kwargs["enable_prefix_caching"]['default'] = None
         cache_group.add_argument(
             "--enable-prefix-caching", **cache_kwargs["enable_prefix_caching"]
         )
