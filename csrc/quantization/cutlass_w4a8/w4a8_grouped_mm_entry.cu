@@ -1,47 +1,24 @@
-#include <iostream>
-#include <fstream>
-#include <sstream>
 #include <vector>
-#include <numeric>
-#include <typeinfo>
-#include <float.h>
+#include <tuple>
 
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
-#include "cutlass/tensor_ref.h"
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
 
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/reference/device/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/reference/host/tensor_copy.h"
-#include "cutlass/util/reference/host/tensor_compare.h"
-#include "cutlass/util/reference/host/tensor_norm.h"
-#include "cutlass/util/reference/host/gett.hpp"
 #include "cutlass/util/mixed_dtype_utils.hpp"
-
-#include "helper.h"
-#include "grouped_mixed_dtype_utils.hpp"
 
 // vllm includes
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 #include "cutlass_extensions/torch_utils.hpp"
+#include "cutlass_extensions/common.hpp"
 
 #include "core/registration.h"
 #include "get_group_starts.cuh"
@@ -84,7 +61,6 @@ using StrideB = cute::remove_pointer_t<cutlass::detail::TagToStrideB_t<LayoutB*>
 using LayoutAtomQuant = decltype(cutlass::compute_memory_reordering_atom<MmaType>());
 using LayoutB_Reordered = decltype(cute::tile_to_shape(LayoutAtomQuant{}, Layout<Shape<int,int,Int<1>>, StrideB>{}));
 
-using ElementZero = cutlass::float_e4m3_t;
 using ElementScale = cutlass::float_e4m3_t;
 using LayoutScale = cutlass::layout::RowMajor;
 
@@ -153,7 +129,12 @@ using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 using StrideS = typename CollectiveMainloopShuffled::StrideScale;
 using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
 
-uint64_t seed = 2020;
+// static asserts for passing in strides/layouts
+// pack to 2x int64
+static_assert(sizeof(StrideS) == 2 * sizeof(int64_t));
+// pack to 3xint32,
+static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
+            "LayoutB_Reordered size must be divisible by 4 bytes");
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 /// GEMM setup and evaluation
@@ -178,6 +159,7 @@ uint64_t seed = 2020;
     const torch::Tensor& group_scale_strides
   ) {
     // validation?
+    
     // TODO: cuda stream/guard
     auto device = a_tensors.device();
     auto device_id = device.index();
@@ -187,22 +169,6 @@ uint64_t seed = 2020;
     int num_experts = static_cast<int>(expert_offsets.size(0));
     int n = static_cast<int>(b_tensors.size(1));
     int k = static_cast<int>(b_tensors.size(2)) * 8; // int4 -> int32 pack factor
-
-    // reconstruct b layout
-    // TODO: need some way to serialize this info to torch so we don't have to rebuild each time
-    // perhaps through the pack methods?
-    cutlass::DeviceAllocation<LayoutB_Reordered> layout_B_reordered_local;
-    std::vector<LayoutB_Reordered> layout_B_reordered_host(num_experts);
-    // for building this we only use n and k
-    for (int32_t i = 0; i < num_experts; ++i) {
-      // this happens after initialize (problem shape transposed) so we need to swap it, gets logical N, K
-      auto shape_B = cute::make_shape(n, k, Int<1>{});
-      // Repeat the reorder layout atom to tile the whole tensor shape 
-      layout_B_reordered_host[i] = tile_to_shape(LayoutAtomQuant{}, shape_B);
-    }
-    // copy to device
-    layout_B_reordered_local.reset(num_experts);
-    layout_B_reordered_local.copy_from_host(layout_B_reordered_host.data());
 
     auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(device);
@@ -231,7 +197,8 @@ uint64_t seed = 2020;
 
     // SwapAB so B operands come first
     MainloopArguments mainloop_arguments{
-        static_cast<const QuantType**>(b_ptrs.data_ptr()), layout_B_reordered_local.get(),
+        static_cast<const QuantType**>(b_ptrs.data_ptr()),
+        static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
         static_cast<const MmaType**>(a_ptrs.data_ptr()), static_cast<StrideA*>(a_strides.data_ptr()),
         static_cast<const cutlass::Array<ElementScale, 8> **>(b_group_scales_ptrs.data_ptr()),
         static_cast<StrideS*>(group_scale_strides.data_ptr()),
@@ -302,11 +269,13 @@ void mm(
     );
 }
 
-torch::Tensor encode_and_reorder_int4b(torch::Tensor const& b_tensors){
+std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(torch::Tensor const& b_tensors){
   TORCH_CHECK(b_tensors.dtype() == torch::kInt32);
   TORCH_CHECK(b_tensors.dim() == 3); // (experts, n, k) TODO: this shape is unclear how it should be passed in but seems correct so far
   TORCH_CHECK(b_tensors.is_contiguous());
   TORCH_CHECK(b_tensors.is_cuda());
+  // we will store it in int32 tensor; this is the number of elements we need
+  constexpr size_t layout_width = sizeof(LayoutB_Reordered) / sizeof(int32_t);
 
   torch::Tensor b_tensors_packed = torch::empty_like(b_tensors);
   int num_experts = static_cast<int>(b_tensors.size(0));
@@ -317,21 +286,48 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& b_tensors){
   auto b_packed_ptr = static_cast<QuantType*>(b_tensors_packed.data_ptr());
   
   // encode first
+  // TODO: replace with the faster cuda version
   cutlass::unified_encode_int4b(b_ptr, b_packed_ptr, num_experts * n * k);
 
-  // offsets and loop through experts
+  // offsets and loop through experts; this assumes each expert has same shape/layout
+  // TODO construct the packed layout tensor
+  using LayoutType = LayoutB_Reordered;
+  std::vector<LayoutType> layout_B_reordered_host(num_experts);
+  auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {n, k, Int<1>{}});
+  auto shape_B = cute::make_shape(n, k, Int<1>{});
+  auto layout_B = make_layout(shape_B, stride_B);
+  LayoutType layout_B_reordered = tile_to_shape(LayoutAtomQuant{}, shape_B);
+  
+  // reorder each expert weights
   for (int i = 0; i < num_experts; i++){
-    auto shape_B = cute::make_shape(n, k, Int<1>{});
-    auto stride_B_local = cutlass::make_cute_packed_stride(StrideB{}, {n, k, Int<1>{}});
-    auto layout_B = make_layout(shape_B, stride_B_local);
-    LayoutB_Reordered layout_B_reordered_local = tile_to_shape(LayoutAtomQuant{}, shape_B);
     auto offset = i * n * k * cutlass::sizeof_bits<QuantType>::value / 8; // bytes/storage type
-    cutlass::reorder_tensor(b_packed_ptr + offset, layout_B, layout_B_reordered_local);
+    cutlass::reorder_tensor(b_packed_ptr + offset, layout_B, layout_B_reordered);
   }
 
-  return b_tensors_packed;
+  // create cpu tensor
+  auto cpu_opts = torch::TensorOptions()
+                    .dtype(torch::kInt32)
+                    .device(torch::kCPU);
+  torch::Tensor layout_cpu =
+    torch::empty({num_experts, layout_width}, cpu_opts);
+
+  // copy to layout
+  int32_t* layout_data = layout_cpu.data_ptr<int32_t>();
+  for (int i = 0; i < num_experts; ++i) {
+    std::memcpy(
+        layout_data + static_cast<std::size_t>(i) * layout_width,  // dst (int32*)
+        &layout_B_reordered,                 // src (LayoutType*)
+        sizeof(LayoutType));                         // number of bytes
+  }
+
+  // move to gpu
+  torch::Tensor packed_layout =
+    layout_cpu.to(b_tensors.device(), /*non_blocking=*/false);
+
+  return {b_tensors_packed, packed_layout};
 
 }
+
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("cutlass_w4a8_moe_mm", &mm);
