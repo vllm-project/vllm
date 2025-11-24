@@ -98,21 +98,6 @@ to warm it up so that future builds are faster.
     <img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/a8ff0fcd-76e0-4e91-b72f-014e3fdb6b94">
 </p>
 
-## Update dependencies
-
-Several vLLM dependencies like xFormers depend on PyTorch and need
-to be updated accordingly. Rather than waiting for all of them to publish new
-releases (which would take too much time), they can be built from
-source to unblock the update process.
-
-### xFormers
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
-```
-
 ## Update all the different vLLM platforms
 
 Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
