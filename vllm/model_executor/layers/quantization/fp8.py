@@ -165,9 +165,11 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
     # deepGEMM on supported platforms with block-quantized weights
     if envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM and block_quant:
         if not has_deep_gemm():
-            logger.warning_once("DeepGEMM backend requested but not available.")
+            logger.warning_once(
+                "DeepGEMM backend requested but not available.", scope="local"
+            )
         elif is_deep_gemm_supported():
-            logger.info_once("Using DeepGEMM backend for FP8 MoE")
+            logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
 
     # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
@@ -176,7 +178,9 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
         and current_platform.is_device_capability(100)
         and block_quant
     ):
-        logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
+        logger.info_once(
+            "Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE", scope="local"
+        )
         return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
@@ -1032,7 +1036,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
             self.rocm_aiter_moe_enabled
             or self.use_marlin
@@ -1053,7 +1060,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,

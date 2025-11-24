@@ -328,10 +328,7 @@ def rotary_embedding(
 def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
-    # If removed, also need to remove contiguous in MatcherRMSNorm
-    input_contiguous = input.contiguous()
-    torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
+    torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(
@@ -2738,6 +2735,31 @@ def cpu_attention_with_kv_cache(
         scheduler_metadata,
         s_aux,
     )
+
+
+def cpu_gemm_wna16(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor | None,
+    g_idx: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    pack_factor: int,
+    isa_hint: str,
+) -> torch.Tensor:
+    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    torch.ops._C.cpu_gemm_wna16(
+        input,
+        q_weight,
+        output,
+        scales,
+        zeros,
+        g_idx,
+        bias,
+        pack_factor,
+        isa_hint,
+    )
+    return output
 
 
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):

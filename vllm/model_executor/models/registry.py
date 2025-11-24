@@ -157,6 +157,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
+    "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -288,6 +289,10 @@ _MULTIMODAL_MODELS = {
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "OpenCUAForConditionalGeneration": (
+        "opencua",
+        "OpenCUAForConditionalGeneration",
+    ),
     "InternS1ForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
@@ -597,7 +602,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                     mi_dict = json.load(file)
             except FileNotFoundError:
                 logger.debug(
-                    ("Cached model info file for class %s.%s not found"),
+                    "Cached model info file for class %s.%s not found",
                     self.module_name,
                     self.class_name,
                 )
@@ -605,7 +610,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
             if mi_dict["hash"] != module_hash:
                 logger.debug(
-                    ("Cached model info file for class %s.%s is stale"),
+                    "Cached model info file for class %s.%s is stale",
                     self.module_name,
                     self.class_name,
                 )
@@ -615,7 +620,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
             logger.debug(
-                ("Cached model info for class %s.%s error. "),
+                "Cached model info for class %s.%s error. ",
                 self.module_name,
                 self.class_name,
             )
@@ -650,14 +655,14 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
-                    ("Loaded model info for class %s.%s from cache"),
+                    "Loaded model info for class %s.%s from cache",
                     self.module_name,
                     self.class_name,
                 )
                 return mi
             else:
                 logger.debug(
-                    ("Cache model info for class %s.%s miss. Loading model instead."),
+                    "Cache model info for class %s.%s miss. Loading model instead.",
                     self.module_name,
                     self.class_name,
                 )
