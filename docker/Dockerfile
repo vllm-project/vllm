@@ -317,7 +317,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y --no-install-recommends \
         software-properties-common \
         curl \
-        wget \
         sudo \
         python3-pip \
         ffmpeg \
