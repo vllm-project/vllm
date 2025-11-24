@@ -22,8 +22,11 @@ In the example above, the KV cache in the first block can be uniquely identified
     We only cache full blocks.
 
 !!! note "Note 2"
-    In previous versions, the above hash key structure was not 100% collision free. As of v0.11, the default hash is "sha256", which uses Pickle for object serialization before hashing.
-    For `vllm serve`, the relevant option to change this hashing function is `--prefix-caching-hash-algo {sha256,sha256_cbor}`. "sha256_cbor" provides a reproducible, cross-language compatible hash.
+    In previous versions, the hash key was not guaranteed to be collision-free. As of v0.11, the default hashing algorithm is `sha256`, which addresses collision risks.
+
+    For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
+    - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
+    - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
 
 
 **A hashing example with multi-modality inputs**  
