@@ -545,6 +545,8 @@ class Worker(WorkerBase):
             and compilation_config.pass_config.enable_sequence_parallelism
             and forward_pass
         ):
+            # currently only supported by V1 GPUModelRunner
+            assert isinstance(self.model_runner, GPUModelRunner)
             num_scheduled_tokens_np = np.array(
                 list(scheduler_output.num_scheduled_tokens.values()),
                 dtype=np.int32,
