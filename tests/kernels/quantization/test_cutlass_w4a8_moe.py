@@ -65,11 +65,12 @@ def cutlass_preprocess(
     """
     reorder/encode the expert weights
     pack the scale weights
+    return the packed layout/strides to pass to grouped gemm
     """
     # i dont think the shape matters as long as contiguous and one after the other
     w_s_packed = ops.cutlass_pack_scale_fp8(torch.cat(w_s_experts))
-    w_q_packed = ops.cutlass_encode_and_reorder_int4b_grouped(torch.stack(w_q_experts)) # expects dim 3
-    return w_q_packed, w_s_packed
+    w_q_packed, packed_layout = ops.cutlass_encode_and_reorder_int4b_grouped(torch.stack(w_q_experts)) # expects dim 3
+    return w_q_packed, w_s_packed, packed_layout
 
 
 GROUP_SIZE = 128
@@ -77,6 +78,11 @@ NUM_EXPERTS = [8, 64]
 Ks = [512, 256] # need divisible by gorup size
 Ns = [2048, 1024]
 ALIGNMENT = 16 # torch scaled mm alignment for M, needed for reference check
+
+# faster test
+# Ks = [512]
+# Ns = [2048]
+# NUM_EXPERTS = [4]
 
 if __name__ == '__main__':
     current_platform.seed_everything(42)
@@ -112,7 +118,7 @@ if __name__ == '__main__':
                     w_qs.append(w_q)
                     w_ss.append(w_s)
                 
-                w_q_packed, w_s_packed = cutlass_preprocess(w_qs, w_ss)
+                w_q_packed, w_s_packed, packed_layout = cutlass_preprocess(w_qs, w_ss)
                 problem_sizes = torch.tensor([[N, M, K] for M in Ms], dtype=torch.int32).cuda()
                 expert_offsets = torch.cat([
                     torch.tensor([0], dtype=torch.int64),
@@ -120,7 +126,7 @@ if __name__ == '__main__':
                 ]).cuda()
 
                 # doesnt matter for now, we are constructing layout at runtime
-                b_strides = torch.tensor(1.0).cuda() 
+                b_strides = packed_layout
                 # since stride is like `(_1,2048,0)` it takes 2xint64 = 16 bytes 
                 # we neeed to have each entry be like (2048, 0) in int64 to make the bytes align
                 group_scale_strides = torch.zeros((num_experts, 2), dtype=torch.int64).cuda()
