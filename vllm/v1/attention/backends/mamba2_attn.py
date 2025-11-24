@@ -317,7 +317,6 @@ class Mamba2AttentionMetadataBuilder(
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
                     :num_decode_tokens
                 ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
 
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
@@ -325,7 +324,6 @@ class Mamba2AttentionMetadataBuilder(
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
                     :num_decode_tokens
                 ]
-                block_idx_last_computed_token[num_decodes:] = 0
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,

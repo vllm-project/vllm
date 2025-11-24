@@ -136,7 +136,6 @@ class Mamba1AttentionMetadataBuilder(
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
                     :num_decode_tokens
                 ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
 
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
@@ -144,7 +143,6 @@ class Mamba1AttentionMetadataBuilder(
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
                     :num_decode_tokens
                 ]
-                block_idx_last_computed_token[num_decodes:] = 0
 
         return Mamba1AttentionMetadata(
             query_start_loc_p=query_start_loc_p,
