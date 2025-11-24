@@ -410,13 +410,6 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         """Decode path orchestration - handled in the layer."""
         raise NotImplementedError
 
-    def supports_compiled_split(self) -> bool:
-        """Whether this implementation supports prefill/decode split entrypoints.
-
-        Default False; backends should override when ready.
-        """
-        return False
-
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype != "auto"

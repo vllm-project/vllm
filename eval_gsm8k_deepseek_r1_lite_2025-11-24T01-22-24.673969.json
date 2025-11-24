@@ -1,0 +1,157 @@
+{
+  "results": {
+    "gsm8k": {
+      "alias": "gsm8k",
+      "exact_match,strict-match": 0.643,
+      "exact_match_stderr,strict-match": 0.015158521721486767,
+      "exact_match,flexible-extract": 0.676,
+      "exact_match_stderr,flexible-extract": 0.014806864733738859
+    }
+  },
+  "group_subtasks": {
+    "gsm8k": []
+  },
+  "configs": {
+    "gsm8k": {
+      "task": "gsm8k",
+      "tag": [
+        "math_word_problems"
+      ],
+      "dataset_path": "gsm8k",
+      "dataset_name": "main",
+      "training_split": "train",
+      "test_split": "test",
+      "fewshot_split": "train",
+      "doc_to_text": "Question: {{question}}\nAnswer:",
+      "doc_to_target": "{{answer}}",
+      "unsafe_code": false,
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "num_fewshot": 8,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": false,
+          "regexes_to_ignore": [
+            ",",
+            "\\$",
+            "(?s).*#### ",
+            "\\.$"
+          ]
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:",
+          "</s>",
+          "<|im_end|>"
+        ],
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "strict-match",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "#### (\\-?[0-9\\.\\,]+)"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        },
+        {
+          "name": "flexible-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "group_select": -1,
+              "regex_pattern": "(-?[$0-9.,]{2,})|(-?[0-9]+)"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 3.0,
+        "pretrained": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "trust_remote_code": true
+      }
+    }
+  },
+  "versions": {
+    "gsm8k": 3.0
+  },
+  "n-shot": {
+    "gsm8k": 8
+  },
+  "higher_is_better": {
+    "gsm8k": {
+      "exact_match": true
+    }
+  },
+  "n-samples": {
+    "gsm8k": {
+      "original": 1319,
+      "effective": 1000
+    }
+  },
+  "config": {
+    "model": "vllm",
+    "model_args": "pretrained=deepseek-ai/DeepSeek-R1-Distill-Llama-8B,trust_remote_code=true",
+    "batch_size": "8",
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 1000.0,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": "28d7e136b",
+  "date": 1763946862.1698308,
+  "pretty_env_info": "PyTorch version: 2.9.0+cu128\nIs debug build: False\nCUDA used to build PyTorch: 12.8\nROCM used to build PyTorch: N/A\n\nOS: Ubuntu 24.04.3 LTS (x86_64)\nGCC version: (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0\nClang version: Could not collect\nCMake version: version 3.28.3\nLibc version: glibc-2.39\n\nPython version: 3.12.11 | packaged by conda-forge | (main, Jun  4 2025, 14:45:31) [GCC 13.3.0] (64-bit runtime)\nPython platform: Linux-5.15.0-160-generic-x86_64-with-glibc2.39\nIs CUDA available: True\nCUDA runtime version: 12.8.93\nCUDA_MODULE_LOADING set to: \nGPU models and configuration: GPU 0: NVIDIA A100-SXM4-80GB\nNvidia driver version: 570.172.08\ncuDNN version: Probably one of the following:\n/usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9.8.0\n/usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9.8.0\nIs XPU available: False\nHIP runtime version: N/A\nMIOpen runtime version: N/A\nIs XNNPACK available: True\n\nCPU:\nArchitecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           46 bits physical, 57 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  152\nOn-line CPU(s) list:                     0-151\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Xeon(R) Platinum 8368 CPU @ 2.40GHz\nCPU family:                              6\nModel:                                   106\nThread(s) per core:                      2\nCore(s) per socket:                      38\nSocket(s):                               2\nStepping:                                6\nCPU(s) scaling MHz:                      31%\nCPU max MHz:                             3400.0000\nCPU min MHz:                             800.0000\nBogoMIPS:                                4800.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 invpcid_single ssbd mba ibrs ibpb stibp ibrs_enhanced tpr_shadow vnmi flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local split_lock_detect wbnoinvd dtherm ida arat pln pts avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq la57 rdpid fsrm md_clear pconfig flush_l1d arch_capabilities\nVirtualization:                          VT-x\nL1d cache:                               3.6 MiB (76 instances)\nL1i cache:                               2.4 MiB (76 instances)\nL2 cache:                                95 MiB (76 instances)\nL3 cache:                                114 MiB (2 instances)\nNUMA node(s):                            2\nNUMA node0 CPU(s):                       0-37,76-113\nNUMA node1 CPU(s):                       38-75,114-151\nVulnerability Gather data sampling:      Mitigation; Microcode\nVulnerability Indirect target selection: Mitigation; Aligned branch/return thunks\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Mitigation; Clear CPU buffers; SMT vulnerable\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl and seccomp\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\n\nVersions of relevant libraries:\n[pip3] numpy==2.2.6\n[pip3] nvidia-cublas-cu12==12.8.4.1\n[pip3] nvidia-cuda-cupti-cu12==12.8.90\n[pip3] nvidia-cuda-nvrtc-cu12==12.8.93\n[pip3] nvidia-cuda-runtime-cu12==12.8.90\n[pip3] nvidia-cudnn-cu12==9.10.2.21\n[pip3] nvidia-cudnn-frontend==1.16.0\n[pip3] nvidia-cufft-cu12==11.3.3.83\n[pip3] nvidia-curand-cu12==10.3.9.90\n[pip3] nvidia-cusolver-cu12==11.7.3.90\n[pip3] nvidia-cusparse-cu12==12.5.8.93\n[pip3] nvidia-cusparselt-cu12==0.7.1\n[pip3] nvidia-nccl-cu12==2.27.5\n[pip3] nvidia-nvjitlink-cu12==12.8.93\n[pip3] nvidia-nvtx-cu12==12.8.90\n[pip3] torch==2.9.0\n[pip3] torchaudio==2.9.0\n[pip3] torchvision==0.24.0\n[pip3] triton==3.5.0\n[conda] numpy                     2.2.6                    pypi_0    pypi\n[conda] nvidia-cublas-cu12        12.8.4.1                 pypi_0    pypi\n[conda] nvidia-cuda-cupti-cu12    12.8.90                  pypi_0    pypi\n[conda] nvidia-cuda-nvrtc-cu12    12.8.93                  pypi_0    pypi\n[conda] nvidia-cuda-runtime-cu12  12.8.90                  pypi_0    pypi\n[conda] nvidia-cudnn-cu12         9.10.2.21                pypi_0    pypi\n[conda] nvidia-cudnn-frontend     1.16.0                   pypi_0    pypi\n[conda] nvidia-cufft-cu12         11.3.3.83                pypi_0    pypi\n[conda] nvidia-curand-cu12        10.3.9.90                pypi_0    pypi\n[conda] nvidia-cusolver-cu12      11.7.3.90                pypi_0    pypi\n[conda] nvidia-cusparse-cu12      12.5.8.93                pypi_0    pypi\n[conda] nvidia-cusparselt-cu12    0.7.1                    pypi_0    pypi\n[conda] nvidia-nccl-cu12          2.27.5                   pypi_0    pypi\n[conda] nvidia-nvjitlink-cu12     12.8.93                  pypi_0    pypi\n[conda] nvidia-nvtx-cu12          12.8.90                  pypi_0    pypi\n[conda] torch                     2.9.0                    pypi_0    pypi\n[conda] torchaudio                2.9.0                    pypi_0    pypi\n[conda] torchvision               0.24.0                   pypi_0    pypi\n[conda] triton                    3.5.0                    pypi_0    pypi",
+  "transformers_version": "4.57.1",
+  "lm_eval_version": "0.4.9.1",
+  "upper_git_hash": null,
+  "tokenizer_pad_token": [
+    "<｜end▁of▁sentence｜>",
+    "128001"
+  ],
+  "tokenizer_eos_token": [
+    "<｜end▁of▁sentence｜>",
+    "128001"
+  ],
+  "tokenizer_bos_token": [
+    "<｜begin▁of▁sentence｜>",
+    "128000"
+  ],
+  "eot_token_id": 128001,
+  "max_length": 131072,
+  "task_hashes": {},
+  "model_source": "vllm",
+  "model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "model_name_sanitized": "deepseek-ai__DeepSeek-R1-Distill-Llama-8B",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "start_time": 2510301.863168998,
+  "end_time": 2510786.864796024,
+  "total_evaluation_time_seconds": "485.0016270256601"
+}

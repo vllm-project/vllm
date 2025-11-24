@@ -198,9 +198,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
     can_return_lse_for_decode: bool = True
 
-    def supports_compiled_split(self) -> bool:
-        return True
-
     def __init__(
         self,
         num_heads: int,

@@ -766,8 +766,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-        self._use_compiled_split = False
-
     def forward(
         self,
         q: torch.Tensor,
