@@ -139,6 +139,16 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        """vLLM이 prompt 업데이트를 처리하도록 False 반환."""
+        return False
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
