@@ -395,6 +395,9 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: dict[str, int] = {}
         self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
@@ -689,6 +692,7 @@ class GPUModelRunner(
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.num_prompt_logprobs.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -756,6 +760,13 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+
+            if sampling_params and sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[req_id] = (
+                    self.input_batch.vocab_size
+                    if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs
+                )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -2468,7 +2479,9 @@ class GPUModelRunner(
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
+        cu_num_new_tokens: list[int] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2481,6 +2494,12 @@ class GPUModelRunner(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                 )
+                if logprobs_tensors:
+                    # Needed for extracting logprobs when spec decoding.
+                    # This must be done prior to discarding sampled tokens.
+                    cu_num_new_tokens = [0]
+                    for toks in valid_sampled_token_ids:
+                        cu_num_new_tokens.append(cu_num_new_tokens[-1] + len(toks))
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()
@@ -2508,10 +2527,6 @@ class GPUModelRunner(
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        logprobs_tensors = sampler_output.logprobs_tensors
-        cu_num_accepted_tokens = (
-            [0] if spec_decode_metadata and logprobs_tensors else None
-        )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
@@ -2519,11 +2534,6 @@ class GPUModelRunner(
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
             num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
-
-            if cu_num_accepted_tokens is not None:
-                cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + num_sampled_ids
-                )
 
             if not sampled_ids:
                 continue
@@ -2546,7 +2556,7 @@ class GPUModelRunner(
             req_state.output_token_ids.extend(sampled_ids)
 
         logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_accepted_tokens)
+            logprobs_tensors.tolists(cu_num_new_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
@@ -2674,7 +2684,7 @@ class GPUModelRunner(
                         scheduler_output, self.vllm_config
                     )
                 if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.input_batch.num_prompt_logprobs, (
+                    assert not self.num_prompt_logprobs, (
                         "--kv-sharing-fast-prefill produces incorrect "
                         "logprobs for prompt tokens, tokens, please disable "
                         "it when the requests need prompt logprobs"
@@ -3362,6 +3372,8 @@ class GPUModelRunner(
                 old_global_expert_indices,
                 rank_mapping,
             )
+            if self.eplb_state.is_async:
+                self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
         if (
             self.vllm_config.compilation_config.mode
@@ -3439,7 +3451,7 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         num_scheduled_tokens: dict[str, int],
     ) -> dict[str, LogprobsTensors | None]:
-        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+        num_prompt_logprobs_dict = self.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
@@ -3450,7 +3462,10 @@ class GPUModelRunner(
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
         for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
-            num_tokens = num_scheduled_tokens[req_id]
+            num_tokens = num_scheduled_tokens.get(req_id)
+            if num_tokens is None:
+                # This can happen if the request was preempted in prefill stage.
+                continue
 
             # Get metadata for this request.
             request = self.requests[req_id]
@@ -3729,6 +3744,31 @@ class GPUModelRunner(
             dp_rank = self.parallel_config.data_parallel_rank
             num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
+        # filter out the valid batch descriptor
+        _cg_mode, batch_descriptor = (
+            self.cudagraph_dispatcher.dispatch(
+                BatchDescriptor(
+                    num_tokens=num_tokens_after_padding,
+                    uniform_decode=uniform_decode,
+                    has_lora=activate_lora and self.lora_config is not None,
+                )
+            )
+            if not is_profile
+            else (CUDAGraphMode.NONE, None)
+        )
+        if cudagraph_runtime_mode is not None:
+            # we allow forcing NONE when the dispatcher disagrees to support
+            # warm ups for cudagraph capture
+            assert (
+                cudagraph_runtime_mode == CUDAGraphMode.NONE
+                or cudagraph_runtime_mode == _cg_mode
+            ), (
+                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
+            )
+        else:
+            cudagraph_runtime_mode = _cg_mode
+
         attn_metadata: PerLayerAttnMetadata | None = None
 
         # If force_attention is True, we always capture attention. Otherwise,
@@ -3802,31 +3842,6 @@ class GPUModelRunner(
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens_after_padding, None, False
                 )
-
-            # filter out the valid batch descriptor
-            _cg_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    BatchDescriptor(
-                        num_tokens=num_tokens_after_padding,
-                        uniform_decode=uniform_decode,
-                        has_lora=activate_lora and self.lora_config is not None,
-                    )
-                )
-                if not is_profile
-                else (CUDAGraphMode.NONE, None)
-            )
-            if cudagraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for cudagraph capture
-                assert (
-                    cudagraph_runtime_mode == CUDAGraphMode.NONE
-                    or cudagraph_runtime_mode == _cg_mode
-                ), (
-                    f"Cudagraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
-                )
-            else:
-                cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
                 # Adjust values to reflect a single ubatch.
@@ -4620,7 +4635,7 @@ class GPUModelRunner(
             """
             for backend in backends:
                 is_supported = False
-                for supported_size in backend.supported_kernel_block_sizes:
+                for supported_size in backend.get_supported_kernel_block_sizes():
                     if isinstance(supported_size, int):
                         if block_size == supported_size:
                             is_supported = True
@@ -4651,7 +4666,7 @@ class GPUModelRunner(
         all_int_supported_sizes = set(
             supported_size
             for backend in backends
-            for supported_size in backend.supported_kernel_block_sizes
+            for supported_size in backend.get_supported_kernel_block_sizes()
             if isinstance(supported_size, int)
         )
 
