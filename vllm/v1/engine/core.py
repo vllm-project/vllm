@@ -1242,19 +1242,21 @@ class DPEngineCoreProc(EngineCoreProc):
         
         # Check if this rank is masked (GPU unhealthy)
         is_masked = self.check_if_masked_by_eplb()
+        last_masked_status = getattr(self, '_last_masked_status', False)
         
-        if counts != self.last_counts or is_masked:
+        # Only publish if counts OR masked status changed
+        if counts != self.last_counts or is_masked != last_masked_status:
             self.last_counts = counts
             
             # Log when masked status changes
-            if is_masked and not getattr(self, '_last_masked_status', False):
+            if is_masked and not last_masked_status:
                 logger.warning(
                     "[GPU_FT] DP rank %d: Publishing masked status (GPU unhealthy). "
                     "Load balancer will stop routing requests to this rank.",
                     self.dp_rank
                 )
                 self._last_masked_status = True
-            elif not is_masked and getattr(self, '_last_masked_status', False):
+            elif not is_masked and last_masked_status:
                 logger.info(
                     "[GPU_FT] DP rank %d: Publishing unmasked status (GPU recovered). "
                     "Load balancer will resume routing requests to this rank.",
