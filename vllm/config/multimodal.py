@@ -173,6 +173,12 @@ class MultiModalConfig:
         # We need to import the real type here (deferred to avoid circular import).
         from vllm.attention.backends.registry import AttentionBackendEnum
 
+        if isinstance(value, str) and value.upper() == "XFORMERS":
+            raise ValueError(
+                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+                "details). Please select a supported attention backend."
+            )
+
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
