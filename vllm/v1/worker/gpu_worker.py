@@ -558,6 +558,7 @@ class Worker(WorkerBase):
                     num_reqs=len(num_scheduled_tokens_np),
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
+                    use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
                 )
             )
             all_gather_tensors = {
