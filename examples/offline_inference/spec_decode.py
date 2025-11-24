@@ -33,6 +33,15 @@ IMAGE_URLS = [
     "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/horsepony.jpg",
 ]
 
+# from fr-spec https://github.com/thunlp/FR-Spec/blob/29d0136b43d372d7d48806db8702cc9c813fdccf/evaluation/mt_bench/eval.py#L97
+SYSTEM_PROMPT = (
+    "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. "
+    "Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. "
+    "Please ensure that your responses are socially unbiased and positive in nature.\n\n"
+    "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. "
+    "If you don't know the answer to a question, please don't share false information."
+)
+
 
 def get_custom_mm_prompts(num_prompts):
     prompts = []
@@ -54,15 +63,6 @@ def run_mtbench_multiturn(llm, sampling_params, num_prompts, max_num_seqs):
     from tqdm import tqdm
     ds = load_dataset("philschmid/mt-bench", split="train")
 
-    # from fr-spec https://github.com/thunlp/FR-Spec/blob/29d0136b43d372d7d48806db8702cc9c813fdccf/evaluation/mt_bench/eval.py#L97
-    MTBENCH_SYSTEM_PROMPT = (
-        "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. "
-        "Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. "
-        "Please ensure that your responses are socially unbiased and positive in nature.\n\n"
-        "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. "
-        "If you don't know the answer to a question, please don't share false information."
-    )
-
     outputs = []
     assert max_num_seqs == 1, "only works for max_num_seqs==1 right now"
     total_samples = min(sum([len(data["turns"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
@@ -70,9 +70,34 @@ def run_mtbench_multiturn(llm, sampling_params, num_prompts, max_num_seqs):
 
     for i, data in tqdm(enumerate(ds), total=total_samples):
         if i >= total_samples: break
-        messages = [{"role": "system", "content": MTBENCH_SYSTEM_PROMPT}]
-        for i in range(len(data["turns"])):
-            qs = data["turns"][i]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for j in range(len(data["turns"])):
+            qs = data["turns"][j]
+            messages.append({"role": "user", "content": qs})
+            output = llm.chat(messages, sampling_params=sampling_params, use_tqdm=False)[0]
+            outputs.append(output)
+            messages.append({
+                "role": "assistant",
+                "content": output.outputs[0].text
+            })
+    return outputs
+
+
+def run_long_spec_bench_multiturn(llm, sampling_params, num_prompts, max_num_seqs):
+    from datasets import load_dataset
+    from tqdm import tqdm
+    ds = load_dataset("eturok/long-spec-bench", split="train")
+
+    outputs = []
+    assert max_num_seqs == 1, "only works for max_num_seqs==1 right now"
+    total_samples = min(sum([len(data["conversation"]) for data in ds]), num_prompts if num_prompts is not None else float('inf'))
+    print(f'Running on {total_samples} samples.')
+
+    for i, data in tqdm(enumerate(ds), total=total_samples):
+        if i >= total_samples: break
+        messages = [{"role": "system", "content":SYSTEM_PROMPT}]
+        for j in range(len(data["conversation"])):
+            qs = data["conversation"][j]["content"]
             messages.append({"role": "user", "content": qs})
             output = llm.chat(messages, sampling_params=sampling_params, use_tqdm=False)[0]
             outputs.append(output)
@@ -129,7 +154,7 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     args.custom_skip_chat_template = True
 
-    if args.dataset_path == "philschmid/mt-bench-multiturn":
+    if args.dataset_path in ["philschmid/mt-bench-multiturn", "eturok/long-spec-bench"]:
         prompts = None
     elif not args.custom_mm_prompts:
         prompts = get_samples(args, tokenizer)
@@ -199,6 +224,8 @@ def main(args):
         # # actually run everything
         # print('Warmup end\nStart the actual run')
         outputs = run_mtbench_multiturn(llm, sampling_params, args.num_prompts, args.max_num_seqs)
+    elif args.dataset_path == "eturok/long-spec-bench":
+        outputs = run_long_spec_bench_multiturn(llm, sampling_params, args.num_prompts, args.max_num_seqs)
     elif not args.custom_mm_prompts:
         outputs = llm.generate(
             [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
