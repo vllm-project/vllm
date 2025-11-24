@@ -357,7 +357,6 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
-template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm_sm120(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
@@ -371,7 +370,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
   using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 
-  using ElementC = OutType;
+  // NOTE: For SM120 it seems templating the output type is not supported and
+  // we need to hardcode the output type to bfloat16
+  using ElementC = cutlass::bfloat16_t;
   using ElementD = ElementC;
   using ElementAccumulator = float;
   // Layout definitions
@@ -443,17 +444,12 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
   torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
-
-  // For SM120, A and B strides must be the same
-  TORCH_CHECK(a.stride(0) == b.stride(1),
-              "For SM120 NVFP4 MOE, A and B strides must be equal. "
-              "Got a.stride(0)=",
-              a.stride(0), " and b.stride(1)=", b.stride(1));
-
-  torch::Tensor ab_strides =
-      torch::full({num_experts}, a.stride(0) * 2, options_int);
-  torch::Tensor c_strides =
+  torch::Tensor c_strides1 =
       torch::full({num_experts}, output.stride(0), options_int);
+  torch::Tensor a_strides1 =
+      torch::full({num_experts}, a.stride(0) * 2, options_int);
+  torch::Tensor b_strides1 =
+      torch::full({num_experts}, b.stride(1) * 2, options_int);
 
   run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -484,9 +480,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   // Mainloop Arguments
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementType**>(a_ptrs.data_ptr()),
-      static_cast<StrideA*>(ab_strides.data_ptr()),
+      static_cast<StrideA*>(a_strides1.data_ptr()),
       static_cast<const ElementType**>(b_ptrs.data_ptr()),
-      static_cast<StrideB*>(ab_strides.data_ptr()),
+      static_cast<StrideB*>(b_strides1.data_ptr()),
       static_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),
       static_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
@@ -496,9 +492,9 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},  // epilogue.thread
       nullptr,
-      static_cast<StrideC*>(c_strides.data_ptr()),
+      static_cast<StrideC*>(c_strides1.data_ptr()),
       static_cast<ElementD**>(out_ptrs.data_ptr()),
-      static_cast<StrideC*>(c_strides.data_ptr())};
+      static_cast<StrideC*>(c_strides1.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
   fusion_args.alpha_ptr_array =
       reinterpret_cast<float**>(alpha_ptrs.data_ptr());
@@ -545,7 +541,7 @@ void run_fp4_blockwise_scaled_group_mm(
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
   if (version_num >= 120 && version_num < 130) {
-    run_fp4_blockwise_scaled_group_mm_sm120<OutType>(
+    run_fp4_blockwise_scaled_group_mm_sm120(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
     return;
@@ -622,6 +618,15 @@ void cutlass_fp4_group_mm(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
   } else {
+#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+    int32_t version_num = get_sm_version_num();
+    if (version_num >= 120 && version_num < 130) {
+      TORCH_CHECK_NOT_IMPLEMENTED(
+          false,
+          "SM120 NVFP4 MOE only supports bfloat16 output, got: ",
+          output.scalar_type());
+    }
+#endif
     run_fp4_blockwise_scaled_group_mm<cutlass::half_t>(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
