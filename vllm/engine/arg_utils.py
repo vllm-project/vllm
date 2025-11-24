@@ -1614,7 +1614,7 @@ class EngineArgs:
 
         if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
             logger.info(
-                "Disabling NCCL for DP synchronization since async scheduling is enabled."
+                "Disabling NCCL for DP synchronization when using async scheduling."
             )
             self.disable_nccl_for_dp_synchronization = True
 
