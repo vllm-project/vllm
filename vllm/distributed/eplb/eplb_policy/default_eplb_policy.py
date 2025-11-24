@@ -212,7 +212,7 @@ class DefaultEplb(EplbPolicy):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_global_expert_indices: torch.Tensor,
+        old_global_expert_indices: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
