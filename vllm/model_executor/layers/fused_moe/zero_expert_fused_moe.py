@@ -34,6 +34,25 @@ class ZeroExpertFusedMoE(FusedMoE):
             "ZeroExpertFusedMoE does not support external custom_routing_function. "
             "It manages its own for routing memoization."
         )
+
+        # Automatically slice router's e_score_correction_bias to only include
+        # real experts (not zero_experts) for the base FusedMoE.
+        # The full bias will be used temporarily in forward() for routing.
+        if (
+            router is not None
+            and hasattr(router, "e_score_correction_bias")
+            and "num_experts" in kwargs
+        ):
+            num_real_experts = kwargs["num_experts"]
+            router_bias = router.e_score_correction_bias
+            user_bias = kwargs.get("e_score_correction_bias")
+
+            # Use router's bias if:
+            # 1. User didn't provide bias, or
+            # 2. User provided full bias (same size as router)
+            if user_bias is None or user_bias.shape[0] == router_bias.shape[0]:
+                kwargs["e_score_correction_bias"] = router_bias[:num_real_experts]
+
         super().__init__(**kwargs)
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type

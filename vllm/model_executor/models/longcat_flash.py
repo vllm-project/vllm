@@ -292,12 +292,6 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        # Slice e_score_correction_bias to only include real experts (not zero_experts)
-        # ZeroExpertFusedMoE will handle zero experts internally
-        e_score_correction_bias_for_experts = self.router.e_score_correction_bias[
-            :num_experts
-        ]
-
         self.experts = ZeroExpertFusedMoE(
             zero_expert_num=config.zero_expert_num,
             zero_expert_type=config.zero_expert_type,
@@ -308,7 +302,8 @@ class LongcatMoe(nn.Module):
             intermediate_size=intermediate_size,
             reduce_results=True,
             params_dtype=params_dtype,
-            e_score_correction_bias=e_score_correction_bias_for_experts,
+            # e_score_correction_bias is automatically sliced by ZeroExpertFusedMoE
+            # from router.e_score_correction_bias to only include real experts
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
