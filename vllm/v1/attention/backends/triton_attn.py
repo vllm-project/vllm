@@ -129,15 +129,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 capture_sizes,
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
-
-            # If the updated threshold becomes significantly larger than the
-            # initial value, it is reset to zero. This enforces the use of the
-            # 2D kernel only and ensures that the size of the allocated
-            # intermediate structures remains bounded.
-            if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
-                self.seq_threshold_3D = upd_seq_threshold_3D
-            else:
-                self.seq_threshold_3D = 0
+            self.seq_threshold_3D = upd_seq_threshold_3D
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
