@@ -1,7 +1,6 @@
 #ifndef CPU_ATTN_HPP
 #define CPU_ATTN_HPP
 
-#include <unistd.h>
 #include <type_traits>
 #include <cstddef>
 
@@ -12,9 +11,10 @@
 #include "cpu_types.hpp"
 #include "scratchpad_manager.h"
 #include "cpu_attn_macros.h"
+#include "utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16 };
+enum class ISA { AMX, VEC, VEC16, NEON };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -142,6 +142,12 @@ struct AttentionMetadata {
         break;
       case ISA::VEC:
         ss << "VEC, ";
+        break;
+      case ISA::VEC16:
+        ss << "VEC16, ";
+        break;
+      case ISA::NEON:
+        ss << "NEON, ";
         break;
     }
     ss << "workitem_group_num: " << workitem_group_num
@@ -754,7 +760,7 @@ class AttentionScheduler {
         return l2_cache_size >> 1;  // use 50% of L2 cache
       }
       // Fallback if sysctlbyname fails
-      return 128 * 1024 >> 1;  // use 50% of 128KB
+      return 128LL * 1024 >> 1;  // use 50% of 128KB
 #else
       long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
       TORCH_CHECK_NE(l2_cache_size, -1);
@@ -841,7 +847,7 @@ struct VecTypeTrait<c10::BFloat16> {
 };
 #endif
 
-#if !defined(__powerpc__)
+#if !defined(__powerpc__) && !defined(__s390x__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;

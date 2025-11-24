@@ -73,12 +73,11 @@ function cpu_tests() {
     pytest -x -s -v \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
-  # Note: disable it until supports V1
-  # Run AWQ test
-  # docker exec cpu-test-"$NUMA_NODE" bash -c "
-  #   set -e
-  #   pytest -x -s -v \
-  #   tests/quantization/test_ipex_quant.py"
+  # Run AWQ/GPTQ test
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -x -s -v \
+    tests/quantization/test_cpu_wna16.py"
 
   # Run multi-lora tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "

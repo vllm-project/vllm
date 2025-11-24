@@ -949,6 +949,31 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
+    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
+        return (n, k) in [
+            (8192, 4096),
+            (1280, 8192),
+            (16384, 53248),
+            (106496, 16384),
+            (57344, 8192),
+            (8192, 2048),
+            (2560, 8192),
+            (10240, 8192),
+            (16384, 16384),
+            (8192, 28672),
+            (28672, 8192),
+            (18432, 16384),
+            (8192, 1024),
+            (7168, 8192),
+            (5120, 8192),
+            (8192, 8192),
+            (8192, 7168),
+            (14336, 8192),
+            (8192, 14336),
+            (8192, 3584),
+        ]
+
+    @staticmethod
     def shuffle_weight(
         self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:

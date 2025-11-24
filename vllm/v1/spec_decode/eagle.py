@@ -86,9 +86,9 @@ class EagleProposer:
 
         self.use_cuda_graph = False
 
-        compilation_config = self.vllm_config.compilation_config
-        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = compilation_config.cudagraph_mode
+        self.compilation_config = self.vllm_config.compilation_config
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
             ):
@@ -103,22 +103,24 @@ class EagleProposer:
                 and not self.speculative_config.enforce_eager
             )
 
-        self.cudagraph_batch_sizes = (
-            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
-            if self.use_cuda_graph
-            else []
-        )
-
-        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
-            # M-RoPE need (3, max_num_tokens)
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -267,7 +269,10 @@ class EagleProposer:
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
         cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -357,7 +362,10 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+        ):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -397,10 +405,13 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-
+            # For data integrity when async scheduling, we shouldn't use in place
+            # operations in case they are modified in next step's `prepare_input`
+            # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            # This is an out-of-place operation to avoid modifying the original tensor.
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 
@@ -484,7 +495,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -499,7 +510,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -510,9 +521,10 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        return torch.tensor(
+        next_token_ids = torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
+        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -764,7 +776,10 @@ class EagleProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            if (
+                self.use_cuda_graph
+                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            ):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
                 cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
@@ -1016,8 +1031,11 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    and torch.equal(
-                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    and torch.allclose(
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
+                        rtol=1e-5,
+                        atol=1e-7,
                     )
                 ):
                     share_embeddings = True
@@ -1098,7 +1116,10 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            cudagraphs_enabled
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
