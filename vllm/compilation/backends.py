@@ -429,7 +429,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 self.vllm_backend.compiler_manager.compile(
                     submod,
                     args,
-                    self.inductor_config,
+                    self.vllm_backend.inductor_config,
                     self.compilation_config,
                     graph_index=index,
                     num_graphs=len(self.compile_submod_names),
@@ -559,11 +559,11 @@ class VllmBackend:
             self.compilation_config
         )
 
+        self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
-        config = self.compilation_config
         self.post_grad_pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -574,7 +574,6 @@ class VllmBackend:
         # We want to avoid PostGradPassManager in CompilationConfig because
         # in future we need PostGradPassManager.uuid() to be executed only
         # at compile time.
-        self.inductor_config = deepcopy(config.inductor_compile_config)
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in self.inductor_config:
             if isinstance(self.inductor_config[PASS_KEY], PostGradPassManager):
