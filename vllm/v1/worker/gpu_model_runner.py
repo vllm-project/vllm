@@ -3150,6 +3150,8 @@ class GPUModelRunner(
                 )
 
         if use_padded_batch_for_ngram:
+            assert self.speculative_config is not None
+            assert isinstance(self.drafter, NgramProposerGPU)
             sampled_token_ids = sampler_output.sampled_token_ids
             if input_fits_in_drafter:
                 # Fast path: GPU-only operation when input fits in drafter
@@ -3295,7 +3297,7 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-        if self.speculative_config.method == "ngram":
+        if spec_config.method == "ngram":
             # TODO:(patchy) NGram GPU proposal
             if isinstance(self.drafter, NgramProposer):
                 assert isinstance(sampled_token_ids, list), (
@@ -3308,7 +3310,7 @@ class GPUModelRunner(
                     self.input_batch.token_ids_cpu,
                     self.input_batch.spec_decode_unsupported_reqs,
                 )
-        elif self.speculative_config.method == "ngram_gpu":
+        elif spec_config.method == "ngram_gpu":
             # GPU-accelerated ngram proposer
             assert isinstance(self.drafter, NgramProposerGPU)
             assert isinstance(sampled_token_ids, torch.Tensor), (
