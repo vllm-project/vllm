@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.platforms import current_platform
 
 # ROCm-specific attention backend selection tests
@@ -39,44 +40,44 @@ def mock_on_gfx9():
         (
             {},
             None,
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
             {},
             "TRITON_ATTN",
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
         # Test Case 3: Explicit ROCM_ATTN backend
         (
             {},
             "ROCM_ATTN",
-            "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend",
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 4: Explicit ROCM_AITER_FA backend
         (
             {},
             "ROCM_AITER_FA",
-            "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 5: Explicit ROCM_AITER_UNIFIED_ATTN backend
         (
             {},
             "ROCM_AITER_UNIFIED_ATTN",
-            "vllm.v1.attention.backends.rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
         # (defaults to AITER FA when MHA not explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=1
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"},
             None,
-            "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
         (
@@ -85,32 +86,32 @@ def mock_on_gfx9():
                 "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "1",
             },
             None,
-            "vllm.v1.attention.backends.rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 9: VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1
         (
             {"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
             None,
-            "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend",
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 10: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_ATTN",
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
         # Test Case 11: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
         # (explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
         # Test Case 12: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",
-            "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend",
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
     ],
 )
@@ -165,7 +166,7 @@ def test_standard_attention_backend_selection(
             {},
             "TRITON_MLA",
             16,
-            "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+            AttentionBackendEnum.TRITON_MLA.get_path(),
             False,
         ),
         # Test Case 2: TRITON_MLA with block_size == 1 (should raise)
@@ -181,7 +182,7 @@ def test_standard_attention_backend_selection(
             {},
             "ROCM_AITER_MLA",
             1,
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
+            AttentionBackendEnum.ROCM_AITER_MLA.get_path(),
             False,
         ),
         # Test Case 4: ROCM_AITER_MLA with block_size != 1 (should raise)
@@ -189,7 +190,7 @@ def test_standard_attention_backend_selection(
             {},
             "ROCM_AITER_MLA",
             16,
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
+            AttentionBackendEnum.ROCM_AITER_MLA.get_path(),
             False,
         ),
         # Test Case 5: VLLM_ROCM_USE_AITER=1 with block_size == 1
@@ -197,16 +198,16 @@ def test_standard_attention_backend_selection(
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
             1,
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
+            AttentionBackendEnum.ROCM_AITER_MLA.get_path(),
             False,
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1 with block_size == 16
-        # (should use TRITON_MLA)
+        # (should use ROCM_AITER_MLA now, as it supports block_size 16)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
             16,
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",
+            AttentionBackendEnum.ROCM_AITER_MLA.get_path(),
             False,
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_MLA
@@ -214,7 +215,7 @@ def test_standard_attention_backend_selection(
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_MLA",
             16,
-            "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+            AttentionBackendEnum.TRITON_MLA.get_path(),
             False,
         ),
         # Test Case 8: Explicit ROCM_AITER_TRITON_MLA
@@ -222,7 +223,7 @@ def test_standard_attention_backend_selection(
             {},
             "ROCM_AITER_TRITON_MLA",
             16,
-            "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend",
+            AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path(),
             False,
         ),
     ],
