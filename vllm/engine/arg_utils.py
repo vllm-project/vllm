@@ -1392,8 +1392,8 @@ class EngineArgs:
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
-        self._set_default_args_chunked_prefill_and_prefix_caching(model_config)
-        self._set_default_args_num_batched_tokens(usage_context, model_config)
+        self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
+        self._set_default_max_num_seqs_and_batched_tokens_args(usage_context, model_config)
 
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
@@ -1918,7 +1918,7 @@ class EngineArgs:
 
         return default_max_num_batched_tokens, default_max_num_seqs
 
-    def _set_default_args_chunked_prefill_and_prefix_caching(
+    def _set_default_chunked_prefill_and_prefix_caching_args(
         self, model_config: ModelConfig
     ) -> None:
         is_chunked_prefill_supported = model_config.is_chunked_prefill_supported
@@ -1980,7 +1980,7 @@ class EngineArgs:
                 scope="local",
             )
 
-    def _set_default_args_num_batched_tokens(
+    def _set_default_max_num_seqs_and_batched_tokens_args(
         self, usage_context: UsageContext, model_config: ModelConfig
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
