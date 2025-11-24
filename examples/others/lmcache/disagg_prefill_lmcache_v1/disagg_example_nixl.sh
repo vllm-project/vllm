@@ -109,6 +109,8 @@ main() {
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
+    LMCACHE_VERSION=$(pip list | grep lmcache | awk '{print $2}' | sed 's/\.post/post/')
+    wget https://raw.githubusercontent.com/LMCache/LMCache/refs/tags/v${LMCACHE_VERSION}/examples/disagg_prefill/disagg_proxy_server.py
     python3 disagg_proxy_server.py \
         --host localhost \
         --port 9000 \
