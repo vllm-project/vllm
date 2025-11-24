@@ -7,11 +7,19 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import cascade_attention, merge_attn_states
-from vllm.vllm_flash_attn import (
-    fa_version_unsupported_reason,
-    flash_attn_varlen_func,
-    is_fa_version_supported,
-)
+
+try:
+    from vllm.vllm_flash_attn import (
+        fa_version_unsupported_reason,
+        flash_attn_varlen_func,
+        is_fa_version_supported,
+    )
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "vllm_flash_attn is not supported for vLLM on ROCm.",
+            allow_module_level=True,
+        )
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]

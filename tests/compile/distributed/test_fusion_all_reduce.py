@@ -32,8 +32,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
-from ..utils import TestFP8Layer, has_module_attribute, multi_gpu_test
-from .backend import TestBackend
+from ...utils import TestFP8Layer, has_module_attribute, multi_gpu_test
+from ..backend import TestBackend
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
