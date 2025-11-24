@@ -79,6 +79,7 @@ class MoRIIOConstants:
 
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
 
+
 try:
     from mori.io import (
         BackendType,
@@ -1293,7 +1294,8 @@ class MoRIIOConnectorScheduler:
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
+                time.perf_counter()
+                + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )
 
         # If we execute in P-D serial mode, no notification port is needed.
@@ -1508,8 +1510,8 @@ class MoRIIOConnectorWorker:
             remote_ip: IP address of remote node
         """
 
-        
-        # synchronization to prevent dirty reads between transfer and attention operations
+        # synchronization to prevent dirty reads between
+        # transfer and attention operations
         # we can consider removing this synchronization after ibgda is enabled.
         # when mori-io supports ibgda functionality
 
@@ -1934,17 +1936,16 @@ class MoRIIOConnectorWorker:
         to track which workers are done.
         """
 
-        done_sending, done_recving  = set() ,set()
+        done_sending, done_recving = set(), set()
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
-           
+
         else:
             if self.mode == MoRIIOMode.WRITE:
                 done_recving = self.moriio_wrapper.pop_finished_write_req_ids()
             else:
                 done_recving = self._pop_done_transfers()
-
 
         return done_sending, done_recving
 
