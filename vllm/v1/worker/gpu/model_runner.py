@@ -763,6 +763,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.req_states.prefill_len.np[idx_mapping_np],
         )
 
+    @torch.inference_mode()
     def propose_draft(
         self,
         input_batch: InputBatch,
