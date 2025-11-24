@@ -436,7 +436,7 @@ def rearrange_expert_weights_inplace(
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
             experts_recv_loc=experts_recv_loc,
-            new_indices=new_global_expert_indices[layer].tolist(),
+            new_indices=new_global_expert_indices_cpu[layer].tolist(),
             ep_group=ep_group,
         )
 
