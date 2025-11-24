@@ -1368,6 +1368,7 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
         max_model_len=8192,
         enable_caching=True,
         enable_kv_cache_events=True,
+        hash_block_size=block_size,
     )
 
     # Test with LoRA request
