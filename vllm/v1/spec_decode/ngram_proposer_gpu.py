@@ -6,21 +6,24 @@ GPU-accelerated N-gram proposer using fully async PyTorch tensor operations.
 This version uses a fully vectorized approach with unfold and argmax for
 finding the first match across all sequences in parallel.
 """
+
+import numpy as np
 import torch
 from torch import nn
-import numpy as np
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    VllmConfig,
+)
+from vllm.forward_context import set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm.config import set_current_vllm_config
-from vllm.forward_context import set_forward_context
-from vllm.v1.utils import CpuGpuBuffer
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -121,7 +124,7 @@ class NgramGPUKernel(nn.Module):
             valid_mask = window_starts <= max_valid_start.unsqueeze(1)
             final_matches = matches & valid_mask
 
-            # Find first match 
+            # Find first match
             # (if no match, argmax returns 0, but we verify with has_match)
             first_indices = torch.argmax(final_matches.int(), dim=1)
             has_match = final_matches[torch.arange(batch_size), first_indices]
@@ -129,7 +132,7 @@ class NgramGPUKernel(nn.Module):
             # Store valid match positions
             all_first_matches[:, i] = torch.where(has_match, first_indices, -1)
 
-        # Select the longest valid match, 
+        # Select the longest valid match,
         # from back to front, prioritizing longer patterns
         best_pattern_idx = (all_first_matches >= 0).int().flip(dims=[1]).argmax(dim=1)
         best_pattern_idx = num_patterns - 1 - best_pattern_idx  # Flip back
@@ -141,14 +144,14 @@ class NgramGPUKernel(nn.Module):
         # Handle matched cases - completely avoid data-dependent branching
         has_any_match = best_match_pos >= 0
 
-        # Calculate result start positions, invalid positions will be 
-        # clamped to valid range. Since all windows have size max_pattern_len, 
-        # and patterns are matched at the END of windows (due to offset), 
+        # Calculate result start positions, invalid positions will be
+        # clamped to valid range. Since all windows have size max_pattern_len,
+        # and patterns are matched at the END of windows (due to offset),
         # the result starts after the full window
         result_starts = torch.where(
             has_any_match,
-            best_match_pos + max_pattern_len, 
-            torch.zeros_like(best_match_pos), 
+            best_match_pos + max_pattern_len,
+            torch.zeros_like(best_match_pos),
         )
 
         # Create gather indices
@@ -232,6 +235,7 @@ class NgramGPUKernel(nn.Module):
         """No model to load for N-gram proposer."""
         pass
 
+
 class NgramProposerGPU:
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         assert vllm_config.speculative_config is not None
@@ -239,24 +243,22 @@ class NgramProposerGPU:
         assert vllm_config.speculative_config.prompt_lookup_max is not None
 
         compilation_config = CompilationConfig(
-            level=3,  
+            level=3,
             custom_ops=["none"],
             splitting_ops=[],
             compile_sizes=[],
             inductor_compile_config={
-                "enable_auto_functionalized_v2": False,  
-                "max_autotune": True,  
-                "aggressive_fusion": True,  
-                "triton.autotune_pointwise": True,  
-                "coordinate_descent_tuning": True,  
-                "use_mixed_mm": False,  
+                "enable_auto_functionalized_v2": False,
+                "max_autotune": True,
+                "aggressive_fusion": True,
+                "triton.autotune_pointwise": True,
+                "coordinate_descent_tuning": True,
+                "use_mixed_mm": False,
             },
             use_cudagraph=False,
         )
 
-        self.vllm_config = VllmConfig(
-            compilation_config=compilation_config
-        )
+        self.vllm_config = VllmConfig(compilation_config=compilation_config)
 
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         self.max_n = vllm_config.speculative_config.prompt_lookup_max
@@ -266,36 +268,36 @@ class NgramProposerGPU:
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.device = device
 
-        with set_current_vllm_config(self.vllm_config, check_compile=False):
-            self.kernel = NgramGPUKernel(vllm_config=vllm_config, prefix="ngram_gpu_kernel", device=device)
-            self.device = device
-            self.kernel.to(device)
-            self.kernel.eval()
-            max_batch_size = vllm_config.scheduler_config.max_num_seqs
-            self.backup_next_token_ids = CpuGpuBuffer(
-                max_batch_size,
-                dtype=torch.int32,
-                pin_memory=is_pin_memory_available(),
-                device=device,
-                with_numpy=True,
-            )
+        self.kernel = NgramGPUKernel(
+            vllm_config=vllm_config, prefix="ngram_gpu_kernel", device=device
+        )
+        self.device = device
+        self.kernel.to(device)
+        self.kernel.eval()
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
+        )
 
-            self._dummy_run()
+        self._dummy_run()
 
     def _dummy_run(self):
-        with set_current_vllm_config(self.vllm_config, check_compile=False):
-            token_ids, num_tokens, sampled_flags, valid_mask = self._generate_dummy_data(
-                batch_size=self.max_num_seqs,
-                max_seq_len=min(self.max_model_len, 1024),  
-                vocab_size=self.vocab_size,
-                pattern_len=self.k,
-                repetition_rate=0.5,
-                device=self.device
-            )
+        token_ids, num_tokens, sampled_flags, valid_mask = self._generate_dummy_data(
+            batch_size=self.max_num_seqs,
+            max_seq_len=min(self.max_model_len, 1024),
+            vocab_size=self.vocab_size,
+            pattern_len=self.k,
+            repetition_rate=0.5,
+            device=self.device,
+        )
 
-            for _ in range(3):
-                with set_forward_context(None, self.vllm_config):
-                    output = self.kernel(num_tokens, token_ids, sampled_flags, valid_mask)
+        for _ in range(3):
+            with set_forward_context(None, self.vllm_config):
+                _ = self.kernel(num_tokens, token_ids, sampled_flags, valid_mask)
 
     def _generate_dummy_data(
         self,
@@ -325,15 +327,13 @@ class NgramProposerGPU:
         """
         # Generate random token IDs
         token_ids = torch.randint(
-            0, vocab_size, (batch_size, max_seq_len),
-            dtype=torch.int32, device=device
+            0, vocab_size, (batch_size, max_seq_len), dtype=torch.int32, device=device
         )
 
         # Generate random sequence lengths
         min_len = max(pattern_len * 2 + 3, max_seq_len // 2)
         num_tokens = torch.randint(
-            min_len, max_seq_len, (batch_size,),
-            dtype=torch.int32, device=device
+            min_len, max_seq_len, (batch_size,), dtype=torch.int32, device=device
         )
 
         # Inject n-gram repetitions using the tail pattern of each sequence
@@ -349,8 +349,9 @@ class NgramProposerGPU:
                     if tgt_pos == src_pos:
                         continue
 
-                    token_ids[i, tgt_pos:tgt_pos + pattern_len] = \
-                        token_ids[i, src_pos:src_pos + pattern_len].clone()
+                    token_ids[i, tgt_pos : tgt_pos + pattern_len] = token_ids[
+                        i, src_pos : src_pos + pattern_len
+                    ].clone()
 
         # All sequences have sampled tokens and are valid
         sampled_flags = torch.ones(batch_size, dtype=torch.bool, device=device)
@@ -365,9 +366,13 @@ class NgramProposerGPU:
         sampled_flags: torch.Tensor,  # [batch_size] bool on GPU
         valid_mask: torch.Tensor,  # [batch_size] bool on GPU
     ) -> torch.Tensor:
-        with set_current_vllm_config(self.vllm_config, check_compile=False):
-            with set_forward_context(None, self.vllm_config):
-                return self.kernel(num_tokens_no_spec, token_ids_gpu, sampled_flags, valid_mask)
+        with set_forward_context(None, self.vllm_config):
+            return self.kernel(
+                num_tokens_no_spec,
+                token_ids_gpu,
+                sampled_flags,
+                valid_mask,
+            )
 
     def prepare_next_token_ids_cpu(
         self,
@@ -471,5 +476,4 @@ class NgramProposerGPU:
         return next_token_ids, valid_sampled_tokens_count, valid_sampled_token_ids_gpu
 
     def load_model(self, *args, **kwargs):
-        with set_current_vllm_config(self.vllm_config, check_compile=False):
-            self.kernel.load_model(*args, **kwargs)
+        self.kernel.load_model(*args, **kwargs)

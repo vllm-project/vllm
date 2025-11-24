@@ -1019,9 +1019,11 @@ class GPUModelRunner(
             else:
                 new_req_indices.append((req_id, curr_idx))
 
-        # Case 2: Only common requests (subset or same set), may need reordering or clearing
+        # Case 2: Only common requests (subset or same set),
+        # may need reordering or clearing
         if not new_req_indices:
-            # If indices haven't changed and it's the exact same set, already handled by Case 1
+            # If indices haven't changed and it's the exact same set,
+            # already handled by Case 1
             # So here we either have reordering or a subset (some requests finished)
             if not indices_match or len(common_req_indices) < len(prev_req_id_to_index):
                 # Need to reorder or clear finished requests
@@ -1032,13 +1034,15 @@ class GPUModelRunner(
                     prev_indices, dtype=torch.long, device=self.device
                 )
 
-                # Create temporary tensors for scatter operation (zeros will clear unused positions)
+                # Create temporary tensors for scatter operation
+                # (zeros will clear unused positions)
                 temp_token_ids = torch.zeros_like(self.input_batch.token_ids_gpu_tensor)
                 temp_num_tokens = torch.zeros_like(
                     self.input_batch.num_tokens_no_spec_gpu
                 )
 
-                # Scatter token_ids - copy entire rows (already up-to-date from prepare_next_token_ids_padded)
+                # Scatter token_ids - copy entire rows
+                # (already up-to-date from prepare_next_token_ids_padded)
                 temp_token_ids[curr_indices_tensor] = (
                     self.input_batch.token_ids_gpu_tensor[prev_indices_tensor]
                 )
