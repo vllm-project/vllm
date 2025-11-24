@@ -490,7 +490,7 @@ class MambaMixer2(MambaBase, CustomOp):
             # Allocate temp cache for checkpointing during speculation
             # We'll move it to the correct device after the model is loaded
             self.spec_temp_cache = torch.zeros(
-                num_spec + 1,
+                num_spec + 2,
                 num_heads // self.tp_size,
                 head_dim,
                 ssm_state_size,
@@ -977,7 +977,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         init_checkpoint_idx = 0 if (num_accepted_tokens is None or num_accepted_tokens[0] <= 1) else (num_accepted_tokens[0].item() - 1)
                         init_slot = state_slots[init_checkpoint_idx].item()
                         
-                        
                         # Ensure temp cache is on correct device and dtype
                         if self.spec_temp_cache.device != ssm_state.device or self.spec_temp_cache.dtype != ssm_state.dtype:
                             self.spec_temp_cache = torch.zeros(
@@ -988,7 +987,6 @@ class MambaMixer2(MambaBase, CustomOp):
                                 dtype=ssm_state.dtype,
                                 device=ssm_state.device,
                             )
-                            print(f"SMOR: Moved spec_temp_cache to {ssm_state.device} with shape {self.spec_temp_cache.shape}")
                         
                         self.spec_temp_cache[0] = ssm_state[init_slot].clone()
                         temp_cache_working_slot = self.spec_temp_cache[0:1]
@@ -1012,7 +1010,7 @@ class MambaMixer2(MambaBase, CustomOp):
                                 self.spec_temp_cache[token_idx + 1] = temp_cache_working_slot[0].clone()
                         
                         num_checkpoints_to_save = min(
-                            num_accepted_tokens[0].item() if num_accepted_tokens is not None else 1,
+                            num_spec_decode_tokens,
                             len(state_slots)
                         )
                         
