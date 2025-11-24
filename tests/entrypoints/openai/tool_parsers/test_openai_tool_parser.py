@@ -225,10 +225,6 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
-    print("DEBUG: function_names =", function_names)
-    print("DEBUG: reasoning =")
-    pprint(reasoning)
-
     try:
         assert FUNC_CALC in function_names, (
             f"Calculator tool missing — found {function_names}"
