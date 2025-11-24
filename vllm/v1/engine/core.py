@@ -391,6 +391,8 @@ def busy_loop_wrapper(busy_loop_func):
                     for req in list(self.scheduler.running):
                         self.scheduler.preempt_request(preempted_req=req)
                     self.scheduler.prev_step_scheduled_req_ids.clear()
+                    if self.batch_queue is not None:
+                        self.batch_queue.clear()
 
                     try:
                         # Block until recovery command received
