@@ -49,7 +49,6 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # Possible string values of STR_BACKEND_ENV_VAR
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 

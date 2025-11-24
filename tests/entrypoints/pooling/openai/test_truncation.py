@@ -7,6 +7,12 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L12-v2"
 max_model_len = 128

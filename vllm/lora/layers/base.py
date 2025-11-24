@@ -42,9 +42,8 @@ class BaseLayerWithLoRA(nn.Module):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: torch.Tensor | None,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
         ...

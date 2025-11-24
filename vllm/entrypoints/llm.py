@@ -339,7 +339,6 @@ class LLM:
 
         log_non_default_args(engine_args)
 
-        # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -466,7 +465,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (

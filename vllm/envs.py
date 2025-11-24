@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -92,11 +92,14 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
+    VLLM_PROFILER_DELAY_ITERS: int = 0
+    VLLM_PROFILER_MAX_ITERS: int = 0
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -228,6 +231,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_USE_V2_MODEL_RUNNER: bool = False
 
 
 def get_default_cache_root():
@@ -636,7 +640,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Example options:
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
-    # - "XFORMERS": use XFormers
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
@@ -781,7 +784,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE": lambda: int(
-        os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")
+        os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(16 * 1024))
     ),
     # Control whether to use fused MoE activation chunking. Current chunking
     # logic is incompatible with torch.compile and causes IMA. See issue
@@ -872,6 +875,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
         os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
     ),
+    # Disable torch profiling of the AsyncLLMEngine process.
+    # If set to 1, will not profile the engine process.
+    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM", "0") != "0"
+    ),
+    # Delay number of iterations before starting profiling when using
+    # the torch/torch CUDA profiler. If set to 0, will start profiling immediately.
+    "VLLM_PROFILER_DELAY_ITERS": lambda: int(
+        os.getenv("VLLM_PROFILER_DELAY_ITERS", "0")
+    ),
+    # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
+    # If set to 0, will not limit the number of iterations.
+    "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,
@@ -1505,6 +1521,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Allows viewing and setting breakpoints in Inductor's code output files.
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
+    ),
+    # Flag to enable v2 model runner.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
+        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
 }
 

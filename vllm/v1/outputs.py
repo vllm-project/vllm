@@ -158,7 +158,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[np.ndarray]
+    sampled_token_ids: list[list[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -220,7 +220,7 @@ def make_empty_encoder_model_runner_output(
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
     # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [np.array([0]) for _ in req_ids]
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
