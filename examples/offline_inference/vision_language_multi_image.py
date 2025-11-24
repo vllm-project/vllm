@@ -1495,6 +1495,12 @@ def main(args: Namespace):
     seed = args.seed
     tensor_parallel_size = args.tensor_parallel_size
 
+    if tensor_parallel_size is not None and tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {tensor_parallel_size}"
+        )
+
     image_urls = IMAGE_URLS[: args.num_images]
 
     if method == "generate":

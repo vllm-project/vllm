@@ -2053,6 +2053,12 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
+    if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {args.tensor_parallel_size}"
+        )
+
     modality = args.modality
     mm_input = get_multi_modal_input(args)
     data = mm_input["data"]

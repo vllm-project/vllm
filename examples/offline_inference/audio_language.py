@@ -441,6 +441,12 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
+    if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {args.tensor_parallel_size}"
+        )
+
     audio_count = args.num_audios
     req_data = model_example_map[model](
         question_per_audio_count[audio_count], audio_count
