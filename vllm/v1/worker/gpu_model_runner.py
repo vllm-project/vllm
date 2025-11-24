@@ -1043,9 +1043,6 @@ class GPUModelRunner(
     def _update_tokens_for_pcp(
         self,
         tokens: np.ndarray,
-        dummy_input: bool = False,
-        num_reqs: int | None = None,
-        num_decode_reqs: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         If prefill context parallelism is enabled, we will update
@@ -1075,13 +1072,12 @@ class GPUModelRunner(
         >>> self.pcp_allgather_resotre_idx
         [0, 9, 1, 2, 10, 11, 12, 13, 3, 4, 5, 6, 14, 15, 16, 17, 7, 8]
         """
-        if not dummy_input:
-            num_reqs = self.input_batch.num_reqs
-            # TODO(yyj) To be fixed. The definition of decode reqs here is too narrow.
-            num_decode_reqs = sum(
-                self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                >= self.input_batch.num_prompt_tokens[:num_reqs]
-            )
+        num_reqs = self.input_batch.num_reqs
+        assert self.reorder_batch_threshold is not None, (
+            "PCP depends on reorder batch to split decode and prefill requests."
+        )
+        num_decode_reqs = sum(tokens <= self.reorder_batch_threshold)
+
         self.num_pcp_pads_cpu[:num_reqs] = 0
         
         num_decode_tokens = sum(tokens[:num_decode_reqs])
