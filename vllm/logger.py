@@ -214,10 +214,11 @@ def init_logger(name: str) -> _VllmLogger:
 
 
 @contextmanager
-def suppress_logging():
-    logging.disable(logging.INFO)
+def suppress_logging(level=logging.INFO):
+    current_level = logging.root.manager.disable
+    logging.disable(level)
     yield
-    logging.disable(logging.NOTSET)
+    logging.disable(current_level)
 
 
 # The root logger is initialized when the module is imported.
