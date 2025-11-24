@@ -149,8 +149,7 @@ class MiniMaxM2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rotary_dim: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         attn_window_size: int | None = None,
         max_position_embeddings: int = 8192,
         head_dim: int | None = None,
@@ -180,7 +179,6 @@ class MiniMaxM2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -205,8 +203,7 @@ class MiniMaxM2Attention(nn.Module):
             self.head_dim,
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -252,8 +249,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
             max_position_embeddings = max(
@@ -269,8 +264,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rotary_dim=config.rotary_dim,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
