@@ -13,7 +13,7 @@ from torch import nn
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, FusedMoEWithLoRA, LoRAMapping
+from vllm.lora.layers import BaseLayerWithLoRA, FusedMoE3DWithLoRA, LoRAMapping
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -358,9 +358,7 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
-        self._is_3d_moe_model = is_moe_model(self.model) and hasattr(
-            self.model, "is_3d_moe_weight"
-        )
+        self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
         self._create_lora_modules()
 
         self.model.lora_manager = self
@@ -411,7 +409,7 @@ class LoRAModelManager:
                 continue
             # Note (gnovack) - If MOE lora weights are not split into
             # num_experts chunks, we split them here
-            if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+            if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(
                 module_lora.lora_a
             ):
                 # Handle PEFT file format where experts.base_layer is the

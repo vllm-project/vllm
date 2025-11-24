@@ -80,7 +80,7 @@ def from_layer(
     max_loras: int,
     lora_config: LoRAConfig,
     packed_modules_list: list,
-    model_config: PretrainedConfig,
+    model_config: PretrainedConfig | None = None,
 ) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -101,7 +101,7 @@ def from_layer_logits_processor(
     lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: PretrainedConfig,
+    model_config: PretrainedConfig | None = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(
         layer,
@@ -290,7 +290,7 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-            if not hasattr(model, "is_3d_moe_weight"):
+            if not model.is_3d_moe_weight:
                 # 3D MoE LoRA does not need `packed_modules_mapping`
                 packed_modules_mapping["experts"] = [
                     weight_name.rstrip(".")
