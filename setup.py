@@ -74,18 +74,6 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
-def is_url_available(url: str) -> bool:
-    from urllib.request import urlopen
-
-    status = None
-    try:
-        with urlopen(url) as f:
-            status = f.status
-    except Exception:
-        return False
-    return status == 200
-
-
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=True, **kwa)
@@ -531,28 +519,6 @@ def get_nvcc_cuda_version() -> Version:
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
     return nvcc_cuda_version
-
-
-def get_gaudi_sw_version():
-    """
-    Returns the driver version.
-    """
-    # Enable console printing for `hl-smi` check
-    output = subprocess.run(
-        "hl-smi",
-        shell=True,
-        text=True,
-        capture_output=True,
-        env={"ENABLE_CONSOLE": "true"},
-    )
-    if output.returncode == 0 and output.stdout:
-        return (
-            output.stdout.split("\n")[2]
-            .replace(" ", "")
-            .split(":")[1][:-1]
-            .split("-")[0]
-        )
-    return "0.0.0"  # when hl-smi is not available
 
 
 def get_vllm_version() -> str:

@@ -1140,7 +1140,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -1216,26 +1216,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        select_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
+
+        topk_weights, topk_ids, zero_expert_result = select_result
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1314,7 +1300,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     self.allow_cutlass_block_scaled_grouped_gemm
                 ),
             )
-        return result
+
+        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
+            assert not isinstance(result, tuple), (
+                "Shared + zero experts are mutually exclusive not yet supported"
+            )
+            return result, zero_expert_result
+        else:
+            return result
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

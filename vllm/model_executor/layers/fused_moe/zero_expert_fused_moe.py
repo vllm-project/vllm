@@ -170,41 +170,26 @@ class ZeroExpertFusedMoE(FusedMoE):
         Returns:
             Combined output from real experts and zero experts
         """
+        # Temporarily override e_score_correction_bias to use full bias
+        # (including zero experts) for routing computation
+        original_bias = self.e_score_correction_bias
+        if self._router is not None:
+            self.e_score_correction_bias = self._router.e_score_correction_bias
+
         # Compute routing once (using full logits to include zero experts)
         # This ensures zero experts can be properly identified in topk_ids
-        topk_weights, topk_ids = self.select_experts(
+        # select_experts now returns (topk_weights, topk_ids, zero_expert_result)
+        topk_weights, topk_ids, zero_expert_result = self.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,  # Full logits (includes zero experts)
-            use_grouped_topk=self.use_grouped_topk,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=None,  # Don't use memoized function here
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=(
-                self._router.e_score_correction_bias
-                if self._router is not None
-                else self.e_score_correction_bias
-            ),
-            indices_type=None,
-            enable_eplb=False,
-            expert_map=None,
-            expert_load_view=None,
-            logical_to_physical_map=None,
-            logical_replica_count=None,
-            num_fused_shared_experts=self.num_fused_shared_experts,
         )
+
+        # Restore original bias
+        self.e_score_correction_bias = original_bias
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
         self._memoized_topk_ids = topk_ids
-
-        # Compute zero expert result using pre-computed routing
-        zero_expert_result = self._compute_zero_expert_result(
-            hidden_states, topk_weights, topk_ids
-        )
 
         # Slice router_logits for real experts only
         router_logits_sliced = router_logits[..., : self.logical_num_experts]
