@@ -33,7 +33,7 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
             base,
             is_neox_style,
             scaling_alpha,
-            dtype
+            dtype,
         )
 
     def forward(
@@ -52,33 +52,30 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
             key: [num_tokens, num_kv_heads * head_size]
         """
         assert positions.ndim == 2
+        assert key is not None
 
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        cos = torch.cat([
-            m[i]
-            for i, m in enumerate(cos.split(self.xdrope_section, dim=-1))
-        ], dim=-1)
-        sin = torch.cat([
-            m[i]
-            for i, m in enumerate(sin.split(self.xdrope_section, dim=-1))
-        ], dim=-1)
+        cos = torch.cat(
+            [m[i] for i, m in enumerate(cos.split(self.xdrope_section, dim=-1))], dim=-1
+        )
+        sin = torch.cat(
+            [m[i] for i, m in enumerate(sin.split(self.xdrope_section, dim=-1))], dim=-1
+        )
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin,
-                                            self.is_neox_style)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin,
-                                          self.is_neox_style)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
+        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -88,10 +85,7 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         seq_len: int,
         xd_sections: int = 4,
     ) -> list[list[int]]:
-        return [
-            list(range(context_len, seq_len))
-            for _ in range(xd_sections)
-        ]
+        return [list(range(context_len, seq_len)) for _ in range(xd_sections)]
 
     @staticmethod
     def get_next_input_positions_tensor(

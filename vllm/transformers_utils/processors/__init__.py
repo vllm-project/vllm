@@ -15,9 +15,9 @@ from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 
 __all__ = [
-    "DeepseekVLV2Processor", 
-    "HunYuanVLProcessor", 
+    "DeepseekVLV2Processor",
+    "HunYuanVLProcessor",
     "HunYuanVLImageProcessor",
-    "OvisProcessor", 
-    "Ovis2_5Processor"
+    "OvisProcessor",
+    "Ovis2_5Processor",
 ]

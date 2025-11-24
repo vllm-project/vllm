@@ -1094,7 +1094,7 @@ def supports_mrope(
 class SupportsXDRoPE(Protocol):
     """The interface required for all models that support XD-RoPE."""
 
-    supports_mrope: ClassVar[Literal[True]] = True
+    supports_xdrope: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports XD-RoPE.
 
