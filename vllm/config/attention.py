@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: "AttentionBackendEnum" | None = None
+    backend: "AttentionBackendEnum | None" = None
     """Attention backend to use. If None, will be selected automatically."""
 
     flash_attn_version: Literal[2, 3] | None = None
