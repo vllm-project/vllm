@@ -33,6 +33,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
+from vllm.attention.layer import MultiHeadAttention
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
 from vllm.transformers_utils.configs.hunyuan_vl import HunYuanVLConfig, HunYuanVLVisionConfig
@@ -246,92 +247,26 @@ class HunYuanVisionAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
             disable_tp=use_data_parallel,
         )
-        self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                self.use_upstream_fa,
-                attn_backend_override=attn_backend_override,
-            )
-        )
-        # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
-        from vllm.platforms import current_platform
 
-        if (
-            current_platform.is_rocm()
-            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-        ):
-            self.use_upstream_fa = True
-        if current_platform.is_xpu():
-            self.use_upstream_fa = False
-        self.is_flash_attn_backend = self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }
+        self.scale = self.hidden_size_per_attention_head**-0.5
+        self.attn = MultiHeadAttention(
+            self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
         x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
-        # [s, b, c] --> [s, b, head * 3 * head_dim]
-        x, _ = self.qkv(x)
-        seq_len, batch_size, _ = x.shape
-
-        qkv = einops.rearrange(
-            x,
-            "s b (three head head_dim) -> b s three head head_dim",
-            three=3,
-            head=self.num_attention_heads_per_partition,
-        )
-        q, k, v = qkv.unbind(dim=2)
-
-        if self.is_flash_attn_backend:
-            context_layer = vit_flash_attn_wrapper(
-                q,
-                k,
-                v,
-                cu_seqlens,
-                max_seqlen,
-                batch_size,
-                self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
-            )
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            # Execute attention entry by entry for speed & less VRAM.
-            from vllm.platforms import current_platform
-
-            # Never remove the next contiguous logic
-            # Without it, hallucinations occur with the backend
-            if current_platform.is_rocm():
-                q = q.contiguous()
-                k = k.contiguous()
-                v = v.contiguous()
-            context_layer = vit_torch_sdpa_wrapper(
-                q,
-                k,
-                v,
-                cu_seqlens,
-            )
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
-
-        output, _ = self.o_proj(context_layer)
+        qkv, _ = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+        out = self.attn(q, k, v)
+        output, _ = self.o_proj(out)
         return output
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "x": 0,
-        "cu_seqlens": 0,
-        "seqlens": 0,
-    },
-    mark_unbacked_dims={"seqlens": 0},
-    enable_if=should_torch_compile_mm_vit,
-)
 class HunYuanVisionBlock(nn.Module):
     def __init__(
         self,
@@ -380,11 +315,7 @@ class HunYuanVisionBlock(nn.Module):
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x),
-                          cu_seqlens=cu_seqlens,
-                          max_seqlen=max_seqlen,
-                          seqlens=seqlens)
-
+        x = x + self.self_attn(self.input_layernorm(x))
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
@@ -518,7 +449,7 @@ class HunYuanVisionTransformer(nn.Module):
             self.embeddings = HunYuanVisionPatchEmbed(vision_config)
 
         norm_layer = partial(nn.LayerNorm, eps=vision_config.rms_norm_eps)
-        use_upstream_fa = True
+        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
