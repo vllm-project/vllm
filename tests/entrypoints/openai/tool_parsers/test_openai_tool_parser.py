@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from pprint import pprint
 
 import jsonschema
 import openai
