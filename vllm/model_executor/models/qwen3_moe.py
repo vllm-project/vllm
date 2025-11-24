@@ -64,7 +64,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
 
 from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
@@ -511,76 +510,7 @@ class Qwen3MoeModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
-
-        quantization_config = getattr(self.config, "quantization_config", None)
-        is_gptq_or_awq = False
-        if quantization_config is not None:
-            quant_method = quantization_config.get("quant_method", "").lower()
-            if quant_method in ("gptq", "awq"):
-                is_gptq_or_awq = True
-                tp_size = get_tensor_model_parallel_world_size()
-                bits = quantization_config.get("bits", 4)
-                moe_intermediate_size = self.config.moe_intermediate_size
-                group_size = quantization_config.get("group_size", 128)
-
-                moe_intermediate_size_group = moe_intermediate_size // group_size
-                per_rank_moe_intermediate_size_group = cdiv(
-                    moe_intermediate_size_group, tp_size
-                )
-                per_rank_moe_intermediate_size = (
-                    per_rank_moe_intermediate_size_group * group_size
-                )
-                moe_intermediate_size_padded = per_rank_moe_intermediate_size * tp_size
-                grouped_moe_intermediate_size_padded = (
-                    moe_intermediate_size_padded // group_size
-                )
-
         for name, loaded_weight in weights:
-            if quantization_config is not None and is_gptq_or_awq:
-                if ".down_proj.g_idx" in name:
-                    pad_size = moe_intermediate_size_padded - loaded_weight.shape[0]
-                    loaded_weight = torch.nn.functional.pad(
-                        loaded_weight, (0, pad_size), value=0
-                    )
-                elif ".down_proj.qweight" in name:
-                    packed_factor = loaded_weight.element_size() * 8 // bits
-                    packed_moe_intermediate_size_padded = (
-                        moe_intermediate_size_padded // packed_factor
-                    )
-                    pad_size = (
-                        packed_moe_intermediate_size_padded - loaded_weight.shape[0]
-                    )
-                    loaded_weight = torch.nn.functional.pad(
-                        loaded_weight, (0, 0, 0, pad_size), value=0
-                    )
-                elif ".down_proj.scales" in name or ".down_proj.qzeros" in name:
-                    pad_size = (
-                        grouped_moe_intermediate_size_padded - loaded_weight.shape[0]
-                    )
-                    loaded_weight = torch.nn.functional.pad(
-                        loaded_weight, (0, 0, 0, pad_size), value=0
-                    )
-                elif (
-                    ".gate_proj.qweight" in name
-                    or ".gate_proj.scales" in name
-                    or ".up_proj.qweight" in name
-                    or ".up_proj.scales" in name
-                ):
-                    pad_size = moe_intermediate_size_padded - loaded_weight.shape[1]
-                    loaded_weight = torch.nn.functional.pad(
-                        loaded_weight, (0, pad_size), value=0
-                    )
-                elif ".gate_proj.qzeros" in name or ".up_proj.qzeros" in name:
-                    packed_factor = loaded_weight.element_size() * 8 // bits
-                    packed_moe_intermediate_size_padded = (
-                        moe_intermediate_size_padded // packed_factor
-                    )
-                    pad_size = (
-                        packed_moe_intermediate_size_padded - loaded_weight.shape[1]
-                    )
-                    loaded_weight = torch.nn.functional.pad(
-                        loaded_weight, (0, pad_size), value=0
-                    )
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
