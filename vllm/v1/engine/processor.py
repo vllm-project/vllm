@@ -394,7 +394,26 @@ class Processor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        close_session: bool = False,
     ) -> EngineCoreRequest:
+        # For close_session requests, skip input preprocessing
+        # and create a minimal request to signal session closure
+        if close_session:
+            return EngineCoreRequest(
+                request_id=request_id,
+                prompt_token_ids=[],
+                mm_features=None,
+                sampling_params=params if isinstance(params, SamplingParams) else None,
+                pooling_params=params if isinstance(params, PoolingParams) else None,
+                eos_token_id=None,
+                arrival_time=arrival_time if arrival_time else time.time(),
+                lora_request=lora_request,
+                cache_salt=None,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                close_session=True,
+            )
+
         self._validate_lora(lora_request)
         self._validate_params(params)
 
@@ -522,6 +541,7 @@ class Processor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
+            close_session=close_session,
         )
 
     def _validate_model_inputs(

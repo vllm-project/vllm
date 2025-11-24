@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for GPUModelRunner._update_streaming_request function."""
 
 from unittest.mock import Mock
@@ -103,7 +105,7 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
     assert updated_req_state.sampling_params.max_tokens == 50
     assert updated_req_state.block_ids == ([0, 1],)
 
-    # Verify output_token_ids were cleared 
+    # Verify output_token_ids were cleared
     # (intermediate outputs are now in prompt_token_ids)
     assert updated_req_state.output_token_ids == []
 
@@ -115,7 +117,7 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
 
 
 def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_batch):
-    """Test that streaming session requests with multimodal features are updated 
+    """Test that streaming session requests with multimodal features are updated
     correctly.
 
     This test validates that when a streaming session with mm features is updated:
@@ -191,7 +193,7 @@ def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_bat
         0
     ] * 5 + [5]
 
-    # Verify output_token_ids were cleared 
+    # Verify output_token_ids were cleared
     # (intermediate outputs are now in prompt_token_ids)
     assert updated_req_state.output_token_ids == []
 

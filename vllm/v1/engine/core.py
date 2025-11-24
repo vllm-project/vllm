@@ -557,7 +557,6 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
-    engine_request_cls: type[EngineCoreRequest] = EngineCoreRequest
 
     def __init__(
         self,
@@ -796,8 +795,8 @@ class EngineCoreProc(EngineCore):
 
         return init_message.addresses
 
-    @classmethod
-    def run_engine_core(cls, *args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    @staticmethod
+    def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -831,7 +830,7 @@ class EngineCoreProc(EngineCore):
             else:
                 set_process_title("EngineCore")
                 decorate_logs()
-                engine_core = cls(*args, **kwargs)
+                engine_core = EngineCoreProc(*args, **kwargs)
 
             engine_core.run_busy_loop()
 
@@ -971,7 +970,7 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(self.engine_request_cls)
+        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
 
         with ExitStack() as stack, zmq.Context() as ctx:

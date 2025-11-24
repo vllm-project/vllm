@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import unittest
 from unittest.mock import MagicMock
 
@@ -18,19 +20,17 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
-from vllm.v1.streaming.streaming_request import StreamingRequest
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.streaming.streaming_scheduler import StreamingScheduler
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
 
 
-class DummyStreamingRequest(StreamingRequest):
+class DummyRequest(Request):
     def __init__(
         self,
         request_id,
-        streaming_sequence_id=0,
         close_session=False,
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
@@ -42,7 +42,6 @@ class DummyStreamingRequest(StreamingRequest):
             pooling_params=None,
             eos_token_id=None,
             mm_features=mm_features,
-            streaming_sequence_id=streaming_sequence_id,
             close_session=close_session,
         )
 
@@ -77,9 +76,8 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_add_request(self):
         scheduler = create_scheduler()
 
-        request = DummyStreamingRequest(
+        request = DummyRequest(
             request_id="test_request",
-            streaming_sequence_id=0,
             close_session=False,
         )
 
@@ -89,50 +87,36 @@ class TestStreamingScheduler(unittest.TestCase):
         assert request.status == RequestStatus.WAITING
         assert len(scheduler.waiting) == 1
 
-        next_request = DummyStreamingRequest(
+        next_request = DummyRequest(
             request_id="test_request",
-            streaming_sequence_id=1,
             close_session=False,
         )
         scheduler.add_request(next_request)
 
-        assert next_request.status == RequestStatus.WAITING_FOR_SESSION_REQ
-        assert len(scheduler.waiting) == 2
-
-    def test_add_request_out_of_order(self):
-        scheduler = create_scheduler()
-
-        request = DummyStreamingRequest(
-            request_id="test_request",
-            streaming_sequence_id=1,
-            close_session=False,
-        )
-        with self.assertRaises(AssertionError):
-            scheduler.add_request(request)
+        assert next_request.status == RequestStatus.WAITING
+        assert len(scheduler.requests["test_request"].streaming_queue) == 1
 
     def test_update_session_request_max_token(self):
         scheduler = create_scheduler()
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
         )
         session_request.num_computed_tokens = len(session_request.prompt_token_ids)
         session_request.max_tokens = 10  # Initial max_tokens
         session_request._output_token_ids = [1] * 10  # reach max_tokens
 
-        new_request = DummyStreamingRequest(
+        new_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5, 6],
         )
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
-        scheduler._update_session_request(session_request, new_request)
+        session_request.streaming_queue.append(new_request)
+        scheduler._update_session_request(session_request)
 
-        assert session_request.streaming_sequence_id == 1
         assert session_request.sampling_params.max_tokens == 10
         assert session_request.max_tokens == 20  # 10 + 10
 
@@ -140,41 +124,38 @@ class TestStreamingScheduler(unittest.TestCase):
 
         # only generated additional 5
         session_request._output_token_ids = [1] * 15
-        new_request2 = DummyStreamingRequest(
+        new_request2 = DummyRequest(
             request_id="session",
-            streaming_sequence_id=2,
             prompt_token_ids=[7, 8, 9],
         )
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
-        scheduler._update_session_request(session_request, new_request2)
+        session_request.streaming_queue.append(new_request2)
+        scheduler._update_session_request(session_request)
 
-        assert session_request.streaming_sequence_id == 2
         assert session_request.sampling_params.max_tokens == 10
         assert session_request.max_tokens == 25  # 15 + 10
 
     def test_update_session_request(self):
         scheduler = create_scheduler()
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
         )
         session_request.num_computed_tokens = len(session_request.prompt_token_ids)
 
-        new_request = DummyStreamingRequest(
+        new_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5, 6],
         )
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
-        scheduler._update_session_request(session_request, new_request)
+        session_request.streaming_queue.append(new_request)
+        scheduler._update_session_request(session_request)
 
         assert session_request.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session_request._all_token_ids == [1, 2, 3, 4, 5, 6]
-        assert session_request.streaming_sequence_id == 1
         assert session_request.sampling_params.max_tokens == 10
         assert session_request.status == RequestStatus.WAITING
 
@@ -187,9 +168,8 @@ class TestStreamingScheduler(unittest.TestCase):
             identifier="",
             mm_position=PlaceholderRange(offset=1, length=1),
         )
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
             mm_features=[mm_feature],
         )
@@ -201,13 +181,13 @@ class TestStreamingScheduler(unittest.TestCase):
             identifier="",
             mm_position=PlaceholderRange(offset=2, length=1),
         )
-        new_request = DummyStreamingRequest(
+        new_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5, 6, 7],
             mm_features=[mm_feature],
         )
-        scheduler._update_session_request(session_request, new_request)
+        session_request.streaming_queue.append(new_request)
+        scheduler._update_session_request(session_request)
 
         assert len(session_request.mm_features) == 2
         assert session_request.mm_features[0].mm_position.offset == 1
@@ -217,9 +197,8 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_process_streaming_requests_with_session_close(self):
         scheduler = create_scheduler()
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
             close_session=False,
         )
@@ -228,13 +207,13 @@ class TestStreamingScheduler(unittest.TestCase):
         _ = scheduler.schedule()
         session_request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
 
-        close_request = DummyStreamingRequest(
+        close_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             close_session=True,
         )
         scheduler.add_request(close_request)
-        assert close_request.status == RequestStatus.WAITING_FOR_SESSION_REQ
+        assert close_request.status == RequestStatus.WAITING
+        assert len(session_request.streaming_queue) == 1
 
         _ = scheduler.process_streaming_requests()
 
@@ -243,9 +222,8 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_add_request_close_session_as_first_request(self):
         scheduler = create_scheduler()
 
-        request = DummyStreamingRequest(
+        request = DummyRequest(
             request_id="test_request",
-            streaming_sequence_id=0,
             close_session=True,
         )
         scheduler.add_request(request)
@@ -256,28 +234,26 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_process_streaming_requests_with_session_update(self):
         scheduler = create_scheduler()
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
         )
         scheduler.add_request(session_request)
         session_request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         session_request.num_computed_tokens = len(session_request.prompt_token_ids)
 
-        next_request = DummyStreamingRequest(
+        next_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5],
             close_session=False,
         )
 
         scheduler.add_request(next_request)
-        assert next_request.status == RequestStatus.WAITING_FOR_SESSION_REQ
+        assert next_request.status == RequestStatus.WAITING
+        assert len(session_request.streaming_queue) == 1
 
         _ = scheduler.process_streaming_requests()
 
-        assert session_request.streaming_sequence_id == 1
         assert session_request.status == RequestStatus.WAITING
         assert session_request.prompt_token_ids == [1, 2, 3, 4, 5]
 
@@ -286,9 +262,8 @@ class TestStreamingScheduler(unittest.TestCase):
         """Test _handle_stopped transitions request to WAITING_FOR_STREAMING_REQ."""
         scheduler = create_scheduler()
 
-        request = DummyStreamingRequest(
+        request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
         )
         request.status = RequestStatus.FINISHED_STOPPED
 
@@ -316,9 +291,8 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_update_session_request_with_output_tokens(self):
         scheduler = create_scheduler()
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],  # 3 prompt tokens
         )
         session_request.append_output_token_ids([10, 11])
@@ -328,13 +302,13 @@ class TestStreamingScheduler(unittest.TestCase):
         """
         session_request.num_computed_tokens = 4
 
-        new_request = DummyStreamingRequest(
+        new_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5],
         )
 
-        scheduler._update_session_request(session_request, new_request)
+        session_request.streaming_queue.append(new_request)
+        scheduler._update_session_request(session_request)
 
         # Verify the last output token (11) was removed, and new prompt tokens added
         assert session_request._all_token_ids == [1, 2, 3, 10, 4, 5]
@@ -380,13 +354,13 @@ class TestStreamingScheduler(unittest.TestCase):
         CRITICAL BUG PREVENTION:
         ========================
         Without .copy() in _create_new_request_data():
-        - Cycle 1 Step 3: cached_state["prompt_token_ids"] aliases 
+        - Cycle 1 Step 3: cached_state["prompt_token_ids"] aliases
             request._all_token_ids
-        - Cycle 1 Step 5: When appending token 10, cached state mutates: 
+        - Cycle 1 Step 5: When appending token 10, cached state mutates:
             [1,2,3] -> [1,2,3,10]
-        - Cycle 2 Step 8: num_tokens = len([1,2,3,10]) + len([10]) 
+        - Cycle 2 Step 8: num_tokens = len([1,2,3,10]) + len([10])
             = 5 (WRONG! Should be 4)
-        - Cycle 2: Discard logic would see seq_lens=4 < num_tokens=5 
+        - Cycle 2: Discard logic would see seq_lens=4 < num_tokens=5
             -> INCORRECTLY DISCARDS
 
         With .copy() in _create_new_request_data():
@@ -401,9 +375,8 @@ class TestStreamingScheduler(unittest.TestCase):
         # CYCLE 1: Initial Request Scheduling and First Decode
         # ═══════════════════════════════════════════════════════════════════
 
-        session_request = DummyStreamingRequest(
+        session_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=0,
             prompt_token_ids=[1, 2, 3],
         )
         scheduler.add_request(session_request)
@@ -552,13 +525,13 @@ class TestStreamingScheduler(unittest.TestCase):
         # ═══════════════════════════════════════════════════════════════════
 
         # Step 12: Add new streaming request with seq_id=1
-        new_request = DummyStreamingRequest(
+        new_request = DummyRequest(
             request_id="session",
-            streaming_sequence_id=1,
             prompt_token_ids=[4, 5],
         )
         scheduler.add_request(new_request)
-        assert new_request.status == RequestStatus.WAITING_FOR_SESSION_REQ
+        assert new_request.status == RequestStatus.WAITING
+        assert len(session_request.streaming_queue) == 1
 
         # Step 13: Scheduler merges new request into session and schedules
         scheduler_output_cycle3 = scheduler.schedule()

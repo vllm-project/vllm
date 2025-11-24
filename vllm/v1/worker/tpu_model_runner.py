@@ -573,9 +573,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # `prompt_token_ids`.
         req_state.output_token_ids.clear()
 
-        if self.uses_mrope:
-            self._init_mrope_positions(req_state)
-
     def get_model(self) -> nn.Module:
         return self.model
 

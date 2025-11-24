@@ -1,4 +1,5 @@
-from overrides import overrides
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.output_processor import (
@@ -7,11 +8,9 @@ from vllm.v1.engine.output_processor import (
     RequestState,
 )
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.streaming.engine import StreamingEngineCoreOutput
 
 
 class StreamingOutputProcessor(OutputProcessor):
-    @overrides
     def add_request(
         self,
         request: EngineCoreRequest,
@@ -45,9 +44,7 @@ class StreamingOutputProcessor(OutputProcessor):
             if parent_req:
                 self.parent_requests[parent_req.request_id] = parent_req
 
-    @overrides
     def _is_finished(self, engine_core_output: EngineCoreOutput) -> bool:
-        assert isinstance(engine_core_output, StreamingEngineCoreOutput)
         return (
             engine_core_output.finish_reason is not None
             and engine_core_output.close_session

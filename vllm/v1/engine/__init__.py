@@ -71,6 +71,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+    close_session: bool = False
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -126,6 +127,7 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    close_session: bool = False
 
     @property
     def finished(self) -> bool:

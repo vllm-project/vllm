@@ -1,50 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from collections.abc import Callable
 from typing import Any
 
-from overrides import overrides
-
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.sched.request_queue import RequestQueue, create_request_queue
+from vllm.v1.core.sched.request_queue import RequestQueue
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.streaming.engine import (
-    StreamingEngineCoreOutput,
-    StreamingEngineCoreOutputs,
-)
-from vllm.v1.streaming.streaming_request import StreamingRequest
 
 
 class StreamingScheduler(Scheduler):
-    engine_core_output_cls: type[EngineCoreOutput] = StreamingEngineCoreOutput
-    engine_core_outputs_cls: type[EngineCoreOutputs] = StreamingEngineCoreOutputs
-
-    @overrides
     def add_request(self, request: Request) -> None:
-        assert isinstance(request, StreamingRequest)
         if request.request_id not in self.requests:
-            # TODO: add logic in vllm predictor to make sure the first request is 
-            # processed before sending others.
-            assert (
-                request.streaming_sequence_id == 0
-            ), f"Request with streaming_sequence_id=0 request must be sent before other\
-            requests with streaming_sequence_id {request.streaming_sequence_id} > 1"
             if request.close_session:
                 return
             self.requests[request.request_id] = request
         else:
             session_request = self.requests[request.request_id]
-            assert request.streaming_sequence_id > session_request.streaming_sequence_id
-            request.status = RequestStatus.WAITING_FOR_SESSION_REQ
+            session_request.streaming_queue.append(request)
 
         self.waiting.add_request(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
-    def _update_session_request(
-        self, session_request: StreamingRequest, request: StreamingRequest
-    ) -> None:
+    def _update_session_request(self, session_request: Request) -> bool:
         """
         Updates the waiting session request with the new streaming request.
 
@@ -55,6 +37,14 @@ class StreamingScheduler(Scheduler):
         so the last output token is no longer needed and will not join the kv cache.
         This also guarantees correct calculation of `num_new_tokens` in `schedule`.
         """
+        request = session_request.streaming_queue.popleft()
+        if request.close_session:
+            session_request.status = RequestStatus.FINISHED_STOPPED
+            session_request.close_session = True
+            session_request.stop_reason = "close_session"
+            self.finished_req_ids.add(session_request.request_id)
+            return True
+
         num_new_tokens = (
             session_request.num_tokens - session_request.num_computed_tokens
         )
@@ -81,53 +71,29 @@ class StreamingScheduler(Scheduler):
         session_request.max_tokens = (
             session_request.num_output_tokens + request.max_tokens
         )
-        session_request.streaming_sequence_id = request.streaming_sequence_id
         session_request.arrival_time = request.arrival_time
         session_request.priority = request.priority
         session_request.sampling_params = request.sampling_params
         session_request.status = RequestStatus.WAITING
-        assert not request.close_session
 
         if self.log_stats:
             session_request.record_event(EngineCoreEventType.QUEUED)
 
-    def process_streaming_requests(self) -> RequestQueue:
-        waiting_requests = create_request_queue(self.policy)
-        while self.waiting:
-            request = self.waiting.pop_request()
-            if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-                pass
-            elif request.status == RequestStatus.WAITING_FOR_SESSION_REQ:
-                session_request = self.requests[request.request_id]
-                if (
-                    session_request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-                    and request.streaming_sequence_id
-                    == 1 + session_request.streaming_sequence_id
-                ):
-                    if request.close_session:
-                        session_request.status = RequestStatus.FINISHED_STOPPED
-                        session_request.close_session = True
-                        session_request.stop_reason = "close_session"
-                        self.finished_req_ids.add(session_request.request_id)
-                    else:
-                        self._update_session_request(session_request, request)
-                    continue
-            waiting_requests.prepend_request(request)
+        return False
 
-        skipped_waiting_requests = create_request_queue(self.policy)
-        while waiting_requests:
-            request = waiting_requests.pop_request()
+    def process_streaming_requests(self) -> RequestQueue:
+        closed_sessions = []
+        for request in self.waiting:
             if (
                 request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-                or request.status == RequestStatus.WAITING_FOR_SESSION_REQ
+                and len(request.streaming_queue) > 0
             ):
-                skipped_waiting_requests.prepend_request(request)
-            elif not RequestStatus.is_finished(request.status):
-                self.waiting.prepend_request(request)
+                closed = self._update_session_request(request)
+                if closed:
+                    closed_sessions.append(request)
 
-        return skipped_waiting_requests
+        self.waiting.remove_requests(closed_sessions)
 
-    @overrides
     def _create_new_request_data(
         self,
         request: Request,
@@ -146,33 +112,17 @@ class StreamingScheduler(Scheduler):
         Make sure that prompt_token_ids is a copy of the original request's
         _all_token_ids. Since the scheduler updates _all_token_ids each iteration, when
         continuing decoding for a text or special token an updated NewRequestData won't
-        be sent from the scheduler, the corresponding prompt_token_ids reference in 
+        be sent from the scheduler, the corresponding prompt_token_ids reference in
         SpeechGPUModelRunner will be mistakenly updated.
         """
         out = super()._create_new_request_data(request, block_ids)
         out.prompt_token_ids = request._all_token_ids.copy()
         return out
 
-    @overrides
     def schedule(self) -> SchedulerOutput:
-        # When new streaming request comes, the lifecycle is
-        # WAITING_FOR_SESSION_REQ -> WAIT (becomes session request) -> 
-        # RUNNING -> WAITING_FOR_STREAM_REQ
-        skipped_waiting_requests = self.process_streaming_requests()
-        scheduler_output = super().schedule()
-        self.waiting.prepend_requests(skipped_waiting_requests)
-        return scheduler_output
+        self.process_streaming_requests()
+        return super().schedule()
 
-    @overrides
-    def _make_engine_core_output(
-        self,
-        request: Request,
-        **kwargs: Any,
-    ) -> StreamingEngineCoreOutput:
-        kwargs["close_session"] = request.close_session
-        return self.engine_core_output_cls(**kwargs)
-
-    @overrides
     def has_unfinished_requests(self) -> bool:
         """
         Returns True if there are unfinished requests in the scheduler's
@@ -191,7 +141,6 @@ class StreamingScheduler(Scheduler):
 
         return False
 
-    @overrides
     def _handle_stopped(
         self,
         request: Request,
@@ -209,7 +158,6 @@ class StreamingScheduler(Scheduler):
             mark_preempted_stopped(request)
         return kv_transfer_params
 
-    @overrides
     def _handle_finished(
         self,
         finished_req_ids: set[str],

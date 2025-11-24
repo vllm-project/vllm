@@ -3,6 +3,7 @@
 
 import enum
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
@@ -44,6 +45,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        close_session: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -126,6 +128,10 @@ class Request:
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+
+        # Used for streaming
+        self.close_session = close_session
+        self.streaming_queue: deque[Request] = deque()
 
     @classmethod
     def from_engine_core_request(
@@ -225,8 +231,7 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
-    WAITING_FOR_STREAMING_REQ = enum.auto() 
-    WAITING_FOR_SESSION_REQ = enum.auto()
+    WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -236,7 +241,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @staticmethod

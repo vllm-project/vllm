@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,7 +41,6 @@ async def test_generate_normal_flow(mock_streaming_llm):
     request_id = "test_request"
     prompt = "Tell me about Paris"
     sampling_params = SamplingParams(max_tokens=10)
-    streaming_sequence_id = 0
     close_session = False
 
     # Create a mock queue with outputs
@@ -81,7 +82,6 @@ async def test_generate_normal_flow(mock_streaming_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        streaming_sequence_id=streaming_sequence_id,
         close_session=close_session,
     ):
         outputs.append(output)
@@ -123,7 +123,6 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
         prompt=prompt1,
         sampling_params=sampling_params,
         request_id=request_id,
-        streaming_sequence_id=0,
         close_session=False,
     ):
         outputs1.append(output)
@@ -155,7 +154,6 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
         prompt=prompt2,
         sampling_params=sampling_params,
         request_id=request_id,
-        streaming_sequence_id=1,
         close_session=False,
     ):
         outputs2.append(output)
@@ -194,7 +192,6 @@ async def test_generate_generator_exit(mock_streaming_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        streaming_sequence_id=0,
         close_session=False,
     )
 

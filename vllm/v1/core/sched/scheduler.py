@@ -432,6 +432,12 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                # Streaming: skip request if still waiting for next streaming req.
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -1095,15 +1101,15 @@ class Scheduler(SchedulerInterface):
 
             if stopped:
                 kv_transfer_params = self._handle_stopped(
-                    request, 
-                    status_before_stop, 
-                    mark_running_stopped, 
-                    mark_preempted_stopped
+                    request,
+                    status_before_stop,
+                    mark_running_stopped,
+                    mark_preempted_stopped,
                 )
             else:
                 self._handle_non_stopped(
-                    request, 
-                    status_before_stop, 
+                    request,
+                    status_before_stop,
                     mark_running_stopped,
                     model_runner_output,
                 )
@@ -1236,8 +1242,8 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _make_engine_core_output(
-        self, 
-        request: Request, 
+        self,
+        request: Request,
         **kwargs: Any,
     ) -> EngineCoreOutput:
         return self.engine_core_output_cls(**kwargs)

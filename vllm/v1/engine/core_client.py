@@ -430,7 +430,6 @@ class MPClient(EngineCoreClient):
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
-    output_cls: type[EngineCoreOutputs] = EngineCoreOutputs
 
     def __init__(
         self,
@@ -443,7 +442,7 @@ class MPClient(EngineCoreClient):
         self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(self.output_cls)
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)

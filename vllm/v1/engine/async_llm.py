@@ -52,9 +52,7 @@ logger = init_logger(__name__)
 
 
 class AsyncLLM(EngineClient):
-    processor_cls: type[Processor] = Processor
     output_processor_cls: type[OutputProcessor] = OutputProcessor
-    engine_core_client_cls: type[EngineCoreClient] = EngineCoreClient
 
     def __init__(
         self,
@@ -117,7 +115,7 @@ class AsyncLLM(EngineClient):
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = self.processor_cls(self.vllm_config, tokenizer)
+        self.processor = Processor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -134,7 +132,7 @@ class AsyncLLM(EngineClient):
             self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = self.engine_core_client_cls.make_async_mp_client(
+        self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
@@ -289,6 +287,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        close_session: bool = False,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -297,8 +296,12 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
+        # Reuse output collector for streaming session, create new otherwise.
+        existing_state = self.output_processor.request_states.get(request_id)
+        if existing_state and existing_state.queue:
+            queue = existing_state.queue
+        else:
+            queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -319,6 +322,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                close_session,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt
@@ -380,6 +384,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        close_session: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -436,6 +441,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                close_session=close_session,
             )
 
             # The output_handler task pushes items into the queue.
