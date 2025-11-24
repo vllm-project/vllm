@@ -98,6 +98,7 @@ from vllm.v1.attention.backends.utils import (
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -977,7 +978,7 @@ class GPUModelRunner(
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
     def _update_streaming_request(
-        self, req_id: str, new_req_data: CachedRequestState
+        self, req_id: str, new_req_data: NewRequestData
     ) -> CachedRequestState:
         """Updates streaming session request from `scheduled_new_reqs`.
 

@@ -61,6 +61,7 @@ from vllm.v1.attention.backends.pallas import (
     PallasMetadata,
     get_page_size_bytes,
 )
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
@@ -546,7 +547,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def _update_streaming_request(
-        self, req_id: str, new_req_data: CachedRequestState
+        self, req_id: str, new_req_data: NewRequestData
     ) -> None:
         """Updates streaming session request from `scheduled_new_reqs`.
 
