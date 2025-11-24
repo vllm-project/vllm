@@ -1391,9 +1391,6 @@ def get_kv_cache_configs(
         if len(kv_cache_config.kv_cache_groups) > 0:
             _report_kv_cache_config(vllm_config, kv_cache_config)
 
-    # TODO: Remove before merging. Only for testing.
-    print("kv_cache_configs", kv_cache_configs[0])
-
     return kv_cache_configs
 
 

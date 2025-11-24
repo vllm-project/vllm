@@ -1545,7 +1545,7 @@ def test_eagle_with_sliding_window():
 def test_different_block_size():
     block_size = 16
     # full attention and sliding window attention layers have the same page size:
-    # (32 tokens * 16 bytes/token, vs. 16 tokens * 32 bytes/token)
+    # (32 tokens/block * float16 token, vs. 16 tokens/block * float32 token)
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
         kv_cache_tensors=[],
