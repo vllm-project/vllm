@@ -43,7 +43,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .eplb_policy.abstract_policy import EplbPolicy
+from .eplb_policy.abstract_policy import AbstractEplbPolicy
 from .eplb_policy.policy_factory import PolicyFactory
 from .rebalance_execute import rearrange_expert_weights_inplace
 
@@ -144,7 +144,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: EplbPolicy | None = None
+        self.policy: AbstractEplbPolicy | None = None
         """
         Selected instance of the EPLB algorithm class
         """
@@ -626,7 +626,7 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
-        assert self.policy is not None, "EplbPolicy must be initialized"
+        assert self.policy is not None, "AbstractEplbPolicy must be initialized"
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows

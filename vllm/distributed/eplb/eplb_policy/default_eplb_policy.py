@@ -15,10 +15,10 @@ on how the EPLB algorithm works.
 import numpy as np
 import torch
 
-from .abstract_policy import EplbPolicy
+from .abstract_policy import AbstractEplbPolicy
 
 
-class DefaultEplb(EplbPolicy):
+class DefaultEplb(AbstractEplbPolicy):
     def balanced_packing(
         self, weight: torch.Tensor, num_packs: int
     ) -> tuple[torch.Tensor, torch.Tensor]:

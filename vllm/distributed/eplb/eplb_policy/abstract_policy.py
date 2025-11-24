@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 import torch
 
 
-class EplbPolicy(ABC):
+class AbstractEplbPolicy(ABC):
     @abstractmethod
     def rebalance_experts(
         self,

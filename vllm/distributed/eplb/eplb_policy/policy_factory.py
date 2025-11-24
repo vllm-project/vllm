@@ -3,13 +3,13 @@
 
 from vllm.config.parallel import EPLBPolicyOption
 
-from .abstract_policy import EplbPolicy
+from .abstract_policy import AbstractEplbPolicy
 from .default_eplb_policy import DefaultEplb
 
 
 class PolicyFactory:
     @staticmethod
-    def generate_policy(policy_type: EPLBPolicyOption) -> EplbPolicy:
+    def generate_policy(policy_type: EPLBPolicyOption) -> AbstractEplbPolicy:
         """
         DefaultEplb: The rearrangement algorithm
         is adapted from [DeepSeek EPLB]
@@ -17,7 +17,7 @@ class PolicyFactory:
         constrained number of expert shuffle
         """
 
-        policy: dict[EPLBPolicyOption, type[EplbPolicy]] = {
+        policy: dict[EPLBPolicyOption, type[AbstractEplbPolicy]] = {
             "default": DefaultEplb,
         }
         if policy_type not in policy:
