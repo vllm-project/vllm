@@ -31,6 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -96,8 +97,25 @@ class DefaultModelLoader(BaseModelLoader):
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
-        # Some quantized models use .pt files for storing the weights.
+
+        # First check for 'auto' format that mistral files format are present.
+        # This is to load mistral models with official format by default.
         if load_format == "auto":
+            load_format = (
+                "mistral"
+                if len(
+                    list_filtered_repo_files(
+                        model_name_or_path=model_name_or_path,
+                        allow_patterns=["consolidated*.safetensors"],
+                        revision=revision,
+                    )
+                )
+                > 0
+                else "hf"
+            )
+
+        # Some quantized models use .pt files for storing the weights.
+        if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == "safetensors" or load_format == "fastsafetensors":
             use_safetensors = True
