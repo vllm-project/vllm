@@ -267,25 +267,17 @@ class CudaPlatformBase(Platform):
     ) -> "AttentionBackendEnum":
         from vllm.attention.backends.registry import AttentionBackendEnum
 
-        # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-        if cls.has_device_capability(100):
-            return AttentionBackendEnum.TORCH_SDPA
-
-        if dtype not in (torch.float16, torch.bfloat16):
-            return AttentionBackendEnum.XFORMERS
-
-        if cls.has_device_capability(80):
+        # Try FlashAttention first
+        try:
             backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
             if backend_class.supports_head_size(
                 head_size
             ) and backend_class.supports_dtype(dtype):
                 return AttentionBackendEnum.FLASH_ATTN
-            else:
-                return AttentionBackendEnum.XFORMERS
-        else:
-            # Fallback for Volta/Turing GPUs or FA not supported
-            return AttentionBackendEnum.XFORMERS
+        except ImportError:
+            pass
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(

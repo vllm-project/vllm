@@ -18,6 +18,10 @@ from typing import Any
 import regex as re
 from typing_extensions import Never
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
@@ -60,6 +64,35 @@ def import_pynvml():
     import vllm.third_party.pynvml as pynvml
 
     return pynvml
+
+
+@cache
+def import_triton_kernels():
+    """
+    For convenience, prioritize triton_kernels that is available in
+    `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
+    """
+    if _has_module("triton_kernels"):
+        import triton_kernels
+
+        logger.debug_once(
+            f"Loading module triton_kernels from {triton_kernels.__file__}.",
+            scope="local",
+        )
+    elif _has_module("vllm.third_party.triton_kernels"):
+        import vllm.third_party.triton_kernels as triton_kernels
+
+        logger.debug_once(
+            f"Loading module triton_kernels from {triton_kernels.__file__}.",
+            scope="local",
+        )
+        sys.modules["triton_kernels"] = triton_kernels
+    else:
+        logger.info_once(
+            "triton_kernels unavailable in this build. "
+            "Please consider installing triton_kernels from "
+            "https://github.com/triton-lang/triton/tree/main/python/triton_kernels"
+        )
 
 
 def import_from_path(module_name: str, file_path: str | os.PathLike):
@@ -397,7 +430,12 @@ def has_deep_gemm() -> bool:
 
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
-    return _has_module("triton_kernels")
+    is_available = _has_module("triton_kernels") or _has_module(
+        "vllm.third_party.triton_kernels"
+    )
+    if is_available:
+        import_triton_kernels()
+    return is_available
 
 
 def has_tilelang() -> bool:
