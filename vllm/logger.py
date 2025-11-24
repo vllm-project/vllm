@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Hashable
+from collections.abc import Generator, Hashable
 from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
@@ -214,7 +214,7 @@ def init_logger(name: str) -> _VllmLogger:
 
 
 @contextmanager
-def suppress_logging(level=logging.INFO):
+def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     current_level = logging.root.manager.disable
     logging.disable(level)
     yield
