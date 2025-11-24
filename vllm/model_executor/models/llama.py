@@ -468,6 +468,9 @@ class LlamaModel(nn.Module):
         is_profiling_enabled: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
+        if is_profiling_enabled:
+            nvtx.push_range("LaAL::LlamaModel.forward")
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -496,6 +499,9 @@ class LlamaModel(nn.Module):
                 nvtx.pop_range()
 
         if not get_pp_group().is_last_rank:
+            if is_profiling_enabled:
+                nvtx.pop_range()
+
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
@@ -516,6 +522,9 @@ class LlamaModel(nn.Module):
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+
+        if is_profiling_enabled:
+            nvtx.pop_range()
 
         return hidden_states
 

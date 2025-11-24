@@ -602,6 +602,8 @@ class EngineArgs:
                                  **model_kwargs["logits_processors"])
         model_group.add_argument("--io-processor-plugin",
                                  **model_kwargs["io_processor_plugin"])
+        model_group.add_argument("--is-profiling-enabled",
+                                 **model_kwargs["is_profiling_enabled"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
