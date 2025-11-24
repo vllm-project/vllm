@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass, rebuild_dataclass
+from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.speculative import EagleModelTypes
@@ -1191,21 +1191,3 @@ def get_layers_from_vllm_config(
         for layer_name in layer_names
         if isinstance(forward_context[layer_name], layer_type)
     }
-
-
-def _rebuild_config_dataclasses() -> None:
-    """Rebuild dataclasses after all imports to resolve forward references.
-
-    This is needed because AttentionBackendEnum is imported under TYPE_CHECKING
-    in AttentionConfig to avoid circular imports.
-    """
-    from vllm.attention.backends.registry import (  # noqa: F401
-        AttentionBackendEnum,
-    )
-
-    rebuild_dataclass(AttentionConfig)
-    rebuild_dataclass(VllmConfig)
-
-
-# Call at module load time
-_rebuild_config_dataclasses()
