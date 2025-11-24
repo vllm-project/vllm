@@ -3461,7 +3461,9 @@ class GPUModelRunner(
             msg = (
                 "Failed to load model - not enough GPU memory. "
                 "Try lowering --gpu-memory-utilization to free memory for weights, "
-                "increasing --tensor-parallel-size, or using --quantization."
+                "increasing --tensor-parallel-size, or using --quantization. "
+                "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+                "for more tips."
             )
             combined_msg = f"{msg} (original error: {e})"
             logger.error("init_failed msg=%s", combined_msg)
