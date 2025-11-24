@@ -3936,31 +3936,6 @@ class GPUModelRunner(
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
 
-        # filter out the valid batch descriptor
-        _cg_mode, batch_descriptor = (
-            self.cudagraph_dispatcher.dispatch(
-                BatchDescriptor(
-                    num_tokens=num_tokens_after_padding,
-                    uniform_decode=uniform_decode,
-                    has_lora=activate_lora and self.lora_config is not None,
-                )
-            )
-            if not is_profile
-            else (CUDAGraphMode.NONE, None)
-        )
-        if cudagraph_runtime_mode is not None:
-            # we allow forcing NONE when the dispatcher disagrees to support
-            # warm ups for cudagraph capture
-            assert (
-                cudagraph_runtime_mode == CUDAGraphMode.NONE
-                or cudagraph_runtime_mode == _cg_mode
-            ), (
-                f"Cudagraph runtime mode mismatch at dummy_run. "
-                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
-            )
-        else:
-            cudagraph_runtime_mode = _cg_mode
-
         attn_metadata: PerLayerAttnMetadata | None = None
 
         # If force_attention is True, we always capture attention. Otherwise,
