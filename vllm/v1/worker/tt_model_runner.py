@@ -149,7 +149,7 @@ class TTModelRunner:
                  self.cache_config.block_size), kv_cache_config.num_blocks)
 
         # Only DP rank 0 allocates KV cache
-        if self.parallel_config.data_parallel_rank != 0:
+        if self.parallel_config.data_parallel_rank_local != 0:
             return
 
         # Make the assumption that we are tensor parallel by

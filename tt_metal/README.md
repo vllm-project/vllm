@@ -1,5 +1,14 @@
+## Contents
+- [vLLM and TT-Metal Branches](#vllm-and-tt-metal-branches)
+- [System Requirements](#system-requirements)
+- [Environment Creation](#environment-creation)
+- [Accessing the Meta-Llama Hugging Face Models](#accessing-the-meta-llama-hugging-face-models)
+- [Preparing the TT-Metal Models](#preparing-the-tt-metal-models)
+- [Running the Offline Inference Example](#running-the-offline-inference-example)
+- [Running the Server Example](#running-the-server-example)
+- [Running on Multi-Host Systems (V1 only)](#running-on-multi-host-systems-v1-only)
 
-## vLLM and tt-metal Branches
+## vLLM and TT-Metal Branches
 For the latest versions of vLLM and tt-metal, git-checkout the following branches in each repo separately:
 - vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (do not commit to this branch)
 - tt-metal branch: [main](https://github.com/tenstorrent/tt-metal)
@@ -51,12 +60,12 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
     login()
     ```
 
-## Preparing the tt-metal models
+## Preparing the TT-Metal Models
 
 1. Ensure that `$PYTHONPATH` contains the path to tt-metal (should already have been done when installing tt-metal)
 2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2 and Qwen-2.5, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers) for preparing the weights and environment variables, and install any extra requirements (e.g. `pip install -r models/tt_transformers/requirements.txt`).
 
-## Running the offline inference example
+## Running the Offline Inference Example
 
 ### Llama-3.1/3.2 (1B, 3B, 8B, 70B) and Qwen-2.5 (7B, 72B) Text Models
 
@@ -81,6 +90,7 @@ MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 - `worker_l1_size`
 - `l1_small_size`
 - `fabric_config`: ["DISABLED", "FABRIC_1D", "FABRIC_2D", "CUSTOM"]
+- `fabric_reliability_mode`: ["STRICT_INIT", "RELAXED_INIT"]
 - `dispatch_core_axis`: ["row", "col"]
 - `data_parallel`: [default: 1]
 - `always_compat_sampling`: [true, false], default: false (If true, use vLLM's full LogitProcessor+Sampler pipeline instead of custom sampling even when not required by the batch)
@@ -106,7 +116,7 @@ Example commands:
 - To run the Llama70B model on Galaxy: `MESH_DEVICE=TG LLAMA_DIR=<path to weights> TT_LLAMA_TEXT_VER="llama3_70b_galaxy" python examples/offline_inference_tt.py --model "meta-llama/Llama-3.1-70B-Instruct" --override_tt_config '{"dispatch_core_axis": "col", "sample_on_device_mode": "all", "fabric_config": "FABRIC_1D_RING", "worker_l1_size": 1344544, "trace_region_size": 184915840}'`
 
 - To run the 20B gpt-oss model on Galaxy: `MESH_DEVICE="(4,8)" python examples/offline_inference_tt.py --model "openai/gpt-oss-20b" --max_seqs_in_batch 1 --override_tt_config '{"fabric_config": "FABRIC_1D_RING"}'`
-### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
+### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision Models
 
 To generate tokens (Llama-3.2-11B on N300) for sample prompts:
 
@@ -127,7 +137,7 @@ MESH_DEVICE=N300 python examples/offline_inference_tt.py --model "meta-llama/Lla
 > - To run the 72B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-72B"`, `--max_seqs_in_batch 32`, `--max_model_len 2048`, and `--override_tt_config '{"trace_region_size": 28467200}'`. Note that this model currently is limited to 2048 tokens per user with batch size 32 to avoid OOM error on T3K.
 > - To run the 27B gemma-3 model, set `MESH_DEVICE=T3K --model "google/gemma-3-27b-it" --max_seqs_in_batch 32 --override_tt_config '{"l1_small_size": 768, "fabric_config": "FABRIC_1D"} --multi_modal --multi_image --mm_processor_kwargs '{"use_fast": true, "do_convert_rgb": true}'`.
 
-## Running the server example
+## Running the Server Example
 
 To start up the server:
 
@@ -136,8 +146,8 @@ VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K python examples/server_example_tt.py
 ```
 
 > **Notes:**
-> - By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the offline inference example](#running-the-offline-inference-example).
-> - Custom TT options can be set using `--override_tt_config` as described in [Running the offline inference example](#running-the-offline-inference-example).
+> - By default, the server will run with Llama-3.1-70B-Instruct. To run with other models, set `MESH_DEVICE` and `--model` as described in [Running the Offline Inference Example](#running-the-offline-inference-example).
+> - Custom TT options can be set using `--override_tt_config` as described in [Running the Offline Inference Example](#running-the-offline-inference-example).
 
 To send a request to the server:
 
@@ -145,7 +155,7 @@ To send a request to the server:
 curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{ "model": "meta-llama/Llama-3.1-70B-Instruct", "prompt": "San Francisco is a", "max_tokens": 32, "temperature": 1, "top_p": 0.9, "top_k": 10 }'
 ```
 
-### Compatibility sampling mode, guided decoding, structured outputs
+### Compatibility Sampling Mode, Guided Decoding, Structured Outputs
 
 Sampling parameters beyond `temperature`, `top_k`, `top_p` require the compatibility sampling mode.
 The compatibility sampling pathway is selected per batch when any request in the batch requires it. It can also be force-enabled for testing purposes with `--override_tt_config '{"always_compat_sampling": true}'`
@@ -153,7 +163,7 @@ The compatibility sampling pathway is selected per batch when any request in the
 Some parameters, such as guided_decoding / strucured outputs require additionally setting `num_scheduler_steps=1`.
 Be aware that both of these settings will incur performance penalties.
 
-### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
+### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision Models
 
 First, start the server following the instructions above with the correct model through `--model`.
 
@@ -212,3 +222,16 @@ Finally, send a request to the server:
 ```bash
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" --data-binary @server-instruct-mm-prompt.json
 ```
+
+## Running on Multi-Host Systems (V1 only)
+To run offline inference or a server on a multi-host system, vLLM needs to be launched from the host that has MPI rank 0 (determined from the rankfile). Underneath the hood, the `tt-run` utility from tt-metal will be used to spawn MPI processes on each host. For example, for offline inference on 2 Wormhole Galaxy hosts with DP=2 (distributed across hosts):
+
+```sh
+MESH_DEVICE=(8,8) VLLM_USE_V1=1 python -u examples/offline_inference_tt.py --model <MODEL_NAME> --num_scheduler_steps 1 --data_parallel_size 2 --async_engine --override_tt_config '{"rank_binding": "<PATH_TO_TT_METAL>/tests/tt_metal/distributed/config/dual_galaxy_rank_bindings.yaml", "mpi_args": "--host <HOST1>,<HOST2> --map-by rankfile:file=/etc/mpirun/rankfile --mca btl self,tcp --mca btl_tcp_if_include cnx1 --bind-to none --tag-output", "config_pkl_dir": "<PATH_TO_SHARED_TMP_DIR>", "fabric_config": "FABRIC_1D", "fabric_reliability_mode": "RELAXED_INIT", "env_passthrough":["VLLM_*", "MESH_DEVICE"]}'
+```
+
+> **Notes:**
+> - The `rank_binding` YAML needs to contain an absolute path for `mesh_graph_desc_path` so the file can be located (the default tt-metal rank binding files contain paths relative to tt-metal).
+> - To check which host has MPI rank 0, examine the rankfile (commonly /etc/mpirun/rankfile). If you launch from another host, vLLM will raise an error and indicate which host to run from.
+> - `config_pkl_dir` needs to be set to a directory that is shared by all hosts (used during initialization to write a temporary config file that is read by other hosts).
+> - If you need to set environment variables that should be propagated to all hosts, you can either 1) specify them as part of `env_passthrough` in `--override_tt_config` or 2) add them as a `global_env` in the rank_binding file.

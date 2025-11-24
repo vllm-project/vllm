@@ -51,15 +51,17 @@ class TTWorker(WorkerBase):
             self.trace_mode = override_tt_config[trace_key]
 
     def init_device(self) -> None:
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-        if dp_rank == 0:
+        local_dp_rank = self.parallel_config.data_parallel_rank_local
+        # Open mesh only on local DP rank 0 (device ranks).
+        if local_dp_rank == 0:
             self.mesh_device = open_mesh_device(
-                self.model_config.override_tt_config, self.trace_mode, dp_rank)
+                self.model_config.override_tt_config, self.trace_mode,
+                local_dp_rank)
             self.device_config.device = self.mesh_device
             assert self.mesh_device is not None
             self.device_config.num_devices = self.mesh_device.get_num_devices()
         else:
-            mesh_grid = get_mesh_grid(dp_rank)
+            mesh_grid = get_mesh_grid(local_dp_rank)
             self.mesh_device = None
             # Num devices is required for determining num blocks in KV cache.
             self.device_config.num_devices = mesh_grid[0] * mesh_grid[1]
@@ -71,8 +73,8 @@ class TTWorker(WorkerBase):
         )
 
     def load_model(self):
-        # Only DP rank 0 loads the model
-        if self.vllm_config.parallel_config.data_parallel_rank == 0:
+        # Only local DP rank 0 (device rank) loads the model
+        if self.parallel_config.data_parallel_rank_local == 0:
             self.model_runner.load_model()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -189,13 +191,14 @@ class TTWorker(WorkerBase):
             self, inputs: Union[list[Optional[TTModelInput]],
                                 dict[str, torch.Tensor]], is_decode: bool,
             max_blocks_decode_batch: Optional[int]) -> torch.Tensor:
-        """Called only by DP rank 0 to concatenate DP-sized inputs and execute.
-        Returns a stacked tensor [world, max_num_seqs, 1] of sampled ids.
+        """Called by TT device ranks (local DP rank 0) to concatenate DP-sized
+        inputs and execute. Returns a stacked tensor
+        [world, max_num_seqs, 1] of sampled ids.
         Each DP slice is right-padded with zeros to max_num_seqs; empty entries
         are zeros. Same behavior for both prefill and decode."""
 
-        assert self.vllm_config.parallel_config.data_parallel_rank == 0, \
-            "concat_and_execute_dp must run on DP rank 0"
+        assert (self.parallel_config.data_parallel_rank_local == 0), \
+            "concat_and_execute_dp must run on local DP rank 0 (device rank)"
         assert self.is_driver_worker, "concat_and_execute_dp must run on driver"
         merged = self.model_runner.concat_dp_model_inputs(
             inputs, is_decode, max_blocks_decode_batch)
@@ -203,7 +206,7 @@ class TTWorker(WorkerBase):
             torch.Tensor] = self.model_runner.execute_with_model_input(merged)
 
         # Pad each DP result to uniform shape for tensor all_gather.
-        world = self.vllm_config.parallel_config.data_parallel_size
+        world = self.parallel_config.data_parallel_size
         assert len(sampled_token_ids_per_dp) == world
         B = int(self.model_runner.scheduler_config.max_num_seqs)
         for dp_rank in range(world):

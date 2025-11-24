@@ -66,3 +66,5 @@ mkdocs.yaml @hmellor
 /vllm/v1/worker/tt_input_batch.py @skhorasganiTT
 /vllm/v1/core/sched/ascend_scheduler.py @skhorasganiTT
 /vllm/v1/engine/core.py @skhorasganiTT
+/vllm/v1/engine/utils.py @skhorasganiTT
+/vllm/v1/engine/tt_core_launcher.py @skhorasganiTT

@@ -52,6 +52,7 @@ ALLOWED_FILES = set([
     'vllm/executor/mp_distributed_executor.py',
     'vllm/executor/ray_distributed_executor.py',
     'vllm/entrypoints/llm.py',
+    'vllm/v1/engine/tt_core_launcher.py',  # for serializing VllmConfig
     'tests/utils.py',
     # pickle and cloudpickle
     'vllm/utils/__init__.py',

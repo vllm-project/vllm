@@ -1094,7 +1094,12 @@ class EngineArgs:
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
         if self.data_parallel_address is None:
-            if self.data_parallel_backend == "ray":
+            if current_platform.is_tt():
+                host_ip = get_ip()
+                logger.info("Using host IP %s as TT data parallel address",
+                            host_ip)
+                data_parallel_address = host_ip
+            elif self.data_parallel_backend == "ray":
                 host_ip = get_ip()
                 logger.info(
                     "Using host IP %s as ray-based data parallel address",

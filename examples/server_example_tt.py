@@ -5,10 +5,6 @@ import argparse
 import runpy
 import sys
 
-from offline_inference_tt import check_tt_model_supported, register_tt_models
-
-register_tt_models()  # Import and register models from tt-metal
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -31,8 +27,6 @@ def main():
         "--block_size", type=int, default=64, help="KV cache block size"
     )
     args, _ = parser.parse_known_args()
-
-    check_tt_model_supported(args.model)
 
     sys.argv.extend(
         [

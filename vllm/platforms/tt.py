@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -21,6 +22,118 @@ else:
     PoolingParams = None
 
 logger = init_logger(__name__)
+
+
+def register_tt_models():
+    from vllm import ModelRegistry
+
+    llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
+    if llama_text_version == "tt_transformers":
+        path_llama_text = (
+            "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM")
+    elif llama_text_version == "llama3_70b_galaxy":
+        path_llama_text = (
+            "models.demos.llama3_70b_galaxy.tt.generator_vllm:LlamaForCausalLM"
+        )
+    elif llama_text_version == "llama2_70b":
+        path_llama_text = (
+            "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
+        )
+    else:
+        raise ValueError(
+            f"Unsupported TT Llama version: {llama_text_version}, "
+            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]")
+
+    # Llama3.1/3.2 - Text
+    ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
+
+    # Llama3.2 - Vision
+    ModelRegistry.register_model(
+        "TTMllamaForConditionalGeneration",
+        "models.tt_transformers.tt.generator_vllm:MllamaForConditionalGeneration",
+    )
+
+    # Qwen2.5 - Text
+    path_qwen_text = "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
+    ModelRegistry.register_model("TTQwen2ForCausalLM", path_qwen_text)
+    ModelRegistry.register_model("TTQwen3ForCausalLM", path_qwen_text)
+
+    # Qwen2.5 - Vision
+    ModelRegistry.register_model(
+        "TTQwen2_5_VLForConditionalGeneration",
+        "models.demos.qwen25_vl.tt.generator_vllm:Qwen2_5_VLForConditionalGeneration",
+    )
+
+    # Mistral
+    ModelRegistry.register_model(
+        "TTMistralForCausalLM",
+        "models.tt_transformers.tt.generator_vllm:MistralForCausalLM",
+    )
+
+    # Gemma3
+    ModelRegistry.register_model(
+        "TTGemma3ForConditionalGeneration",
+        "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration",
+    )
+
+    # DeepseekV3
+    ModelRegistry.register_model(
+        "TTDeepseekV3ForCausalLM",
+        "models.demos.deepseek_v3.tt.generator_vllm:DeepseekV3ForCausalLM",
+    )
+
+    # GPT-OSS
+    ModelRegistry.register_model(
+        "TTGptOssForCausalLM",
+        "models.tt_transformers.tt.generator_vllm:GptOssForCausalLM",
+    )
+
+
+def check_tt_model_supported(model):
+    supported_models = [
+        "meta-llama/Llama-3.1-70B",
+        "meta-llama/Llama-3.1-70B-Instruct",
+        "meta-llama/Llama-3.1-8B",
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.2-1B",
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "meta-llama/Llama-3.2-11B-Vision",
+        "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        "meta-llama/Llama-3.2-90B-Vision-Instruct",
+        "meta-llama/Llama-3.3-70B",
+        "meta-llama/Llama-3.3-70B-Instruct",
+        "Qwen/Qwen2.5-7B",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-14B",
+        "Qwen/Qwen2.5-14B-Instruct",
+        "Qwen/Qwen2.5-32B",
+        "Qwen/Qwen2.5-32B-Instruct",
+        "Qwen/Qwen2.5-Coder-32B",
+        "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "Qwen/Qwen2.5-72B",
+        "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "Qwen/Qwen2.5-VL-32B-Instruct",
+        "Qwen/Qwen2.5-VL-72B-Instruct",
+        "Qwen/Qwen3-0.6B",
+        "Qwen/Qwen3-1.7B",
+        "Qwen/Qwen3-4B",
+        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3-14B",
+        "Qwen/Qwen3-32B",
+        "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        "google/gemma-3-4b-it",
+        "google/gemma-3-27b-it",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "deepseek-ai/DeepSeek-R1-0528",
+    ]
+    assert model in supported_models, (
+        f"{model} is not in list of supported TT models")
 
 
 class TTPlatform(Platform):
@@ -49,6 +162,12 @@ class TTPlatform(Platform):
             "LoRA is not supported for TT backend")
         assert not vllm_config.cache_config.enable_prefix_caching, (
             "Automatic prefix caching is not yet supported for TT backend")
+
+        # Check if model is in list of supported models
+        check_tt_model_supported(vllm_config.model_config.model)
+
+        # Import and register models from tt-metal
+        register_tt_models()
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":

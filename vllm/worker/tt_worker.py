@@ -511,6 +511,23 @@ def get_fabric_config(override_tt_config, num_devices):
     return fabric_config
 
 
+def get_reliability_mode(override_tt_config):
+    # Default to strict init and override if specified in override_tt_config.
+    reliability_mode = ttnn.FabricReliabilityMode.STRICT_INIT
+    if (override_tt_config is not None
+            and "fabric_reliability_mode" in override_tt_config):
+        reliability_mode_str = override_tt_config["fabric_reliability_mode"]
+        reliability_mode_map = {
+            "STRICT_INIT": ttnn.FabricReliabilityMode.STRICT_INIT,
+            "RELAXED_INIT": ttnn.FabricReliabilityMode.RELAXED_INIT,
+        }
+        reliability_mode = reliability_mode_map.get(reliability_mode_str)
+        assert reliability_mode is not None, (
+            f"Invalid fabric_reliability_mode: {reliability_mode_str}. "
+            f"Expected one of {list(reliability_mode_map.keys())}.")
+    return reliability_mode
+
+
 # From tt-metal/conftest.py:
 # Set fabric config to passed in value
 # Do nothing if not set
@@ -518,7 +535,10 @@ def get_fabric_config(override_tt_config, num_devices):
 def set_fabric(override_tt_config, num_devices):
     fabric_config = get_fabric_config(override_tt_config, num_devices)
     if fabric_config:
-        ttnn.set_fabric_config(fabric_config)
+        reliability_mode = get_reliability_mode(override_tt_config)
+        logger.info("Setting fabric config: %s, reliability mode: %s",
+                    fabric_config, reliability_mode)
+        ttnn.set_fabric_config(fabric_config, reliability_mode)
 
 
 # From tt-metal/conftest.py:
@@ -552,10 +572,10 @@ def device_params_from_override_tt_config(override_tt_config, trace_mode):
     return device_params
 
 
-def get_mesh_grid(dp_rank=0):
-    if dp_rank == 0:
-        # Only DP rank 0 should get device ids, otherwise device init may hang.
-        num_devices_available = len(ttnn.get_device_ids())
+def get_mesh_grid(local_dp_rank=0):
+    if local_dp_rank == 0:
+        # Only DP rank 0 should query devices.
+        num_devices_available = ttnn.get_num_devices()
     mesh_grid_dict = {
         "N150": (1, 1),
         "P100": (1, 1),
@@ -575,7 +595,6 @@ def get_mesh_grid(dp_rank=0):
             # Try to parse as a literal tuple first
             parsed_value = ast.literal_eval(mesh_device_env)
             if isinstance(parsed_value, tuple) and len(parsed_value) == 2:
-                logger.debug("MESH_DEVICE is a tuple", mesh_device_env)
                 mesh_grid = parsed_value
             else:
                 raise ValueError("Not a valid tuple")
@@ -585,11 +604,11 @@ def get_mesh_grid(dp_rank=0):
                 f"Invalid MESH_DEVICE: {mesh_device_env}")
             mesh_grid = mesh_grid_dict[mesh_device_env]
     else:
-        assert dp_rank == 0, (
+        assert local_dp_rank == 0, (
             "MESH_DEVICE must be set when running with data_parallel_size > 1")
         mesh_grid = (1, num_devices_available)
 
-    assert dp_rank != 0 or (
+    assert local_dp_rank != 0 or ttnn.using_distributed_env() or (
         mesh_grid[0] * mesh_grid[1] <= num_devices_available), (
             f"Requested mesh grid shape {mesh_grid} is larger than "
             f"number of available devices {num_devices_available}")
@@ -597,9 +616,10 @@ def get_mesh_grid(dp_rank=0):
     return mesh_grid
 
 
-def open_mesh_device(override_tt_config, trace_mode, dp_rank=0):
-    assert dp_rank == 0, "open_mesh_device must run on DP rank 0"
-    mesh_grid = get_mesh_grid(dp_rank)
+def open_mesh_device(override_tt_config, trace_mode, local_dp_rank=0):
+    assert local_dp_rank == 0, "open_mesh_device must run on local DP rank 0"
+    mesh_grid = get_mesh_grid(local_dp_rank)
+    logger.info("Attempting to open mesh device with grid shape %s", mesh_grid)
 
     device_params = device_params_from_override_tt_config(
         override_tt_config, trace_mode)
@@ -624,6 +644,8 @@ def close_mesh_device(mesh_device, override_tt_config):
 
     # Close devices
     num_devices = mesh_device.get_num_devices()
+    for submesh in mesh_device.get_submeshes():
+        ttnn.close_mesh_device(submesh)
     ttnn.close_mesh_device(mesh_device)
 
     # Reset fabric
