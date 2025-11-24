@@ -9,14 +9,13 @@ vLLM now supports optimization levels (`-O0`, `-O1`, `-O2`, `-O3`). Optimization
 ## Level Summaries and Usage Examples
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model microsoft/DialoGPT-medium -O0
+python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O0
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
-from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
-    model="microsoft/DialoGPT-medium",
+    model="RedHatAI/Llama-3.2-1B-FP8",
     optimization_level=0
 )
 ```
@@ -28,14 +27,13 @@ llm = LLM(
 
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model microsoft/DialoGPT-medium -O1
+python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
-from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
-    model="microsoft/DialoGPT-medium",
+    model="RedHatAI/Llama-3.2-1B-FP8",
     optimization_level=1
 )
 ```
@@ -47,14 +45,13 @@ llm = LLM(
 
 ```bash
 # CLI usage (default, so optional)
-python -m vllm.entrypoints.api_server --model microsoft/DialoGPT-medium -O2
+python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O2
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
-from vllm.config.vllm import OptimizationLevel
 
 llm = LLM(
-    model="microsoft/DialoGPT-medium",
+    model="RedHatAI/Llama-3.2-1B-FP8",
     optimization_level=2  # This is the default
 )
 ```

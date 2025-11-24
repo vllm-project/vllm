@@ -1762,7 +1762,6 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1779,6 +1778,7 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
+            optimization_level=self.optimization_level,
         )
 
         return config
