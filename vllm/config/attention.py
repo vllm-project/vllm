@@ -45,7 +45,7 @@ class AttentionConfig:
     disable_flashinfer_prefill: bool = False
     """Whether to disable flashinfer prefill."""
 
-    flashinfer_disable_q_quantization: bool = False
+    disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
     def compute_hash(self) -> str:
@@ -106,6 +106,6 @@ class AttentionConfig:
             "disable_flashinfer_prefill", "VLLM_DISABLE_FLASHINFER_PREFILL"
         )
         self._set_from_env_if_set(
-            "flashinfer_disable_q_quantization",
+            "disable_flashinfer_q_quantization",
             "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         )

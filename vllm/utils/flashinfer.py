@@ -499,12 +499,12 @@ def flashinfer_scaled_fp8_mm(
 
 
 @functools.cache
-def flashinfer_disable_q_quantization() -> bool:
+def disable_flashinfer_q_quantization() -> bool:
     """Cache result which only depends on the attention config"""
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    return vllm_config.attention_config.flashinfer_disable_q_quantization
+    return vllm_config.attention_config.disable_flashinfer_q_quantization
 
 
 __all__ = [
@@ -527,7 +527,7 @@ __all__ = [
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
-    "flashinfer_disable_q_quantization",
+    "disable_flashinfer_q_quantization",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
 ]
