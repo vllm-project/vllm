@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from unittest.mock import patch
 import pytest
-import shutil
-import os
-from pathlib import Path
+from huggingface_hub import snapshot_download
+from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 
-from huggingface_hub import snapshot_download
-from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -64,8 +62,11 @@ VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
 @patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_list_safetensors")
 @patch(f"{STREAMER_MODULE_PATH}.SafetensorsStreamer")
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
-    mock_streamer_class, mock_list_safetensors, mock_pull_files, # Mocks are passed LIFO
-    vllm_runner, tmp_path: Path
+    mock_streamer_class,
+    mock_list_safetensors,
+    mock_pull_files, # Mocks are passed LIFO
+    vllm_runner,
+    tmp_path: Path
 ):
     """
     Tests loading a model from a mocked S3 path using unittest.mock.patch decorators.
