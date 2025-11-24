@@ -195,18 +195,10 @@ class CudaPlatformBase(Platform):
                     use_flashmla = True
             else:
                 # Forced case
-                use_flashmla = (
-                    vllm_config.attention_config.backend
-                    == AttentionBackendEnum.FLASHMLA
-                )
-                use_cutlass_mla = (
-                    vllm_config.attention_config.backend
-                    == AttentionBackendEnum.CUTLASS_MLA
-                )
-                use_flashinfer_mla = (
-                    vllm_config.attention_config.backend
-                    == AttentionBackendEnum.FLASHINFER_MLA
-                )
+                backend = vllm_config.attention_config.backend
+                use_flashmla = backend == AttentionBackendEnum.FLASHMLA
+                use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
+                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
