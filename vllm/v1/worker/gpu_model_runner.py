@@ -2674,6 +2674,7 @@ class GPUModelRunner(
                     continue
                 assert len(new_block_ids) >= 1 + num_speculative_blocks
                 block_ids: list[int] = self.requests[cached_reqs.req_ids[i]].block_ids[kv_cache_group_id]
+                # TODO: for sps, need to handle sps blocks
                 src_block_idx = cdiv(num_compute_tokens, block_size) - 1
                 dest_block_idx = len(new_block_ids) - 1 - num_speculative_blocks
                 src_block_id, dest_block_id = block_ids[src_block_idx], new_block_ids[dest_block_idx]

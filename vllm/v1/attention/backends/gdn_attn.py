@@ -58,6 +58,7 @@ class GDNAttentionMetadata:
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
 
+# TODO: need to move, and called by all mamba builders
 def mamba_gather_indices(common_attn_metadata: CommonAttentionMetadata,
                          block_size: int,
                          num_blocks: int):

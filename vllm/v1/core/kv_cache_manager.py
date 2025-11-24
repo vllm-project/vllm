@@ -305,9 +305,7 @@ class KVCacheManager:
                 "Computed blocks should be empty when prefix caching is disabled"
             )
 
-        if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE 
-            or new_computed_block_list is not self.empty_kv_cache_blocks.blocks
-        ):
+        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.save_new_computed_blocks(
