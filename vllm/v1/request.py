@@ -200,6 +200,19 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
+    def get_skip_reading_prefix_cache(self) -> bool:
+        if (
+            self.sampling_params is not None
+            and self.sampling_params.skip_reading_prefix_cache is not None
+        ):
+            return self.sampling_params.skip_reading_prefix_cache
+        elif (
+            self.pooling_params is not None
+            and self.pooling_params.skip_reading_prefix_cache is not None
+        ):
+            return self.pooling_params.skip_reading_prefix_cache
+        return False
+
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 

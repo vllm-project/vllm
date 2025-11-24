@@ -18,17 +18,17 @@ class StreamingScheduler(Scheduler):
             if request.close_session:
                 return
             self.requests[request.request_id] = request
+            self.waiting.add_request(request)
         else:
             session_request = self.requests[request.request_id]
             session_request.streaming_queue.append(request)
 
-        self.waiting.add_request(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
     def _update_session_request(self, session_request: Request) -> bool:
         """
-        Updates the waiting session request with the new streaming request.
+        Updates the waiting session request with the next streaming request.
 
         Removes the last output token (which hasn't been scheduled yet) from
         `_all_token_ids`, as the new request's prompt tokens are replacing it. Typically
@@ -94,10 +94,11 @@ class StreamingScheduler(Scheduler):
 
         self.waiting.remove_requests(closed_sessions)
 
-    def _create_new_request_data(
+    def _make_new_request_data(
         self,
         request: Request,
         block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
     ) -> NewRequestData:
         """
         Creates NewRequestData for requests in waiting queue to be sent to
@@ -115,7 +116,7 @@ class StreamingScheduler(Scheduler):
         be sent from the scheduler, the corresponding prompt_token_ids reference in
         SpeechGPUModelRunner will be mistakenly updated.
         """
-        out = super()._create_new_request_data(request, block_ids)
+        out = super()._make_new_request_data(request, block_ids, prefill_token_ids)
         out.prompt_token_ids = request._all_token_ids.copy()
         return out
 

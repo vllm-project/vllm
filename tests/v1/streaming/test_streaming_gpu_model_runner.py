@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Unit tests for GPUModelRunner._update_streaming_request function."""
 
 from unittest.mock import Mock

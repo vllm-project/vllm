@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import unittest
 from unittest.mock import MagicMock
 
@@ -51,6 +52,7 @@ def create_scheduler() -> StreamingScheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.max_model_len = 1024
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
     vllm_config.cache_config.enable_prefix_caching = False
@@ -203,8 +205,6 @@ class TestStreamingScheduler(unittest.TestCase):
             close_session=False,
         )
         scheduler.add_request(session_request)
-
-        _ = scheduler.schedule()
         session_request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
 
         close_request = DummyRequest(
