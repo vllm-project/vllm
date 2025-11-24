@@ -213,11 +213,7 @@ def main(args):
             print(f"---Generated Text ({len(output.outputs[0].token_ids)} tokens)---\n{output.outputs[0].text}")
             print('\n')
 
-    try:
-        metrics = llm.get_metrics()
-    except AssertionError:
-        print("Metrics are not supported in the V0 engine.")
-        return
+    metrics = llm.get_metrics()
 
     prefill_tokens = sum(len(output.prompt_token_ids) for output in outputs)
     decode_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)

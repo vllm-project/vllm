@@ -292,7 +292,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
     ):
         # Make sure we don't accidentally collect outside operations
         torch_xla.sync()
@@ -313,7 +312,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            extra_vocab_size,
+            0,  # extra_vocab_size
             "cpu",
         )
         self._token_lora_indices = self._pad_to_shape(
