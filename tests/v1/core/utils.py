@@ -43,7 +43,6 @@ def create_scheduler(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
-    enable_prefix_caching: bool | None = None,
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
