@@ -41,6 +41,7 @@ from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.utils import async_barrier
 
 logger = init_logger(__name__)
 
@@ -150,6 +151,9 @@ class EagleProposer:
             device=device,
             with_numpy=True,
         )
+        self.backup_next_token_ids_event: torch.Event | None = None
+        if vllm_config.scheduler_config.async_scheduling:
+            self.backup_next_token_ids_event = torch.Event()
 
         # Determine allowed attention backends once during initialization.
         from vllm.attention.backends.registry import AttentionBackendEnum
@@ -548,15 +552,17 @@ class EagleProposer:
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
+        backup_next_token_ids = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
+                requests[req_id].get_token_id(seq_len)
+                for req_id, seq_len in zip(
+                    gpu_input_batch.req_ids, common_attn_metadata.seq_lens_cpu.numpy()
                 )
-                for i in range(num_reqs)
             ]
         )
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        with async_barrier(self.backup_next_token_ids_event):
+            self.backup_next_token_ids.np[:num_reqs] = backup_next_token_ids
+            self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[
