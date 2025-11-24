@@ -502,20 +502,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
-        # Copy prefill tokens from CPU to GPU and get query_start_loc.
+        # Get query_start_loc.
+        np.cumsum(
+            num_scheduled_tokens,
+            out=self.input_buffers.query_start_loc.np[1 : num_reqs + 1],
+        )
+        # Pad for full CUDA graph mode.
+        # Some attention backends like FA3 require query_start_loc to be non-decreasing.
+        self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
+        self.input_buffers.query_start_loc.copy_to_gpu()
+        query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
+
+        # Copy prefill tokens from CPU to GPU.
         prepare_prefill_inputs(
             idx_mapping_np,
             num_scheduled_tokens,
-            num_tokens,
+            query_start_loc_np,
             self.req_states.prefill_token_ids,
             self.req_states.num_computed_prefill_tokens,
-            self.req_states.prefill_len.np,
-            self.input_buffers.input_ids,
-            self.input_buffers.query_start_loc,
+            self.input_buffers.input_ids.np,
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-        query_start_loc_np = query_start_loc.np[: num_reqs + 1]
+        self.input_buffers.input_ids.copy_to_gpu(num_tokens)
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
