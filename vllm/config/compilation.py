@@ -192,6 +192,54 @@ class PassConfig:
             self.enable_qk_norm_rope_fusion = False
 
 
+class DynamicShapesType(str, enum.Enum):
+    """Types of dynamic shapes handling in torch.compile().
+    see  Dynamic shapes and vllm guard dropping in torch_compile.md
+    for more details."""
+
+    BACKED = "backed"
+    """Use backed dynamic shapes. torch.compile() guards on backed dynamic
+    shapes and may add guards. Symbols are specialized to 0, 1, or >=2 even
+    without encountering branching on those ranges."""
+
+    UNBACKED = "unbacked"
+    """Use unbacked dynamic shapes. Guaranteed not to be guarded on and not
+    0/1 specialized, but may throw data dependent errors when branches require
+    their value without explicit unbacked handling."""
+
+    BACKED_SIZE_OBLIVIOUS = "backed_size_oblivious"
+    """Experimental flag that treats backed symbols as unbacked when explicit
+    unbacked handling is defined."""
+
+
+@config
+@dataclass
+class DynamicShapesConfig:
+    """Configuration to control/debug torch compile dynamic shapes."""
+
+    type: DynamicShapesType = DynamicShapesType.BACKED
+    """Controls the type of dynamic shapes handling to use with torch.compile().
+
+    - BACKED: Default PyTorch behavior with potential guards ignored.
+    - UNBACKED: No guards guaranteed (most sound) but may throw
+      data dependent errors.
+    - BACKED_SIZE_OBLIVIOUS: Experimental safer alternative to
+      backed/unbacked.
+    """
+
+    # TODO add a debug mode to fail
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash for DynamicShapesConfig
+        """
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, {})
+        return hash_factors(factors)
+
+
 @config
 @dataclass
 class CompilationConfig:
@@ -322,7 +370,7 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` on selected platforms. 
+    Currently, this only works for `Qwen2_5_vl` on selected platforms.
     Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
@@ -348,9 +396,11 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
+
     inductor_passes: dict[str, str] = field(default_factory=dict)
     """Additional passes for inductor. It is a dictionary
     from pass name to pass function qualified name. We use function
@@ -460,8 +510,15 @@ class CompilationConfig:
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
+
+    dynamic_shapes_config: DynamicShapesConfig = field(
+        default_factory=DynamicShapesConfig
+    )
+    """Configuration for dynamic shapes options"""
+
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
+
     bs_to_padded_graph_size: list[int] = field(
         default=None,  # type: ignore
         init=False,
@@ -530,6 +587,7 @@ class CompilationConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+
         factors["pass_config"] = self.pass_config.compute_hash()
         return hash_factors(factors)
 
@@ -950,14 +1008,18 @@ class CompilationConfig:
             )
         )
 
+        if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
+            # if one valid but would be round_down use that
+            rounded_sizes = [multiple_of]
+
         if len(rounded_sizes) == 0:
-            logger.warning(
-                "No valid cudagraph sizes after rounding to multiple of "
-                " num_speculative_tokens + 1 (%d); please adjust num_speculative_tokens"
-                " or max_cudagraph_capture_size (or cudagraph_capture_sizes)",
-                multiple_of,
+            raise ValueError(
+                f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
+                f"(num_speculative_tokens + 1 or tp if sequence parallelism is enabled)"
+                f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
+                f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
+                f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
             )
-            return
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
