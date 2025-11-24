@@ -5,17 +5,13 @@
 """Image processor class for HunYuanVL."""
 
 import math
-from typing import Optional, Union
 
 import numpy as np
 import torchvision.transforms as transforms
-
 from transformers import AutoImageProcessor
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.image_transforms import (
     convert_to_rgb,
-    resize,
-    to_channel_dimension_format,
 )
 from transformers.image_utils import (
     OPENAI_CLIP_MEAN,
@@ -23,24 +19,23 @@ from transformers.image_utils import (
     ChannelDimension,
     ImageInput,
     PILImageResampling,
-    get_image_size,
-    infer_channel_dimension_format,
-    is_scaled_image,
     make_flat_list_of_images,
     make_list_of_images,
-    to_numpy_array,
     valid_images,
     validate_preprocess_arguments,
 )
 from transformers.utils import TensorType, logging
 from transformers.video_utils import VideoInput, make_batched_videos
 
-
 logger = logging.get_logger(__name__)
 
 
 def smart_resize(
-    height: int, width: int, factor: int = 16, min_pixels: int = 512 * 512, max_pixels: int = 2048 * 2048
+    height: int,
+    width: int,
+    factor: int = 16,
+    min_pixels: int = 512 * 512,
+    max_pixels: int = 2048 * 2048,
 ):
     """Rescales the image so that the following conditions are met:
 
@@ -53,7 +48,8 @@ def smart_resize(
     """
     if max(height, width) / min(height, width) > 200:
         raise ValueError(
-            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+            "absolute aspect ratio must be smaller than 200, got "
+            f"{max(height, width) / min(height, width)}"
         )
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
@@ -101,34 +97,44 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
             The temporal patch size of the vision encoder.
         merge_size (`int`, *optional*, defaults to 2):
             The merge size of the vision encoder to llm encoder.
-    """
+    """  # noqa: E501
 
-    model_input_names = ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]
+    model_input_names = [
+        "pixel_values",
+        "image_grid_thw",
+        "pixel_values_videos",
+        "video_grid_thw",
+    ]
 
     def __init__(
         self,
         do_resize: bool = True,
-        size: Optional[dict[str, int]] = None,
+        size: dict[str, int] | None = None,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
-        rescale_factor: Union[int, float] = 1 / 255,
+        rescale_factor: int | float = 1 / 255,
         do_normalize: bool = True,
-        image_mean: Optional[Union[float, list[float]]] = None,
-        image_std: Optional[Union[float, list[float]]] = None,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
         do_convert_rgb: bool = True,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
         patch_size: int = 16,
         temporal_patch_size: int = 2,
         merge_size: int = 2,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        if size is not None and ("shortest_edge" not in size or "longest_edge" not in size):
-            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+        if size is not None and (
+            "shortest_edge" not in size or "longest_edge" not in size
+        ):
+            raise ValueError(
+                "size must contain 'shortest_edge' and 'longest_edge' keys."
+            )
         else:
-            size = {"shortest_edge": 512*512, "longest_edge": 2048*2048}
-        # backward compatibility: override size with min_pixels and max_pixels if they are provided
+            size = {"shortest_edge": 512 * 512, "longest_edge": 2048 * 2048}
+        # backward compatibility: override size with min_pixels and max_pixels
+        # if they are provided.
         if min_pixels is not None:
             size["shortest_edge"] = min_pixels
         if max_pixels is not None:
@@ -154,21 +160,21 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
 
     def _preprocess(
         self,
-        images: Union[ImageInput, VideoInput],
-        do_resize: Optional[bool] = None,
-        size: Optional[dict[str, int]] = None,
+        images: ImageInput | VideoInput,
+        do_resize: bool | None = None,
+        size: dict[str, int] | None = None,
         resample: PILImageResampling = None,
-        do_rescale: Optional[bool] = None,
-        rescale_factor: Optional[float] = None,
-        do_normalize: Optional[bool] = None,
-        image_mean: Optional[Union[float, list[float]]] = None,
-        image_std: Optional[Union[float, list[float]]] = None,
-        patch_size: Optional[int] = None,
-        temporal_patch_size: Optional[int] = None,
-        merge_size: Optional[int] = None,
-        do_convert_rgb: Optional[bool] = None,
-        data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
-        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        do_rescale: bool | None = None,
+        rescale_factor: float | None = None,
+        do_normalize: bool | None = None,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
+        patch_size: int = 16,
+        temporal_patch_size: int = 2,
+        merge_size: int = 2,
+        do_convert_rgb: bool | None = None,
+        data_format: ChannelDimension | None = ChannelDimension.FIRST,
+        input_data_format: str | ChannelDimension | None = None,
     ):
         """
         Preprocess an image or batch of images. Copy of the `preprocess` method from `CLIPImageProcessor`.
@@ -212,7 +218,7 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.   - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
-        """
+        """  # noqa: E501
         images = make_list_of_images(images)
 
         if do_convert_rgb:
@@ -227,18 +233,19 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
                     width,
                     height,
                     factor=patch_size * merge_size,
-                    min_pixels=size["shortest_edge"],
-                    max_pixels=size["longest_edge"],
+                    min_pixels=self.min_pixels,
+                    max_pixels=self.max_pixels,
                 )
                 image = image.resize((resized_width, resized_height))
 
             if do_normalize:
-                image = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(self.image_mean, self.image_std)
-                ])(image)
+                image = transforms.Compose(
+                    [
+                        transforms.ToTensor(),
+                        transforms.Normalize(self.image_mean, self.image_std),
+                    ]
+                )(image)
             processed_images.append(image)
-
 
         patches = np.array(processed_images)
         channel = patches.shape[1]
@@ -255,7 +262,9 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
             patch_size,
         )
         patches = patches.transpose(0, 2, 3, 5, 6, 1, 4, 7)
-        flatten_patches = patches.reshape( 1 * grid_h * grid_w, channel * patch_size * patch_size)
+        flatten_patches = patches.reshape(
+            1 * grid_h * grid_w, channel * patch_size * patch_size
+        )
 
         return flatten_patches, (grid_t, grid_h, grid_w)
 
@@ -263,23 +272,23 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
         self,
         images: ImageInput,
         videos: VideoInput = None,
-        do_resize: Optional[bool] = None,
-        size: Optional[dict[str, int]] = None,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        do_resize: bool | None = None,
+        size: dict[str, int] | None = None,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
         resample: PILImageResampling = None,
-        do_rescale: Optional[bool] = None,
-        rescale_factor: Optional[float] = None,
-        do_normalize: Optional[bool] = None,
-        image_mean: Optional[Union[float, list[float]]] = None,
-        image_std: Optional[Union[float, list[float]]] = None,
-        patch_size: Optional[int] = None,
-        temporal_patch_size: Optional[int] = None,
-        merge_size: Optional[int] = None,
-        do_convert_rgb: Optional[bool] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-        data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
-        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        do_rescale: bool | None = None,
+        rescale_factor: float | None = None,
+        do_normalize: bool | None = None,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
+        patch_size: int | None = None,
+        temporal_patch_size: int | None = None,
+        merge_size: int | None = None,
+        do_convert_rgb: bool | None = None,
+        return_tensors: str | TensorType | None = None,
+        data_format: ChannelDimension | None = ChannelDimension.FIRST,
+        input_data_format: str | ChannelDimension | None = None,
     ):
         """
         Args:
@@ -339,16 +348,19 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
 
-        """
+        """  # noqa: E501
         min_pixels = min_pixels if min_pixels is not None else self.min_pixels
         max_pixels = max_pixels if max_pixels is not None else self.max_pixels
 
         if size is not None:
             if "shortest_edge" not in size or "longest_edge" not in size:
-                raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+                raise ValueError(
+                    "size must contain 'shortest_edge' and 'longest_edge' keys."
+                )
             min_pixels = size["shortest_edge"]
         elif min_pixels is not None and max_pixels is not None:
-            # backward compatibility: override size with min_pixels and max_pixels if they are provided
+            # backward compatibility: override size with min_pixels and max_pixels
+            # if they are provided.
             size = {"shortest_edge": min_pixels, "longest_edge": max_pixels}
         else:
             size = {**self.size}
@@ -357,14 +369,22 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
 
         resample = resample if resample is not None else self.resample
         do_rescale = do_rescale if do_rescale is not None else self.do_rescale
-        rescale_factor = rescale_factor if rescale_factor is not None else self.rescale_factor
+        rescale_factor = (
+            rescale_factor if rescale_factor is not None else self.rescale_factor
+        )
         do_normalize = do_normalize if do_normalize is not None else self.do_normalize
         image_mean = image_mean if image_mean is not None else self.image_mean
         image_std = image_std if image_std is not None else self.image_std
         patch_size = patch_size if patch_size is not None else self.patch_size
-        temporal_patch_size = temporal_patch_size if temporal_patch_size is not None else self.temporal_patch_size
+        temporal_patch_size = (
+            temporal_patch_size
+            if temporal_patch_size is not None
+            else self.temporal_patch_size
+        )
         merge_size = merge_size if merge_size is not None else self.merge_size
-        do_convert_rgb = do_convert_rgb if do_convert_rgb is not None else self.do_convert_rgb
+        do_convert_rgb = (
+            do_convert_rgb if do_convert_rgb is not None else self.do_convert_rgb
+        )
 
         if images is not None:
             images = make_flat_list_of_images(images)
@@ -410,12 +430,15 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
                 vision_grid_thws.append(image_grid_thw)
             pixel_values = np.array(pixel_values)
             vision_grid_thws = np.array(vision_grid_thws)
-            data.update({"pixel_values": pixel_values, "image_grid_thw": vision_grid_thws})
+            data.update(
+                {"pixel_values": pixel_values, "image_grid_thw": vision_grid_thws}
+            )
 
         # kept for BC only and should be removed after v5.0
         if videos is not None:
             logger.warning(
-                "`HunYuanVLV1ImageProcessor` works only with image inputs and doesn't process videos anymore. "
+                "`HunYuanVLV1ImageProcessor` works only with image inputs "
+                "and doesn't process videos anymore. "
                 "This is a deprecated behavior and will be removed in v5.0. "
                 "Your videos should be forwarded to `HunYuanVLV1VideoProcessor`. "
             )
@@ -464,8 +487,16 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
         Returns:
             `int`: Number of image patches per image.
         """
-        min_pixels = images_kwargs["min_pixels"] if "min_pixels" in images_kwargs else self.size["shortest_edge"]
-        max_pixels = images_kwargs["max_pixels"] if "max_pixels" in images_kwargs else self.size["longest_edge"]
+        min_pixels = (
+            images_kwargs["min_pixels"]
+            if "min_pixels" in images_kwargs
+            else self.size["shortest_edge"]
+        )
+        max_pixels = (
+            images_kwargs["max_pixels"]
+            if "max_pixels" in images_kwargs
+            else self.size["longest_edge"]
+        )
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
 
