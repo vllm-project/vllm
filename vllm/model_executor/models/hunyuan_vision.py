@@ -213,9 +213,6 @@ class HunYuanVisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -278,9 +275,6 @@ class HunYuanVisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -294,9 +288,6 @@ class HunYuanVisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
-            attn_backend_override=attn_backend_override,
         )
         self.mlp = HunYuanVisionMLP(
             dim,
@@ -311,9 +302,6 @@ class HunYuanVisionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.self_attn(self.input_layernorm(x))
         x = x + self.mlp(self.post_attention_layernorm(x))
@@ -449,30 +437,6 @@ class HunYuanVisionTransformer(nn.Module):
             self.embeddings = HunYuanVisionPatchEmbed(vision_config)
 
         norm_layer = partial(nn.LayerNorm, eps=vision_config.rms_norm_eps)
-        use_upstream_fa = False
-        self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
-        )
-
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                use_upstream_fa,
-                attn_backend_override=attn_backend_override,
-            )
-        )
-
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"HunYuan-VL does not support {self.attn_backend} backend now."
-            )
 
         with set_model_tag("HunYuanVisionBlock"):
             self.layers = nn.ModuleList(
@@ -486,9 +450,6 @@ class HunYuanVisionTransformer(nn.Module):
                         quant_config=quant_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
                         use_data_parallel=use_data_parallel,
-                        attn_backend=self.attn_backend,
-                        use_upstream_fa=use_upstream_fa,
-                        attn_backend_override=attn_backend_override,
                     )
                     for layer_idx in range(num_hidden_layers)
                 ]
@@ -511,21 +472,6 @@ class HunYuanVisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.embeddings.patch_embedding.weight.device
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        seqlens = torch.zeros(1, device=cu_seqlens.device)
-        if self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        return max_seqlen, seqlens
-
     def forward(
         self,
         x: torch.Tensor,
@@ -545,20 +491,12 @@ class HunYuanVisionTransformer(nn.Module):
         cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
         cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
 
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-            cu_seqlens)
-
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
 
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(0)
         for layer_num, layer in enumerate(self.layers):
-            hidden_states = layer(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen_full,
-                seqlens=seqlens_full,
-            )
+            hidden_states = layer(hidden_states)
 
         # adapter
         split_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -648,7 +586,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
+        return {"image": None}
 
     def get_mm_max_tokens_per_item(
         self,
