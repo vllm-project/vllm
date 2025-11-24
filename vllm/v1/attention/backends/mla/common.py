@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar, cast
 
 import torch
 
@@ -971,7 +971,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
-        return attn_metadata
+        return cast(M, attn_metadata)
 
 
 def reorg_kvcache(
