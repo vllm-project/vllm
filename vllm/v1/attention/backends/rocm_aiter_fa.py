@@ -58,58 +58,56 @@ if current_platform.is_rocm():
         head_size,
         x,
         max_block_num,
-        num_tokens,
-        num_programs,
         DEQUANT: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
-        bid = tl.program_id(0)
+        token_id = tl.program_id(0)
         col_offsets = tl.arange(0, BLOCK_SIZE)
         if DEQUANT:
             k_scale = tl.load(k_scale_ptr)
             v_scale = tl.load(v_scale_ptr)
 
-        for token_id in tl.range(bid, num_tokens, num_programs):
-            key_ptr_offset = key_ptr + token_id * head_size * num_heads
-            value_ptr_offset = value_ptr + token_id * head_size * num_heads
-            batch_idx = tl.load(token_to_batch_ptr + token_id)
-            batch_start = tl.load(seq_start_ptr + batch_idx)
-            token_start = tl.load(cu_seqlens_kv_ptr + batch_idx)
-            batch_offset = token_id - token_start + batch_start
-            block_offset = batch_offset // PAGE_SIZE
-            block_id = tl.load(
-                block_table_ptr + max_block_num * batch_idx + block_offset
+        # for token_id in tl.range(bid, num_tokens, num_programs):
+        key_ptr_offset = key_ptr + token_id * head_size * num_heads
+        value_ptr_offset = value_ptr + token_id * head_size * num_heads
+        batch_idx = tl.load(token_to_batch_ptr + token_id)
+        batch_start = tl.load(seq_start_ptr + batch_idx)
+        token_start = tl.load(cu_seqlens_kv_ptr + batch_idx)
+        batch_offset = token_id - token_start + batch_start
+        block_offset = batch_offset // PAGE_SIZE
+        block_id = tl.load(
+            block_table_ptr + max_block_num * batch_idx + block_offset
+        ).to(tl.int64)
+        slot_id = batch_offset % PAGE_SIZE
+
+        if CACHE_FORMAT == "NHD":
+            # for kv cache layout as
+            # K: [num_blocks, page_size, num_head, head_dim]
+            # V: [num_blocks, page_size, num_head, head_dim]
+            key_cache_ptr_offset = (
+                key_cache_ptr
+                + block_id * num_heads * head_size * PAGE_SIZE
+                + slot_id * num_heads * head_size
             )
-            slot_id = batch_offset % PAGE_SIZE
+            value_cache_ptr_offset = (
+                value_cache_ptr
+                + block_id * num_heads * head_size * PAGE_SIZE
+                + slot_id * num_heads * head_size
+            )
 
-            if CACHE_FORMAT == "NHD":
-                # for kv cache layout as
-                # K: [num_blocks, page_size, num_head, head_dim]
-                # V: [num_blocks, page_size, num_head, head_dim]
-                key_cache_ptr_offset = (
-                    key_cache_ptr
-                    + block_id * num_heads * head_size * PAGE_SIZE
-                    + slot_id * num_heads * head_size
-                )
-                value_cache_ptr_offset = (
-                    value_cache_ptr
-                    + block_id * num_heads * head_size * PAGE_SIZE
-                    + slot_id * num_heads * head_size
-                )
-
-                for i in tl.range(0, head_size * num_heads, BLOCK_SIZE):
-                    mask = (col_offsets + i) < head_size * num_heads
-                    k_reg = tl.load(key_cache_ptr_offset + col_offsets + i, mask=mask)
-                    v_reg = tl.load(value_cache_ptr_offset + col_offsets + i, mask=mask)
-                    if DEQUANT:
-                        k_dtype = k_reg.dtype
-                        v_dtype = v_reg.dtype
-                        k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
-                        v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
-                    tl.store(key_ptr_offset + col_offsets + i, k_reg, mask=mask)
-                    tl.store(value_ptr_offset + col_offsets + i, v_reg, mask=mask)
+            for i in tl.range(0, head_size * num_heads, BLOCK_SIZE):
+                mask = (col_offsets + i) < head_size * num_heads
+                k_reg = tl.load(key_cache_ptr_offset + col_offsets + i, mask=mask)
+                v_reg = tl.load(value_cache_ptr_offset + col_offsets + i, mask=mask)
+                if DEQUANT:
+                    k_dtype = k_reg.dtype
+                    v_dtype = v_reg.dtype
+                    k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
+                    v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
+                tl.store(key_ptr_offset + col_offsets + i, k_reg, mask=mask)
+                tl.store(value_ptr_offset + col_offsets + i, v_reg, mask=mask)
 
     def cp_mha_gather_cache(
         key_cache: torch.Tensor,
@@ -144,9 +142,7 @@ if current_platform.is_rocm():
         page_size = key_cache.shape[1]
         num_heads = key_cache.shape[2]
 
-        NUM_PRGMS = num_programs(total_tokens)
-        BLOCK_SIZE = block_size(key_cache, head_dim)
-        grid = lambda meta: (NUM_PRGMS,)
+        grid = lambda meta: (total_tokens,)
         cp_mha_gather_cache_kernel[grid](
             key_cache,
             value_cache,
@@ -162,12 +158,10 @@ if current_platform.is_rocm():
             head_dim,
             x,
             block_tables.size(1),
-            total_tokens,
-            NUM_PRGMS,
             DEQUANT=dequant,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
-            BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_SIZE=head_dim,
         )
 
 
@@ -194,9 +188,11 @@ class AiterFlashAttentionPrefillMetadata:
 class AiterChunkSlidingWindowMetadata:
     swa_seqlens: list[torch.Tensor]
     swa_cu_seqlens: list[torch.Tensor]
+    swa_cu_querylens: list[torch.Tensor]
     swa_seq_starts: list[torch.Tensor]
     swa_token_to_batch: list[torch.Tensor]
     swa_max_seqlens: list[int]
+    swa_max_query_lens: list[int]
     swa_total_tokens: list[int]
     swa_chunk_starts: list[int]
     swa_chunk_ends: list[int]
@@ -343,6 +339,7 @@ class AiterFlashAttentionMetadataBuilder(
             num_prefill_tokens,
         ) = split_ret
 
+        print("split ret is: ", split_ret, flush=True)
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         seq_lens = common_attn_metadata.seq_lens_cpu
@@ -400,19 +397,23 @@ class AiterFlashAttentionMetadataBuilder(
                 token_budgets = _CP_TOKENS_PER_ITER_ROCM
                 swa_seqlens = []
                 swa_cu_seqlens = []
+                swa_cu_querylens = []
                 swa_seq_starts = []
                 swa_token_to_batch = []
                 swa_total_tokens = []
                 swa_chunk_starts = []
                 swa_chunk_ends = []
                 swa_max_seqlens = []
+                swa_max_querylens = []
                 swa_chunk_start = 0
                 chunk_swa_seqlens: list[int] = []
                 chunk_seqlens: list[int] = []
+                chunk_querylens: list[int] = []
                 for i in range(num_extends):
                     token_budgets -= swa_seqlens_for_extend[i].item()
-                    chunk_swa_seqlens.append(swa_seqlens_for_extend[i])
-                    chunk_seqlens.append(seq_lens_for_extend[i])
+                    chunk_swa_seqlens.append(swa_seqlens_for_extend[i].item())
+                    chunk_seqlens.append(seq_lens_for_extend[i].item())
+                    chunk_querylens.append(query_lens_for_extend[i].item())
                     if (
                         i == num_extends - 1
                         or token_budgets < swa_seqlens_for_extend[i + 1].item()
@@ -421,6 +422,7 @@ class AiterFlashAttentionMetadataBuilder(
                             _CP_TOKENS_PER_ITER_ROCM - token_budgets
                         )
                         chunk_batches = len(chunk_swa_seqlens)
+                        chunk_swa_querylens_tensor = torch.tensor(chunk_querylens)
                         chunk_swa_seqlens_tensor = torch.tensor(chunk_swa_seqlens)
                         chunk_seqlens_tensor = torch.tensor(chunk_seqlens)
                         chunk_swa_seq_starts = torch.clamp(
@@ -429,12 +431,23 @@ class AiterFlashAttentionMetadataBuilder(
                         chunk_swa_cu_seqlens = torch.zeros(
                             chunk_batches + 1, dtype=torch.int
                         )
+                        chunk_swa_cu_querylens = torch.zeros(
+                            chunk_batches + 1, dtype=torch.int
+                        )
                         torch.cumsum(
                             chunk_swa_seqlens_tensor,
                             dim=0,
                             out=chunk_swa_cu_seqlens[1:],
                         )
+                        torch.cumsum(
+                            chunk_swa_querylens_tensor,
+                            dim=0,
+                            out=chunk_swa_cu_querylens[1:],
+                        )
                         chunk_swa_max_seqlens = chunk_swa_seqlens_tensor.max().item()
+                        chunk_swa_max_querylens = (
+                            chunk_swa_querylens_tensor.max().item()
+                        )
                         token_to_batch = torch.arange(
                             swa_chunk_start,
                             i + 1,
@@ -444,12 +457,14 @@ class AiterFlashAttentionMetadataBuilder(
                         token_to_batch = torch.repeat_interleave(
                             token_to_batch, chunk_swa_seqlens_tensor
                         )
-
                         swa_seqlens.append(
                             chunk_swa_seqlens_tensor.to(self.device, non_blocking=True)
                         )
                         swa_cu_seqlens.append(
                             chunk_swa_cu_seqlens.to(self.device, non_blocking=True)
+                        )
+                        swa_cu_querylens.append(
+                            chunk_swa_cu_querylens.to(self.device, non_blocking=True)
                         )
                         swa_seq_starts.append(
                             chunk_swa_seq_starts.to(self.device, non_blocking=True)
@@ -461,21 +476,26 @@ class AiterFlashAttentionMetadataBuilder(
                         swa_chunk_starts.append(swa_chunk_start)
                         swa_chunk_ends.append(i + 1)
                         swa_max_seqlens.append(chunk_swa_max_seqlens)
+                        swa_max_querylens.append(chunk_swa_max_querylens)
                         swa_chunk_start = i + 1
                         token_budgets = _CP_TOKENS_PER_ITER_ROCM
                         chunk_swa_seqlens = []
                         chunk_seqlens = []
+                        chunk_querylens = []
 
                 swa_metadata = AiterChunkSlidingWindowMetadata(
                     swa_seqlens=swa_seqlens,
                     swa_cu_seqlens=swa_cu_seqlens,
+                    swa_cu_querylens=swa_cu_querylens,
                     swa_seq_starts=swa_seq_starts,
                     swa_token_to_batch=swa_token_to_batch,
                     swa_max_seqlens=swa_max_seqlens,
+                    swa_max_query_lens=swa_max_querylens,
                     swa_total_tokens=swa_total_tokens,
                     swa_chunk_starts=swa_chunk_starts,
                     swa_chunk_ends=swa_chunk_ends,
                 )
+                print("swa metadata:", swa_metadata, flush=True)
 
             # allocate the equal amount of workspace for
             # each chunk prefill request
@@ -669,17 +689,33 @@ class AiterFlashAttentionImpl(AttentionImpl):
         swa_metadata = chunked_metadata.swa_metadata
         assert swa_metadata is not None
         swa_cu_seqlens = swa_metadata.swa_cu_seqlens
+        swa_cu_querylens = swa_metadata.swa_cu_querylens
         swa_seq_starts = swa_metadata.swa_seq_starts
         swa_token_to_batch = swa_metadata.swa_token_to_batch
         swa_max_seqlens = swa_metadata.swa_max_seqlens
         swa_total_tokens = swa_metadata.swa_total_tokens
         swa_chunk_starts = swa_metadata.swa_chunk_starts
         swa_chunk_ends = swa_metadata.swa_chunk_ends
+        swa_max_querylens = swa_metadata.swa_max_query_lens
         key_fetched, value_fetched = (
             chunked_metadata.workspace[0],
             chunked_metadata.workspace[1],
         )
         for i in range(len(swa_chunk_starts)):
+            # torch.cuda.synchronize()
+            # print(f"into swa chunk {i}", flush=True)
+            # # torch.save(key_cache, f"./key_cache_chunk_{i}.pt")
+            # # torch.save(value_cache, f"./value_cache_chunk_{i}.pt")
+            # # torch.save(key_fetched, f"./key_fetched_chunk_{i}.pt")
+            # # torch.save(value_fetched, f"./value_fetched_chunk_{i}.pt")
+            # torch.save(k_scale, f"./k_scale_chunk_{i}.pt")
+            # torch.save(v_scale, f"./v_scale_chunk_{i}.pt")
+            # torch.save(block_table, f"./block_table_chunk_{i}.pt")
+            # torch.save(swa_cu_seqlens[i], f"./swa_cu_seqlens_chunk_{i}.pt")
+            # torch.save(swa_token_to_batch[i], f"./swa_token_to_batch_chunk_{i}.pt")
+            # torch.save(swa_seq_starts[i], f"./swa_seq_starts_chunk_{i}.pt")
+            # print(f"total tokens: {swa_total_tokens}", flush=True)
+            # torch.cuda.synchronize()
             cp_mha_gather_cache(
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -695,14 +731,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 kv_cache_layout="NHD",
                 total_tokens=swa_total_tokens[i],
             )
+            # torch.cuda.synchronize()
+            # print(f"after gather cache for swa chunk {i}", flush=True)
 
             aiter.flash_attn_varlen_func(
                 q=query[swa_chunk_starts[i] : swa_chunk_ends[i]],
                 k=key_fetched,
                 v=value_fetched,
-                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_q=swa_cu_querylens[i],
                 cu_seqlens_k=swa_cu_seqlens[i],
-                max_seqlen_q=max_seqlen_q,
+                max_seqlen_q=swa_max_querylens[i],
                 max_seqlen_k=swa_max_seqlens[i],
                 min_seqlen_q=1,
                 dropout_p=0.0,
@@ -713,6 +751,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 return_lse=False,
                 out=output[swa_chunk_starts[i] : swa_chunk_ends[i]],
             )
+            # torch.cuda.synchronize()
+            # print(f"after varlen {i}", flush=True)
 
     def extend_forward(
         self,
@@ -733,7 +773,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         v_scale: float,
     ):
         if self.sliding_window[0] != -1:
-            return self.extend_for_sliding_window(
+            # torch.cuda.synchronize()
+            # print("into extend swa path", flush=True)
+            self.extend_for_sliding_window(
                 attn_metadata,
                 query,
                 key_cache,
@@ -745,6 +787,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 k_scale,
                 v_scale,
             )
+            # torch.cuda.synchronize()
+            # print("out of extend swa path", flush=True)
+            return
         out, lse = aiter.flash_attn_varlen_func(
             q=query,
             k=key,
