@@ -65,6 +65,12 @@ class EagleSpeculator:
         # [num_reqs]
         next_prefill_tokens: torch.Tensor,
     ) -> torch.Tensor:
+        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
+        # number of rejected tokens, we maintain the size of eagle's input_ids and
+        # hidden_states the same as the target model's. This means, we pad each
+        # request's query length to include any rejected positions. By doing so,
+        # we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model.
         if aux_hidden_states:
             assert self.method == "eagle3"
             hidden_states = self.model.combine_hidden_states(
@@ -110,6 +116,11 @@ class EagleSpeculator:
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
         pos = input_batch.positions[last_token_indices] + 1
+        # NOTE(woosuk): For draft sampling, we only consider the temperature
+        # and ignore the other sampling parameters such as top_k and top_p,
+        # for simplicity and performance.
+        # While this may slightly degrade the acceptance rate, it does not
+        # affect the output distribution after rejection sampling.
         draft_tokens = gumbel_sample(
             logits, temperature, seed, pos, apply_temperature=True
         )
