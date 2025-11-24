@@ -215,7 +215,7 @@ def init_logger(name: str) -> _VllmLogger:
 
 @contextmanager
 def suppress_logging():
-    logging.disable(logging.WARNING)
+    logging.disable(logging.INFO)
     yield
     logging.disable(logging.NOTSET)
 
