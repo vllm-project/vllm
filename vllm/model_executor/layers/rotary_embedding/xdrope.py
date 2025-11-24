@@ -36,7 +36,7 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
             dtype
         )
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,

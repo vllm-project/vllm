@@ -10,7 +10,7 @@ from typing import Optional, Union
 import numpy as np
 import torchvision.transforms as transforms
 
-from transformers import AutoProcessor
+from transformers import AutoImageProcessor
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -477,4 +477,4 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
         return grid_h * (grid_w + 1) + 2
 
 
-AutoProcessor.register("HunYuanVLImageProcessor", HunYuanVLImageProcessor)
+AutoImageProcessor.register("HunYuanVLImageProcessor", HunYuanVLImageProcessor)

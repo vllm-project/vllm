@@ -33,9 +33,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
-from transformers.models.hunyuan_vl.processing_hunyuan_vl import HunYuanVLProcessor
-from transformers.models.hunyuan_vl.configuration_hunyuan_vl import HunYuanVLConfig, HunYuanVLVisionConfig
-from transformers.models.hunyuan_vl.image_processing_hunyuan_vl import smart_resize
+from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
+from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
+from vllm.transformers_utils.configs.hunyuan_vl import HunYuanVLConfig, HunYuanVLVisionConfig
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
@@ -1009,6 +1009,7 @@ class HunYuanVLForConditionalGeneration(
                 config.vision_config,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
+                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
