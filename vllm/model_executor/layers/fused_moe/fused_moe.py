@@ -643,8 +643,8 @@ def fused_moe_kernel_small_batch_size(
     offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     offs_token = tl.where(
         offs == 0,
-        pid_m,      # first element = pid_m
-        num_valid_tokens   # remaining elements = constant
+        pid_m,  # first element = pid_m
+        num_valid_tokens,  # remaining elements = constant
     )
     token_mask = offs_token < num_valid_tokens
 
@@ -818,10 +818,7 @@ def invoke_fused_moe_kernel(
 
     M = A.size(0)
     num_tokens = M * top_k
-    if not use_unpermute:
-        EM = sorted_token_ids.size(0)
-    else:
-        EM = num_tokens_post_padded
+    EM = sorted_token_ids.size(0) if not use_unpermute else num_tokens_post_padded
     if A.size(0) < config["BLOCK_SIZE_M"] and not use_unpermute:
         # optimize for small batch_size.
         # We assume that top_ids of each token is unique,
@@ -924,7 +921,7 @@ def invoke_fused_moe_kernel(
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
-        
+
         if use_unpermute:
             fused_moe_kernel_small_batch_size[grid](
                 A,
@@ -2167,25 +2164,21 @@ def fused_experts_impl(
 
         # Enable unpermute when token fan-out is manageable and the WNA16 kernels
         # (int4/int8 with block groups) are not required.
-        use_unpermute = (
-            tokens_in_chunk * top_k_num * 4 <= global_num_experts
-            and not (
-                (use_int8_w8a16 or use_int4_w4a16)
-                and block_shape is not None
-                and block_shape[1] > 0
-            )
+        use_unpermute = tokens_in_chunk * top_k_num * 4 <= global_num_experts and not (
+            (use_int8_w8a16 or use_int4_w4a16)
+            and block_shape is not None
+            and block_shape[1] > 0
         )
-        
+
         if not use_unpermute:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
                 curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
             )
         else:
-            max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"] 
+            max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
             expert_ids = topk_ids
             num_tokens_post_padded = max_num_tokens_padded
             sorted_token_ids = None
-
 
         invoke_fused_moe_kernel(
             qcurr_hidden_states,
