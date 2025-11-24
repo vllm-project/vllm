@@ -532,6 +532,7 @@ class VllmBackend:
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
     inductor_config: dict[str, Any]
+    """Merged CompilationConfig.inductor_compile_config and PostGradPassManager"""
 
     def __init__(
         self,
