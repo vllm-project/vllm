@@ -119,6 +119,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        # Record an event capturing all prior work on the default stream so LoRA
+        # stream can wait on inputs without waiting for the base GEMM.
+        pre_event = torch.cuda.Event()
+        pre_event.record(torch.cuda.current_stream())
+
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In Transformers modeling backend, x and output have extra batch dimension like
@@ -128,11 +133,38 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
-        )
+        # Parallelize base GEMM and LoRA delta on separate streams, then add.
+        lora_delta = torch.empty_like(output)
+        # Record an event so LoRA stream waits only for prior work on the default
+        # stream (input readiness), not for the base GEMM itself.
+        if hasattr(self.punica_wrapper, "add_lora_linear_into_async"):
+            evt = self.punica_wrapper.add_lora_linear_into_async(
+                lora_delta,
+                x,
+                self.lora_a_stacked,
+                self.lora_b_stacked,
+                1.0,
+                self.output_slices,
+                pre_event=pre_event,
+            )
+            if evt is not None:
+                torch.cuda.current_stream().wait_event(evt)
+        else:
+            # Fallback to synchronous in-place path if async helper missing
+            self.punica_wrapper.add_lora_linear(
+                lora_delta,
+                x,
+                self.lora_a_stacked,
+                self.lora_b_stacked,
+                1.0,
+                self.output_slices,
+            )
+
+        output.add_(lora_delta)
+
         if not current_platform.can_update_inplace():
-            output = lora_output
+            # On non in-place platforms, return the combined tensor explicitly.
+            output = output
 
         return output
 
