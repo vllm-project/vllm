@@ -11,6 +11,7 @@ import pprint
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from functools import partial
 from typing import Any
 
@@ -428,7 +429,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 self.vllm_backend.compiler_manager.compile(
                     submod,
                     args,
-                    self.compilation_config.inductor_compile_config,
+                    self.inductor_config,
                     self.compilation_config,
                     graph_index=index,
                     num_graphs=len(self.compile_submod_names),
@@ -530,6 +531,7 @@ class VllmBackend:
     sym_tensor_indices: list[int]
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
+    inductor_config: dict[str, Any]
 
     def __init__(
         self,
@@ -566,20 +568,21 @@ class VllmBackend:
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
-        inductor_config = config.inductor_compile_config
+
+        # Deepcopy the inductor config to detach the post-grad custom pass
+        # from CompilationConfig.
+        self.inductor_config = deepcopy(config.inductor_compile_config)
         PASS_KEY = "post_grad_custom_post_pass"
-        if PASS_KEY in inductor_config:
-            if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
-                # PassManager already added to config, make sure it's correct
-                assert (
-                    inductor_config[PASS_KEY].uuid()
-                    == self.post_grad_pass_manager.uuid()
+        if PASS_KEY in self.inductor_config:
+            if isinstance(self.inductor_config[PASS_KEY], PostGradPassManager):
+                raise ValueError(
+                    "PostGradPassManager can not be kept in CompilationConfig."
                 )
             else:
                 # Config should automatically wrap all inductor passes
-                assert isinstance(inductor_config[PASS_KEY], InductorPass)
-                self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
-        inductor_config[PASS_KEY] = self.post_grad_pass_manager
+                assert isinstance(self.inductor_config[PASS_KEY], InductorPass)
+                self.post_grad_pass_manager.add(self.inductor_config[PASS_KEY])
+        self.inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(
         self, graph: fx.GraphModule, example_inputs
@@ -638,9 +641,7 @@ class VllmBackend:
         self.compilation_config.local_cache_dir = local_cache_dir
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
-        disable_cache = not is_compile_cache_enabled(
-            self.compilation_config.inductor_compile_config
-        )
+        disable_cache = not is_compile_cache_enabled(self.inductor_config)
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
