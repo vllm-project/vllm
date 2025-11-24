@@ -315,13 +315,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ccache \
         software-properties-common \
-        git \
         curl \
         wget \
         sudo \
-        vim \
         python3-pip \
         ffmpeg \
         libsm6 \
