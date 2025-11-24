@@ -192,9 +192,37 @@ class Scheduler(SchedulerInterface):
 
     def _has_mamba_spec(self) -> bool:
         has_mamba: bool = any(isinstance(spec.kv_cache_spec, MambaSpec) 
-                              for spec in self.kv_cache_config.kv_cache_groups) 
+                              for spec in self.kv_cache_config.kv_cache_groups)
         assert not has_mamba or self.vllm_config.model_config.is_hybrid
         return has_mamba
+    
+    def _mamba_block_aligned_split(self, request: Request, num_new_tokens: int) -> int:
+        if (self.cache_config.enable_prefix_caching 
+            and self._has_mamba_spec()):
+            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+            # must be a multiple of `block_size`.
+            # As an exception, if `num_new_tokens` is less than `block_size`, the
+            # state is simply not cached, requiring no special handling.
+            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
+            # matching block. To prevent this from causing a Mamba cache miss, the
+            # last chunk must be larger than `block_size`.
+            block_size = self.cache_config.block_size
+            if request.num_output_tokens == 0: # prefill
+                last_cache_position = request.num_prompt_tokens - request.num_prompt_tokens % block_size
+                # eagle prune
+                if self.use_eagle:
+                    last_cache_position = max(last_cache_position - block_size, 0)
+                num_computed_tokens_after_prefill = request.num_computed_tokens + num_new_tokens 
+                if num_computed_tokens_after_prefill < last_cache_position:
+                    # align to block_size
+                    num_new_tokens = num_new_tokens // block_size * block_size
+                elif request.num_computed_tokens < last_cache_position < num_computed_tokens_after_prefill:
+                    # force to cache the last chunk
+                    num_new_tokens = last_cache_position - request.num_computed_tokens
+                else:
+                    # prefill the last few tokens
+                    pass
+        return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -248,29 +276,7 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
 
-            if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                and self.cache_config.enable_prefix_caching
-                and self._has_mamba_spec()):
-                # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-                # must be a multiple of `block_size`.
-                # As an exception, if `num_new_tokens` is less than `block_size`, the
-                # state is simply not cached, requiring no special handling.
-                # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-                # matching block. To prevent this from causing a Mamba cache miss, the
-                # last chunk must be larger than `block_size`.
-                block_size = self.block_size
-                max_last_chunk = block_size * (2 if self.use_eagle else 1)
-                if num_new_tokens < max_last_chunk:
-                    num_new_tokens = min(num_new_tokens, token_budget)
-                else:
-                    ori_num_new_tokens = num_new_tokens
-                    num_new_tokens = min(num_new_tokens, token_budget)
-                    num_new_tokens = num_new_tokens // block_size * block_size
-                    if self.use_eagle and ori_num_new_tokens - num_new_tokens < block_size:
-                        assert num_new_tokens >= block_size
-                        num_new_tokens -= block_size
-            else:
-                num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(num_new_tokens, token_budget)         
 
             # Make sure the input position does not exceed the max model len or
             # request's max_tokens.
@@ -298,6 +304,10 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     encoder_compute_budget,
                 )
+
+            if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                num_new_tokens = self._mamba_block_aligned_split(
+                    request, num_new_tokens)
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -553,25 +563,7 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                    if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                        and self.cache_config.enable_prefix_caching
-                        and self._has_mamba_spec()):
-                        block_size = self.block_size
-                        max_last_chunk = block_size * (2 if self.use_eagle else 1)
-                        if num_new_tokens < max_last_chunk:
-                            num_new_tokens = min(num_new_tokens, token_budget)
-                        else:
-                            ori_num_new_tokens = num_new_tokens
-                            num_new_tokens = min(num_new_tokens, token_budget)
-                            num_new_tokens = num_new_tokens // block_size * block_size
-                            if self.use_eagle and ori_num_new_tokens - num_new_tokens < block_size:
-                                assert num_new_tokens >= block_size
-                                num_new_tokens -= block_size
-                            if num_new_tokens == 0:
-                                token_budget = 0
-                                break
-                    else:
-                        num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -590,6 +582,12 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+
+                if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                    num_new_tokens = self._mamba_block_aligned_split(
+                        request, num_new_tokens)
+                    if num_new_tokens == 0:
+                        break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
