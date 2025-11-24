@@ -829,7 +829,7 @@ def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
     Get the page size of the KV cache.
     """
-    page_sizes = set(layer.page_size_bytes for layer in kv_cache_specs)
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
     return page_sizes.pop()
 
@@ -1219,7 +1219,8 @@ def get_kv_cache_groups(
         return _get_kv_cache_groups_uniform_type(uniform_spec)
 
     # As KVCacheManager can only allocate memory of one size, we need to unify
-    # the page size of the layers.
+    # the page size of the layers. For cases cannot be unified, this function
+    # will raise an error.
     kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
     # Model contains multiple attention types, but KV cache of all layers
     # have the same physical memory per block per layer. Split the layers

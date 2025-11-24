@@ -1501,6 +1501,7 @@ def test_get_kv_cache_config_one_worker():
             ),
         ],
     )
+
     # different hidden size but same type, use UniformTypeKVCacheSpecs
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=128),
