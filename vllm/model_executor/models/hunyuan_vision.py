@@ -442,7 +442,6 @@ class HunYuanVisionTransformer(nn.Module):
         num_hidden_layers = vision_config.num_hidden_layers
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_attention_heads
-        head_dim = self.hidden_size // self.num_heads
         self.spatial_merge_size = vision_config.spatial_merge_size
 
         from vllm.compilation.backends import set_model_tag
@@ -684,7 +683,6 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
 class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
 
         hf_processor = self.info.get_hf_processor()
         image_token: str = hf_processor.image_token
@@ -698,7 +696,6 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 1)
-        num_videos = mm_counts.get("video", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
@@ -734,7 +731,6 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
 
         placeholder = {
             "image": hf_processor.image_token_id,
@@ -809,7 +805,6 @@ class HunYuanVLForConditionalGeneration(
         image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
 
         hf_config = self.config
-        image_token_id = hf_config.image_token_id
         image_start_token_id = hf_config.image_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         xd_num = len(hf_config.rope_scaling["xdrope_section"])
@@ -827,7 +822,7 @@ class HunYuanVLForConditionalGeneration(
             # +1 : first image_token, +2: for xdrope positions
             pos = image_start_indices[image_index] + 2
             t, h, w = image_grid_thw[image_index]
-            llm_grid_t, llm_grid_h, llm_grid_w = (
+            _, llm_grid_h, llm_grid_w = (
                 t,
                 h // spatial_merge_size,
                 w // spatial_merge_size,
@@ -858,7 +853,7 @@ class HunYuanVLForConditionalGeneration(
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
-            return "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"
+            return "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
 
         raise ValueError("Only image modality is supported")
 
