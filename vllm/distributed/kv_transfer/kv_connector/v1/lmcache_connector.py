@@ -1049,7 +1049,7 @@ class LMCachePromMetrics(KVConnectorPromMetrics):
             ],
         ):
             value = transfer_stats_data.get(counter_key)
-            if value is not None and value >= 0:
+            if value is not None:
                 counter_obj[engine_idx].inc(value)
 
         for gauge_obj, gauge_key in zip(
