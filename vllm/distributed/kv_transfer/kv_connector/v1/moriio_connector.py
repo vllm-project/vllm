@@ -1603,12 +1603,13 @@ class MoRIIOConnectorWorker:
                             "Max retries (%s) exceeded. Stopping ping loop.",
                             MoRIIOConstants.MAX_PING_RETRIES,
                         )
-                        raise RuntimeError(f"Ping failed after {retry_count} retries")
+                        raise RuntimeError(
+                            f"Ping failed after {retry_count} retries"
+                        ) from e
 
                 finally:
                     time.sleep(MoRIIOConstants.PING_INTERVAL)
                     index += 1
-              
 
     def close(self):
         if hasattr(self, "_handshake_initiation_executor"):
@@ -2262,7 +2263,6 @@ class MoRIIOConnectorWorker:
                 offs[2], offs[0], offs[1], sessions[sess_idx]
             )
             with self.moriio_wrapper.lock:
-
                 self._recving_transfers[request_id].append(transfer_status)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
