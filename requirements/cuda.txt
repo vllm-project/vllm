@@ -9,6 +9,5 @@ torch==2.9.0
 torchaudio==2.9.0
 # These must be updated alongside torch
 torchvision==0.24.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
-xformers==0.0.33.post1; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch >= 2.9
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.5.2

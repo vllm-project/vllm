@@ -162,9 +162,11 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
     # deepGEMM on supported platforms with block-quantized weights
     if envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM and block_quant:
         if not has_deep_gemm():
-            logger.warning_once("DeepGEMM backend requested but not available.")
+            logger.warning_once(
+                "DeepGEMM backend requested but not available.", scope="local"
+            )
         elif is_deep_gemm_supported():
-            logger.info_once("Using DeepGEMM backend for FP8 MoE")
+            logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
 
     # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
@@ -173,7 +175,9 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
         and current_platform.is_device_capability(100)
         and block_quant
     ):
-        logger.info_once("Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE")
+        logger.info_once(
+            "Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE", scope="local"
+        )
         return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
@@ -1136,7 +1140,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -1212,31 +1216,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
 
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
-        select_result = FusedMoE.select_experts(
+        select_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            global_num_experts=global_num_experts,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         topk_weights, topk_ids, zero_expert_result = select_result
@@ -1318,7 +1300,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     self.allow_cutlass_block_scaled_grouped_gemm
                 ),
             )
-        if zero_expert_num != 0 and zero_expert_type is not None:
+
+        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )
