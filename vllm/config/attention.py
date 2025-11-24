@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -67,6 +69,8 @@ class AttentionConfig:
     def validate_backend_before(cls, value: Any) -> Any:
         """Enable parsing of the `backend` enum type from string."""
         if isinstance(value, str):
+            from vllm.attention.backends.registry import AttentionBackendEnum
+
             return AttentionBackendEnum[value.upper()]
         return value
 
