@@ -1216,6 +1216,7 @@ class GPUModelRunner(
             req_index = self.input_batch.req_id_to_index[req_id]
             req_state = self.requests[req_id]
             if req_state.mm_features is None:
+                self.encoder_seq_lens.np[req_index] = 0
                 continue
 
             # Get the total number of encoder input tokens for running encoder requests
