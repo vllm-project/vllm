@@ -20,7 +20,6 @@ import numpy as np
 import torch
 import zmq
 
-from vllm import envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
@@ -1014,9 +1013,8 @@ class MoRIIOConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
-        self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.mode = get_moriio_mode()
-
+        self.host_ip = get_ip()
         self.handshake_port = (
             self.vllm_config.kv_transfer_config.kv_connector_extra_config[
                 "handshake_port"
@@ -1305,7 +1303,7 @@ class MoRIIOConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=self.side_channel_host,
+            remote_host=self.host_ip,
             remote_port=self.handshake_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
