@@ -9,7 +9,7 @@ from .default_eplb_policy import DefaultEplb
 
 class PolicyFactory:
     @staticmethod
-    def generate_policy(policy_type: EPLBPolicyOption) -> AbstractEplbPolicy:
+    def generate_policy(policy_type: EPLBPolicyOption) -> type[AbstractEplbPolicy]:
         """
         DefaultEplb: The rearrangement algorithm
         is adapted from [DeepSeek EPLB]
@@ -26,4 +26,4 @@ class PolicyFactory:
                 f"Available policies are: {list(policy.keys())}"
             )
         selected_policy = policy.get(policy_type, DefaultEplb)
-        return selected_policy()
+        return selected_policy

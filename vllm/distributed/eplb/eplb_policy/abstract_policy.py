@@ -7,9 +7,10 @@ import torch
 
 
 class AbstractEplbPolicy(ABC):
+    @classmethod
     @abstractmethod
     def rebalance_experts(
-        self,
+        cls,
         weight: torch.Tensor,
         num_replicas: int,
         num_groups: int,

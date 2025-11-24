@@ -19,8 +19,9 @@ from .abstract_policy import AbstractEplbPolicy
 
 
 class DefaultEplb(AbstractEplbPolicy):
+    @classmethod
     def balanced_packing(
-        self, weight: torch.Tensor, num_packs: int
+        cls, weight: torch.Tensor, num_packs: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Pack n weighted objects to m packs, such that each bin contains exactly
@@ -78,8 +79,9 @@ class DefaultEplb(AbstractEplbPolicy):
 
         return pack_index, rank_in_pack
 
+    @classmethod
     def replicate_experts(
-        self, weight: torch.Tensor, num_phy: int
+        cls, weight: torch.Tensor, num_phy: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Replicate `num_log` experts to `num_phy` replicas, such that the maximum
@@ -109,8 +111,9 @@ class DefaultEplb(AbstractEplbPolicy):
             logcnt[arangen, redundant_indices] += 1
         return phy2log, rank, logcnt
 
+    @classmethod
     def rebalance_experts_hierarchical(
-        self,
+        cls,
         weight: torch.Tensor,
         num_physical_experts: int,
         num_groups: int,
@@ -156,7 +159,7 @@ class DefaultEplb(AbstractEplbPolicy):
 
         # Step 1: pack groups to nodes
         tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
-        group_pack_index, group_rank_in_pack = self.balanced_packing(
+        group_pack_index, group_rank_in_pack = cls.balanced_packing(
             tokens_per_group, num_nodes
         )
         log2mlog = (
@@ -174,14 +177,14 @@ class DefaultEplb(AbstractEplbPolicy):
         tokens_per_mlog = weight.gather(-1, mlog2log).view(
             -1, num_logical_experts // num_nodes
         )
-        phy2mlog, phyrank, mlogcnt = self.replicate_experts(
+        phy2mlog, phyrank, mlogcnt = cls.replicate_experts(
             tokens_per_mlog, num_physical_experts // num_nodes
         )
 
         # Step 3: pack physical_experts to GPUs
         # [num_layers * num_nodes, num_physical_experts // num_nodes]
         tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-        pack_index, rank_in_pack = self.balanced_packing(
+        pack_index, rank_in_pack = cls.balanced_packing(
             tokens_per_phy, num_gpus // num_nodes
         )
         phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
@@ -204,8 +207,9 @@ class DefaultEplb(AbstractEplbPolicy):
         logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
         return pphy2log, pphyrank, logcnt
 
+    @classmethod
     def rebalance_experts(
-        self,
+        cls,
         weight: torch.Tensor,
         num_replicas: int,
         num_groups: int,
@@ -240,12 +244,12 @@ class DefaultEplb(AbstractEplbPolicy):
         weight = weight.float()
         if num_groups % num_nodes == 0:
             # use hierarchical load-balance policy
-            phy2log, phyrank, logcnt = self.rebalance_experts_hierarchical(
+            phy2log, phyrank, logcnt = cls.rebalance_experts_hierarchical(
                 weight, num_replicas, num_groups, num_nodes, num_ranks
             )
         else:
             # use global load-balance policy
-            phy2log, phyrank, logcnt = self.rebalance_experts_hierarchical(
+            phy2log, phyrank, logcnt = cls.rebalance_experts_hierarchical(
                 weight, num_replicas, 1, 1, num_ranks
             )
         num_redundant_experts = num_replicas - num_logical_experts

@@ -44,6 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .eplb_policy.abstract_policy import AbstractEplbPolicy
+from .eplb_policy.default_eplb_policy import DefaultEplb
 from .eplb_policy.policy_factory import PolicyFactory
 from .rebalance_execute import rearrange_expert_weights_inplace
 
@@ -144,14 +145,14 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: AbstractEplbPolicy | None = None
+        self.policy: type[AbstractEplbPolicy] = DefaultEplb
         """
         Selected instance of the EPLB algorithm class
         """
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
-        
+
         Different from `expert_rearrangement_step`, 
         each EP rank may have its own `expert_load_window_step`.
         """
