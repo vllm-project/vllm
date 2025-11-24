@@ -20,7 +20,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    MambaSpec,
 )
 from vllm.v1.request import Request
 
@@ -292,12 +291,11 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             self.block_size *= dcp_world_size
         if pcp_world_size > 1:
             self.block_size *= pcp_world_size
-        # For models using only Mamba, block_size is set to max_model_len by default,
-        # and hash_block_size validation is skipped.
-        assert (
-            isinstance(self.kv_cache_spec, MambaSpec)
-            or hash_block_size == self.block_size
-        ), "UnitaryKVCacheCoordinator assumes hash_block_size == block_size"
+        # For models using only Mamba, block_size is set to max_model_len when
+        # prefix caching is disabled, and hash_block_size validation is skipped.
+        assert not enable_caching or (hash_block_size == self.block_size), (
+            "UnitaryKVCacheCoordinator assumes hash_block_size == block_size"
+        )
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
             "UnitaryKVCacheCoordinator assumes only one kv cache group"
         )
