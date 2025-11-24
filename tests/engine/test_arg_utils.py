@@ -279,17 +279,22 @@ def test_prefix_cache_default():
     args = parser.parse_args([])
 
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.enable_prefix_caching, "prefix caching should default to on."
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.cache_config.enable_prefix_caching, (
+        "prefix caching should default to on."
+    )
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.enable_prefix_caching
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.cache_config.enable_prefix_caching
 
     # with disable flag to turn it off.
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.enable_prefix_caching
+    vllm_config = engine_args.create_engine_config()
+    assert not vllm_config.cache_config.enable_prefix_caching
 
 
 @pytest.mark.parametrize(

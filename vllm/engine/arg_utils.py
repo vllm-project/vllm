@@ -598,9 +598,6 @@ class EngineArgs:
                 self.model,
             )
 
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = True
-
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
