@@ -497,6 +497,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
  should remain unchanged""",
             )
 
+
 @pytest.mark.parametrize(
     "world_size,num_layers,num_local_experts,num_logical_experts",
     [
