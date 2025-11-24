@@ -1110,6 +1110,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=16384,
         max_num_seqs=16,
+        trust_remote_code=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
