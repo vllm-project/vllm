@@ -140,11 +140,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
             and (9, 0) <= current_platform.get_device_capability() < (11, 0)
         )
-        if (
-            envs.VLLM_MXFP4_USE_MARLIN
-            or not triton_kernels_supported
-            or not is_torch_equal_or_newer("2.8.0")
-        ):
+        if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
             logger.info_once("Using Marlin backend")
             return Mxfp4Backend.MARLIN
         else:
