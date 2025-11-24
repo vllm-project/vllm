@@ -4,7 +4,6 @@ import contextlib
 import copy
 import logging
 import math
-import os
 import queue
 import threading
 import time
@@ -810,9 +809,6 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        # TODO temporary, once nixl allows for telemetry flag in config
-        # (next release), we can remove this env var.
-        os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -828,10 +824,11 @@ class NixlConnectorWorker:
         if nixl_agent_config is None:
             config = None
         else:
+            # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends)
+                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads)
+                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
