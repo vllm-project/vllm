@@ -1393,7 +1393,7 @@ class EngineArgs:
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
-        self._set_default_args_chunked_prefill_and_refix_caching(model_config)
+        self._set_default_args_chunked_prefill_and_prefix_caching(model_config)
         self._set_default_args_num_batched_tokens(usage_context, model_config)
 
         sliding_window: int | None = None
@@ -1919,7 +1919,7 @@ class EngineArgs:
 
         return default_max_num_batched_tokens, default_max_num_seqs
 
-    def _set_default_args_chunked_prefill_and_refix_caching(
+    def _set_default_args_chunked_prefill_and_prefix_caching(
         self, model_config: ModelConfig
     ) -> None:
         is_chunked_prefill_supported = model_config.is_chunked_prefill_supported
