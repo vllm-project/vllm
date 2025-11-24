@@ -144,7 +144,7 @@ class HunYuanVLTextConfig(PretrainedConfig):
             The dropout ratio for the attention probabilities.
         head_dim (`int`, *optional*, defaults to 128):
             The attention head dimension.
-    """
+    """  # noqa: E501
 
     model_type = "hunyuan_vl_text"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -215,29 +215,44 @@ class HunYuanVLTextConfig(PretrainedConfig):
 
         if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
             raise ValueError(
-                "`rope_scaling` must be a dictionary with with two fields, `type` and `factor` or `type` and `alpha`, "
-                f"got {self.rope_scaling}"
+                "`rope_scaling` must be a dictionary with with two fields, `type` and "
+                f"`factor` or `type` and `alpha`, got {self.rope_scaling}"
             )
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
         rope_scaling_alpha = self.rope_scaling.get("alpha", None)
         if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
             raise ValueError(
-                f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
+                "`rope_scaling`'s type field must be one of ['linear', 'dynamic'], "
+                f"got {rope_scaling_type}"
             )
         if rope_scaling_factor is None and rope_scaling_alpha is None:
-            raise ValueError("`rope_scaling`'s factor or alpha field must be have one, got both of none")
-        if rope_scaling_factor is not None:
-            if not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-                raise ValueError(f"`rope_scaling`'s factor field must be a float > 1.0, got {rope_scaling_factor}")
-        if rope_scaling_alpha is not None:
-            if not isinstance(rope_scaling_alpha, float) or rope_scaling_alpha <= 1.0:
-                raise ValueError(f"`rope_scaling`'s alpha field must be a float > 1.0, got {rope_scaling_alpha}")
+            raise ValueError(
+                "`rope_scaling`'s factor or alpha field must be have one, "
+                "got both of none"
+            )
+        if rope_scaling_factor is not None and (
+            not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0
+        ):
+            raise ValueError(
+                "`rope_scaling`'s factor field must be a float > 1.0, "
+                f"got {rope_scaling_factor}"
+            )
+        if rope_scaling_alpha is not None and (
+            not isinstance(rope_scaling_alpha, float) or rope_scaling_alpha <= 1.0
+        ):
+            raise ValueError(
+                "`rope_scaling`'s alpha field must be a float > 1.0, "
+                f"got {rope_scaling_alpha}"
+            )
 
 
 class HunYuanVLConfig(PretrainedConfig):
     model_type = "hunyuan_vl"
-    sub_configs = {"vision_config": HunYuanVLVisionConfig, "text_config": HunYuanVLTextConfig}
+    sub_configs = {
+        "vision_config": HunYuanVLVisionConfig,
+        "text_config": HunYuanVLTextConfig,
+    }
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -254,7 +269,8 @@ class HunYuanVLConfig(PretrainedConfig):
     ):
         # We need to init super() here so that it does not reset values
         # that are in text config to the BaseClass defaults. The Base
-        # config has many text related defaults and not all defaults are same as for `HunYuanVLTextConfig`
+        # config has many text related defaults and not all defaults are
+        # same as for `HunYuanVLTextConfig`.
         super().__init__(**kwargs)
 
         if isinstance(vision_config, dict):
@@ -277,12 +293,14 @@ class HunYuanVLConfig(PretrainedConfig):
 
         self.vision_config.text_hidden_size = self.text_config.hidden_size
 
-        # Attention implementation to use. It sets it recursively on sub-configs so we call it again in the end
+        # Attention implementation to use. It sets it recursively on sub-configs
+        # so we call it again in the end.
         self._attn_implementation = kwargs.pop("attn_implementation", None)
 
     def __setattr__(self, key, value):
         if (
-            (text_config := super().__getattribute__("__dict__").get("text_config")) is not None
+            (text_config := super().__getattribute__("__dict__").get("text_config"))
+            is not None
             and key not in ["dtype", "_attn_implementation_internal"]
             and key in text_config.__dict__
         ):
