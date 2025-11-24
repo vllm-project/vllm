@@ -5,6 +5,7 @@
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
+from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -36,6 +37,7 @@ from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.gpu_profiler import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
@@ -49,6 +51,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -529,9 +532,46 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
+        intermediate_tensors = None
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._pad_for_sequence_parallelism(
+            num_scheduled_tokens
+        )
+        all_gather_tensors = {
+            "residual": not is_residual_scattered_for_sp(
+                self.vllm_config, num_input_tokens
+            )
+        }
+        if forward_pass and not get_pp_group().is_first_rank:
+            tensor_dict = get_pp_group().recv_tensor_dict(
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
+            )
+            assert tensor_dict is not None
+            intermediate_tensors = IntermediateTensors(tensor_dict)
+
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(scheduler_output)
-        return output
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors
+            )
+            if isinstance(output, (ModelRunnerOutput, NoneType)):
+                return output
+
+        assert isinstance(output, IntermediateTensors)
+        parallel_config = self.vllm_config.parallel_config
+        assert (
+            parallel_config.distributed_executor_backend != "external_launcher"
+            and not get_pp_group().is_last_rank
+        )
+
+        get_pp_group().send_tensor_dict(
+            output.tensors,
+            all_gather_group=get_tp_group(),
+            all_gather_tensors=all_gather_tensors,
+        )
+
+        return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

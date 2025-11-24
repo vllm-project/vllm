@@ -2765,20 +2765,12 @@ class GPUModelRunner(
 
         return cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp
 
-    def _pp_all_gather_tensors(self, num_tokens_padded: int) -> dict[str, bool]:
-        return {
-            "residual": not is_residual_scattered_for_sp(
-                self.vllm_config, num_tokens_padded
-            )
-        }
-
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | None:
-        intermediate_tensors = None
-
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -2891,16 +2883,6 @@ class GPUModelRunner(
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
 
-                if not get_pp_group().is_first_rank:
-                    tensor_dict = get_pp_group().recv_tensor_dict(
-                        all_gather_group=get_tp_group(),
-                        all_gather_tensors=self._pp_all_gather_tensors(
-                            num_tokens_padded
-                        ),
-                    )
-                    assert tensor_dict is not None
-                    intermediate_tensors = IntermediateTensors(tensor_dict)
-
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -2977,22 +2959,7 @@ class GPUModelRunner(
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-
-                    parallel_config = self.vllm_config.parallel_config
-                    assert (
-                        parallel_config.distributed_executor_backend
-                        != "external_launcher"
-                        and not get_pp_group().is_last_rank
-                    )
-
-                    get_pp_group().send_tensor_dict(
-                        hidden_states.tensors,
-                        all_gather_group=get_tp_group(),
-                        all_gather_tensors=self._pp_all_gather_tensors(
-                            num_tokens_padded
-                        ),
-                    )
-                    return None
+                    return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
