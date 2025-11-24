@@ -45,7 +45,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        close_session: bool = False,
+        close_session: bool = True,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index

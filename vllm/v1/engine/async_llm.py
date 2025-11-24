@@ -52,8 +52,6 @@ logger = init_logger(__name__)
 
 
 class AsyncLLM(EngineClient):
-    output_processor_cls: type[OutputProcessor] = OutputProcessor
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -123,7 +121,7 @@ class AsyncLLM(EngineClient):
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         stream_interval = self.vllm_config.scheduler_config.stream_interval
-        self.output_processor = self.output_processor_cls(
+        self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
@@ -287,7 +285,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
-        close_session: bool = False,
+        close_session: bool = True,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -384,7 +382,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        close_session: bool = False,
+        close_session: bool = True,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -455,17 +453,37 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
+                if (
+                    len(out.outputs) > 0
+                    and out.outputs[0].stop_reason == "close_session"
+                ):
+                    return
                 assert isinstance(out, RequestOutput)
                 yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
-        except (asyncio.CancelledError, GeneratorExit):
+        except asyncio.CancelledError:
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
+
+        except GeneratorExit:
+            if not close_session:
+                if self.log_requests:
+                    logger.info(
+                        "Request %s generator completed, session remains alive.",
+                        request_id,
+                    )
+                # For streaming sessions, generator completion is normal
+                return
+            else:
+                await self.abort(request_id)
+                if self.log_requests:
+                    logger.info("Request %s aborted.", request_id)
+                raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:

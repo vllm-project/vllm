@@ -394,7 +394,7 @@ class Processor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        close_session: bool = False,
+        close_session: bool = True,
     ) -> EngineCoreRequest:
         # For close_session requests, skip input preprocessing
         # and create a minimal request to signal session closure

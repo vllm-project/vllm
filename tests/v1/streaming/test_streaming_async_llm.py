@@ -8,15 +8,15 @@ import pytest
 
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
-from vllm.v1.streaming.engine.streaming_async_llm import StreamingAsyncLLM
 
 
 @pytest.fixture
 def mock_streaming_llm():
-    """Create a mock StreamingAsyncLLM with mocked dependencies."""
+    """Create a mock AsyncLLM with mocked dependencies."""
     # Create a minimal mock without initializing the full engine
-    llm = MagicMock(spec=StreamingAsyncLLM)
+    llm = MagicMock(spec=AsyncLLM)
 
     # Mock the essential attributes
     llm.vllm_config = MagicMock()
@@ -25,13 +25,15 @@ def mock_streaming_llm():
     llm.model_config.max_model_len = 2048
     llm.log_requests = False
     llm.errored = False
+    llm._pause_cond = asyncio.Condition()
+    llm._paused = False
 
     # Mock methods
     llm._run_output_handler = MagicMock()
     llm.abort = AsyncMock()
 
-    # Use the real generate method from StreamingAsyncLLM
-    llm.generate = StreamingAsyncLLM.generate.__get__(llm, StreamingAsyncLLM)
+    # Use the real generate method from AsyncLLM
+    llm.generate = AsyncLLM.generate.__get__(llm, AsyncLLM)
 
     return llm
 
