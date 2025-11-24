@@ -571,6 +571,9 @@ class VllmBackend:
 
         # Deepcopy the inductor config to detach the post-grad custom pass
         # from CompilationConfig.
+        # We want to avoid PostGradPassManager in CompilationConfig because
+        # in future we need PostGradPassManager.uuid() to be executed only
+        # at compile time.
         self.inductor_config = deepcopy(config.inductor_compile_config)
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in self.inductor_config:
