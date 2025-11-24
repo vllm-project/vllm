@@ -16,14 +16,11 @@ class AbstractEplbPolicy(ABC):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_global_expert_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
 
         Parameters:
-            old_global_expert_indices: [num_moe_layers, num_physical_experts],
-                mapping from physical experts to logical experts.
             weight: [layers, num_logical_experts], the load statistics
                 for all logical experts
             num_replicas: number of physical experts, must be a multiple of
