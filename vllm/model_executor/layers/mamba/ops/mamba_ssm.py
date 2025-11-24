@@ -39,7 +39,13 @@ else:
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
-@triton.jit
+@triton.heuristics(
+    {
+        "CACHE_INTERMEDIATE_STATES": lambda args: args["intermediate_states_buffer"]
+        is not None
+    }
+)
+@triton.jit(do_not_specialize=["T"])
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
@@ -55,8 +61,11 @@ def _selective_scan_update_kernel(
     state_batch_indices_ptr,
     dst_state_batch_indices_ptr,
     pad_slot_id,
+    intermediate_states_buffer,
+    cache_steps,
     # Matrix dimensions
     batch,
+    T,
     nheads,
     dim,
     dstate,
@@ -67,9 +76,11 @@ def _selective_scan_update_kernel(
     stride_state_dim,
     stride_state_dstate,
     stride_x_batch,
+    stride_x_T,
     stride_x_head,
     stride_x_dim,
     stride_dt_batch,
+    stride_dt_T,
     stride_dt_head,
     stride_dt_dim,
     stride_dt_bias_head,
@@ -78,19 +89,27 @@ def _selective_scan_update_kernel(
     stride_A_dim,
     stride_A_dstate,
     stride_B_batch,
+    stride_B_T,
     stride_B_group,
     stride_B_dstate,
     stride_C_batch,
+    stride_C_T,
     stride_C_group,
     stride_C_dstate,
     stride_D_head,
     stride_D_dim,
     stride_z_batch,
+    stride_z_T,
     stride_z_head,
     stride_z_dim,
     stride_out_batch,
+    stride_out_T,
     stride_out_head,
     stride_out_dim,
+    stride_state_indices_batch,
+    stride_state_indices_T,
+    stride_dst_state_indices_batch,
+    stride_dst_state_indices_T,
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
     TIE_HDIM: tl.constexpr,
@@ -99,6 +118,8 @@ def _selective_scan_update_kernel(
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
     HAS_STATE_BATCH_INDICES: tl.constexpr,
+    DISABLE_STATE_UPDATE: tl.constexpr,
+    CACHE_INTERMEDIATE_STATES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -109,12 +130,12 @@ def _selective_scan_update_kernel(
     # is taken from the state_batch_indices_ptr Otherwise, the state coordinate
     # is the same as the batch id.
     if HAS_STATE_BATCH_INDICES:
-        dst_state_batch_indices_ptr += pid_b
+        dst_state_batch_indices_ptr += pid_b * stride_dst_state_indices_batch + 0 * stride_dst_state_indices_T
         dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
         dst_state_ptr = state_ptr + (
             dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
         )
-        state_batch_indices_ptr += pid_b
+        state_batch_indices_ptr += pid_b * stride_state_indices_batch + 0 * stride_state_indices_T
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:
@@ -142,67 +163,94 @@ def _selective_scan_update_kernel(
     dst_state_ptrs = dst_state_ptr + (
         offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
     )
-    x_ptrs = x_ptr + offs_m * stride_x_dim
-    dt_ptrs = dt_ptr + offs_m * stride_dt_dim
+
+    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
+    if HAS_STATE_BATCH_INDICES:
+        mask &= state_batch_idx != pad_slot_id
+    state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
+
     if HAS_DT_BIAS:
         dt_bias_ptrs = dt_bias_ptr + offs_m * stride_dt_bias_dim
     if HAS_D:
         D_ptr += pid_h * stride_D_head
-    A_ptrs = A_ptr + (
-        offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
-    )
-    B_ptrs = B_ptr + offs_n * stride_B_dstate
-    C_ptrs = C_ptr + offs_n * stride_C_dstate
-    if HAS_D:
         D_ptrs = D_ptr + offs_m * stride_D_dim
-    if HAS_Z:
-        z_ptrs = z_ptr + offs_m * stride_z_dim
-    out_ptrs = out_ptr + offs_m * stride_out_dim
-    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
-    if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
-    state = tl.load(state_ptrs, mask=mask, other=0.0)
+    A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
-    x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
-    if not TIE_HDIM:
-        dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
-        if HAS_DT_BIAS:
-            dt += tl.load(dt_bias_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
-        if DT_SOFTPLUS:
-            dt = softplus(dt)
-        A = tl.load(
-            A_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0
-        ).to(tl.float32)
-        dA = tl.exp(A * dt[:, None])
-    else:
-        dt = tl.load(dt_ptr).to(tl.float32)
-        if HAS_DT_BIAS:
-            dt += tl.load(dt_bias_ptr).to(tl.float32)
-        if DT_SOFTPLUS:
-            dt = softplus(dt)
-        A = tl.load(A_ptr).to(tl.float32)
-        dA = tl.exp(A * dt)  # scalar, not a matrix
+    current_step_idx = 0
+    for _ in range(T):
+        x_ptrs = x_ptr + offs_m * stride_x_dim
+        dt_ptrs = dt_ptr + offs_m * stride_dt_dim
+        B_ptrs = B_ptr + offs_n * stride_B_dstate
+        C_ptrs = C_ptr + offs_n * stride_C_dstate
+        if HAS_Z:
+            z_ptrs = z_ptr + offs_m * stride_z_dim
+        out_ptrs = out_ptr + offs_m * stride_out_dim
 
-    B = tl.load(B_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
-    C = tl.load(C_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
-    if HAS_D:
-        D = tl.load(D_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
-    if HAS_Z:
-        z = tl.load(z_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+        x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+        if not TIE_HDIM:
+            dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+            if HAS_DT_BIAS:
+                dt += tl.load(dt_bias_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+            if DT_SOFTPLUS:
+                dt = softplus(dt)
+            A = tl.load(
+                A_ptrs,
+                mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
+                other=0.0,
+            ).to(tl.float32)
+            dA = tl.exp(A * dt[:, None])
+        else:
+            dt = tl.load(dt_ptr).to(tl.float32)
+            if HAS_DT_BIAS:
+                dt += tl.load(dt_bias_ptr).to(tl.float32)
+            if DT_SOFTPLUS:
+                dt = softplus(dt)
+            A = tl.load(A_ptr).to(tl.float32)
+            dA = tl.exp(A * dt)  # scalar, not a matrix
 
-    dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
-    state = state * dA + dB * x[:, None]
+        B = tl.load(B_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
+        C = tl.load(C_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
+        if HAS_D:
+            D = tl.load(D_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+        if HAS_Z:
+            z = tl.load(z_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
 
-    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
-    if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
-    tl.store(dst_state_ptrs, state, mask=mask)
-    out = tl.sum(state * C[None, :], axis=1)
-    if HAS_D:
-        out += x * D
-    if HAS_Z:
-        out *= z * tl.sigmoid(z)
-    tl.store(out_ptrs, out, mask=offs_m < dim)
+        dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
+        state = state * dA + dB * x[:, None]
+
+        if CACHE_INTERMEDIATE_STATES:
+            if HAS_STATE_BATCH_INDICES:
+                if state_batch_idx != pad_slot_id:
+                    cache_ptr_base = (
+                        intermediate_states_buffer
+                        + state_batch_idx * cache_steps * nheads * dim * dstate
+                        + current_step_idx * nheads * dim * dstate
+                        + pid_h * dim * dstate
+                    )
+                    cache_ptrs = cache_ptr_base + (
+                        offs_m[:, None] * dstate + offs_n[None, :]
+                    )
+                    tl.store(cache_ptrs, state.to(cache_ptrs.dtype.element_ty), mask=mask)
+
+        out = tl.sum(state * C[None, :], axis=1)
+        if HAS_D:
+            out += x * D
+        if HAS_Z:
+            out *= z * tl.sigmoid(z)
+        tl.store(out_ptrs, out, mask=offs_m < dim)
+
+        current_step_idx += 1
+
+        x_ptr += stride_x_T
+        dt_ptr += stride_dt_T
+        B_ptr += stride_B_T
+        C_ptr += stride_C_T
+        out_ptr += stride_out_T
+        if HAS_Z:
+            z_ptr += stride_z_T
+
+    if not DISABLE_STATE_UPDATE:
+        tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
 
 
 def selective_state_update(
@@ -220,14 +268,17 @@ def selective_state_update(
     dst_state_batch_indices=None,
     pad_slot_id=PAD_SLOT_ID,
     out=None,
+    disable_state_update=False,
+    intermediate_states_buffer=None,
+    cache_steps=None,
 ):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim)
+        x: (batch, dim) or (batch, nheads, dim) for single-token or (batch, T, nheads, dim) for multi-token
         dt: (batch, dim) or (batch, nheads, dim)
         A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate)
+        B: (batch, dstate) or (batch, ngroups, dstate) for single-token or (batch, T, ngroups, dstate) for multi-token
         C: (batch, dstate) or (batch, ngroups, dstate)
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
@@ -240,37 +291,57 @@ def selective_state_update(
             indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
+        disable_state_update: If True, don't write back to state (for speculative verify)
+        intermediate_states_buffer: Buffer to cache intermediate states
+        cache_steps: Total number of steps in the buffer
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
     if x.dim() == 2:
         x = x.unsqueeze(1)
+    if x.dim() == 3:
+        x = x.unsqueeze(1)
     if dt.dim() == 2:
+        dt = dt.unsqueeze(1)
+    if dt.dim() == 3:
         dt = dt.unsqueeze(1)
     if A.dim() == 2:
         A = A.unsqueeze(0)
     if B.dim() == 2:
         B = B.unsqueeze(1)
+    if B.dim() == 3:
+        B = B.unsqueeze(1)
     if C.dim() == 2:
+        C = C.unsqueeze(1)
+    if C.dim() == 3:
         C = C.unsqueeze(1)
     if D is not None and D.dim() == 1:
         D = D.unsqueeze(0)
-    if z is not None and z.dim() == 2:
-        z = z.unsqueeze(1)
+    if z is not None:
+        if z.dim() == 2:
+            z = z.unsqueeze(1)
+        if z.dim() == 3:
+            z = z.unsqueeze(1)
     if dt_bias is not None and dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
+    if out.dim() == 3:
+        out = out.unsqueeze(1)
+    if state_batch_indices is not None and state_batch_indices.dim() == 1:
+        state_batch_indices = state_batch_indices.unsqueeze(1)
+    if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
+        dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
 
     _, nheads, dim, dstate = state.shape
-    batch = x.shape[0]
+    batch, T, _, _ = x.shape
 
-    assert x.shape == (batch, nheads, dim)
+    assert x.shape == (batch, T, nheads, dim)
     assert dt.shape == x.shape
     assert A.shape == (nheads, dim, dstate)
-    ngroups = B.shape[1]
+    ngroups = B.shape[2]
     assert nheads % ngroups == 0, "nheads must be divisible by ngroups"
-    assert B.shape == (batch, ngroups, dstate)
+    assert B.shape == (batch, T, ngroups, dstate)
     assert C.shape == B.shape
     if D is not None:
         assert D.shape == (nheads, dim)
@@ -279,16 +350,22 @@ def selective_state_update(
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
-        assert state_batch_indices.shape == (batch,)
+        assert state_batch_indices.shape == (batch, T)
     if dst_state_batch_indices is not None:
-        assert dst_state_batch_indices.shape == (batch,)
+        assert dst_state_batch_indices.shape == (batch, T)
     else:
         # revert to the default behavior of in-place state updates
         dst_state_batch_indices = state_batch_indices
     assert out.shape == x.shape
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
-    z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
+    z_strides = (
+        (z.stride(0), z.stride(1), z.stride(2), z.stride(3))
+        if z is not None
+        else (0, 0, 0, 0)
+    )
+    state_batch_indices_strides = (state_batch_indices.stride(0), state_batch_indices.stride(1)) if state_batch_indices is not None else (0, 0)
+    dst_state_batch_indices_strides = (dst_state_batch_indices.stride(0), dst_state_batch_indices.stride(1)) if dst_state_batch_indices is not None else (0, 0)
     # We don't want autotune since it will overwrite the state
     # We instead tune by hand.
     BLOCK_SIZE_M, num_warps = (
@@ -321,7 +398,10 @@ def selective_state_update(
             state_batch_indices,
             dst_state_batch_indices,
             pad_slot_id,
+            intermediate_states_buffer,
+            cache_steps if cache_steps is not None else 0,
             batch,
+            T,
             nheads,
             dim,
             dstate,
@@ -333,9 +413,11 @@ def selective_state_update(
             x.stride(0),
             x.stride(1),
             x.stride(2),
+            x.stride(3),
             dt.stride(0),
             dt.stride(1),
             dt.stride(2),
+            dt.stride(3),
             *(dt_bias.stride(0), dt_bias.stride(1)) if dt_bias is not None else 0,
             A.stride(0),
             A.stride(1),
@@ -343,19 +425,28 @@ def selective_state_update(
             B.stride(0),
             B.stride(1),
             B.stride(2),
+            B.stride(3),
             C.stride(0),
             C.stride(1),
             C.stride(2),
+            C.stride(3),
             *(D.stride(0), D.stride(1)) if D is not None else 0,
             z_strides[0],
             z_strides[1],
             z_strides[2],
+            z_strides[3],
             out.stride(0),
             out.stride(1),
             out.stride(2),
+            out.stride(3),
+            state_batch_indices_strides[0],
+            state_batch_indices_strides[1],
+            dst_state_batch_indices_strides[0],
+            dst_state_batch_indices_strides[1],
             dt_softplus,
             tie_hdim,
             BLOCK_SIZE_M,
+            DISABLE_STATE_UPDATE=disable_state_update,
             num_warps=num_warps,
         )
 
