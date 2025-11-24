@@ -550,7 +550,7 @@ def run_hunyuan_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"
+    placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
     prompts = [
         f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
         for question in questions
