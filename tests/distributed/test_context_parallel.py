@@ -18,6 +18,7 @@ import torch
 
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -276,6 +277,64 @@ def test_cp_generation(
     if (
         model_id == "bigcode/gpt_bigcode-santacoder"
         and torch.cuda.get_device_capability() != (9, 0)
+    ):
+        pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
+
+    _compare_cp_with_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=False,
+    )
+
+
+CP_ROCM_AITER_MODELS = {
+    "bigcode/gpt_bigcode-santacoder": [
+        CPTestSettings.detailed(tp_base=2, attn_backend="ROCM_AITER_FA"),
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "runner",
+        "test_options",
+    ),
+    [
+        params
+        for model_id, settings in CP_ROCM_AITER_MODELS.items()
+        for setting in settings
+        for params in setting.iter_params(model_id)
+    ],
+)
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only test on ROCm platforms"
+)
+def test_cp_generation_rocm_aiter(
+    model_id: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    runner: RunnerOption,
+    test_options: CPTestOptions,
+    num_gpus_available,
+):
+    """Test context parallel generation with ROCm aiter FA backend.
+
+    This test uses the ROCM_AITER_FA attention backend via test_options
+    on ROCm platforms for the bigcode/gpt_bigcode-santacoder model.
+    """
+
+    if (
+        model_id == "bigcode/gpt_bigcode-santacoder"
+        and torch.cuda.get_device_capability() != (9, 4)
     ):
         pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
 
