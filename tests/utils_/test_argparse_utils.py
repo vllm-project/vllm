@@ -166,7 +166,6 @@ def test_dict_args(parser):
         "--hf-overrides.key2.key4",
         "val3",
         # Test compile config and compilation mode
-        "-O.use_inductor=true",
         "-O.backend",
         "custom",
         "-O1",
@@ -219,7 +218,6 @@ def test_dict_args(parser):
     }
     assert parsed_args.compilation_config == {
         "mode": 1,
-        "use_inductor": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
     }
