@@ -42,12 +42,6 @@ else:
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
-@triton.heuristics(
-    {
-        "CACHE_INTERMEDIATE_STATES": lambda args: args["intermediate_states_buffer"]
-        is not None
-    }
-)
 @triton.jit(do_not_specialize=["T"])
 def _selective_scan_update_kernel(
     # Pointers to matrices
@@ -65,8 +59,6 @@ def _selective_scan_update_kernel(
     dst_state_batch_indices_ptr,
     pad_slot_id,
     num_accepted_tokens_ptr,
-    intermediate_states_buffer,
-    cache_steps,
     # Matrix dimensions
     batch,
     T,
@@ -124,7 +116,6 @@ def _selective_scan_update_kernel(
     HAS_STATE_BATCH_INDICES: tl.constexpr,
     INPLACE_FINAL_STATE: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
-    CACHE_INTERMEDIATE_STATES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -252,20 +243,6 @@ def _selective_scan_update_kernel(
                     token_dst_ptrs, state.to(token_dst_ptrs.dtype.element_ty), mask=mask
                 )
 
-        if (
-            CACHE_INTERMEDIATE_STATES
-            and HAS_STATE_BATCH_INDICES
-            and state_batch_idx != pad_slot_id
-        ):
-            cache_ptr_base = (
-                intermediate_states_buffer
-                + state_batch_idx * cache_steps * nheads * dim * dstate
-                + i_t * nheads * dim * dstate
-                + pid_h * dim * dstate
-            )
-            cache_ptrs = cache_ptr_base + (offs_m[:, None] * dstate + offs_n[None, :])
-            tl.store(cache_ptrs, state.to(cache_ptrs.dtype.element_ty), mask=mask)
-
         out = tl.sum(state * C[None, :], axis=1)
         if HAS_D:
             out += x * D
@@ -302,8 +279,6 @@ def selective_state_update(
     out=None,
     inplace_final_state=False,
     num_accepted_tokens=None,
-    intermediate_states_buffer=None,
-    cache_steps=None,
 ):
     """
     Argument:
@@ -326,8 +301,6 @@ def selective_state_update(
             indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
-        intermediate_states_buffer: Buffer to cache intermediate states
-        cache_steps: Total number of steps in the buffer
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
@@ -443,8 +416,6 @@ def selective_state_update(
             dst_state_batch_indices,
             pad_slot_id,
             num_accepted_tokens,
-            intermediate_states_buffer,
-            cache_steps if cache_steps is not None else 0,
             batch,
             T,
             nheads,
