@@ -17,6 +17,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -167,11 +168,14 @@ class TestCUDAGraphWrapper:
         batch_descriptor = BatchDescriptor(num_tokens=10)
 
         # 0. global warmup
-        with set_forward_context(
-            attn_metadata=None,
-            vllm_config=self.vllm_config,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            batch_descriptor=None,
+        with (
+            set_forward_context(
+                attn_metadata=None,
+                vllm_config=self.vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=None,
+            ),
+            graph_capture(device=torch.device("cuda")) as graph_ctx,
         ):
             wrapper(self.input_tensor)
 
@@ -184,6 +188,7 @@ class TestCUDAGraphWrapper:
                 batch_descriptor=batch_descriptor,
             ),
             patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
+            graph_capture(device=torch.device("cuda")) as graph_ctx,
         ):
             output1 = wrapper(self.input_tensor)
             # capturing phase should generate a zero output
