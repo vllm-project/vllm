@@ -3345,6 +3345,8 @@ class GPUModelRunner(
             scope="local",
         )
         prepare_communication_buffer_for_model(self.model)
+        if hasattr(self, "drafter") and hasattr(self.drafter, 'model'):
+            prepare_communication_buffer_for_model(self.drafter.model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
