@@ -37,6 +37,9 @@ class InputBuffers:
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.cu_num_logits = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
 
+        # Spec decoding.
+        self.next_prefill_tokens = self._make_buffer(max_num_reqs, dtype=torch.int32)
+
         # Structured outputs.
         self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
         self.grammar_bitmask = self._make_buffer(

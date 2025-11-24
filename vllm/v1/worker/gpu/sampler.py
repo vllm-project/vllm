@@ -100,8 +100,9 @@ def _gumbel_sample_kernel(
         mask=mask,
         other=float("-inf"),
     )
+    logits = logits.to(tl.float32)
 
-    temp = tl.load(temp_ptr + req_idx)
+    temp = tl.load(temp_ptr + req_idx).to(tl.float32)
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_idx)
@@ -116,7 +117,7 @@ def _gumbel_sample_kernel(
         # Apply temperature.
         if APPLY_TEMPERATURE:
             # NOTE(woosuk): Use div_rn to match the behavior of torch.
-            logits = tl.div_rn(logits, temp.to(tl.float32))
+            logits = tl.div_rn(logits, temp)
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
