@@ -434,9 +434,15 @@ class Scheduler(SchedulerInterface):
 
                 # Streaming: skip request if still waiting for next streaming req.
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-                    self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
-                    continue
+                    if len(request.streaming_queue) > 0:
+                        close = self._update_session_request(request)
+                        if close:
+                            self.waiting.pop_request()
+                            continue
+                    else:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -769,6 +775,9 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _update_session_request(self, session_request: Request) -> bool:
+        raise NotImplementedError("Use streaming scheduler")
 
     def _make_new_request_data(
         self,

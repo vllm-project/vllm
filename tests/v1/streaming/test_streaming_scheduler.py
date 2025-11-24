@@ -215,7 +215,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert close_request.status == RequestStatus.WAITING
         assert len(session_request.streaming_queue) == 1
 
-        _ = scheduler.process_streaming_requests()
+        _ = scheduler.schedule()
 
         assert session_request.status == RequestStatus.FINISHED_STOPPED
 
@@ -231,7 +231,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert "test_request" not in scheduler.requests
         assert len(scheduler.waiting) == 0
 
-    def test_process_streaming_requests_with_session_update(self):
+    def test_streaming_request_session_update(self):
         scheduler = create_scheduler()
 
         session_request = DummyRequest(
@@ -252,9 +252,9 @@ class TestStreamingScheduler(unittest.TestCase):
         assert next_request.status == RequestStatus.WAITING
         assert len(session_request.streaming_queue) == 1
 
-        _ = scheduler.process_streaming_requests()
+        _ = scheduler.schedule()
 
-        assert session_request.status == RequestStatus.WAITING
+        assert session_request.status == RequestStatus.RUNNING
         assert session_request.prompt_token_ids == [1, 2, 3, 4, 5]
 
     @parameterized.expand([(RequestStatus.RUNNING,), (RequestStatus.PREEMPTED,)])

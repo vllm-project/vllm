@@ -5,8 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.sched.request_queue import RequestQueue
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput
 from vllm.v1.request import Request, RequestStatus
@@ -30,8 +29,9 @@ class StreamingScheduler(Scheduler):
         """
         Updates the waiting session request with the next streaming request.
 
-        Removes the last output token (which hasn't been scheduled yet) from
-        `_all_token_ids`, as the new request's prompt tokens are replacing it. Typically
+        Closes the session if the streaming request is a close session request.
+        Otherwise, removes the last output token (which hasn't been scheduled) from
+        `_all_token_ids`, as the new request's prompt tokens will replace it. Typically
         decoding outputs are scheduled as the next input in autoregressive decoding.
         When we receive a new streaming request, the new prompt becomes our next input,
         so the last output token is no longer needed and will not join the kv cache.
@@ -81,19 +81,6 @@ class StreamingScheduler(Scheduler):
 
         return False
 
-    def process_streaming_requests(self) -> RequestQueue:
-        closed_sessions = []
-        for request in self.waiting:
-            if (
-                request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-                and len(request.streaming_queue) > 0
-            ):
-                closed = self._update_session_request(request)
-                if closed:
-                    closed_sessions.append(request)
-
-        self.waiting.remove_requests(closed_sessions)
-
     def _make_new_request_data(
         self,
         request: Request,
@@ -119,10 +106,6 @@ class StreamingScheduler(Scheduler):
         out = super()._make_new_request_data(request, block_ids, prefill_token_ids)
         out.prompt_token_ids = request._all_token_ids.copy()
         return out
-
-    def schedule(self) -> SchedulerOutput:
-        self.process_streaming_requests()
-        return super().schedule()
 
     def has_unfinished_requests(self) -> bool:
         """
