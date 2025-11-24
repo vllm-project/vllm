@@ -20,6 +20,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -142,13 +143,27 @@ class Processor:
         self,
         params: SamplingParams,
     ) -> None:
-        # Best of not yet supported.
-        if params.best_of is not None and params.best_of > 1:
-            raise ValueError("vLLM V1 does not yet support best_of.")
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
                 "vLLM V1 does not support per request user provided logits processors."
+            )
+        # Async scheduling + spec decode currently incompatible with some
+        # sampling parameters.
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.scheduler_config.async_scheduling
+            and (
+                params.frequency_penalty != 0.0
+                or params.presence_penalty != 0.0
+                or params.repetition_penalty != 1.0
+                or params.bad_words_token_ids
+                or params.structured_outputs
+            )
+        ):
+            raise ValueError(
+                "async scheduling with spec decoding doesn't yet support "
+                "penalties, bad words or structured outputs in sampling parameters."
             )
 
     def _validate_params(
@@ -286,12 +301,24 @@ class Processor:
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
+            if isinstance(self.tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "Mistral tokenizer is not supported for the 'guidance' "
+                    "structured output backend. Please use ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             validate_guidance_grammar(params, tokenizer=None)
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(params)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
+            if isinstance(self.tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
+                    "structured output backend. Please use ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             validate_structured_output_request_lm_format_enforcer(params)
         else:
             # NOTE: backend must be "auto" here, because we have
@@ -306,9 +333,15 @@ class Processor:
             except ValueError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
-                # are not supported in xgrammar. Fall back to guidance.
-                validate_guidance_grammar(params, tokenizer=None)
-                params.structured_outputs._backend = "guidance"
+                # are not supported in xgrammar.
+                if isinstance(self.tokenizer, MistralTokenizer):
+                    # Fall back to outlines if the tokenizer is Mistral
+                    validate_structured_output_request_outlines(params)
+                    params.structured_outputs._backend = "outlines"
+                else:
+                    # Fall back to guidance by default.
+                    validate_guidance_grammar(params, tokenizer=None)
+                    params.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
 
