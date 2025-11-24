@@ -1412,7 +1412,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 max_seqlen_k=prefill.max_query_len // 2 * (self.pcp_rank + 1),
                 softmax_scale=self.scale,
                 causal=True,
-                return_softmax_lse=return_softmax_lse,
+                return_softmax_lse=True,
             )
 
             output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
@@ -1429,17 +1429,20 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 * (self.pcp_world_size * 2 - self.pcp_rank),
                 softmax_scale=self.scale,
                 causal=True,
-                return_softmax_lse=return_softmax_lse,
+                return_softmax_lse=True,
             )
 
             output = torch.cat([output_head, output_tail], dim=0)
-            # FA returns LSE in shape [ H, B ]
-            lse = torch.cat([lse_head, lse_tail], dim=-1)
             output_restore_idx = prefill.output_restore_idx
-            return (
-                torch.index_select(output, 0, output_restore_idx),
-                torch.index_select(lse, -1, output_restore_idx),
-            )
+            if return_softmax_lse:
+                # FA returns LSE in shape [ H, B ]
+                lse = torch.cat([lse_head, lse_tail], dim=-1)
+                return (
+                    torch.index_select(output, 0, output_restore_idx),
+                    torch.index_select(lse, -1, output_restore_idx),
+                )
+            else:
+                return torch.index_select(output, 0, output_restore_idx)
         else:
             return self._flash_attn_varlen_diff_headdims(
                 q=q,
@@ -2016,9 +2019,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if self.pcp_world_size is None:
             self.pcp_world_size = get_pcp_group().world_size
         if self.dcp_rank is None:
-            self.dcp_rank = get_dcp_group().rank
+            self.dcp_rank = get_dcp_group().rank_in_group
         if self.pcp_rank is None:
-            self.pcp_rank = get_pcp_group().rank
+            self.pcp_rank = get_pcp_group().rank_in_group
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
@@ -2027,16 +2030,22 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if attn_metadata.prefill is not None and self.pcp_world_size > 1:
-            # NOTE Skip pcp kv all-gather when there are only decode requests.
-            assert attn_metadata.prefill.pcp_allgather_restore_idx is not None
-            k_c_normed, k_pe = pcp_kv_allgather_and_restore(
-                k_c_normed,
-                k_pe,
-                num_actual_toks,
-                attn_metadata.prefill.pcp_allgather_restore_idx,
-                get_pcp_group(),
-            )
+        if self.pcp_world_size > 1:
+            if attn_metadata.prefill is not None:
+                assert attn_metadata.prefill.pcp_allgather_restore_idx is not None
+                k_c_normed, k_pe = pcp_kv_allgather_and_restore(
+                    k_c_normed,
+                    k_pe,
+                    num_actual_toks,
+                    attn_metadata.prefill.pcp_allgather_restore_idx,
+                    get_pcp_group(),
+                )
+            else:
+                # NOTE(yyj) Skip unnecessary kv all-gather when there are only decode
+                # requests, but token duplication is still required to align with 
+                # the padding in slot mapping.
+                k_c_normed = k_c_normed.repeat_interleave(self.pcp_world_size, dim=0)
+                k_pe = k_pe.repeat_interleave(self.pcp_world_size, dim=0)
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output

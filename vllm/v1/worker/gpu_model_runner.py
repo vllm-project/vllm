@@ -1040,7 +1040,7 @@ class GPUModelRunner(
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
-    def _update_tokens_and_positions_for_pcp(
+    def _update_tokens_for_pcp(
         self,
         tokens: np.ndarray,
         dummy_input: bool = False,
@@ -1077,6 +1077,7 @@ class GPUModelRunner(
         """
         if not dummy_input:
             num_reqs = self.input_batch.num_reqs
+            # TODO(yyj) To be fixed. The definition of decode reqs here is too narrow.
             num_decode_reqs = sum(
                 self.input_batch.num_computed_tokens_cpu[:num_reqs]
                 >= self.input_batch.num_prompt_tokens[:num_reqs]
@@ -1730,6 +1731,9 @@ class GPUModelRunner(
                 encoder_seq_lens=encoder_seq_lens,
                 cp_local_seq_lens=cp_local_seq_lens,
                 cp_local_seq_lens_cpu=cp_local_seq_lens_cpu,
+                pcp_allgather_restore_idx=self.pcp_allgather_restore_idx.gpu[
+                    : total_num_scheduled_tokens * self.pcp_world_size
+                ] if self.pcp_world_size > 1 else None,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2930,6 +2934,8 @@ class GPUModelRunner(
                 ) = self._prepare_inputs(
                     scheduler_output, num_scheduled_tokens_np, max_num_scheduled_tokens
                 )
+                if self.pcp_world_size > 1:
+                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -2968,6 +2974,12 @@ class GPUModelRunner(
                     self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
                 elif num_tokens_across_dp is not None:
                     num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                elif self.pcp_world_size > 1:
+                    # NOTE For PCP, we update num_scheduled_tokens_np but
+                    # do not update total_num_scheduled_tokens in scheduler_output
+                    num_input_tokens = self._get_num_input_tokens(
+                        num_scheduled_tokens_np.sum()
+                    )
                 else:
                     num_input_tokens = self._get_num_input_tokens(
                         scheduler_output.total_num_scheduled_tokens

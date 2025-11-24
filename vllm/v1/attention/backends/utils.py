@@ -284,7 +284,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self,
         reorder_batch_threshold: int | None = 1,
         supports_spec_as_decode: bool = False,
-        supports_dcp_with_varlen: bool = False,
+        supports_cp_with_varlen: bool = False,
     ) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
         if self.reorder_batch_threshold is not None and supports_spec_as_decode:
@@ -302,8 +302,11 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 )
 
         if (
-            self.vllm_config.parallel_config.decode_context_parallel_size > 1
-            and not supports_dcp_with_varlen
+            (
+                self.vllm_config.parallel_config.decode_context_parallel_size > 1
+                or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            )
+            and not supports_cp_with_varlen
         ):
             self.reorder_batch_threshold = 1
 
