@@ -17,7 +17,6 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
