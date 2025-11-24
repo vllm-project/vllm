@@ -186,7 +186,7 @@ def get_rope(
                     "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
                 )
         elif scaling_type == "xdrope":
-            scaling_alpha = rope_scaling["alpha"]
+            scaling_alpha = rope_parameters["alpha"]
             rotary_emb = XDRotaryEmbedding(
                 head_size,
                 rotary_dim,
@@ -195,7 +195,7 @@ def get_rope(
                 is_neox_style,
                 scaling_alpha,
                 dtype,
-                xdrope_section=rope_scaling["xdrope_section"],
+                xdrope_section=rope_parameters["xdrope_section"],
             )
         elif scaling_type == "yarn":
             scaling_factor = rope_parameters["factor"]
