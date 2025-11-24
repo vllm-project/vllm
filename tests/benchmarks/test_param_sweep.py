@@ -4,10 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-try:
-    import pytest
-except ImportError:
-    pytest = None
+import pytest
 
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
 

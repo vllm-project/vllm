@@ -138,9 +138,9 @@ def _get_comb_base_path(
 ):
     parts = list[str]()
     if serve_comb:
-        parts.extend(("SERVE-", serve_comb.name()))
+        parts.extend(("SERVE-", serve_comb.name))
     if bench_comb:
-        parts.extend(("BENCH-", bench_comb.name()))
+        parts.extend(("BENCH-", bench_comb.name))
 
     return output_dir / sanitize_filename("-".join(parts))
 

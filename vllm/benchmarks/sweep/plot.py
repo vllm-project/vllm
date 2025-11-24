@@ -62,9 +62,7 @@ class PlotEqualTo(PlotFilterBase):
         except ValueError:
             target = self.target
 
-        # If the target is a float but present as a string in the dataframe
-        # For example, request_rate=inf gets parsed as a string
-        return df[(df[self.var] == target) | (df[self.var] == self.target)]
+        return df[df[self.var] == target]
 
 
 @dataclass
@@ -76,9 +74,7 @@ class PlotNotEqualTo(PlotFilterBase):
         except ValueError:
             target = self.target
 
-        # If the target is a float but present as a string in the dataframe
-        # For example, request_rate=inf gets parsed as a string
-        return df[(df[self.var] != target) & (df[self.var] != self.target)]
+        return df[df[self.var] != target]
 
 
 @dataclass
@@ -184,6 +180,31 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
         return json.load(f)
 
 
+def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
+    """
+    Convert string values "inf", "-inf", and "nan" to their float equivalents.
+    
+    This handles the case where JSON serialization represents inf/nan as strings.
+    """
+    converted_data = []
+    for record in data:
+        converted_record = {}
+        for key, value in record.items():
+            if isinstance(value, str):
+                if value == "inf":
+                    converted_record[key] = float("inf")
+                elif value == "-inf":
+                    converted_record[key] = float("-inf")
+                elif value == "nan":
+                    converted_record[key] = float("nan")
+                else:
+                    converted_record[key] = value
+            else:
+                converted_record[key] = value
+        converted_data.append(converted_record)
+    return converted_data
+
+
 def _get_metric(run_data: dict[str, object], metric_key: str):
     try:
         return run_data[metric_key]
@@ -262,6 +283,8 @@ def _plot_fig(
         print("[END FIGURE]")
         return
 
+    # Convert string "inf", "-inf", and "nan" to their float equivalents
+    fig_data = _convert_inf_nan_strings(fig_data)
     df = pd.DataFrame.from_records(fig_data)
 
     if var_x not in df.columns:

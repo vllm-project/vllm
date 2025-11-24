@@ -65,6 +65,7 @@ class ParameterSweepItem(dict[str, object]):
     def __or__(self, other: dict[str, Any]):
         return type(self)(super().__or__(other))
 
+    @property
     def name(self) -> str:
         """
         Get the name for this parameter sweep item.
