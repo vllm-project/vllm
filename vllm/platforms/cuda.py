@@ -277,12 +277,7 @@ class CudaPlatformBase(Platform):
         except ImportError:
             pass
 
-        if cls.has_device_capability(100):
-            # xFormers doesn't support Blackwell, fall back to SDPA
-            # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-            return AttentionBackendEnum.TORCH_SDPA
-        else:
-            return AttentionBackendEnum.XFORMERS
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(
