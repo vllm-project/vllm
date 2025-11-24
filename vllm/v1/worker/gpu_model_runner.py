@@ -1429,6 +1429,7 @@ class GPUModelRunner(
 
     def _build_attention_metadata(
         self,
+        scheduler_output: "SchedulerOutput",
         total_num_scheduled_tokens: int,
         max_num_scheduled_tokens: int,
         num_reqs: int,
@@ -1531,9 +1532,11 @@ class GPUModelRunner(
                 
                 if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
                     and self.cache_config.enable_prefix_caching
-                    and isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
+                    and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
                 ):
-                    self._preprocess_mamba(scheduler_output, kv_cache_group_id, kv_cache_group_spec)
+                    # TODO: temporarily add `scheduler_output` as it's missing in the new API.
+                    #       maybe move the _preprocess_mamba function outside.
+                    self._preprocess_mamba(scheduler_output, kv_cache_gid, kv_cache_group)
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
