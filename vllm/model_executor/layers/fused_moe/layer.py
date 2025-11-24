@@ -667,6 +667,7 @@ class FusedMoE(CustomOp):
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
         self.ensure_moe_quant_config_init()
+        logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
@@ -1498,7 +1499,6 @@ class FusedMoE(CustomOp):
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
-        logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
 
     @property
     def moe_quant_config(self) -> FusedMoEQuantConfig | None:
@@ -1945,7 +1945,7 @@ class FusedMoE(CustomOp):
 
         use_shared_experts_stream, hidden_states_clone = (
             self._maybe_setup_shared_experts_stream(
-                hidden_states, has_separate_shared_experts, use_chunked_impl
+                hidden_states, self.has_separate_shared_experts, use_chunked_impl
             )
         )
 
@@ -1977,9 +1977,11 @@ class FusedMoE(CustomOp):
                 )
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
-            if has_separate_shared_experts and not use_shared_experts_stream:
+            if self.has_separate_shared_experts and not use_shared_experts_stream:
                 assert self.shared_experts is not None
                 shared_output = self.shared_experts(hidden_states)
+            else:
+                shared_output = None
 
             # NOTE: Similar with DP, PCP also needs dispatch and combine. For
             # simplicity, AgRsAll2All was added separately for PCP here. Maybe
@@ -2033,20 +2035,12 @@ class FusedMoE(CustomOp):
                         # conflict with the main stream
                         shared_output = self.shared_experts(hidden_states_clone)
                     current_stream().wait_stream(self.shared_experts_stream)
-
+                assert shared_output is not None
                 return (shared_output, combine_output(final_hidden_states))
             elif self.shared_experts is not None:
                 return (final_hidden_states[0], combine_output(final_hidden_states[1]))
             elif self.has_zero_experts:
                 final_hidden_states, zero_expert_result = final_hidden_states
-
-            if self.shared_experts is not None:
-                return (
-                    final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
-                )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, torch.Tensor)
                 return (combine_output(final_hidden_states), zero_expert_result)
             else:
                 assert isinstance(final_hidden_states, torch.Tensor)
