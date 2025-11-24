@@ -37,6 +37,9 @@ else:
     }
 )
 @triton.heuristics(
+    {"IS_SPEC_DECODING": lambda args: args["num_accepted_tokens_ptr"] is not None}
+)
+@triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
 @triton.heuristics(
@@ -61,6 +64,7 @@ def _selective_scan_update_kernel(
     state_batch_indices_ptr,
     dst_state_batch_indices_ptr,
     pad_slot_id,
+    num_accepted_tokens_ptr,
     intermediate_states_buffer,
     cache_steps,
     # Matrix dimensions
@@ -118,7 +122,8 @@ def _selective_scan_update_kernel(
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
     HAS_STATE_BATCH_INDICES: tl.constexpr,
-    DISABLE_STATE_UPDATE: tl.constexpr,
+    INPLACE_FINAL_STATE: tl.constexpr,
+    IS_SPEC_DECODING: tl.constexpr,
     CACHE_INTERMEDIATE_STATES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
@@ -130,12 +135,23 @@ def _selective_scan_update_kernel(
     # is taken from the state_batch_indices_ptr Otherwise, the state coordinate
     # is the same as the batch id.
     if HAS_STATE_BATCH_INDICES:
-        dst_state_batch_indices_ptr += pid_b * stride_dst_state_indices_batch + 0 * stride_dst_state_indices_T
+        if IS_SPEC_DECODING:
+            num_accepted = tl.load(num_accepted_tokens_ptr + pid_b).to(tl.int64)
+            init_token_idx = tl.maximum(num_accepted - 1, 0)
+        else:
+            init_token_idx = 0
+
+        dst_state_batch_indices_ptr += (
+            pid_b * stride_dst_state_indices_batch
+            + init_token_idx * stride_dst_state_indices_T
+        )
         dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
         dst_state_ptr = state_ptr + (
             dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
         )
-        state_batch_indices_ptr += pid_b * stride_state_indices_batch + 0 * stride_state_indices_T
+        state_batch_indices_ptr += (
+            pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
+        )
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:
@@ -176,8 +192,7 @@ def _selective_scan_update_kernel(
         D_ptrs = D_ptr + offs_m * stride_D_dim
     A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
-    current_step_idx = 0
-    for _ in range(T):
+    for i_t in range(T):
         x_ptrs = x_ptr + offs_m * stride_x_dim
         dt_ptrs = dt_ptr + offs_m * stride_dt_dim
         B_ptrs = B_ptr + offs_n * stride_B_dstate
@@ -218,19 +233,38 @@ def _selective_scan_update_kernel(
         dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
         state = state * dA + dB * x[:, None]
 
-        if CACHE_INTERMEDIATE_STATES:
-            if HAS_STATE_BATCH_INDICES:
-                if state_batch_idx != pad_slot_id:
-                    cache_ptr_base = (
-                        intermediate_states_buffer
-                        + state_batch_idx * cache_steps * nheads * dim * dstate
-                        + current_step_idx * nheads * dim * dstate
-                        + pid_h * dim * dstate
-                    )
-                    cache_ptrs = cache_ptr_base + (
-                        offs_m[:, None] * dstate + offs_n[None, :]
-                    )
-                    tl.store(cache_ptrs, state.to(cache_ptrs.dtype.element_ty), mask=mask)
+        if INPLACE_FINAL_STATE:
+            dst_idx_ptr = (
+                dst_state_batch_indices_ptr
+                + pid_b * stride_dst_state_indices_batch
+                + i_t * stride_dst_state_indices_T
+            )
+            token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
+            if token_dst_idx != pad_slot_id:
+                token_dst_ptrs = (
+                    state_ptr
+                    + token_dst_idx * stride_state_batch
+                    + pid_h * stride_state_head
+                    + offs_m[:, None] * stride_state_dim
+                    + offs_n[None, :] * stride_state_dstate
+                )
+                tl.store(
+                    token_dst_ptrs, state.to(token_dst_ptrs.dtype.element_ty), mask=mask
+                )
+
+        if (
+            CACHE_INTERMEDIATE_STATES
+            and HAS_STATE_BATCH_INDICES
+            and state_batch_idx != pad_slot_id
+        ):
+            cache_ptr_base = (
+                intermediate_states_buffer
+                + state_batch_idx * cache_steps * nheads * dim * dstate
+                + i_t * nheads * dim * dstate
+                + pid_h * dim * dstate
+            )
+            cache_ptrs = cache_ptr_base + (offs_m[:, None] * dstate + offs_n[None, :])
+            tl.store(cache_ptrs, state.to(cache_ptrs.dtype.element_ty), mask=mask)
 
         out = tl.sum(state * C[None, :], axis=1)
         if HAS_D:
@@ -238,8 +272,6 @@ def _selective_scan_update_kernel(
         if HAS_Z:
             out *= z * tl.sigmoid(z)
         tl.store(out_ptrs, out, mask=offs_m < dim)
-
-        current_step_idx += 1
 
         x_ptr += stride_x_T
         dt_ptr += stride_dt_T
@@ -249,7 +281,7 @@ def _selective_scan_update_kernel(
         if HAS_Z:
             z_ptr += stride_z_T
 
-    if not DISABLE_STATE_UPDATE:
+    if not INPLACE_FINAL_STATE:
         tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
 
 
@@ -268,17 +300,20 @@ def selective_state_update(
     dst_state_batch_indices=None,
     pad_slot_id=PAD_SLOT_ID,
     out=None,
-    disable_state_update=False,
+    inplace_final_state=False,
+    num_accepted_tokens=None,
     intermediate_states_buffer=None,
     cache_steps=None,
 ):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim) for single-token or (batch, T, nheads, dim) for multi-token
+        x: (batch, dim) or (batch, nheads, dim) for single-token
+           or (batch, T, nheads, dim) for multi-token
         dt: (batch, dim) or (batch, nheads, dim)
         A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate) for single-token or (batch, T, ngroups, dstate) for multi-token
+        B: (batch, dstate) or (batch, ngroups, dstate) for single-token
+           or (batch, T, ngroups, dstate) for multi-token
         C: (batch, dstate) or (batch, ngroups, dstate)
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
@@ -291,7 +326,6 @@ def selective_state_update(
             indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
-        disable_state_update: If True, don't write back to state (for speculative verify)
         intermediate_states_buffer: Buffer to cache intermediate states
         cache_steps: Total number of steps in the buffer
     """
@@ -357,6 +391,8 @@ def selective_state_update(
         # revert to the default behavior of in-place state updates
         dst_state_batch_indices = state_batch_indices
     assert out.shape == x.shape
+    if num_accepted_tokens is not None:
+        assert num_accepted_tokens.shape == (batch,)
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
     z_strides = (
@@ -364,8 +400,16 @@ def selective_state_update(
         if z is not None
         else (0, 0, 0, 0)
     )
-    state_batch_indices_strides = (state_batch_indices.stride(0), state_batch_indices.stride(1)) if state_batch_indices is not None else (0, 0)
-    dst_state_batch_indices_strides = (dst_state_batch_indices.stride(0), dst_state_batch_indices.stride(1)) if dst_state_batch_indices is not None else (0, 0)
+    state_batch_indices_strides = (
+        (state_batch_indices.stride(0), state_batch_indices.stride(1))
+        if state_batch_indices is not None
+        else (0, 0)
+    )
+    dst_state_batch_indices_strides = (
+        (dst_state_batch_indices.stride(0), dst_state_batch_indices.stride(1))
+        if dst_state_batch_indices is not None
+        else (0, 0)
+    )
     # We don't want autotune since it will overwrite the state
     # We instead tune by hand.
     BLOCK_SIZE_M, num_warps = (
@@ -398,6 +442,7 @@ def selective_state_update(
             state_batch_indices,
             dst_state_batch_indices,
             pad_slot_id,
+            num_accepted_tokens,
             intermediate_states_buffer,
             cache_steps if cache_steps is not None else 0,
             batch,
@@ -446,7 +491,7 @@ def selective_state_update(
             dt_softplus,
             tie_hdim,
             BLOCK_SIZE_M,
-            DISABLE_STATE_UPDATE=disable_state_update,
+            INPLACE_FINAL_STATE=inplace_final_state,
             num_warps=num_warps,
         )
 
