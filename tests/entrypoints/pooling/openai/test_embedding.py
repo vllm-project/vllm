@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     PoolingResponse,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
@@ -27,6 +28,11 @@ from vllm.utils.serial_utils import (
     binary2tensor,
     decode_pooling_output,
 )
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
