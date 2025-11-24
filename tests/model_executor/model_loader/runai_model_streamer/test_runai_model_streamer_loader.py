@@ -3,13 +3,14 @@
 
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
 from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
+
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
-
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -58,6 +59,7 @@ def test_runai_model_loader_download_files_gcs(
 STREAMER_MODULE_PATH = "runai_model_streamer"
 VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
 
+
 @patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_pull_files")
 @patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_list_safetensors")
 @patch(f"{STREAMER_MODULE_PATH}.SafetensorsStreamer")
@@ -68,10 +70,6 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     vllm_runner,
     tmp_path: Path,
 ):
-    """
-    Tests loading a model from a mocked S3 path using unittest.mock.patch decorators.
-    """
- 
     test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
 
     # Download model from HF
@@ -89,4 +87,3 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
-
