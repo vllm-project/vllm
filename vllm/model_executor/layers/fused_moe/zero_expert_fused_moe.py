@@ -4,98 +4,8 @@
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.triton_utils import tl, triton
-
-
-@triton.jit
-def _compute_identity_kernel(
-    top_k: int,
-    hidden_states_ptr: tl.tensor,
-    expert_scales_ptr: tl.tensor,
-    num_tokens: int,
-    output_ptr: tl.tensor,
-    hidden_dim: int,
-    scales_stride: int,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    pid = tl.program_id(0)
-
-    batch_id = pid // (hidden_dim // BLOCK_SIZE)
-    dim_offset = pid % (hidden_dim // BLOCK_SIZE) * BLOCK_SIZE
-
-    if batch_id >= num_tokens or dim_offset >= hidden_dim:
-        return
-
-    h = tl.load(
-        hidden_states_ptr
-        + batch_id * hidden_dim
-        + dim_offset
-        + tl.arange(0, BLOCK_SIZE),
-        mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim,
-    )
-
-    result = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    for i in range(top_k):
-        scale = tl.load(expert_scales_ptr + batch_id * scales_stride + i)
-        result += h * scale
-
-    tl.store(
-        output_ptr + batch_id * hidden_dim + dim_offset + tl.arange(0, BLOCK_SIZE),
-        result,
-        mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim,
-    )
-
-
-def zero_experts_compute_triton(
-    expert_indices: torch.Tensor,
-    expert_scales: torch.Tensor,
-    num_experts: int,
-    zero_expert_type: str,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Compute the contribution of zero experts.
-
-    Args:
-        expert_indices: Top-k expert indices selected by router.
-        expert_scales: Corresponding router weights.
-        num_experts: Number of real experts.
-        zero_expert_type: Currently only "identity" is supported.
-        hidden_states: Token hidden states prior to expert dispatch.
-    """
-    if zero_expert_type != "identity":
-        raise ValueError(
-            f"Unsupported zero_expert_type={zero_expert_type!r}. "
-            "Currently only identity zero experts are supported."
-        )
-
-    zero_expert_mask = expert_indices < num_experts
-    zero_expert_scales = expert_scales.clone()
-    zero_expert_scales[zero_expert_mask] = 0.0
-
-    normal_expert_mask = expert_indices >= num_experts
-    expert_indices[normal_expert_mask] = 0
-    expert_scales[normal_expert_mask] = 0.0
-
-    output = torch.zeros_like(hidden_states).to(hidden_states.device)
-    hidden_dim = hidden_states.size(-1)
-    num_tokens = hidden_states.size(0)
-
-    # Use cdiv to handle non-divisible hidden_dim
-    grid = lambda meta: (num_tokens * triton.cdiv(hidden_dim, meta["BLOCK_SIZE"]),)
-    _compute_identity_kernel[grid](
-        top_k=expert_indices.size(-1),
-        hidden_states_ptr=hidden_states,
-        expert_scales_ptr=zero_expert_scales,
-        num_tokens=num_tokens,
-        output_ptr=output,
-        hidden_dim=hidden_dim,
-        scales_stride=zero_expert_scales.stride(0),
-        BLOCK_SIZE=256,
-    )
-
-    return output
 
 
 class ZeroExpertFusedMoE(FusedMoE):
@@ -116,6 +26,14 @@ class ZeroExpertFusedMoE(FusedMoE):
         router: nn.Module | None = None,
         **kwargs,
     ):
+        # ZeroExpertFusedMoE manages its own custom_routing_function for memoization
+        assert (
+            "custom_routing_function" not in kwargs
+            or kwargs.get("custom_routing_function") is None
+        ), (
+            "ZeroExpertFusedMoE does not support external custom_routing_function. "
+            "It manages its own for routing memoization."
+        )
         super().__init__(**kwargs)
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type
@@ -207,36 +125,6 @@ class ZeroExpertFusedMoE(FusedMoE):
 
         # Combine results
         if zero_expert_result is not None:
-            # Align dimensions if needed
-            final_dim = fused_out.size(-1)
-            zero_dim = zero_expert_result.size(-1)
-
-            if final_dim != zero_dim:
-                if final_dim < zero_dim:
-                    fused_out = torch.nn.functional.pad(
-                        fused_out,
-                        (0, zero_dim - final_dim),
-                        mode="constant",
-                        value=0.0,
-                    )
-                else:
-                    zero_expert_result = torch.nn.functional.pad(
-                        zero_expert_result,
-                        (0, final_dim - zero_dim),
-                        mode="constant",
-                        value=0.0,
-                    )
-
-            # Verify alignment succeeded
-            if fused_out.size(-1) != zero_expert_result.size(-1):
-                raise RuntimeError(
-                    f"[ZeroExpertFusedMoE] Shape mismatch after alignment: "
-                    f"fused_out.shape={fused_out.shape} "
-                    f"(last_dim={fused_out.size(-1)}), "
-                    f"zero_expert_result.shape={zero_expert_result.shape} "
-                    f"(last_dim={zero_expert_result.size(-1)})"
-                )
-
             fused_out = fused_out + zero_expert_result
 
         # Clear memoization after use
