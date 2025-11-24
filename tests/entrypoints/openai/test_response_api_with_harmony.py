@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import importlib
 import json
 import time
 
@@ -35,7 +35,11 @@ GET_WEATHER_SCHEMA = {
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--tool-server", "demo"]
+    assert importlib.util.find_spec("gpt_oss") is not None, (
+        "Harmony tests require gpt_oss package to be installed"
+    )
+
+    args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
@@ -548,6 +552,31 @@ def call_function(name, args):
         return get_horoscope(**args)
     else:
         raise ValueError(f"Unknown function: {name}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_reasoning_item(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            {"type": "message", "content": "Hello.", "role": "user"},
+            {
+                "type": "reasoning",
+                "id": "lol",
+                "content": [
+                    {
+                        "type": "reasoning_text",
+                        "text": "We need to respond: greeting.",
+                    }
+                ],
+                "summary": [],
+            },
+        ],
+        temperature=0.0,
+    )
+    assert response is not None
+    assert response.status == "completed"
 
 
 @pytest.mark.asyncio
