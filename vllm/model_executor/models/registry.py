@@ -289,6 +289,10 @@ _MULTIMODAL_MODELS = {
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "OpenCUAForConditionalGeneration": (
+        "opencua",
+        "OpenCUAForConditionalGeneration",
+    ),
     "InternS1ForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
