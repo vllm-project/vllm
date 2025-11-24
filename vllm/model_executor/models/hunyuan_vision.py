@@ -986,20 +986,6 @@ class HunYuanVLForConditionalGeneration(
         inputs_embeds: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for HunYuanVL.
-
-        Args:
-            input_ids: Flattened (concatenated) input_ids corresponding to a
-                batch.
-            positions: Flattened (concatenated) position ids corresponding to a
-                batch.
-                **NOTE**: If xdrope is enabled (default setting for
-                HunYuanVL opensource models), the shape will be
-                `(xd, seq_len)`, otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-        """
-
         if intermediate_tensors is not None:
             inputs_embeds = None
 

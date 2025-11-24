@@ -1119,9 +1119,8 @@ class SupportsXDRoPE(Protocol):
             mm_features: Information about each multi-modal data item
 
         Returns:
-            torch.Tensor `llm_positions`
-            - llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
-              4D(P/W/H/T), 3D(W/H/T) positions
+            llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
+            4D(P/W/H/T) or 3D(W/H/T) positions.
         """
         ...
 
