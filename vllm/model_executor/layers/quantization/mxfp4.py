@@ -755,6 +755,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             self.w13_weight = w13_weight
             self.w2_weight = w2_weight
+            del layer.w13_weight
+            del layer.w2_weight
             layer.w13_weight = w13_weight
             layer.w2_weight = w2_weight
         else:
@@ -1065,8 +1067,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             return triton_kernel_moe_forward(
                 hidden_states=x,
-                w1=self.w13_weight,
-                w2=self.w2_weight,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
@@ -1145,7 +1147,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
     ) -> torch.Tensor:
         assert activation == "swigluoai", (
             "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
-        )  # noqa:
+        )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
         hidden_states = layer.ipex_fusion(

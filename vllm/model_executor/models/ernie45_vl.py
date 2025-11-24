@@ -214,7 +214,6 @@ class Ernie4_5_VisionAttention(nn.Module):
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -259,7 +258,6 @@ class Ernie4_5_VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -308,20 +306,6 @@ class Ernie4_5_VisionAttention(nn.Module):
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
@@ -404,14 +388,12 @@ class Ernie4_5_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -562,18 +544,14 @@ class Ernie4_5_VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def compute_attn_mask_seqlen(
-        self, cu_seqlens: torch.Tensor
-    ) -> tuple[int | None, list[int] | None]:
-        max_seqlen, seqlens = None, None
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> int | None:
+        max_seqlen = None
         if (
             self.attn_backend == AttentionBackendEnum.FLASH_ATTN
             or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
+        return max_seqlen
 
     def forward(
         self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, num_pad=0
@@ -598,8 +576,8 @@ class Ernie4_5_VisionTransformer(nn.Module):
         if hidden_states.ndim == 2:
             hidden_states = hidden_states.unsqueeze(dim=1)
 
-        # pre-compute seqlens for attn mask to reduce cuMemcpy operations
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         for i, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -607,7 +585,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
 
         final_output = self.ln(hidden_states)
@@ -1656,9 +1633,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return modalities
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -1681,7 +1656,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1694,9 +1669,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
