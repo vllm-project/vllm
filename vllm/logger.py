@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 from collections.abc import Hashable
+from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
@@ -210,6 +211,13 @@ def init_logger(name: str) -> _VllmLogger:
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)
+
+
+@contextmanager
+def suppress_logging():
+    logging.disable(logging.WARNING)
+    yield
+    logging.disable(logging.NOTSET)
 
 
 # The root logger is initialized when the module is imported.
