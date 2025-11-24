@@ -34,6 +34,12 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.distributed.eplb.policy import (
+    AbstractEplbPolicy,
+    DefaultEplbPolicy,
+    EplbPolicyFactory,
+)
+from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_node_count,
@@ -42,11 +48,6 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-
-from .eplb_policy.abstract_policy import AbstractEplbPolicy
-from .eplb_policy.default_eplb_policy import DefaultEplb
-from .eplb_policy.policy_factory import PolicyFactory
-from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
 
@@ -145,7 +146,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplb
+        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
         """
         Selected instance of the EPLB algorithm class
         """
@@ -333,7 +334,7 @@ class EplbState:
         # Construct the algorithm instance based
         # on the selected eplb algorithm type.
         policy_type = self.parallel_config.eplb_config.policy
-        self.policy = PolicyFactory.generate_policy(policy_type)
+        self.policy = EplbPolicyFactory.generate_policy(policy_type)
         logger.debug("Generated EPLB policy instance of type: %d", policy_type)
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
