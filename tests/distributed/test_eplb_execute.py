@@ -127,6 +127,7 @@ def verify_expert_weights_after_shuffle(
 ):
     """Verify the weights after shuffling are correct."""
     num_layers = len(expert_weights)
+    success = True
 
     for layer in range(num_layers):
         for weight_idx, hidden_size in enumerate(hidden_sizes):
@@ -148,15 +149,21 @@ def verify_expert_weights_after_shuffle(
                     device=actual_weights.device,
                     dtype=actual_weights.dtype,
                 )
+                if not torch.allclose(actual_weights, expected_weights):
+                    success = False
+                    print(
+                        f"Rank: {ep_rank}, Layer {layer}, weight {weight_idx},"
+                        f"local expert {local_expert}: "
+                        f"weights do not match. "
+                        f"Expected logical expert {expected_logical_expert}"
+                    )
 
-                torch.testing.assert_close(
-                    actual_weights,
-                    expected_weights,
-                    msg=f"Layer {layer}, weight {weight_idx},"
-                    f"local expert {local_expert}: "
-                    f"weights do not match. "
-                    f"Expected logical expert {expected_logical_expert}",
-                )
+    tensor_result = torch.tensor(
+        [success], device=expert_weights[0][0].device, dtype=torch.int32
+    )
+    torch.distributed.all_reduce(tensor_result, op=torch.distributed.ReduceOp.MIN)
+    success = tensor_result.item()
+    assert success, "Weights do not match"
 
 
 def verify_redundant_experts_have_same_weights(
@@ -171,6 +178,7 @@ def verify_redundant_experts_have_same_weights(
     """
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
+    success = True
 
     for layer in range(num_layers):
         # Collect weights for all physical experts for each weight matrix
@@ -221,14 +229,24 @@ def verify_redundant_experts_have_same_weights(
                 # Verify that current physical expert's weights match the
                 # previously saved logical expert weights
                 for weight_idx in range(len(hidden_sizes)):
-                    torch.testing.assert_close(
+                    if not torch.allclose(
                         all_weights[weight_idx][physical_pos],
                         logical_expert_weights[logical_expert_id][weight_idx],
-                        msg=f"Layer {layer}, weight {weight_idx},"
-                        f"logical expert {logical_expert_id}: "
-                        f"Physical expert {physical_pos} has different weights"
-                        f"than expected",
-                    )
+                    ):
+                        success = False
+                        print(
+                            f"Layer {layer}, weight {weight_idx},"
+                            f"logical expert {logical_expert_id}: "
+                            f"Physical expert {physical_pos} has different weights"
+                            f"than expected"
+                        )
+
+    tensor_result = torch.tensor(
+        [success], device=expert_weights[0][0].device, dtype=torch.int32
+    )
+    torch.distributed.all_reduce(tensor_result, op=torch.distributed.ReduceOp.MIN)
+    success = tensor_result.item()
+    assert success, "Redundant experts have different weights"
 
 
 def _test_rearrange_expert_weights_with_redundancy(
