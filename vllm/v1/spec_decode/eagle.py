@@ -3,6 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -43,6 +44,9 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import async_barrier
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
@@ -53,7 +57,7 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner=None,
+        runner: "GPUModelRunner | None" = None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
@@ -249,19 +253,20 @@ class EagleProposer:
         else:
             attn_metadata_builder = self.attn_metadata_builder
 
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0
-        )
-        # FIXME: support hybrid kv for draft model (remove separate indexer)
-        if self.draft_indexer_metadata_builder:
-            draft_indexer_metadata = (
-                self.draft_indexer_metadata_builder.build_for_drafting(
-                    common_attn_metadata=common_attn_metadata,
-                    draft_index=0,
-                )
+        with async_barrier(self.runner.prepare_inputs_event):
+            attn_metadata = attn_metadata_builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata, draft_index=0
             )
-        else:
-            draft_indexer_metadata = None
+            # FIXME: support hybrid kv for draft model (remove separate indexer)
+            if self.draft_indexer_metadata_builder:
+                draft_indexer_metadata = (
+                    self.draft_indexer_metadata_builder.build_for_drafting(
+                        common_attn_metadata=common_attn_metadata,
+                        draft_index=0,
+                    )
+                )
+            else:
+                draft_indexer_metadata = None
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
         per_layer_attn_metadata = {}
@@ -451,9 +456,11 @@ class EagleProposer:
             )
 
             # Rebuild attention metadata
-            attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
-                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
-            )
+            with async_barrier(self.runner.prepare_inputs_event):
+                attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=token_index + 1,
+                )
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -670,6 +677,7 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
+        assert self.runner is not None
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0
         ].get_metadata_builder()
@@ -1162,6 +1170,7 @@ class EagleProposer:
         builder = None
         chosen_layer = self.attn_layer_names[0]
 
+        assert self.runner is not None
         for kv_cache_group in self.runner.attn_groups:
             for attn_group in kv_cache_group:
                 if chosen_layer in attn_group.layer_names:
