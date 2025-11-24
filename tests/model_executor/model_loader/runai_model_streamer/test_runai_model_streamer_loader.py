@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
 import pytest
-
+import shutil
+import os
+from pathlib import Path
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
+
+from huggingface_hub import snapshot_download
+from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -49,3 +55,49 @@ def test_runai_model_loader_download_files_gcs(
     with vllm_runner(test_gcs_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
+
+
+STREAMER_MODULE_PATH = "runai_model_streamer"
+VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
+
+@patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_pull_files")
+@patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_list_safetensors")
+@patch(f"{STREAMER_MODULE_PATH}.SafetensorsStreamer")
+def test_runai_model_loader_download_files_s3_mocked_with_patch(
+    mock_streamer_class, mock_list_safetensors, mock_pull_files, # Mocks are passed LIFO
+    vllm_runner, tmp_path: Path, request: pytest.FixtureRequest
+):
+    """
+    Tests loading a model from a mocked S3 path using unittest.mock.patch decorators.
+    """
+
+    def cleanup_temp_dir():
+        """Ensure the temporary directory is removed."""
+        if tmp_path.exists():
+            try:
+                # Use the root of the pytest session's temp dir
+                shutil.rmtree(tmp_path)
+            except OSError as e:
+                pass
+
+    # Schedule the cleanup function to run regardless of test success/failure
+    request.addfinalizer(cleanup_temp_dir)
+
+    test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
+
+    # Download model from HF
+    mock_model_dir = f"{tmp_path}/gpt2"
+    real_model_cache_path = snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
+
+    # Initialize the Patcher and configure mocks to replace the S3 path with the local path
+    local_bucket_root = str(tmp_path)
+    patcher = StreamerPatcher(local_bucket_root)
+
+    mock_list_safetensors.side_effect = patcher.shim_list_safetensors
+    mock_pull_files.side_effect = patcher.shim_pull_files
+    mock_streamer_class.side_effect = patcher.create_mock_streamer
+
+    with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
+        deserialized_outputs = llm.generate(prompts, sampling_params)
+        assert deserialized_outputs
+
