@@ -1959,8 +1959,6 @@ class EngineArgs:
                 "to crash or produce incorrect outputs."
             )
 
-        print(self.enable_prefix_caching)
-
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = is_prefix_caching_supported.value
 
@@ -1974,7 +1972,6 @@ class EngineArgs:
                 template="{reason} Enabling this manually may cause the engine "
                 "to crash or produce incorrect outputs."
             )
-        print(self.enable_prefix_caching)
 
         if (
             model_config.runner_type == "generate"
