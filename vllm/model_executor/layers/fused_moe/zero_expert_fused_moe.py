@@ -139,12 +139,20 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Slice router_logits for real experts only
         router_logits_sliced = router_logits[..., : self.logical_num_experts]
 
+        # Temporarily set zero_expert_num to 0 to prevent FusedMoE from
+        # trying to handle zero experts (we handle them ourselves)
+        original_zero_expert_num = self.zero_expert_num
+        object.__setattr__(self, "zero_expert_num", 0)
+
         # Compute real expert results (will reuse memoized routing via
         # custom_routing_function)
         fused_out = super().forward(
             hidden_states=hidden_states,
             router_logits=router_logits_sliced,
         )
+
+        # Restore original zero_expert_num
+        object.__setattr__(self, "zero_expert_num", original_zero_expert_num)
 
         # Combine results
         if zero_expert_result is not None:
