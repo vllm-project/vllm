@@ -640,7 +640,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Example options:
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
-    # - "XFORMERS": use XFormers
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA

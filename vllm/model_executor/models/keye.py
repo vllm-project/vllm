@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from transformers import PretrainedConfig
 from transformers.activations import GELUActivation
@@ -424,7 +425,7 @@ class KeyeSiglipAttention(nn.Module):
 
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.TORCH_SDPA,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -451,7 +452,6 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         batch_size = q.shape[0]
 
         if rope_emb is None:
@@ -498,17 +498,21 @@ class KeyeSiglipAttention(nn.Module):
                 softmax_scale=self.scale,
             )
             context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            outputs = []
+            for i in range(1, len(cu_seqlens)):
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (
+                    rearrange(x, "b s h d -> b h s d") for x in (q_i, k_i, v_i)
+                )
+                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1) if outputs else q[:, :0]
 
         context_layer = rearrange(context_layer, "b s h d -> b s (h d)").contiguous()
 

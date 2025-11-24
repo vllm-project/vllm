@@ -22,7 +22,6 @@ API_KEY=${API_KEY:-"your-api-key"}
 POOLING_TYPE=${POOLING_TYPE:-"auto"}  # auto, MEAN, CLS, LAST
 export VLLM_ENABLE_CHUNKED_PROCESSING=true
 export CUDA_VISIBLE_DEVICES=2,3,4,5
-# export VLLM_ATTENTION_BACKEND=XFORMERS
 
 echo "🚀 Starting vLLM Embedding Server with Enhanced Chunked Processing"
 echo "=================================================================="
