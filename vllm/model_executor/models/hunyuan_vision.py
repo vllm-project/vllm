@@ -286,7 +286,7 @@ class HunYuanVisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
             use_data_parallel=use_data_parallel,
         )
         self.mlp = HunYuanVisionMLP(
