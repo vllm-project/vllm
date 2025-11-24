@@ -475,6 +475,7 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -1205,32 +1206,31 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
-    ) -> np.ndarray | None:
+    ) -> tuple[torch.Tensor | None, np.ndarray | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
-            return None
+            return None, None
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
         for req_id in num_scheduled_tokens:
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_index is None:
+            req_index = self.input_batch.req_id_to_index[req_id]
+            req_state = self.requests[req_id]
+            if req_state.mm_features is None:
                 continue
 
-            req_state = self.requests.get(req_id)
-            if req_state is None or not req_state.mm_features:
-                continue
-
-            # All encoder inputs are processed together in the first step, then
-            # all are cached for decode. Count all mm_features so that
-            # cross-attention knows how many cached encoder tokens to attend to
-            encoder_len = sum(
+            # Get the total number of encoder input tokens for running encoder requests
+            # whether encoding is finished or not so that cross-attention knows how
+            # many encoder tokens to attend to.
+            encoder_input_tokens = sum(
                 feature.mm_position.length for feature in req_state.mm_features
             )
+            self.encoder_seq_lens.np[req_index] = encoder_input_tokens
 
-            encoder_seq_lens[req_index] = encoder_len
+        self.encoder_seq_lens.copy_to_gpu(num_reqs)
+        encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
+        encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
 
-        return encoder_seq_lens
+        return encoder_seq_lens, encoder_seq_lens_cpu
 
     def _prepare_inputs(
         self,
@@ -1561,7 +1561,7 @@ class GPUModelRunner(
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
+            encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs,
@@ -1605,6 +1605,7 @@ class GPUModelRunner(
                 num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
