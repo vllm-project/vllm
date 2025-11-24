@@ -430,7 +430,7 @@ class EngineArgs:
         ParallelConfig.max_parallel_loading_workers
     )
     block_size: BlockSize | None = CacheConfig.block_size
-    enable_prefix_caching: bool | None = CacheConfig.enable_prefix_caching
+    enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -1394,6 +1394,27 @@ class EngineArgs:
 
         self._check_feature_supported(model_config)
         self._set_default_args(usage_context, model_config)
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+            CpuArchEnum.POWERPC,
+            CpuArchEnum.S390X,
+            CpuArchEnum.RISCV,
+        ):
+            logger.info(
+                "Chunked prefill is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
+        assert self.enable_chunked_prefill is not None
 
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
@@ -1940,6 +1961,13 @@ class EngineArgs:
             )
             is_prefix_caching_supported = (
                 APC_REASONS.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
+            default_chunked_prefill = False
+            default_prefix_caching = False
+            logger.warning_once(
+                "--prefill-context-parallel-size > 1 is not compatible with "
+                "chunked prefill and prefix caching now. Chunked prefill "
+                "and prefix caching have been disabled by default.",
+                scope="local",
             )
 
         if self.enable_chunked_prefill is None:
@@ -1954,6 +1982,27 @@ class EngineArgs:
             is_chunked_prefill_supported.warning_if_false(
                 template="{reason} Enabling this manually may cause the engine "
                 "to crash or produce incorrect outputs."
+        elif (
+            model_config.runner_type == "generate"
+            and not self.enable_chunked_prefill
+            and default_chunked_prefill
+        ):
+            logger.warning_once(
+                "This model does not officially support disabling chunked prefill. "
+                "Disabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+                scope="local",
+            )
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_chunked_prefill
+            and not default_chunked_prefill
+        ):
+            logger.warning_once(
+                "This model does not officially support chunked prefill. "
+                "Enabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+                scope="local",
             )
 
         if self.enable_prefix_caching is None:
@@ -1968,6 +2017,16 @@ class EngineArgs:
             is_prefix_caching_supported.warning_if_false(
                 template="{reason} Enabling this manually may cause the engine "
                 "to crash or produce incorrect outputs."
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_prefix_caching
+            and not default_prefix_caching
+        ):
+            logger.warning_once(
+                "This model does not officially support prefix caching. "
+                "Enabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+                scope="local",
             )
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
