@@ -27,7 +27,7 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 from packaging.version import Version
-from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -84,7 +84,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32=DeepseekV3Config,
+    deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
@@ -204,7 +204,19 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
+
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
         # to int and add the layer_types list[str] to make it HF compatible
