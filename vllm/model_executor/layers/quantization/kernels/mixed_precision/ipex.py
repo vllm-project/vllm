@@ -10,8 +10,7 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
-class IPEXwNA16LinearKernel(MPLinearKernel):
-
+class IPEXwNa16LinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
         return 0
@@ -61,9 +60,9 @@ class IPEXwNA16LinearKernel(MPLinearKernel):
 
         return True, None
 
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from packaging import version
+
         MIN_IPEX_VERSION = "2.6.0"
         bias = layer.bias if not layer.skip_bias_add else None
 
@@ -96,8 +95,8 @@ class IPEXwNA16LinearKernel(MPLinearKernel):
             weight_dtype=weight_dtype,
             lowp_mode=lowp_mode,
             act_quant_mode=act_quant_mode,
-            group_size= self.config.group_size,
-            weight_qscheme=ipex.quantization.WoqWeightQScheme.SYMMETRIC
+            group_size=self.config.group_size,
+            weight_qscheme=ipex.quantization.WoqWeightQScheme.SYMMETRIC,
         )
         qweight = layer.weight_packed
         layer.ipex_output_size = qweight.shape[-1]
@@ -119,11 +118,10 @@ class IPEXwNA16LinearKernel(MPLinearKernel):
                 qconfig=qconfig,
                 g_idx=g_idx,
                 bias=bias,
-                group_size= self.config.group_size,
-                quant_method=0, # `0` stands for the IPEX GPTQ
+                group_size=self.config.group_size,
+                quant_method=0,  # `0` stands for the IPEX GPTQ
             )
         )
-        
 
     def apply_weights(
         self,
