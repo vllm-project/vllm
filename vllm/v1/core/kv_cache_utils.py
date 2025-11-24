@@ -974,11 +974,12 @@ def _get_kv_cache_groups_uniform_page_size(
     min_num_layers = min([len(layers) for layers in same_type_layers.values()])
     group_size = min_num_layers
     max_num_layers = max([len(layers) for layers in same_type_layers.values()])
-    if max_num_layers < min_num_layers * 1.2:
+    if max_num_layers < min_num_layers * 1.25:
         # If the number of layers is not much larger than the minimum number of layers,
         # use the maximum number of layers as the group size to avoid too many padding
         # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
-        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full)
+        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
+        # magic number to avoid too many padding layers.
         group_size = max_num_layers
     grouped_layers = []
     for layers in same_type_layers.values():
