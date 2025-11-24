@@ -156,6 +156,9 @@ class ZeroExpertFusedMoE(FusedMoE):
 
         # Combine results
         if zero_expert_result is not None:
+            # Ensure zero_expert_result is on the same device as fused_out
+            # (important for expert parallel where fused_out on different devices)
+            zero_expert_result = zero_expert_result.to(fused_out.device)
             fused_out = fused_out + zero_expert_result
 
         # Clear memoization after use
