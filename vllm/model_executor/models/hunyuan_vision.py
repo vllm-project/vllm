@@ -39,24 +39,15 @@ from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
 from vllm.transformers_utils.configs.hunyuan_vl import HunYuanVLConfig, HunYuanVLVisionConfig
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
-from vllm.attention.ops.vit_attn_wrappers import (
-    vit_flash_attn_wrapper,
-    vit_torch_sdpa_wrapper,
-    vit_xformers_attn_wrapper,
-)
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
