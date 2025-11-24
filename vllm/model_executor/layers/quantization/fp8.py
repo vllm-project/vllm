@@ -164,13 +164,12 @@ def get_fp8_moe_backend(
 
     # Determine if we should use DeepGEMM with block-quantized weights:
     # - If explicitly set by user, respect their choice
-    # - If not explicitly set (default), disable when TP size is 8
+    # - If not explicitly set (default), disable when TP size is >= 8
     moe_use_deep_gemm = envs.VLLM_MOE_USE_DEEP_GEMM
-    if not envs.is_set("VLLM_MOE_USE_DEEP_GEMM") and moe_parallel_config.tp_size == 8:
-        # Disable DeepGEMM by default when TP size is 8
+    if not envs.is_set("VLLM_MOE_USE_DEEP_GEMM") and moe_parallel_config.tp_size >= 8:
         moe_use_deep_gemm = False
         logger.info_once(
-            "DeepGEMM MoE is disabled by default when TP size is 8. "
+            "DeepGEMM MoE is disabled by default when TP size is >= 8. "
             "Set VLLM_MOE_USE_DEEP_GEMM=1 to enable it.",
             scope="local",
         )
