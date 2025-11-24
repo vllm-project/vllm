@@ -19,18 +19,17 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    modular_marlin_fused_moe,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    modular_oai_triton_fused_moe,
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 
 
@@ -113,25 +112,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         top_k = self.base_layer.top_k
 
         self.base_layer.ensure_moe_quant_config_init()
-        quant_config = self.base_layer.quant_method.moe_quant_config
 
-        if quant_config.use_mxfp4_w4a16:
-            from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Backend
-
-            mxfp4_backend = self.base_layer.quant_method.mxfp4_backend
-            m_fused_moe_fn = (
-                modular_oai_triton_fused_moe(
-                    quant_config, shared_experts=self.base_layer.shared_experts
-                )
-                if mxfp4_backend == Mxfp4Backend.TRITON
-                else modular_marlin_fused_moe(
-                    quant_config, shared_experts=self.base_layer.shared_experts
-                )
-            )
-        else:
-            m_fused_moe_fn = modular_triton_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
-            )
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        m_fused_moe_fn = FusedMoEModularKernel(
+            prepare_finalize,
+            self.base_layer.quant_method.select_gemm_impl(
+                prepare_finalize, self.base_layer
+            ),
+            self.base_layer.shared_experts,
+            getattr(self.base_layer, "shared_experts_stream", None),
+        )
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):

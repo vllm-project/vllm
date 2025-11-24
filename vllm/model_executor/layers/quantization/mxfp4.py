@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -864,6 +865,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
+                if self.moe.is_lora_enabled:
+                    return UnfusedOAITritonExperts(self.moe_quant_config)
                 return OAITritonExperts(self.moe_quant_config)
             else:
                 raise NotImplementedError(
