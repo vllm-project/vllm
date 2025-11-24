@@ -23,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -179,16 +178,6 @@ class Scheduler(SchedulerInterface):
 
         # Create the KV cache manager.
         enable_caching = bool(self.cache_config.enable_prefix_caching)
-
-        # TODO(wentao): fix prefix caching for batch invariance of TRITON_MLA.
-        if vllm_is_batch_invariant() and envs.VLLM_ATTENTION_BACKEND == "TRITON_MLA":
-            if enable_caching:
-                logger.warning_once(
-                    "Disabling prefix caching for TRITON_MLA with batch "
-                    "invariance, as it is not yet supported.",
-                    scope="local",
-                )
-            enable_caching = False
 
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
