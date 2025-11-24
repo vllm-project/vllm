@@ -56,7 +56,6 @@ class DefaultEplb(EplbPolicy):
         rank_in_pack_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
 
         # Run the packing algorithm
-        rank_in_pack = torch.full_like(pack_index, fill_value=-1)
         for i in range(num_layers):
             pack_weights = [0.0] * num_packs
             pack_items = [0] * num_packs
