@@ -452,6 +452,8 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
+    # rope_theta may exist in custom models written for Transformers v4
+    rope_theta: float | None = getattr(config, "rope_theta", None)
     # Retrieve rope_parameters differently based on Transformers version
     if Version(version("transformers")) >= Version("5.0.0.dev0"):
         from transformers.modeling_rope_utils import RopeParameters
@@ -459,13 +461,16 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
             config, "rope_parameters", None
         )
+        # If rope_theta exists, move it into rope_parameters
+        if rope_parameters is not None and rope_theta is not None:
+            rope_parameters["rope_theta"] = rope_theta
+            del config.rope_theta
     elif hasattr(config, "rope_parameters"):
         # We are in Transformers v4 and rope_parameters
         # has already been patched for this config
         return
     else:
         # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
-        rope_theta: float | None = getattr(config, "rope_theta", None)
         rope_scaling: dict | None = getattr(config, "rope_scaling", None)
         rope_parameters = rope_scaling
         # Move rope_theta into rope_parameters
