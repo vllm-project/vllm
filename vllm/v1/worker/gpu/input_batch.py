@@ -344,8 +344,8 @@ def _post_update_kernel(
     sampled_tokens_ptr,
     sampled_tokens_stride,
     num_sampled_ptr,
+    num_rejected_ptr,
     query_start_loc_ptr,
-    cu_num_logits_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
@@ -360,17 +360,10 @@ def _post_update_kernel(
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
     query_len = query_end - query_start
+    num_rejected = tl.load(num_rejected_ptr + req_id)
 
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len
-    # Consider the rejected tokens in spec decoding.
-    if num_sampled > 0:
-        # NOTE(woosuk): We must skip num_sampled == 0 to account for chunked prefills.
-        logits_start = tl.load(cu_num_logits_ptr + req_id)
-        logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
-        num_logits = logits_end - logits_start
-        num_rejected = num_logits - num_sampled
-        num_computed -= num_rejected
+    num_computed += query_len - num_rejected
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
@@ -385,10 +378,10 @@ def post_update(
     sampled_tokens: torch.Tensor,
     # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
+    num_rejected: torch.Tensor,
     # [num_reqs + 1]
     query_start_loc: torch.Tensor,
-    # [num_reqs + 1]
-    cu_num_logits: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -398,7 +391,7 @@ def post_update(
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,
+        num_rejected,
         query_start_loc,
-        cu_num_logits,
         num_warps=1,
     )
