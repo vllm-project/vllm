@@ -144,7 +144,7 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend | None = None
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
 
     def compute_hash(self) -> str:

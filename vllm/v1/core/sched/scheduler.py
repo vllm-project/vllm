@@ -42,7 +42,7 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import (
-    BlockResidencyEvent,
+    KVCacheEvictionEvent,
     PrefixCacheStats,
     SchedulerStats,
 )
@@ -79,7 +79,6 @@ class Scheduler(SchedulerInterface):
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self._kv_metrics_enabled:
             self.kv_metrics_collector = KVCacheMetricsCollector(
-                enabled=True,
                 sample_rate=metrics_cfg.kv_cache_metrics_sample,
             )
         self.structured_output_manager = structured_output_manager
@@ -1357,17 +1356,14 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
     ) -> SchedulerStats | None:
-        if not (self.log_stats or self._kv_metrics_enabled):
+        if not self.log_stats:
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
-        if prefix_cache_stats is None:
-            prefix_cache_stats = PrefixCacheStats()
-        connector_prefix_cache_stats = None
-        if self.log_stats:
-            connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
-        block_events: list[BlockResidencyEvent] = []
+        assert prefix_cache_stats is not None
+        connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
+        block_events: list[KVCacheEvictionEvent] = []
         if self._kv_metrics_enabled:
-            block_events = self.kv_cache_manager.collect_block_residency_events()
+            block_events = self.kv_cache_manager.collect_kv_cache_eviction_events()
         spec_stats = spec_decoding_stats if self.log_stats else None
         connector_stats_payload = None
         if self.log_stats and kv_connector_stats is not None:
@@ -1378,7 +1374,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
-            block_residency_events=block_events,
+            kv_cache_eviction_events=block_events,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
         )

@@ -12,7 +12,7 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import BlockResidencyEvent, PrefixCacheStats
+from vllm.v1.metrics.stats import KVCacheEvictionEvent, PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -203,7 +203,7 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
-    def collect_block_residency_events(self) -> list[BlockResidencyEvent]:
+    def collect_kv_cache_eviction_events(self) -> list[KVCacheEvictionEvent]:
         if not self.metrics_collector:
             return []
         return self.metrics_collector.drain_events()

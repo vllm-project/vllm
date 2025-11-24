@@ -51,7 +51,7 @@ class KVCacheCoordinator(ABC):
             enable_caching,
             hash_block_size,
             enable_kv_cache_events,
-            metrics_collector=metrics_collector,
+            metrics_collector,
         )
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled

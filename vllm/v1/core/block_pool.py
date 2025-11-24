@@ -177,7 +177,6 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
-        # KV cache metrics collector
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -335,6 +334,10 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        # Clean up metrics tracking first to prevent leaks
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
+
         block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
@@ -346,9 +349,6 @@ class BlockPool:
             return False
 
         block.reset_hash()
-
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
 
         if self.enable_kv_cache_events:
             # FIXME (Chen): Not sure whether we should return `hash_value`

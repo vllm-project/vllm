@@ -20,7 +20,6 @@ from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
-    BlockResidencyEvent,
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
@@ -376,6 +375,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = vllm_config.observability_config.show_hidden_metrics
+        self.kv_cache_metrics_enabled = (
+            vllm_config.observability_config.kv_cache_metrics
+        )
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
@@ -857,76 +859,90 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # KV Cache residency metrics
         #
-        kv_cache_residency_buckets = [
-            0.001,
-            0.002,
-            0.005,
-            0.01,
-            0.02,
-            0.05,
-            0.1,
-            0.2,
-            0.5,
-            1,
-            2,
-            5,
-            10,
-            20,
-            30,
-            60,
-            120,
-            300,
-            600,
-            1200,
-            1800,
-        ]
+        if self.kv_cache_metrics_enabled:
+            kv_cache_residency_buckets = [
+                0.001,
+                0.002,
+                0.005,
+                0.01,
+                0.02,
+                0.05,
+                0.1,
+                0.2,
+                0.5,
+                1,
+                2,
+                5,
+                10,
+                20,
+                30,
+                60,
+                120,
+                300,
+                600,
+                1200,
+                1800,
+            ]
 
-        histogram_kv_block_lifetime = self._histogram_cls(
-            name="vllm_kv_block_lifetime_seconds",
-            documentation=(
-                "Histogram of KV cache block lifetime from allocation to eviction."
-            ),
-            buckets=kv_cache_residency_buckets,
-            labelnames=labelnames,
-        )
-        self.histogram_kv_block_lifetime = make_per_engine(
-            histogram_kv_block_lifetime, engine_indexes, model_name
-        )
+            histogram_kv_block_lifetime = self._histogram_cls(
+                name="vllm_kv_block_lifetime_seconds",
+                documentation=(
+                    "Histogram of KV cache block lifetime from allocation to eviction. "
+                    "Sampled metrics (controlled by --kv-cache-metrics-sample)."
+                ),
+                buckets=kv_cache_residency_buckets,
+                labelnames=labelnames,
+            )
+            self.histogram_kv_block_lifetime = make_per_engine(
+                histogram_kv_block_lifetime, engine_indexes, model_name
+            )
 
-        histogram_kv_block_idle_before_evict = self._histogram_cls(
-            name="vllm_kv_block_idle_before_evict_seconds",
-            documentation="Histogram of idle time before KV cache block eviction.",
-            buckets=kv_cache_residency_buckets,
-            labelnames=labelnames,
-        )
-        self.histogram_kv_block_idle_before_evict = make_per_engine(
-            histogram_kv_block_idle_before_evict, engine_indexes, model_name
-        )
+            histogram_kv_block_idle_before_evict = self._histogram_cls(
+                name="vllm_kv_block_idle_before_evict_seconds",
+                documentation=(
+                    "Histogram of idle time before KV cache block eviction. "
+                    "Sampled metrics (controlled by --kv-cache-metrics-sample)."
+                ),
+                buckets=kv_cache_residency_buckets,
+                labelnames=labelnames,
+            )
+            self.histogram_kv_block_idle_before_evict = make_per_engine(
+                histogram_kv_block_idle_before_evict, engine_indexes, model_name
+            )
 
-        histogram_kv_block_reuse_gap = self._histogram_cls(
-            name="vllm_kv_block_reuse_gap_seconds",
-            documentation=(
-                "Histogram of time gaps between consecutive KV cache block accesses."
-            ),
-            buckets=kv_cache_residency_buckets,
-            labelnames=labelnames,
-        )
-        self.histogram_kv_block_reuse_gap = make_per_engine(
-            histogram_kv_block_reuse_gap, engine_indexes, model_name
-        )
+            histogram_kv_block_reuse_gap = self._histogram_cls(
+                name="vllm_kv_block_reuse_gap_seconds",
+                documentation=(
+                    "Histogram of time gaps between consecutive KV cache block "
+                    "accesses. Only the most recent accesses are recorded "
+                    "(ring buffer). Sampled metrics (controlled by "
+                    "--kv-cache-metrics-sample)."
+                ),
+                buckets=kv_cache_residency_buckets,
+                labelnames=labelnames,
+            )
+            self.histogram_kv_block_reuse_gap = make_per_engine(
+                histogram_kv_block_reuse_gap, engine_indexes, model_name
+            )
 
-        histogram_request_prefix_residency = self._histogram_cls(
-            name="vllm_request_prefix_residency_seconds",
-            documentation=(
-                "Histogram of request prefix block residency time "
-                "after prefill completion."
-            ),
-            buckets=kv_cache_residency_buckets,
-            labelnames=labelnames,
-        )
-        self.histogram_request_prefix_residency = make_per_engine(
-            histogram_request_prefix_residency, engine_indexes, model_name
-        )
+            histogram_request_prefix_residency = self._histogram_cls(
+                name="vllm_request_prefix_residency_seconds",
+                documentation=(
+                    "Histogram of request prefix block residency time "
+                    "after prefill completion. "
+                    "Sampled metrics (controlled by --kv-cache-metrics-sample)."
+                ),
+                buckets=kv_cache_residency_buckets,
+                labelnames=labelnames,
+            )
+            self.histogram_request_prefix_residency = make_per_engine(
+                histogram_request_prefix_residency, engine_indexes, model_name
+            )
+        else:
+            self.histogram_kv_block_lifetime = {}
+            self.histogram_kv_block_idle_before_evict = {}
+            self.histogram_kv_block_reuse_gap = {}
+            self.histogram_request_prefix_residency = {}
 
         #
         # LoRA metrics
@@ -1019,13 +1035,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
-            if scheduler_stats.block_residency_events:
+            if (
+                self.kv_cache_metrics_enabled
+                and scheduler_stats.kv_cache_eviction_events
+            ):
                 lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
                 idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
                 reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
                 prefix_hist = self.histogram_request_prefix_residency[engine_idx]
 
-                for event in scheduler_stats.block_residency_events:
+                for event in scheduler_stats.kv_cache_eviction_events:
                     lifetime_hist.observe(event.lifetime_seconds)
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:
@@ -1046,20 +1065,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_max_lora: self.max_lora,
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
-
-            if scheduler_stats.block_residency_events:
-                lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
-                idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
-                reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
-                prefix_hist = self.histogram_request_prefix_residency[engine_idx]
-
-                for event in scheduler_stats.block_residency_events:
-                    lifetime_hist.observe(event.lifetime_seconds)
-                    idle_hist.observe(event.idle_seconds)
-                    for gap in event.reuse_gaps_seconds:
-                        reuse_hist.observe(gap)
-                    if event.prefix_residency_seconds is not None:
-                        prefix_hist.observe(event.prefix_residency_seconds)
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
