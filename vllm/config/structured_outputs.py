@@ -68,25 +68,6 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
-        # Import here to avoid circular import
-        from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
-
-        if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
-            ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
-
-        valid_reasoning_parsers = ReasoningParserManager.list_registered()
-        if (
-            self.reasoning_parser != ""
-            and self.reasoning_parser not in valid_reasoning_parsers
-        ):
-            logger.warning(
-                "Reasoning parser %s not found among built-in parsers or "
-                "reasoning_parser_plugin argument. Assuming it will be "
-                "registered to the ReasoningParserManager programmatically "
-                "before use.",
-                self.reasoning_parser,
-            )
-
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
