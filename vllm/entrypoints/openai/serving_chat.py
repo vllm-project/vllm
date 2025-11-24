@@ -273,6 +273,8 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 prompt_text, _, _ = self._get_prompt_components(request_prompts[i])
+                # If we are creating sub requests for multiple prompts, ensure that they
+                # have unique request ids.
                 sub_request_id = (
                     request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
                 )

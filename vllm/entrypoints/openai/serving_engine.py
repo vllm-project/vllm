@@ -1244,6 +1244,7 @@ class OpenAIServing:
         orig_priority = priority
         sub_request = 0
         while True:
+            # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
                 sub_request_id,
