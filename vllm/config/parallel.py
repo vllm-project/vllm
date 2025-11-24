@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+ExpertMapperPolicy = Literal["greedy", "bipartite"]
 
 
 @config
@@ -59,6 +60,24 @@ class EPLBConfig:
     """
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
+    """
+
+    num_wait_worker_iterations: int = 500
+    """
+    Number of iterations to wait before applying a redistribution plan
+    """
+
+    enable_async: bool = False
+    """
+    A gate to trigger asynchronous expert load rebalancing and weight transfer
+    """
+
+    expert_mapper_policy: ExpertMapperPolicy = "greedy"
+    """
+    Determine using which expert mapping strategy
+
+    "greedy": GreedyExpertUpdate
+    "bipartite": BipartiteExpertUpdate
     """
 
 
