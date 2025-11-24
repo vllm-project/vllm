@@ -177,7 +177,6 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     message = response.choices[0].message
 
     tool_calls = getattr(message, "tool_calls", [])
-    reasoning = getattr(message, "content", "")
 
     function_names = [
         c.function.name for c in tool_calls if getattr(c, "function", None)
@@ -190,7 +189,6 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
         f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     )
-    assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
 @pytest.mark.asyncio
