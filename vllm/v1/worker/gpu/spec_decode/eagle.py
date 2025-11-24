@@ -66,8 +66,11 @@ class EagleSpeculator:
         next_prefill_tokens: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we keep the size of eagle's input_ids and
-        # hidden_states the same as the target model's.
+        # number of rejected tokens, we maintain the size of eagle's input_ids and
+        # hidden_states the same as the target model's. This means, we pad each
+        # request's query length to include any rejected positions. By doing so,
+        # we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model.
         if aux_hidden_states:
             assert self.method == "eagle3"
             hidden_states = self.model.combine_hidden_states(
