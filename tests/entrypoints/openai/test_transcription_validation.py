@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # imports for structured outputs tests
+import asyncio
 import io
 import json
 
@@ -33,7 +34,7 @@ def server():
 
 
 @pytest_asyncio.fixture
-async def client(server):
+async def whisper_client(server):
     async with server.get_async_client() as async_client:
         yield async_client
 
@@ -63,6 +64,32 @@ async def test_basic_audio(mary_had_lamb, model_name):
         out_usage = out["usage"]
         assert "Mary had a little lamb," in out_text
         assert out_usage["seconds"] == 16, out_usage["seconds"]
+
+
+@pytest.mark.asyncio
+async def test_basic_audio_batched(mary_had_lamb, winning_call, whisper_client):
+    transcription = whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+    )
+    transcription2 = whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=winning_call,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+    )
+    # Await both transcriptions by scheduling coroutines together
+    transcription, transcription2 = await asyncio.gather(transcription, transcription2)
+    out = json.loads(transcription)
+    out_text = out["text"]
+    assert "Mary had a little lamb," in out_text
+    out2 = json.loads(transcription2)
+    out_text2 = out2["text"]
+    assert "Edgar Martinez" in out_text2
 
 
 @pytest.mark.asyncio
@@ -137,16 +164,16 @@ async def test_non_asr_model(winning_call):
 
 
 @pytest.mark.asyncio
-async def test_bad_requests(mary_had_lamb, client):
+async def test_bad_requests(mary_had_lamb, whisper_client):
     # invalid language
     with pytest.raises(openai.BadRequestError):
-        await client.audio.transcriptions.create(
+        await whisper_client.audio.transcriptions.create(
             model=MODEL_NAME, file=mary_had_lamb, language="hh", temperature=0.0
         )
 
 
 @pytest.mark.asyncio
-async def test_long_audio_request(mary_had_lamb, client):
+async def test_long_audio_request(mary_had_lamb, whisper_client):
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
     # Add small silence after each audio for repeatability in the split process
@@ -156,7 +183,7 @@ async def test_long_audio_request(mary_had_lamb, client):
     buffer = io.BytesIO()
     sf.write(buffer, repeated_audio, sr, format="WAV")
     buffer.seek(0)
-    transcription = await client.audio.transcriptions.create(
+    transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=buffer,
         language="en",
@@ -172,9 +199,9 @@ async def test_long_audio_request(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
-async def test_completion_endpoints(client):
+async def test_completion_endpoints(whisper_client):
     # text to text model
-    res = await client.chat.completions.create(
+    res = await whisper_client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "system", "content": "You are a helpful assistant."}],
     )
@@ -182,23 +209,23 @@ async def test_completion_endpoints(client):
     assert err["code"] == 400
     assert err["message"] == "The model does not support Chat Completions API"
 
-    res = await client.completions.create(model=MODEL_NAME, prompt="Hello")
+    res = await whisper_client.completions.create(model=MODEL_NAME, prompt="Hello")
     err = res.error
     assert err["code"] == 400
     assert err["message"] == "The model does not support Completions API"
 
 
 @pytest.mark.asyncio
-async def test_streaming_response(winning_call, client):
+async def test_streaming_response(winning_call, whisper_client):
     transcription = ""
-    res_no_stream = await client.audio.transcriptions.create(
+    res_no_stream = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
         response_format="json",
         language="en",
         temperature=0.0,
     )
-    res = await client.audio.transcriptions.create(
+    res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
         language="en",
@@ -215,8 +242,8 @@ async def test_streaming_response(winning_call, client):
 
 
 @pytest.mark.asyncio
-async def test_stream_options(winning_call, client):
-    res = await client.audio.transcriptions.create(
+async def test_stream_options(winning_call, whisper_client):
+    res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
         language="en",
@@ -237,12 +264,12 @@ async def test_stream_options(winning_call, client):
 
 
 @pytest.mark.asyncio
-async def test_sampling_params(mary_had_lamb, client):
+async def test_sampling_params(mary_had_lamb, whisper_client):
     """
     Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked.
     """
-    transcription = await client.audio.transcriptions.create(
+    transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=mary_had_lamb,
         language="en",
@@ -258,7 +285,7 @@ async def test_sampling_params(mary_had_lamb, client):
         ),
     )
 
-    greedy_transcription = await client.audio.transcriptions.create(
+    greedy_transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=mary_had_lamb,
         language="en",
@@ -270,11 +297,11 @@ async def test_sampling_params(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
-async def test_audio_prompt(mary_had_lamb, client):
+async def test_audio_prompt(mary_had_lamb, whisper_client):
     prompt = "This is a speech, recorded in a phonograph."
     # Prompts should not omit the part of original prompt while transcribing.
     prefix = "The first words I spoke in the original phonograph"
-    transcription = await client.audio.transcriptions.create(
+    transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=mary_had_lamb,
         language="en",
@@ -283,7 +310,7 @@ async def test_audio_prompt(mary_had_lamb, client):
     )
     out = json.loads(transcription)["text"]
     assert prefix in out
-    transcription_wprompt = await client.audio.transcriptions.create(
+    transcription_wprompt = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=mary_had_lamb,
         language="en",
