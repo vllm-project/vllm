@@ -28,7 +28,6 @@ In the example above, the KV cache in the first block can be uniquely identified
     - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
     - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
 
-
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
 
