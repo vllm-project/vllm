@@ -453,12 +453,12 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
+                assert isinstance(out, RequestOutput)
                 if (
                     len(out.outputs) > 0
                     and out.outputs[0].stop_reason == "close_session"
                 ):
                     return
-                assert isinstance(out, RequestOutput)
                 yield out
 
         # If the request is disconnected by the client, generate()

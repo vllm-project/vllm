@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
@@ -892,7 +892,7 @@ def launch_core_engines(
             sched_cls = resolve_obj_by_qualname(sched_cls)
         engine_core_proc = (
             StreamingEngineCoreProc
-            if issubclass(sched_cls, StreamingScheduler)
+            if issubclass(cast(type, sched_cls), StreamingScheduler)
             else EngineCoreProc
         )
 
