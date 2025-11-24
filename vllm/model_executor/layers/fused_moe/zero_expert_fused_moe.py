@@ -144,7 +144,11 @@ class ZeroExpertFusedMoE(FusedMoE):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | None:
         """Compute zero expert results using pre-computed routing."""
-        if self.zero_expert_num <= 0 or self.zero_expert_type is None:
+        if (
+            self.zero_expert_num is None
+            or self.zero_expert_num <= 0
+            or self.zero_expert_type is None
+        ):
             return None
 
         return zero_experts_compute_triton(
