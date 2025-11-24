@@ -829,19 +829,8 @@ def sparse_attn_indexer(
     #     quant_block_size,
     #     scale_fmt,
     # )
-    # print("indexer and quant", flush=True)
-    # import torch.distributed as dist
-    # rid = dist.get_rank()
-    # print("k shape: ", k.shape, flush=True)
-    # torch.save(k, f"k_{rid}.pt")
-    # torch.save(kv_cache, f"kv_cache_{rid}.pt")
-    # torch.save(slot_mapping, f"slot_mapping_{rid}.pt")
-    # torch.cuda.synchronize()
 
     indexer_k_quant_and_cache_triton(k, kv_cache, slot_mapping, scale_fmt)
-
-    # torch.cuda.synchronize()
-    # print("end of indexer and quant", flush=True)
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -864,20 +853,6 @@ def sparse_attn_indexer(
             #     chunk.block_table,
             #     chunk.cu_seq_lens,
             # )
-            # print("cp gather indexer quant", flush=True)
-            # import torch.distributed as dist
-            # rid = dist.get_rank()
-            # print("kv_cache shape: ", kv_cache.shape, kv_cache.dtype, flush=True)
-            # print("k_fp8_shape: ",  k_fp8.shape, flush=True)
-            # print("block_table shape: ", chunk.block_table, flush=True)
-            # torch.save(kv_cache, f"kv_cache_{rid}.pt")
-            # torch.save(k_fp8, f"k_fp8_{rid}.pt")
-            # torch.save(k_scale, f"k_scale_{rid}.pt")
-            # torch.save(chunk.block_table, f"block_table_{rid}.pt")
-            # torch.save(chunk.cu_seq_lens, f"cu_seq_lens_{rid}.pt")
-            # torch.save(chunk.token_to_seq, f"token_to_seq_{rid}.pt")
-            # torch.cuda.synchronize()
-            # print("done saving", flush=True)
             cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
@@ -886,8 +861,6 @@ def sparse_attn_indexer(
                 chunk.cu_seq_lens,
                 chunk.token_to_seq,
             )
-            # torch.cuda.synchronize()
-            # print("end of cp gather indexer quant", flush=True)
             fp8_mqa_logits_func = fp8_mqa_logits
             if current_platform.is_rocm():
                 from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
@@ -900,8 +873,6 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
-            # torch.cuda.synchronize()
-            # print("end of mqa logits: ", flush=True)
             num_rows = logits.shape[0]
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
@@ -916,8 +887,6 @@ def sparse_attn_indexer(
                 logits.stride(1),
                 topk_tokens,
             )
-            # torch.cuda.synchronize()
-            # print("end of topk: ", flush=True)
 
     if has_decode:
         decode_metadata = attn_metadata.decode
@@ -949,7 +918,6 @@ def sparse_attn_indexer(
             )
 
             fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
-        # print("start fp8_mqa pa", flush=True)
 
         logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
@@ -961,23 +929,8 @@ def sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
-        # torch.cuda.synchronize()
-        # print("end of fp8_mqa pa", flush=True)
-        # _, _, heads, _ = padded_q_fp8_decode_tokens.shape
-        # logits = torch.empty(
-        #     (batch_size * next_n, max_model_len),
-        #     device="cuda",
-        #     dtype=torch.float32,
-        # )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-        # print("start topk per row decode", flush=True)
-        # print("next n: ", next_n, flush=True)
-        # print("seq_lens: ", decode_metadata.seq_lens, flush=True)
-        # print("num rows: ", num_rows, flush=True)
-        # torch.save(logits, "logits.pt")
-        # torch.save(topk_indices, "topk_indices.pt")
-        # torch.cuda.synchronize()
         torch.ops._C.top_k_per_row_decode(
             logits,
             next_n,
@@ -988,8 +941,7 @@ def sparse_attn_indexer(
             logits.stride(1),
             topk_tokens,
         )
-        # torch.cuda.synchronize()
-        # print("end of fp8_mqa pa topk", flush=True)
+
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
@@ -1000,8 +952,6 @@ def sparse_attn_indexer(
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
                 topk_indices
             )
-            # torch.cuda.synchronize()
-            # print("end of unpack", flush=True)
 
     return topk_indices_buffer
 
