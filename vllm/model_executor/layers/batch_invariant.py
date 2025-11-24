@@ -261,17 +261,19 @@ def bmm_kernel(
     if pid_m >= num_pid_m or pid_n >= num_pid_n:
         return
 
-    # offs_m: [BLOCK_SIZE_M], global row indices
+    # offs_m / offs_n: raw global row/col indices for this tile
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    # offs_n: [BLOCK_SIZE_N], global col indices
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # masks for valid logical rows/cols within (M, N)
+    mask_m = offs_m < M  # [BLOCK_SIZE_M]
+    mask_n = offs_n < N  # [BLOCK_SIZE_N]
 
     if A_LARGE or B_LARGE or C_LARGE:
         offs_m = offs_m.to(tl.int64)
         offs_n = offs_n.to(tl.int64)
 
-    offs_m = tl.where(offs_m < M, offs_m, 0)
-    offs_n = tl.where(offs_n < N, offs_n, 0)
+    offs_m = tl.where(mask_m, offs_m, 0)
+    offs_n = tl.where(mask_n, offs_n, 0)
 
     # hint for triton contiguous memory
     offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -308,16 +310,23 @@ def bmm_kernel(
             offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
         )
 
+        # valid K lanes for this block
+        k_valid = offs_k_mask < (K - ki * BLOCK_SIZE_K)
+        # A mask within (M, K): [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        a_mask = mask_m[:, None] & k_valid[None, :]
+        # B mask within (K, N): [BLOCK_SIZE_K, BLOCK_SIZE_N]
+        b_mask = k_valid[:, None] & mask_n[None, :]
+
         # a: [BLOCK_SIZE_M, BLOCK_SIZE_K] from A[offs_m, offs_k]
         a = tl.load(
             a_ptrs,
-            mask=offs_k_mask[None, :] < K - ki * BLOCK_SIZE_K,
+            mask=a_mask,
             other=0.0,
         )
         # b: [BLOCK_SIZE_K, BLOCK_SIZE_N] from B[offs_k, offs_n]
         b = tl.load(
             b_ptrs,
-            mask=offs_k_mask[:, None] < K - ki * BLOCK_SIZE_K,
+            mask=b_mask,
             other=0.0,
         )
         accumulator = tl.dot(a, b, accumulator)
@@ -333,7 +342,7 @@ def bmm_kernel(
     #   element (i, j) points to C[pid_b, c_m[i], c_n[j]]
     c_ptrs = c_batch_ptr + stride_cm * c_m[:, None] + stride_cn * c_n[None, :]
     # mask out elements that fall outside logical (M, N) range
-    c_mask = (c_m[:, None] < M) & (c_n[None, :] < N)
+    c_mask = mask_m[:, None] & mask_n[None, :]
     # cast FP32 accumulator back to original dtype of C
     c = accumulator.to(c_ptr.dtype.element_ty)
     tl.store(c_ptrs, c, mask=c_mask)
@@ -997,6 +1006,7 @@ def override_envs_for_invariance():
         "FLASH_ATTN",  # best supported backend
         "FLASHINFER",
         "FLASH_ATTN_MLA",
+        "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
         # "FLEX_ATTENTION", # IMA issue even if we disable batch invariance
