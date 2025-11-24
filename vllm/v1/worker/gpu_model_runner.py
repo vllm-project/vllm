@@ -3424,7 +3424,9 @@ class GPUModelRunner(
                             else None
                         )
                         if self.eplb_state is None:
-                            self.eplb_state = EplbState(self.parallel_config, self.device)
+                            self.eplb_state = EplbState(
+                                self.parallel_config, self.device
+                            )
                         self.eplb_state.add_model(
                             self.drafter.model,
                             spec_config.draft_model_config,
@@ -3455,18 +3457,15 @@ class GPUModelRunner(
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
-        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            err_str = str(e).lower()
-            if isinstance(e, torch.cuda.OutOfMemoryError) or "out of memory" in err_str:
-                msg = (
-                    "Failed to load model - not enough GPU memory. "
-                    "Try lowering --gpu-memory-utilization to free memory for weights, "
-                    "increasing --tensor-parallel-size, or using --quantization."
-                )
-                combined_msg = f"{msg} (original error: {e})"
-                logger.error("init_failed msg=%s", combined_msg)
-                raise RuntimeError(combined_msg) from e
-            raise
+        except torch.cuda.OutOfMemoryError as e:
+            msg = (
+                "Failed to load model - not enough GPU memory. "
+                "Try lowering --gpu-memory-utilization to free memory for weights, "
+                "increasing --tensor-parallel-size, or using --quantization."
+            )
+            combined_msg = f"{msg} (original error: {e})"
+            logger.error("init_failed msg=%s", combined_msg)
+            raise RuntimeError(combined_msg) from e
         logger.info_once(
             "Model loading took %.4f GiB memory and %.6f seconds",
             self.model_memory_usage / GiB_bytes,

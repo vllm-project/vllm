@@ -71,13 +71,13 @@ def test_kv_cache_oom_no_memory():
         )
     }
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         check_enough_kv_cache_memory(config, spec, 0)
 
     msg = str(exc_info.value)
-    assert "KV cache" in msg
-    assert "--max-model-len" in msg
-    assert "--max-num-seqs" in msg
+    assert "cache blocks" in msg
+    assert "gpu_memory_utilization" in msg
+    assert "conserving_memory" in msg
 
 
 def test_kv_cache_oom_insufficient_memory(monkeypatch):
@@ -104,10 +104,11 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
         )
     }
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB
 
     msg = str(exc_info.value)
     assert "KV cache" in msg
     assert "GiB" in msg
-    assert "--max-model-len" in msg
+    assert "gpu_memory_utilization" in msg
+    assert "conserving_memory" in msg

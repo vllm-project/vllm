@@ -675,7 +675,7 @@ def check_enough_kv_cache_memory(
         available_memory: Memory available for KV cache in bytes.
 
     Raises:
-        RuntimeError: If there is not enough memory available for the KV cache.
+        ValueError: If there is not enough memory available for the KV cache.
     """
 
     # No need to check for available memory if the kv_cache_spec is empty
@@ -683,36 +683,39 @@ def check_enough_kv_cache_memory(
         return
 
     if available_memory <= 0:
-        msg = (
-            "No memory available for KV cache blocks. "
-            "Try reducing --max-model-len or --max-num-seqs, "
-            "increasing --gpu-memory-utilization, or see "
-            "https://docs.vllm.ai/en/latest/configuration/conserving_memory/."
+        raise ValueError(
+            "No available memory for the cache blocks. "
+            "Try increasing `gpu_memory_utilization` when "
+            "initializing the engine. "
+            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            "for more details."
         )
-        logger.error("init_failed msg=%s", msg)
-        raise RuntimeError(msg)
 
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
     if needed_memory > available_memory:
+        # Estimate the maximum model length that can fit in the available memory
         estimated_max_len = estimate_max_model_len(
             vllm_config, kv_cache_spec, available_memory
         )
-        hint = ""
+        estimated_msg = ""
         if estimated_max_len > 0:
-            hint = f" Estimated max length with available memory: {estimated_max_len}."
+            estimated_msg = (
+                "Based on the available memory, "
+                f"the estimated maximum model length is {estimated_max_len}."
+            )
 
-        msg = (
-            f"Insufficient KV cache memory: need {needed_memory / GiB_bytes:.2f} GiB "
-            f"but only {available_memory / GiB_bytes:.2f} GiB available "
-            f"(max_model_len={max_model_len}).{hint} "
-            f"Try reducing --max-model-len or --max-num-seqs, "
-            f"increasing --gpu-memory-utilization, or see "
-            f"https://docs.vllm.ai/en/latest/configuration/conserving_memory/."
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({available_memory / GiB_bytes:.2f} GiB). "
+            f"{estimated_msg} "
+            f"Try increasing `gpu_memory_utilization` when initializing the engine. "
+            f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            f"for more details."
         )
-        logger.error("init_failed msg=%s", msg)
-        raise RuntimeError(msg)
 
 
 def create_kv_cache_group_specs(
