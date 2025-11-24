@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 class DeepseekV32IndexerBackend(AttentionBackend):
     supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
 
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 128]
