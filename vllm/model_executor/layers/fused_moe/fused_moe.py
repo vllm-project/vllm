@@ -2165,7 +2165,16 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        use_unpermute = tokens_in_chunk * top_k_num * 4 <= global_num_experts and not ((use_int8_w8a16 or use_int4_w4a16) and block_shape is not None and block_shape[1] > 0)
+        # Enable unpermute when token fan-out is manageable and the WNA16 kernels
+        # (int4/int8 with block groups) are not required.
+        use_unpermute = (
+            tokens_in_chunk * top_k_num * 4 <= global_num_experts
+            and not (
+                (use_int8_w8a16 or use_int4_w4a16)
+                and block_shape is not None
+                and block_shape[1] > 0
+            )
+        )
         
         if not use_unpermute:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
