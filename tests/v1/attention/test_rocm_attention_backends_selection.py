@@ -217,6 +217,14 @@ def test_standard_attention_backend_selection(
             "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
             False,
         ),
+        # Test Case 8: Explicit ROCM_AITER_TRITON_MLA
+        (
+            {},
+            "ROCM_AITER_TRITON_MLA",
+            16,
+            "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend",
+            False,
+        ),
     ],
 )
 def test_mla_backend_selection(
