@@ -3,6 +3,7 @@
 """Argument parsing utilities for vLLM."""
 
 import json
+import shlex
 import sys
 import textwrap
 from argparse import (
@@ -23,6 +24,18 @@ import yaml
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class StoreBoolean(Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values.lower() == "true":
+            setattr(namespace, self.dest, True)
+        elif values.lower() == "false":
+            setattr(namespace, self.dest, False)
+        else:
+            raise ValueError(f"Invalid boolean value: {values}. "
+                             "Expected 'true' or 'false'.")
 
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
@@ -180,12 +193,13 @@ class FlexibleArgumentParser(ArgumentParser):
         self,
         args: list[str] | None = None,
         namespace: Namespace | None = None,
+        extra_params: dict[str, Any] | None = None,
     ):
         if args is None:
             args = sys.argv[1:]
 
         # Check for --model in command line arguments first
-        if args and args[0] == "serve":
+        if args and not isinstance(args, dict) and args[0] == "serve":
             try:
                 model_idx = next(
                     i
@@ -222,6 +236,9 @@ class FlexibleArgumentParser(ArgumentParser):
 
         if "--config" in args:
             args = self._pull_args_from_config(args)
+
+        if isinstance(args, dict):
+            args = self._pull_args_from_dict(args, extra_params)
 
         def repl(match: re.Match) -> str:
             """Replaces underscores with dashes in the matched string."""
@@ -443,6 +460,41 @@ class FlexibleArgumentParser(ArgumentParser):
             args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
 
         return args
+
+    # NOTE(Jacky): The following _pull_args_from_dict method is added for PDJob YAML adaptation.
+    # It is used to convert a dict of arguments (from YAML config) into a list of CLI-style
+    # arguments for argparse. This logic is specific for vLLM PDJob YAML scenarios.
+    def _pull_args_from_dict(self, args: dict[str, Any], extra_params: str) -> list[str]:
+        """Pulls arguments from a dictionary and returns them as a list of strings.
+        This is used to convert a dictionary of arguments into a format that can
+        be passed to the ArgumentParser.
+        """
+        store_boolean_arguments = [
+            action.dest for action in self._actions
+            if isinstance(action, StoreBoolean)
+        ]
+        logger.info(f"show the store_boolean_arguments: {store_boolean_arguments}")
+        processed_args = ["serve", args["model"]]
+        for key, value in args.items():
+            if key == "model":
+                continue
+            elif (isinstance(value, bool) or
+                (isinstance(value, str) and value.lower() in ("true", "false"))) and key not in store_boolean_arguments:
+                is_true = (isinstance(value, bool) and value) or \
+                        (isinstance(value, str) and value.lower() == "true")
+                is_false = (isinstance(value, bool) and not value) or \
+                        (isinstance(value, str) and value.lower() == "false")
+                if is_true:
+                    processed_args.append('--' + key)
+                elif is_false:
+                    processed_args.append('--no-' + key)  
+            else:
+                processed_args.append('--' + key)
+                processed_args.append(str(value))
+        # Handle extra_params string if provided
+        extra_params_list = shlex.split(extra_params)
+        processed_args.extend(extra_params_list)
+        return processed_args
 
     def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
