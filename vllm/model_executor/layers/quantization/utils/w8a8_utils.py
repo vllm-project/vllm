@@ -11,6 +11,7 @@ from vllm import envs
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16, mxfp8_e4m3_quantize_python
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 from vllm.utils.platform_utils import get_cu_count
@@ -490,6 +491,47 @@ class Fp8LinearOp:
             bias=bias,
             output_shape=output_shape,
         )
+
+class MXFp8LinearOp:
+    """
+    This class executes a MXFP8 linear layer using pytorch.
+    It needs to be a class instead of a method so that config can be read
+    in the __init__ method, as reading config is not allowed inside forward.
+    """
+
+    def __init__(
+        self,
+    ):
+        
+        self.preferred_backend = "torch"
+        act_quant_group_shape = GroupShape(row=1, col=32)
+        
+        self.act_quant_group_shape = act_quant_group_shape
+
+
+    def apply(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Apply linear layer in fake MXFP8 with block-wise matmul and dequantization.
+        """
+        # Quantize each block (simulate MXFP8)
+    
+        q_input, input_scales = mxfp8_e4m3_quantize_python(input)
+        # q_input_ref, input_scales_ref = mxfp8_e4m3_quantize(input)
+        dq_input = dequant_mxfp8_to_bf16(q_input, input_scales)
+        dq_weight = dequant_mxfp8_to_bf16(weight.T, weight_scale).T
+        
+        output = torch.matmul(dq_input, dq_weight)
+        # Add bias if provided
+        if bias is not None:
+            output += bias
+
+        return output
 
 
 def normalize_e4m3fn_to_e4m3fnuz(
