@@ -2076,13 +2076,20 @@ def _raise_unsupported_error(feature_name: str):
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
+    Also accepts -1 as a special value for auto-detection.
 
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024
     - '25.6k' -> 25,600
+    - '-1' -> -1 (special value for auto-detection)
     """
     value = value.strip()
+
+    # Handle -1 as a special value for auto-detection
+    if value == "-1":
+        return -1
+
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
     if match:
         decimal_multiplier = {

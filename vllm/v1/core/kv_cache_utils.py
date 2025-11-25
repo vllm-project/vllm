@@ -1296,6 +1296,80 @@ def _report_kv_cache_config(
     )
 
 
+def _auto_fit_max_model_len(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> None:
+    """
+    Automatically determines the maximum model length that fits in GPU memory.
+
+    When max_model_len == -1, this function estimates the largest
+    context length that can be supported with the available GPU memory.
+    It uses binary search to find the maximum length that fits across all
+    workers.
+
+    Args:
+        vllm_config: The global VllmConfig (will be modified in-place)
+        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
+        available_memory: Memory available for KV cache in bytes for each
+            worker.
+    """
+    original_max = vllm_config.model_config.max_model_len
+
+    # Find the minimum estimated max_model_len across all workers
+    estimated_max_lens = []
+    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
+        kv_cache_specs, available_memory
+    ):
+        if not kv_cache_spec_one_worker:
+            # Skip empty specs (attention-free models)
+            continue
+        estimated = estimate_max_model_len(
+            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
+        )
+        estimated_max_lens.append(estimated)
+
+    if not estimated_max_lens:
+        # All workers have empty specs (attention-free model)
+        logger.info(
+            "Auto-fit max_model_len: attention-free model, "
+            "using derived max_model_len=%d",
+            original_max,
+        )
+        return
+
+    # Use the minimum across all workers to ensure all can handle it
+    auto_fit_max = min(estimated_max_lens)
+
+    if auto_fit_max <= 0:
+        raise ValueError(
+            "Cannot auto-fit max_model_len: not enough GPU memory available "
+            "to serve even a single token. Try increasing `gpu_memory_utilization`."
+        )
+
+    # Restore the original max_model_len in case estimate_max_model_len modified it
+    vllm_config.model_config.max_model_len = original_max
+
+    if auto_fit_max >= original_max:
+        # The model's full context length fits in memory
+        logger.info(
+            "Auto-fit max_model_len: full model context length %d fits in "
+            "available GPU memory",
+            original_max,
+        )
+    else:
+        # Need to reduce max_model_len to fit in memory
+        vllm_config.model_config.max_model_len = auto_fit_max
+        logger.info(
+            "Auto-fit max_model_len: reduced from %d to %d to fit in "
+            "available GPU memory (%.2f GiB available for KV cache)",
+            original_max,
+            auto_fit_max,
+            min(available_memory) / GiB_bytes,
+        )
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -1327,6 +1401,11 @@ def get_kv_cache_configs(
     Returns:
         The generated KVCacheConfigs for each worker.
     """
+
+    # Handle auto-fit mode: if original_max_model_len was -1, automatically
+    # determine the maximum model length that fits in available GPU memory.
+    if vllm_config.model_config.original_max_model_len == -1:
+        _auto_fit_max_model_len(vllm_config, kv_cache_specs, available_memory)
 
     # Check if the available memory is enough for each worker.
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
