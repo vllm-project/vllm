@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.v1.worker.ubatch_utils import check_cudagraph_threshold
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -394,7 +395,13 @@ class UBatchWrapper:
             # for this shape during a normal run.
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
-                if batch_descriptor.num_tokens in self.cudagraphs:
+                num_tokens = batch_descriptor.num_tokens
+                uniform_decode = batch_descriptor.uniform_decode
+                # Check if the model runner made a non-dbo cudagraph for this shape
+                cudagraph_exists = check_cudagraph_threshold(
+                    self.vllm_config.parallel_config, num_tokens, uniform_decode
+                )
+                if num_tokens in self.cudagraphs and not cudagraph_exists:
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):

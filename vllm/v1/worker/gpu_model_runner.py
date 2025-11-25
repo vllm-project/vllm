@@ -147,6 +147,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
+    check_cudagraph_threshold,
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -4287,7 +4288,7 @@ class GPUModelRunner(
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
             # version of the graph
-            allow_microbatching = (
+            microbatching_enabled = (
                 self.parallel_config.enable_dbo
                 and cudagraph_runtime_mode == CUDAGraphMode.FULL
                 and uniform_decode
@@ -4298,32 +4299,45 @@ class GPUModelRunner(
                 )
             )
 
-            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+            # When num_tokens is near the dbo_decode_token_threshold, different ranks
+            # may make different microbatching decisions (some above threshold, some
+            # below). Since all ranks must agree for DBO to work, they'll all fall back
+            # to non-DBO execution. To avoid running without cudagraphs in these mixed
+            # cases, we preemptively compile cudagraphs for both microbatching modes.
+            microbatching_modes = [microbatching_enabled]
+            compile_both_modes = check_cudagraph_threshold(
+                self.parallel_config, num_tokens, uniform_decode
+            )
+            if microbatching_enabled and compile_both_modes:
+                microbatching_modes = [False, True]  # Compile both modes
+
+            for allow_microbatching in microbatching_modes:
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                    # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                    # But be careful, warm up with `NONE`is orthogonal to
+                    # if we want to warm up attention or not. This is
+                    # different from the case where `FULL` implies capture
+                    # attention while `PIECEWISE` implies no attention.
+                    force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    self._dummy_run(
+                        num_tokens,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=force_attention,
+                        uniform_decode=uniform_decode,
+                        allow_microbatching=allow_microbatching,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        activate_lora=activate_lora,
+                    )
                 self._dummy_run(
                     num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
                     remove_lora=False,
                     activate_lora=activate_lora,
                 )
-            self._dummy_run(
-                num_tokens,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                uniform_decode=uniform_decode,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
-                activate_lora=activate_lora,
-            )
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
