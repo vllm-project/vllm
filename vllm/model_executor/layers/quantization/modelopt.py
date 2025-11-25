@@ -1132,6 +1132,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
                 " for ModelOptNvFp4FusedMoE."
             )
+        elif self.use_marlin:
+            logger.info_once("Using Marlin for ModelOptNvFp4FusedMoE.")
+        else:
+            logger.info_once("Using Cutlass for ModelOptNvFp4FusedMoE.")
 
     def maybe_make_prepare_finalize(
         self,
