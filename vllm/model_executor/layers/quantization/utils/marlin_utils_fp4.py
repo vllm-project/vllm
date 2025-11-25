@@ -174,12 +174,14 @@ def prepare_fp4_layer_for_marlin(
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = layer.weight.view(torch.int32).T.contiguous()
 
+    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
         size_k=part_size_k,
         size_n=part_size_n,
         num_bits=4,
+        is_a_8bit=is_a_8bit,
     )
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
 
@@ -192,7 +194,11 @@ def prepare_fp4_layer_for_marlin(
 
     weight_scale = weight_scale.to(param_dtype)
     weight_scale = marlin_permute_scales(
-        s=weight_scale, size_k=part_size_k, size_n=part_size_n, group_size=group_size
+        s=weight_scale,
+        size_k=part_size_k,
+        size_n=part_size_n,
+        group_size=group_size,
+        is_a_8bit=is_a_8bit
     )
 
     if is_nvfp4:
@@ -238,6 +244,7 @@ def prepare_moe_fp4_layer_for_marlin(
     param_dtype = layer.params_dtype
     layer.workspace = marlin_make_workspace_new(device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
+    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     # WEIGHT
     # Repack weights to marlin format
@@ -255,7 +262,12 @@ def prepare_moe_fp4_layer_for_marlin(
             qweight = weight[i].view(torch.int32).T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=4
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=4,
+                is_a_8bit=is_a_8bit,
             )
             tensor_list.append(marlin_qweight)
 
@@ -284,7 +296,11 @@ def prepare_moe_fp4_layer_for_marlin(
             scale = scales[i].T
 
             marlin_scales = marlin_permute_scales(
-                s=scale, size_k=size_k, size_n=size_n, group_size=group_size
+                s=scale,
+                size_k=size_k,
+                size_n=size_n,
+                group_size=group_size,
+                is_a_8bit=is_a_8bit,
             )
             if is_nvfp4:
                 marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
