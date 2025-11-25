@@ -4245,14 +4245,18 @@ class GPUModelRunner(
                     # NOTE: This happens when encoder cache needs to store
                     # the embeddings that encoder outputs are scattered onto.
                     # In this case we create dummy embeddings of size
-                    # (encode_budget, hidden_size) and scatter encoder
-                    # output into it.
+                    # (max_tokens_for_modality, hidden_size) and scatter
+                    # encoder output into it.
                     encoder_output_shape = dummy_encoder_outputs[0].shape
-                    if encoder_output_shape[0] < encoder_budget:
+                    max_mm_tokens_per_item = mm_budget.max_tokens_by_modality[
+                        dummy_modality
+                    ]
+                    if encoder_output_shape[0] < max_mm_tokens_per_item:
+                        encoder_hidden_size = encoder_output_shape[-1]
                         expanded_outputs = []
                         for output in dummy_encoder_outputs:
                             expanded = output.new_zeros(
-                                (encoder_budget, encoder_output_shape[-1])
+                                (max_mm_tokens_per_item, encoder_hidden_size)
                             )
                             num_tokens = output.shape[0]
                             expanded[:num_tokens].copy_(output)
