@@ -403,5 +403,10 @@ class CachedMamba2AttentionMetadataBuilder(Mamba2AttentionMetadataBuilder):
                 CachedMamba2AttentionMetadataBuilder.cache_content
             )
             # Update the part that changes across cache groups:
-            attn_metadata.state_indices_tensor = common_attn_metadata.block_table_tensor
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                state_indices_t = common_attn_metadata.block_table_tensor
+            else:
+                # Always return just a single block per each request:
+                state_indices_t = common_attn_metadata.block_table_tensor[:, 0]
+            attn_metadata.state_indices_tensor = state_indices_t
         return attn_metadata
