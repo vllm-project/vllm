@@ -750,10 +750,10 @@ def unified_attention(
     k_descale,
     v_descale,
     seq_threshold_3D,
-    num_par_softmax_segments,
-    softmax_segm_output,
-    softmax_segm_max,
-    softmax_segm_expsum,
+    num_par_softmax_segments=None,
+    softmax_segm_output=None,
+    softmax_segm_max=None,
+    softmax_segm_expsum=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -799,7 +799,11 @@ def unified_attention(
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill or number of sequences is larger than threshold
-    if max_seqlen_q > 1 or num_seqs > seq_threshold_3D:
+    if (
+        max_seqlen_q > 1
+        or num_seqs > seq_threshold_3D
+        or num_par_softmax_segments is None
+    ):
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
