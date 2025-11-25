@@ -5680,11 +5680,12 @@ class GPUModelRunner(
             self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
             + 1
         ) * block_size
+        self.instance_id = f"rank_{self.vllm_config.parallel_config.rank // self.vllm_config.parallel_config.world_size}"
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.model_config,
-            instance_id=self.vllm_config.instance_id,
+            instance_id=self.instance_id,
             enable_shared_memory=get_tensor_model_parallel_rank() == 0,
         )
 

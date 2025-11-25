@@ -234,10 +234,11 @@ class Scheduler(SchedulerInterface):
         self.routed_experts_reader = RoutedExpertsReader.create(
             enable=self.vllm_config.model_config.enable_return_routed_experts
         )
+        self.instance_id = f"rank_{vllm_config.parallel_config.rank // vllm_config.parallel_config.world_size}"
         self.routed_experts_reader.attach_buffer(
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.vllm_config.model_config,
-            instance_id=self.vllm_config.instance_id,
+            instance_id=self.instance_id,
         )
 
     def schedule(self) -> SchedulerOutput:
