@@ -971,6 +971,7 @@ steps:
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - vllm/model_executor/layers/fused_moe/layer.py
   - tests/compile/test_fusion_attn.py
   - tests/compile/test_silu_mul_quant_fusion.py
   - tests/compile/distributed/test_fusion_all_reduce.py
