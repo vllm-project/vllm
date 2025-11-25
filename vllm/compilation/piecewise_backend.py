@@ -107,7 +107,7 @@ class PiecewiseBackend:
             entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
                 args,
-                self.compilation_config.inductor_compile_config,
+                self.vllm_backend.inductor_config,
                 self.compilation_config,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
