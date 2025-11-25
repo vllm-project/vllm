@@ -94,14 +94,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: torch.Tensor | None,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
         assert (
             len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
         )
@@ -121,7 +122,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
-        # In transformers backend, x and output have extra batch dimension like
+        # In Transformers modeling backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
         # therefore we need to flatten the batch dimensions.
         if x.ndim == 3 and output.ndim == 3:

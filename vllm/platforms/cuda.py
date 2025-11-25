@@ -267,25 +267,17 @@ class CudaPlatformBase(Platform):
     ) -> "AttentionBackendEnum":
         from vllm.attention.backends.registry import AttentionBackendEnum
 
-        # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-        if cls.has_device_capability(100):
-            return AttentionBackendEnum.TORCH_SDPA
-
-        if dtype not in (torch.float16, torch.bfloat16):
-            return AttentionBackendEnum.XFORMERS
-
-        if cls.has_device_capability(80):
+        # Try FlashAttention first
+        try:
             backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
             if backend_class.supports_head_size(
                 head_size
             ) and backend_class.supports_dtype(dtype):
                 return AttentionBackendEnum.FLASH_ATTN
-            else:
-                return AttentionBackendEnum.XFORMERS
-        else:
-            # Fallback for Volta/Turing GPUs or FA not supported
-            return AttentionBackendEnum.XFORMERS
+        except ImportError:
+            pass
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(
@@ -298,6 +290,7 @@ class CudaPlatformBase(Platform):
         has_sink,
         use_sparse,
         device_capability,
+        attn_type,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -318,6 +311,7 @@ class CudaPlatformBase(Platform):
                     has_sink,
                     use_sparse,
                     device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -336,16 +330,15 @@ class CudaPlatformBase(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
-            )
+        from vllm.attention import AttentionType
+
+        if attn_type is None:
+            attn_type = AttentionType.DECODER
 
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -363,6 +356,7 @@ class CudaPlatformBase(Platform):
                     has_sink,
                     use_sparse,
                     device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
@@ -386,6 +380,7 @@ class CudaPlatformBase(Platform):
             has_sink,
             use_sparse,
             device_capability,
+            attn_type,
         )
         reasons_str = (
             "{"
