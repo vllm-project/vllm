@@ -54,7 +54,7 @@ STR_INVALID_VAL: str = "INVALID"
 
 
 def random_uuid() -> str:
-    return str(uuid.uuid4().hex)
+    return "%016x" % (uuid.uuid4().int >> 64)  # 16 hex chars
 
 
 def length_from_prompt_token_ids_or_embeds(

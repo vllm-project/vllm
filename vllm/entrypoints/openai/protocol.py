@@ -717,7 +717,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1201,7 +1201,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1502,7 +1502,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1597,7 +1597,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -2019,7 +2019,7 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -2110,7 +2110,7 @@ class ClassificationChatRequest(OpenAIBaseModel):
     )
 
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3221,7 +3221,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 ####### Tokens IN <> Tokens OUT #######
 class GenerateRequest(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3278,7 +3278,7 @@ class GenerateResponseChoice(BaseModel):
 
 class GenerateResponse(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
