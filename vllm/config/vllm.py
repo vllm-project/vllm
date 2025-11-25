@@ -753,9 +753,9 @@ class VllmConfig:
         if self.model_config and self.model_config.is_encoder_decoder:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
-            self.scheduler_config.max_num_encoder_input_tokens = (
-                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
-            )
+            # self.scheduler_config.max_num_encoder_input_tokens = (
+            #     MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+            # )
             logger.debug(
                 "Encoder-decoder model detected: setting "
                 "`max_num_encoder_input_tokens` to encoder length (%s)",
