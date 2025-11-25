@@ -12,6 +12,7 @@ from copy import copy
 from http import HTTPStatus
 from typing import Final
 
+import fbvscode
 import jinja2
 from fastapi import Request
 from openai.types.responses import (
@@ -309,6 +310,7 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        fbvscode.set_trace()
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -374,7 +376,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -422,6 +424,10 @@ class OpenAIServingResponses(OpenAIServing):
                             tokenizer=tokenizer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
+                            tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
                         )
                     else:
                         context = SimpleContext()
