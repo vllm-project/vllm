@@ -37,17 +37,16 @@ class FaultToleranceConfig:
     The port to use for external fault notify.
     """
 
-    engine_core_cmd_addr: str = ""
-    """
-    The ZMQ address between engine_core_sentinel and worker_sentinel.
-    It will be initialized and assigned in EngineCore, then passed
-    to the Worker via vllm_config—this is required for the Worker
-    to spin up the WorkerSentinel.
-    """
-
     gloo_comm_timeout: int = 30
     """
     The timeout for gloo communication.
+    """
+
+    worker_cmd_addr: str = None
+    """
+    ZMQ address used by EngineCoreSentinel to dispatch instructions to 
+    WorkerSentinel instances. This address is assigned dynamically during 
+    runtime.
     """
 
     def compute_hash(self) -> str:

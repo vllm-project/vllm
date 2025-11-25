@@ -72,7 +72,6 @@ class EngineZmqAddresses:
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
 
-    engine_core_cmd_addrs: list[str] | None = None
     # ZMQ input socket address of DP coordinator if applicable
     coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
@@ -923,9 +922,6 @@ def launch_core_engines(
     )
 
     if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
-        addresses.engine_core_cmd_addrs = [
-            get_engine_client_zmq_addr(client_local_only, host) for _ in range(dp_size)
-        ]
         addresses.fault_report_addr = get_engine_client_zmq_addr(
             local_only=False,
             host=vllm_config.parallel_config.data_parallel_master_ip,
