@@ -15,7 +15,7 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionType
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import (
     STR_BACKEND_ENV_VAR,
@@ -847,9 +847,10 @@ def torch_experts(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
+    activation: str,
     global_num_experts: int = -1,
-    b_bias1: torch.Tensor | None = None,
-    b_bias2: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
@@ -891,17 +892,22 @@ def torch_experts(
 
     f32 = torch.float32
 
+    def apply_moe_activation(act_str, act_input):
+        act_fn = get_act_and_mul_fn(act_str)
+        return act_fn(act_input)
+
     for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
             if quant_dtype is None:
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
-                if b_bias1 is not None:
-                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+                if w1_bias is not None:
+                    tmp1 = tmp1 + w1_bias[i].view(1, -1).to(tmp1.dtype)
+
+                tmp2 = apply_moe_activation(activation, tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
-                if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+                if w2_bias is not None:
+                    out[mask] = out[mask] + w2_bias[i].view(1, -1).to(tmp1.dtype)
             elif block_shape is not None:
                 # block quantized
                 assert (
@@ -912,9 +918,11 @@ def torch_experts(
                 tmp1 = native_w8a8_block_matmul(
                     a[mask], w1[i], a_scale[mask], w1_scale[i], block_shape, out.dtype
                 )
-                if b_bias1 is not None:
-                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+                if w1_bias is not None:
+                    tmp1 = tmp1 + w1_bias[i].view(1, -1).to(tmp1.dtype)
+
+                tmp2 = apply_moe_activation(activation, tmp1)
+
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
                 )
@@ -922,8 +930,8 @@ def torch_experts(
                 out[mask] = native_w8a8_block_matmul(
                     tmp2, w2[i], b_scale, w2_scale[i], block_shape, out.dtype
                 )
-                if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+                if w2_bias is not None:
+                    out[mask] = out[mask] + w2_bias[i].view(1, -1).to(tmp1.dtype)
             else:
                 assert (
                     a_scale is not None
@@ -935,10 +943,10 @@ def torch_experts(
                 tmp1 = a[mask].to(f32) * scales
                 w1_dq = (w1[i].to(f32) * w1_scale[i]).transpose(0, 1)
                 tmp1 = (tmp1 @ w1_dq).to(out.dtype)
-                if b_bias1 is not None:
-                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
+                if w1_bias is not None:
+                    tmp1 = tmp1 + w1_bias[i].view(1, -1).to(out.dtype)
 
-                tmp2 = SiluAndMul()(tmp1).to(out.dtype)
+                tmp2 = apply_moe_activation(activation, tmp1)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
@@ -948,8 +956,8 @@ def torch_experts(
                 tmp2 = tmp2.to(f32) * b_scale
                 w2_dq = (w2[i].to(f32) * w2_scale[i]).transpose(0, 1)
                 out[mask] = (tmp2 @ w2_dq).to(out.dtype)
-                if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(out.dtype)
+                if w2_bias is not None:
+                    out[mask] = out[mask] + w2_bias[i].view(1, -1).to(out.dtype)
 
     if apply_router_weights_on_input:
         return out
@@ -967,8 +975,8 @@ def torch_moe(
     w2: torch.Tensor,
     score: torch.Tensor,
     topk: int,
-    b_bias1: torch.Tensor | None = None,
-    b_bias2: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -981,8 +989,8 @@ def torch_moe(
         topk_weight,
         topk_ids,
         global_num_experts,
-        b_bias1,
-        b_bias2,
+        w1_bias,
+        w2_bias,
         expert_map,
     )
 
