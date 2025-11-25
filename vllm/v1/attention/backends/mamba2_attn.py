@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import itertools
 from dataclasses import dataclass
 
@@ -89,8 +90,12 @@ def compute_varlen_chunk_metadata(
 
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
-        return Mamba2AttentionMetadataBuilder
+    def get_builder_cls() -> type["CachedMamba2AttentionMetadataBuilder"]:
+        return CachedMamba2AttentionMetadataBuilder
+
+    # In case disabling metadata caching is needed, use:
+    # def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
+    #     return Mamba2AttentionMetadataBuilder
 
 
 @dataclass
@@ -351,4 +356,52 @@ class Mamba2AttentionMetadataBuilder(
             block_idx_last_computed_token=block_idx_last_computed_token,
             num_computed_tokens_p=num_computed_tokens_p,
         )
+        return attn_metadata
+
+
+class CachedMamba2AttentionMetadataBuilder(Mamba2AttentionMetadataBuilder):
+    """
+    Wraps Mamba2AttentionMetadataBuilder class with metadata caching capability.
+    """
+
+    cache_origin = None
+    cache_content = None
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Mamba2AttentionMetadata:
+        if CachedMamba2AttentionMetadataBuilder.cache_origin is None:
+            # Store in first metadata builder object as the cache "origin".
+            CachedMamba2AttentionMetadataBuilder.cache_origin = self
+        # For each computation cycle, each builder is invoked once.
+        # This means that every time we reach the "origin", it is a new
+        # computation cycle and we need to invalidate cache / recompute:
+        if CachedMamba2AttentionMetadataBuilder.cache_origin == self:
+            attn_metadata = super().build(
+                common_prefix_len, common_attn_metadata, fast_build
+            )
+            CachedMamba2AttentionMetadataBuilder.cache_content = attn_metadata
+        else:
+            assert isinstance(
+                CachedMamba2AttentionMetadataBuilder.cache_content,
+                Mamba2AttentionMetadata,
+            )
+            # Reuse cached metadata
+            attn_metadata = copy.copy(
+                CachedMamba2AttentionMetadataBuilder.cache_content
+            )
+            # Update the part that changes across cache groups:
+            attn_metadata.state_indices_tensor = common_attn_metadata.block_table_tensor
         return attn_metadata
