@@ -1246,6 +1246,10 @@ class Qwen2_5_VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        from vllm.platforms import current_platform
+
+        self.set_forward_context = current_platform.get_forward_context_manager()
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
 
@@ -1314,11 +1318,8 @@ class Qwen2_5_VLForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            from vllm.platforms import current_platform
-
             pixel_values = image_input["pixel_values"]
-            set_forward_context = current_platform.get_forward_context_manager()
-            with set_forward_context(None, self.vllm_config):
+            with self.set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
@@ -1372,11 +1373,8 @@ class Qwen2_5_VLForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            from vllm.platforms import current_platform
-
             pixel_values_videos = video_input["pixel_values_videos"]
-            set_forward_context = current_platform.get_forward_context_manager()
-            with set_forward_context(None, self.vllm_config):
+            with self.set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
