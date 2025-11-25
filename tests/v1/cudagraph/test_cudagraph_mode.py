@@ -95,9 +95,9 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
 combo_cases_2 = [
     ("FA2", "FULL", CompilationMode.NONE, True),
     ("FA2", "FULL", CompilationMode.VLLM_COMPILE, True),
-    ("FA2", "PIECEWISE", CompilationMode.NONE, False),
+    ("FA2", "PIECEWISE", CompilationMode.NONE, True),
     ("FA2", "PIECEWISE", CompilationMode.VLLM_COMPILE, True),
-    ("FA2", "FULL_AND_PIECEWISE", CompilationMode.NONE, False),
+    ("FA2", "FULL_AND_PIECEWISE", CompilationMode.NONE, True),
     ("FA2", "FULL_AND_PIECEWISE", CompilationMode.VLLM_COMPILE, True),
     ("FA2", "FULL_DECODE_ONLY", CompilationMode.NONE, True),
     ("FA2", "FULL_DECODE_ONLY", CompilationMode.VLLM_COMPILE, True),

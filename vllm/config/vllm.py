@@ -589,9 +589,9 @@ class VllmConfig:
             logger.warning("Enforce eager set, overriding optimization level to -O0")
             self.optimization_level = OptimizationLevel.O0
 
-        if (
-            self.compilation_config.backend == "eager"
-            or self.compilation_config.mode == CompilationMode.NONE
+        if self.compilation_config.backend == "eager" or (
+            self.compilation_config.mode is not None
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
                 "Inductor compilation was disabled by user settings,"
