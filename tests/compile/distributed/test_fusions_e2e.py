@@ -315,8 +315,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         log_holder.text
     )
 
-    assert int(log_matches[0]) == matches.attention_fusion
-    assert int(log_matches[1]) == matches.attention_fusion
+    assert all(int(log_match) == matches.attention_fusion for log_match in log_matches)
 
     log_matches = re.findall(
         r"collective_fusion.py:\d+] Replaced (\d+) patterns",
