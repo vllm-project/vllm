@@ -10,11 +10,13 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParams,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -136,28 +138,29 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         return fused_experts(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            params.w13_weight,
+            params.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            activation=params.activation,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
             quant_config=self.moe_quant_config,
         )
 

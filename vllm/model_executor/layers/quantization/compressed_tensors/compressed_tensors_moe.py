@@ -16,10 +16,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEActivationFormat,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParams,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoeWeightScaleSupported,
 )
@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
@@ -510,34 +511,35 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
+        assert params.activation == "silu", "Only SiLU activation is supported."
 
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
-            if layer.enable_eplb:
+            if params.enable_eplb:
                 raise NotImplementedError(
                     "EPLB not supported for `CompressedTensorsW4A4MoeMethod` yet."
                 )
 
             return flashinfer_trtllm_fp4_moe(
-                layer=layer,
+                layer=params,
                 x=x,
                 router_logits=router_logits,
-                top_k=layer.top_k,
-                global_num_experts=layer.global_num_experts,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                custom_routing_function=layer.custom_routing_function,
-                e_score_correction_bias=layer.e_score_correction_bias,
+                top_k=params.top_k,
+                global_num_experts=params.global_num_experts,
+                num_expert_group=params.num_expert_group,
+                topk_group=params.topk_group,
+                custom_routing_function=params.custom_routing_function,
+                e_score_correction_bias=params.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -545,22 +547,22 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         if self.use_marlin:
             return fused_marlin_moe(
                 x,
-                layer.w13_weight,
-                layer.w2_weight,
+                params.w13_weight,
+                params.w2_weight,
                 None,
                 None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
+                params.w13_weight_scale,
+                params.w2_weight_scale,
                 router_logits,
                 topk_weights,
                 topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
+                global_scale1=params.w13_weight_scale_2,
+                global_scale2=params.w2_weight_scale_2,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                workspace=layer.workspace,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
+                global_num_experts=params.global_num_experts,
+                expert_map=params.expert_map,
+                workspace=params.workspace,
             )
 
         # FlashInfer fused experts path
@@ -570,28 +572,28 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             )
 
             assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight
+                x, params.w13_weight, params.w2_weight
             ), "Flashinfer CUTLASS Fused MoE not applicable!"
 
             assert self.moe_quant_config is not None
 
             return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=params.w13_weight,
+                w2=params.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
                 inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                activation=params.activation,
+                global_num_experts=params.global_num_experts,
+                expert_map=params.expert_map,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
             )
         else:
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 
-            assert layer.expert_map is None, (
+            assert params.expert_map is None, (
                 "Expert Parallelism / expert_map "
                 "is currently not supported for "
                 "CompressedTensorsW4A4MoeMethod."
@@ -602,17 +604,17 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             # and fp4 quantized weights loaded from the checkpoint
             return cutlass_moe_fp4(
                 a=x,
-                w1_fp4=layer.w13_weight,
-                w2_fp4=layer.w2_weight,
+                w1_fp4=params.w13_weight,
+                w2_fp4=params.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
                 # TODO(bnell): derive these from arguments
                 m=x.shape[0],
-                n=layer.w2_weight.shape[2] * 2,
+                n=params.w2_weight.shape[2] * 2,
                 k=x.shape[1],
-                e=layer.w13_weight.shape[0],
+                e=params.w13_weight.shape[0],
             ).to(x.dtype)
 
 
@@ -1082,11 +1084,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1095,25 +1098,25 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         per_channel_quant = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
 
         if self.use_marlin:
-            assert layer.activation == "silu", (
-                f"{layer.activation} not supported for Marlin MoE."
+            assert params.activation == "silu", (
+                f"{params.activation} not supported for Marlin MoE."
             )
             return fused_marlin_moe(
                 x,
-                layer.w13_weight,
-                layer.w2_weight,
+                params.w13_weight,
+                params.w2_weight,
                 None,
                 None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
+                params.w13_weight_scale,
+                params.w2_weight_scale,
                 router_logits,
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                workspace=layer.workspace,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
+                global_num_experts=params.global_num_experts,
+                expert_map=params.expert_map,
+                workspace=params.workspace,
             )
 
         elif self.rocm_aiter_moe_enabled:
@@ -1125,13 +1128,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert self.moe_quant_config is not None
             return rocm_aiter_fused_experts(
                 hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=params.w13_weight,
+                w2=params.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
+                activation=params.activation,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
+                expert_map=params.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -1146,17 +1149,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 assert per_act_token == per_channel_quant
                 return fused_experts(
                     hidden_states=x,
-                    w1=layer.w13_weight,
-                    w2=layer.w2_weight,
+                    w1=params.w13_weight,
+                    w2=params.w2_weight,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     inplace=True,
-                    activation=layer.activation,
-                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                    global_num_experts=layer.global_num_experts,
+                    activation=params.activation,
+                    apply_router_weight_on_input=params.apply_router_weight_on_input,
+                    global_num_experts=params.global_num_experts,
                     expert_map=None
                     if self.disable_expert_map
-                    else layer.expert_map,  # ???
+                    else params.expert_map,  # ???
                     quant_config=self.moe_quant_config,
                 )
             else:
@@ -1168,14 +1171,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 assert self.moe_quant_config is not None
                 return cutlass_moe_fp8(
                     x,
-                    layer.w13_weight,
-                    layer.w2_weight,
+                    params.w13_weight,
+                    params.w2_weight,
                     topk_weights,
                     topk_ids,
                     quant_config=self.moe_quant_config,
-                    activation=layer.activation,
-                    global_num_experts=layer.global_num_experts,
-                    expert_map=None if self.disable_expert_map else layer.expert_map,
+                    activation=params.activation,
+                    global_num_experts=params.global_num_experts,
+                    expert_map=None if self.disable_expert_map else params.expert_map,
                     ab_strides1=self.ab_strides1_c_strides2,
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
@@ -1189,15 +1192,15 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert self.moe_quant_config is not None
             return fused_experts(
                 hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=params.w13_weight,
+                w2=params.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=layer.activation,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
+                activation=params.activation,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
+                global_num_experts=params.global_num_experts,
+                expert_map=params.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -1315,28 +1318,29 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         return fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=params.w13_weight,
+            w2=params.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            activation=params.activation,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
             quant_config=self.moe_quant_config,
         )
 
@@ -1644,39 +1648,40 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", (
-            f"{layer.activation} not supported for Marlin MoE."
+        assert params.activation == "silu", (
+            f"{params.activation} not supported for Marlin MoE."
         )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         return fused_marlin_moe(
             x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
+            params.w13_weight_packed,
+            params.w2_weight_packed,
             None,
             None,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
+            params.w13_weight_scale,
+            params.w2_weight_scale,
             router_logits,
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            g_idx1=layer.w13_weight_g_idx,
-            g_idx2=layer.w2_weight_g_idx,
-            sort_indices1=layer.w13_g_idx_sort_indices,
-            sort_indices2=layer.w2_g_idx_sort_indices,
-            workspace=layer.workspace,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
+            g_idx1=params.w13_weight_g_idx,
+            g_idx2=params.w2_weight_g_idx,
+            sort_indices1=params.w13_g_idx_sort_indices,
+            sort_indices2=params.w2_g_idx_sort_indices,
+            workspace=params.workspace,
             is_k_full=self.is_k_full,
         )
 
@@ -1877,28 +1882,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         return fused_experts(
             x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
+            params.w13_weight_packed,
+            params.w2_weight_packed,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            activation=params.activation,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
             quant_config=self.moe_quant_config,
         )
 
@@ -2172,15 +2178,16 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert not layer.enable_eplb, "EPLB not supported for W4A8-int MoE yet."
-        assert layer.activation in ("silu", "swigluoai", "swiglu"), (
+        assert not params.enable_eplb, "EPLB not supported for W4A8-int MoE yet."
+        assert params.activation in ("silu", "swigluoai", "swiglu"), (
             "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
         )
-        assert layer.expert_map is None, """expert_map/EP not implemented
+        assert params.expert_map is None, """expert_map/EP not implemented
         for CPU dyn-4bit MoE."""
 
         def _act_kind(s: str) -> int:
@@ -2197,27 +2204,27 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=layer.use_grouped_topk,
-            top_k=layer.top_k,
-            renormalize=layer.renormalize,
-            topk_group=layer.topk_group,
-            num_expert_group=layer.num_expert_group,
-            custom_routing_function=layer.custom_routing_function,
-            scoring_func=layer.scoring_func,
-            routed_scaling_factor=layer.routed_scaling_factor,
-            e_score_correction_bias=layer.e_score_correction_bias,
+            use_grouped_topk=params.use_grouped_topk,
+            top_k=params.top_k,
+            renormalize=params.renormalize,
+            topk_group=params.topk_group,
+            num_expert_group=params.num_expert_group,
+            custom_routing_function=params.custom_routing_function,
+            scoring_func=params.scoring_func,
+            routed_scaling_factor=params.routed_scaling_factor,
+            e_score_correction_bias=params.e_score_correction_bias,
         )
 
         return torch.ops._C.dynamic_4bit_int_moe(
             x,
             topk_ids.to(torch.long),
             topk_weights,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
-            layer.w2_out_features,
-            layer.w2_in_features,
-            layer.w13_out_features,
-            layer.group_size,
-            layer.apply_router_weight_on_input,
-            int(_act_kind(layer.activation)),
+            params.w13_weight_packed,
+            params.w2_weight_packed,
+            params.w2_out_features,
+            params.w2_in_features,
+            params.w13_out_features,
+            params.group_size,
+            params.apply_router_weight_on_input,
+            int(_act_kind(params.activation)),
         )
