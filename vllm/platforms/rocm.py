@@ -262,6 +262,10 @@ class RocmPlatform(Platform):
                 f"is not MLA type while requested for MLA backend."
             )
 
+        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend.")
+            return AttentionBackendEnum.FLEX_ATTENTION.get_path()
+
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info("Using Triton Attention backend on V1 engine.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
