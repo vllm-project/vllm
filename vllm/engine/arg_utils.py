@@ -1576,6 +1576,12 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
+        if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
+            logger.info(
+                "Disabling NCCL for DP synchronization when using async scheduling."
+            )
+            self.disable_nccl_for_dp_synchronization = True
+
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
