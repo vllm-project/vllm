@@ -131,7 +131,6 @@ VLLM_ROCM_USE_AITER=1 VLLM_ATTENTION_BACKEND="TRITON_MLA" vllm serve deepseek-ai
 
 ```
 
-
 ### 6. DeepSeek MLA (ROCM_AITER_MLA)
 
 For DeepSeek models, vLLM defaults to ROCM_AITER_MLA on supported hardware.
@@ -155,13 +154,15 @@ VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-R1 \
 
 When multiple configurations are provided, vLLM follows this strict priority order:
 
-1.  **Explicit Selection**:
+1. **Explicit Selection**:
     * `VLLM_ATTENTION_BACKEND` takes the highest precedence. If set, other flags are ignored.
-2.  **Implicit Flags** (only checked if no explicit backend is set):
+
+2. **Implicit Flags** (only checked if no explicit backend is set):
     * **Priority 1**: `ROCM_AITER_UNIFIED_ATTN` (if `VLLM_ROCM_USE_AITER=1` AND `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`).
     * **Priority 2**: `ROCM_AITER_FA` (if `VLLM_ROCM_USE_AITER=1` AND hardware is `gfx9`).
     * **Priority 3**: `ROCM_ATTN` (if `VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1`).
-3.  **Default**:
+
+3. **Default**:
     * Falls back to `TRITON_ATTN`.
 
 !!! note
