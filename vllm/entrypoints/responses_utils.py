@@ -10,6 +10,9 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
@@ -94,6 +97,12 @@ def construct_chat_message_with_tool_call(
             "role": "assistant",
             "reasoning": reasoning_content,
         }
+    elif isinstance(item, ResponseFunctionToolCallOutputItem):
+        return ChatCompletionToolMessageParam(
+            role="tool",
+            content=item.output,
+            tool_call_id=item.call_id,
+        )
     elif item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
