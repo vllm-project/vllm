@@ -622,6 +622,12 @@ def sparse_attn_indexer(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Reserve workspace for indexer during profiling run
+        current_workspace_manager().get_simultaneous(
+            ((total_seq_lens, head_dim), torch.float8_e4m3fn),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -781,11 +787,6 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # Reserve workspace for indexer during profiling run
-    current_workspace_manager().get_simultaneous(
-        ((total_seq_lens, head_dim), torch.float8_e4m3fn),
-        ((total_seq_lens, 4), torch.uint8),
-    )
     return topk_indices_buffer
 
 
