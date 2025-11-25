@@ -112,29 +112,35 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_hidden_layers,
                     model_config.hf_text_config.num_experts_per_tok,
                 )
-                nbytes = int(np.prod(shape)) * np.dtype(np.int32).itemsize
+                self.dest_size = int(np.prod(shape)) * np.dtype(np.int32).itemsize
                 self.lock_file = f"{LOCK_FILE_PREFIX}_{instance_id}.lock"
+                self.shm_name = f"{BUFFER_PREFIX}_{instance_id}"
 
-                # 创建共享内存
                 with open(self.lock_file, "wb") as fp:
                     lock_file(fp)
                     try:
-                        # If already exists, SharedMemory(create=True) would raise.
-                        # We assume capturer creates it first.
-                        self._shm = shared_memory.SharedMemory(
-                            create=True,
-                            size=nbytes,
-                            name=f"{BUFFER_PREFIX}_{instance_id}",
-                        )
+                        shm = shared_memory.SharedMemory(name=self.shm_name, create=True, size=self.dest_size)
+                    except:
+                        shm = shared_memory.SharedMemory(name=self.shm_name, create=False, size=self.dest_size)
 
-                        # 创建 numpy array 视图
-                        self._host_buffer_view = np.ndarray(
-                            shape, dtype=np.int32, buffer=self._shm.buf
-                        )
-                        # 初始化为 0
-                        self._host_buffer_view.fill(0)
-                    finally:
-                        unlock_file(fp)
+                    if shm.size != self.dest_size:
+                        logger.warning(f"size not same, unlink shm {self.shm_name} and create again")
+                        shm.close()
+                        shm.unlink()
+                        try:
+                            shm = shared_memory.SharedMemory(name=self.shm_name, create=True, size=self.dest_size)
+                            logger.info(f"create shm {self.shm_name}")
+                        except:
+                            shm = shared_memory.SharedMemory(name=self.shm_name, create=False, size=self.dest_size)
+                            logger.info(f"link shm {self.shm_name}")
+
+                    self._shm = shm
+                    self._host_buffer_view = np.ndarray(
+                        shape, dtype=np.int32, buffer=self._shm.buf
+                    )
+                    # init 0
+                    self._host_buffer_view.fill(0)
+                    unlock_file(fp)
 
                 # parameterized logging (avoid f-strings in logging)
                 logger.debug(
