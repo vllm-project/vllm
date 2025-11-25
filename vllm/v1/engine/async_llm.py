@@ -321,14 +321,15 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, parent_params)
