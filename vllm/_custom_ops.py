@@ -1453,7 +1453,8 @@ def cutlass_w4a8_moe_mm(
     )
 
 
-def cutlass_encode_and_reorder_int4b_grouped(b_tensors: torch.Tensor) -> torch.Tensor:
+# TODO: fake ops, potentially consolidate with w4a8 dense
+def cutlass_encode_and_reorder_int4b_grouped(b_tensors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
 
 

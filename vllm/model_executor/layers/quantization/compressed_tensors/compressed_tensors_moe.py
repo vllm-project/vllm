@@ -2452,7 +2452,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ):
         super().__init__(moe)
         self.quant_config = quant_config
-        self.moe_quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations"
@@ -2476,7 +2475,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # implement weight creation
         layer.intermediate_size_per_partition = intermediate_size_per_partition
         layer.hidden_size = hidden_size
         layer.num_experts = num_experts
@@ -2569,7 +2567,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_chan_scale, extra_weight_attrs)
 
         # weight shapes
-        # TODO czhu: dont believe it matters the quant method here
+        # TODO(czhu): dont believe it matters the quant method here
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
         )
@@ -2589,9 +2587,66 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer):
         # encode and reorder weights
         # pack scales
-        # define the a/b/c strides
+        # define the a/b/c/s strides
         # do i have to rename weight_packed -> weight? dont think so
-        pass
+        device = layer.w13_weight_packed.device
+
+        # STRIDES
+        # A, C
+        self.a_strides1_c_strides2 = torch.full(
+            (layer.local_num_experts,),
+            layer.hidden_size,
+            device=device,
+            dtype=torch.int64,
+        )
+        self.a_strides2 = torch.full(
+            (layer.local_num_experts,),
+            layer.intermediate_size_per_partition,
+            device=device,
+            dtype=torch.int64,
+        )
+        self.c_strides1 = torch.full(
+            (layer.local_num_experts,),
+            2 * layer.intermediate_size_per_partition,
+            device=device,
+            dtype=torch.int64,
+        )
+
+        # S (group-wise scales)
+        self.s_strides1 = torch.zeros(
+            (layer.local_num_experts, 2),
+            device=device,
+            dtype=torch.int64
+        )
+        self.s_strides1[:, 0] = 2 * layer.intermediate_size_per_partition
+
+        self.s_strides2 = torch.zeros(
+            (layer.local_num_experts, 2),
+            device=device,
+            dtype=torch.int64
+        )
+        self.s_strides2[:, 0] = layer.hidden_size
+
+        # pack group-wise scales
+        w13_weight_scale_packed = ops.cutlass_pack_scale_fp8(
+            layer.w13_weight_scale
+        )
+        replace_parameter(layer, "w13_weight_scale", w13_weight_scale_packed)
+        w2_weight_scale_packed = ops.cutlass_pack_scale_fp8(
+            layer.w2_weight_scale
+        )
+        replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
+
+        # packed int4 weights B
+        # we get the layout/strides from the packing function
+        w13_weight_shuffled, self.b_strides1 = ops.cutlass_encode_and_reorder_int4b_grouped(
+            layer.w13_weight_packed
+        )
+        replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
+        w2_weight_shuffled, self.b_strides2 = ops.cutlass_encode_and_reorder_int4b_grouped(
+            layer.w2_weight_packed
+        )
+        replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         # double check this pass needed for cutlass moe kernels?
@@ -2601,19 +2656,28 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         # should be like dense w4a8; input is token, weights are per-chan but also per group
-        # TODO: need to have both per-chan and per-group weights for this stuff
+        # TODO(czhu): need to have both per-chan and per-group weights for this stuff
         # but dont actually know what it is needed for? should figure this out
         # before adding a bunch of fields
         return int4_w4afp8_moe_quant_config(
             w1_scale=layer.w13_weight_scale, # group scale
             w2_scale=layer.w2_weight_scale, # group scale
-            a1_scale=layer.w13_input_scale, # none
-            a2_scale=layer.w2_input_scale, # none
+            w1_chan_scale=layer.w13_weight_chan_scale,
+            w2_chan_scale=layer.w2_weight_chan_scale,
             per_act_token_quant=True, # always use dynamc per-tok
             per_out_ch_quant=True, # always use per-chan
             block_shape=layer.weight_block_size, # should it be [0, group_size] ? 
-            # need int4 dtype? fp8 activations?
         )
+        # i guess this means we need to pass strides through the cutlass moe fn
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        layer: torch.nn.Module,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        __import__('fpdb').ForkedPdb().set_trace()
+        assert self.moe_quant_config is not None
+        pass
 
     def apply(
         self,
@@ -2642,7 +2706,51 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
             )
-        
+        assert self.moe_quant_config is not None
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+        )
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            cutlass_moe_w4a8_fp8,
+        )
+        # args needs some change i think
+        return cutlass_moe_w4a8_fp8(
+            x,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            topk_weights,
+            topk_ids,
+            quant_config=self.moe_quant_config,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=None if self.disable_expert_map else expert_map,
+            a_strides1=self.a_strides1_c_strides2,
+            a_strides2=self.a_strides2,
+            b_strides1=self.b_strides1,
+            b_strides2=self.b_strides2,
+            c_strides1=self.c_strides1,
+            c_strides2=self.a_strides1_c_strides2,
+            s_strides1=self.s_strides1,
+            s_strides2=self.s_strides2
+        )
 
     @property
     def supports_eplb(self) -> bool:

@@ -310,6 +310,14 @@ class FusedMoEQuantConfig:
         return self._w2.alpha_or_gscale
 
     @property
+    def w1_chan_scale(self) -> torch.Tensor | None:
+        return self._w1.chan_scale
+
+    @property
+    def w2_chan_scale(self) -> torch.Tensor | None:
+        return self._w2.chan_scale
+    
+    @property
     def use_fp8_w8a8(self) -> bool:
         return self.quant_dtype == torch.float8_e4m3fn
 
@@ -454,8 +462,10 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
-        - w1_chan_scale: Optional per-channel scale to be used for w1
-        - w2_chan_scale: Optional per-channel scale to be used for w1
+        - w1_chan_scale: Optional per-channel scale to be used for w1 when
+          `w1_scale` is used by the group scales.
+        - w2_chan_scale: Optional per-channel scale to be used for w1 when
+          `w2_scale` is used by the group scales.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -468,6 +478,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "int4",
         }
 
         if weight_dtype is None:
@@ -683,8 +694,8 @@ def int8_w8a16_moe_quant_config(
 def int4_w4afp8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
+    w1_chan_scale: torch.Tensor,
+    w2_chan_scale: torch.Tensor,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
@@ -693,18 +704,15 @@ def int4_w4afp8_moe_quant_config(
     Construct a quant config for fp8 activations and int4 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn, # this is...incorrect?
+        torch.float8_e4m3fn, # quant dtype for activations
         w1_scale=w1_scale,
-        g1_alphas=g1_alphas,
         w2_scale=w2_scale,
-        g2_alphas=g2_alphas,
-        a1_scale=a1_scale,
-        a1_gscale=a1_gscale,
-        a2_scale=a2_scale,
-        a2_gscale=a2_gscale,
+        w1_chan_scale=w1_chan_scale,
+        w2_chan_scale=w2_chan_scale,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        weight_dtype="int4", # weight dtype for weights
     )
 
 

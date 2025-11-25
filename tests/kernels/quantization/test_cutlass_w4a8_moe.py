@@ -79,10 +79,10 @@ Ks = [512, 256] # need divisible by gorup size
 Ns = [2048, 1024]
 ALIGNMENT = 16 # torch scaled mm alignment for M, needed for reference check
 
-# faster test
-# Ks = [512]
-# Ns = [2048]
-# NUM_EXPERTS = [4]
+# faster test, qwen config
+Ks = [2048]
+Ns = [768]
+NUM_EXPERTS = [128]
 
 if __name__ == '__main__':
     current_platform.seed_everything(42)
@@ -91,6 +91,9 @@ if __name__ == '__main__':
             for N in Ns:
                 # generate random number of tokens per expert
                 Ms = [ALIGNMENT * random.randint(1, 64) for _ in range(num_experts)]
+                # set some random indices to 0
+                for zindex in [6, 7, 8, 17, 83, 94, 114]:
+                    Ms[zindex] = 0
                 M_full = sum(Ms)
                 scale_k = K // GROUP_SIZE
 
@@ -152,6 +155,7 @@ if __name__ == '__main__':
                 starts = expert_offsets.cpu().tolist()
                 for i in range(num_experts):
                     start, end = starts[i], ends[i]
+                    if start == end: continue # no tokens for this expert
                     out_ref = torch._scaled_mm(
                         a_ref[start:end].to(torch.float8_e4m3fn),
                         w_refs[i].to(torch.float8_e4m3fn).t().contiguous().t(),
