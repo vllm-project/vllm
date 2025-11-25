@@ -585,16 +585,26 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
-                debug_info = {
-                    "architectures": architectures,
-                    "is_generative_model": is_generative_model,
-                    "is_pooling_model": is_pooling_model,
-                }
-                raise AssertionError(
-                    "The model should be a generative or "
-                    "pooling model when task is set to "
-                    f"{self.task!r}. Found: {debug_info}"
-                )
+                # Neither generative nor pooling model - try to convert if possible
+                if is_pooling_task:
+                    runner = "pooling"
+                    convert = _task_to_convert(self.task)
+                    msg_hint = (
+                        "Please replace this option with `--runner pooling "
+                        f"--convert {convert}` to continue using this model "
+                        "as a pooling model."
+                    )
+                else:
+                    debug_info = {
+                        "architectures": architectures,
+                        "is_generative_model": is_generative_model,
+                        "is_pooling_model": is_pooling_model,
+                    }
+                    raise AssertionError(
+                        "The model should be a generative or "
+                        "pooling model when task is set to "
+                        f"{self.task!r}. Found: {debug_info}"
+                    )
 
             self.runner = runner
             self.convert = convert
