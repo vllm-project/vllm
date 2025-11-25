@@ -654,12 +654,13 @@ def get_config(
     # Separate model folder from file path for GGUF models
 
     _is_gguf = is_gguf(model)
+    _is_remote_gguf = is_remote_gguf(model)
     if _is_gguf:
         if check_gguf_file(model):
             # Local GGUF file
             kwargs["gguf_file"] = Path(model).name
             model = Path(model).parent
-        elif is_remote_gguf(model):
+        elif _is_remote_gguf:
             # Remote GGUF - extract repo_id from repo_id:quant_type format
             # The actual GGUF file will be downloaded later by GGUFModelLoader
             # Keep model as repo_id:quant_type for download, but use repo_id for config
@@ -671,10 +672,25 @@ def get_config(
             # Transformers implementation.
             if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
-            elif _is_gguf or file_or_path_exists(
+            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
             ):
                 config_format = "hf"
+            # Remote GGUF models must have config.json in repo,
+            # otherwise the config can't be parsed correctly.
+            # FIXME(Isotr0py): Support remote GGUF repos without config.json
+            elif _is_remote_gguf and not file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                err_msg = (
+                    "Could not find config.json for remote GGUF model repo. "
+                    "To load remote GGUF model through `<repo_id>:<quant_type>`, "
+                    "ensure your model has config.json (HF format) file. "
+                    "Otherwise please specify --hf-config-path <original_repo> "
+                    "in engine args to fetch config from unquantized hf model."
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
