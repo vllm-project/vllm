@@ -48,6 +48,7 @@ def test_deepseekv2_lora(deepseekv2_lora_files):
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
+        gpu_memory_utilization=0.85,
         enforce_eager=True,
         trust_remote_code=True,
         enable_chunked_prefill=True,
@@ -63,6 +64,7 @@ def test_deepseekv2(deepseekv2_lora_files):
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
+        gpu_memory_utilization=0.85,
         enforce_eager=True,
         trust_remote_code=True,
     )
