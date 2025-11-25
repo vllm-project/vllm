@@ -1136,9 +1136,17 @@ def fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
+    scoring_func: str = "softmax",
 ):
     n_routed_experts = gating_output.shape[-1]
-    scores = gating_output.softmax(dim=-1)
+
+    if scoring_func == "softmax":
+        scores = gating_output.softmax(dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
@@ -1190,14 +1198,7 @@ def grouped_topk(
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    if scoring_func == "softmax":
-        scores = torch.softmax(gating_output, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
-    else:
-        raise ValueError(f"Unsupported scoring function: {scoring_func}")
-
-    num_experts = scores.size(-1)
+    num_experts = gating_output.shape[-1]
     if num_experts <= num_expert_group or num_experts % num_expert_group != 0:
         logger.warning(
             (
@@ -1209,13 +1210,21 @@ def grouped_topk(
             num_expert_group,
         )
         # fallback to normal topk computation
-        topk_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
-        topk_weights = scores.gather(1, topk_indices)
-        if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-        if routed_scaling_factor != 1.0:
-            topk_weights = topk_weights * routed_scaling_factor
-        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+        return fused_topk_bias(
+            hidden_states,
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            scoring_func=scoring_func,
+        )
+
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     num_token = scores.size(0)
     if e_score_correction_bias is not None:
