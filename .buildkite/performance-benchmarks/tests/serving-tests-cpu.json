@@ -508,7 +508,7 @@
         "enable_chunked_prefill": ""
       },
       "client_parameters": {
-        "model": "zai-org/glm-4-9b-hf",
+        "model": "google/gemma-7b",
         "dataset_name": "random",
         "random-input-len": 128,
         "random-output-len": 128,
