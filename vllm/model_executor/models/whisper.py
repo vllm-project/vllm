@@ -604,8 +604,7 @@ class WhisperModel(nn.Module):
         positions: torch.Tensor,
         encoder_outputs: list[torch.Tensor],
     ) -> torch.Tensor:
-        assert len(encoder_outputs) in (0, 1)
-        enc_states = encoder_outputs[0] if len(encoder_outputs) == 1 else None
+        enc_states = torch.cat(encoder_outputs, dim=0) if len(encoder_outputs) else None
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
