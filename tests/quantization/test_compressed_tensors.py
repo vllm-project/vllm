@@ -770,6 +770,10 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is not for non-CUDA platforms",
+)
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     """
     Integration test for MoE layer ignore functionality with a real model.
@@ -784,7 +788,9 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     - Config with ignore list containing specific MoE layers
     - Multiple MoE layers where some are quantized and some are not
     """
-    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
+
+    # model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only" # CT 12.3
+    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"  # CT 12.2
 
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
