@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = "Success: LoRA adapter '{lora_name}' added successfully."
 LORA_UNLOADING_SUCCESS_MESSAGE = (

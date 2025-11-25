@@ -9,7 +9,8 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
-from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -138,7 +139,7 @@ class InputBatch:
         self.min_tokens: dict[int, tuple[int, set[int]]] = {}
 
         # lora related
-        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int32)
+        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -148,9 +149,6 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
-        # NOTE(rob): num_prompt_logprobs only includes reqs
-        # that are currently in the prefill phase.
-        self.num_prompt_logprobs: dict[str, int] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -214,8 +212,8 @@ class InputBatch:
         sampling_params = request.sampling_params
         assert sampling_params is not None, "pooling requests not supported yet"
         if sampling_params.sampling_type == SamplingType.GREEDY:
-            # Avoid later division by zero.
-            self.temperature_cpu[req_index] = -1.0
+            # Should avoid division by zero later when apply_temperature.
+            self.temperature_cpu[req_index] = 0.0
             self.greedy_reqs.add(req_id)
         else:
             self.temperature_cpu[req_index] = sampling_params.temperature
@@ -255,8 +253,6 @@ class InputBatch:
 
         if sampling_params.logprobs is not None:
             self.num_logprobs[req_id] = sampling_params.logprobs
-        if sampling_params.prompt_logprobs is not None:
-            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
@@ -316,7 +312,6 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
@@ -525,7 +520,7 @@ class InputBatch:
         return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
 
     def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
+        self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
@@ -582,10 +577,6 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
-
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return not self.num_prompt_logprobs
 
     @property
     def no_allowed_token_ids(self) -> bool:

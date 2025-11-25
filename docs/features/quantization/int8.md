@@ -44,7 +44,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
+    MODEL_ID,
+    device_map="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
@@ -85,7 +87,7 @@ Now, apply the quantization algorithms:
 ??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import GPTQModifier
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 

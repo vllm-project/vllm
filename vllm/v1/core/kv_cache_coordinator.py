@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -26,6 +27,7 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        pcp_world_size: int,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
@@ -43,6 +45,7 @@ class KVCacheCoordinator(ABC):
                 block_pool=self.block_pool,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
+                pcp_world_size=pcp_world_size,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -51,7 +54,7 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         num_tokens: int,
-        new_computed_blocks: tuple[list[KVCacheBlock], ...],
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
     ) -> int:
         """
@@ -84,7 +87,7 @@ class KVCacheCoordinator(ABC):
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[list[KVCacheBlock], ...]
+        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -209,6 +212,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         use_eagle: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        pcp_world_size: int,
     ):
         super().__init__(
             kv_cache_config,
@@ -217,6 +221,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             False,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -249,6 +254,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        pcp_world_size: int,
     ):
         super().__init__(
             kv_cache_config,
@@ -257,12 +263,16 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
+        self.pcp_world_size = pcp_world_size
         if dcp_world_size > 1:
             self.block_size *= dcp_world_size
+        if pcp_world_size > 1:
+            self.block_size *= pcp_world_size
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
             "UnitaryKVCacheCoordinator assumes only one kv cache group"
         )
@@ -280,6 +290,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             dcp_world_size=self.dcp_world_size,
+            pcp_world_size=self.pcp_world_size,
         )
         return hit_blocks, len(hit_blocks[0]) * self.block_size
 
@@ -301,6 +312,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        pcp_world_size: int,
     ):
         super().__init__(
             kv_cache_config,
@@ -309,8 +321,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
+        assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -451,6 +465,7 @@ def get_kv_cache_coordinator(
     enable_caching: bool,
     enable_kv_cache_events: bool,
     dcp_world_size: int,
+    pcp_world_size: int,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -459,6 +474,7 @@ def get_kv_cache_coordinator(
             use_eagle,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -468,6 +484,7 @@ def get_kv_cache_coordinator(
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -476,4 +493,5 @@ def get_kv_cache_coordinator(
         enable_caching,
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
+        pcp_world_size=pcp_world_size,
     )

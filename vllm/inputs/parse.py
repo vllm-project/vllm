@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict, cas
 
 from typing_extensions import TypeIs
 
-from vllm.utils import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 from .data import (
     EmbedsPrompt,

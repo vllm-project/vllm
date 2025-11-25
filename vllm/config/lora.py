@@ -2,17 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -47,19 +45,6 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: LoRAExtraVocabSize = Field(
-        default=256,
-        deprecated=(
-            "`lora_extra_vocab_size` is deprecated and will be removed "
-            "in v0.12.0. Additional vocabulary support for "
-            "LoRA adapters is being phased out."
-        ),
-    )
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
-    LoRA adapter. Will be removed in v0.12.0."""
-    lora_vocab_padding_size: ClassVar[int] = (
-        current_platform.get_lora_vocab_padding_size()
-    )
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -88,8 +73,6 @@ class LoRAConfig:
         factors.append(self.max_loras)
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
 
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -105,10 +88,6 @@ class LoRAConfig:
             )
 
         return self
-
-    def verify_with_cache_config(self, cache_config: CacheConfig):
-        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
-            raise ValueError("V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):

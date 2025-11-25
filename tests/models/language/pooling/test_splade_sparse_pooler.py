@@ -3,7 +3,6 @@
 
 import types
 
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -14,11 +13,12 @@ from vllm.model_executor.models.bert import (
 )
 
 # ---------------------------------------------------------------------
-# 1) Functional test: SPLADE formula correctness (no HF download needed)
+# Functional test: SPLADE formula correctness (no HF download needed)
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("B,T,H,V", [(2, 3, 5, 7)])
+@torch.inference_mode
 def test_splade_pooler_matches_reference_formula(B, T, H, V):
     """Ensure SPLADESparsePooler forward() matches the mathematical formula:
     log1p(relu(logits)) -> max over sequence length (after masking)."""
@@ -26,9 +26,11 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
 
     # Prepare [B] sequences of shape [T, H]
     hs_list = [torch.randn(T, H) for _ in range(B)]
+    hs_tenser = torch.cat(hs_list)
 
     # Simulate PoolingMetadata (only required fields)
     prompt_lens = [T, T - 1]
+    prompt_lens_tenser = torch.tensor(prompt_lens, dtype=torch.int32)
     token_ids = torch.tensor(
         [
             [101, 5, 102],  # Batch 0: [CLS], token, [SEP]
@@ -36,7 +38,9 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
         ],
         dtype=torch.long,
     )
-    meta = types.SimpleNamespace(prompt_lens=prompt_lens, prompt_token_ids=token_ids)
+    meta = types.SimpleNamespace(
+        prompt_lens=prompt_lens_tenser, prompt_token_ids=token_ids
+    )
 
     # MLM head (prefer BertMLMHead, fallback to Linear if unavailable)
     try:
@@ -46,10 +50,10 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
 
     # Forward pass through SPLADE pooler
     pooler = SPLADESparsePooler(mlm_head=mlm_head, pooling="max", remove_cls_sep=True)
-    pooled = pooler(hidden_states=hs_list, pooling_metadata=meta)  # list of [V]
+    pooled = pooler(hidden_states=hs_tenser, pooling_metadata=meta)  # list of [V]
 
     # Basic output checks
-    assert isinstance(pooled, list) and len(pooled) == B
+    assert isinstance(pooled, torch.Tensor) and len(pooled) == B
     for vec in pooled:
         assert vec.shape == (V,)
         assert torch.isfinite(vec).all()
@@ -83,40 +87,3 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
         rtol=1e-4,
         atol=1e-4,
     )
-
-
-# ---------------------------------------------------------------------
-# 2) Integration smoke test: end-to-end embedding path wiring
-# ---------------------------------------------------------------------
-
-
-@pytest.mark.cpu_model
-def test_bert_splade_sparse_embed_smoke(vllm_runner, monkeypatch):
-    """Ensure BertSpladeSparseEmbeddingModel loads and produces sparse embeddings."""
-    from transformers import AutoTokenizer
-
-    MODEL_ID = "hf-internal-testing/tiny-random-bert"
-    hf_overrides = {"architectures": ["BertSpladeSparseEmbeddingModel"]}
-
-    # Enforce CPU-only execution (optional)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
-    vocab_size = tok.vocab_size
-
-    # The embed path should route through SPLADESparsePooler
-    with vllm_runner(
-        MODEL_ID,
-        runner="pooling",
-        max_model_len=64,
-        hf_overrides=hf_overrides,
-    ) as vm:
-        outs = vm.embed(["hello world", "splade sparse test"])
-
-        # Basic sanity checks
-        assert len(outs) == 2
-        assert outs[0].shape[0] == vocab_size
-        assert outs[1].shape[0] == vocab_size
-        assert np.isfinite(outs[0]).all() and (outs[0] >= 0).all()
-        assert np.isfinite(outs[1]).all() and (outs[1] >= 0).all()

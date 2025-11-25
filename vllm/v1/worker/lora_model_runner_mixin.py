@@ -76,13 +76,17 @@ class LoRAModelRunnerMixin:
         self,
         input_batch: InputBatch,
         num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        if num_sampled_tokens is None:
+            num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
+
+        prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
-            input_batch.make_lora_inputs(num_scheduled_tokens)
+            input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
@@ -130,7 +134,12 @@ class LoRAModelRunnerMixin:
         lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        num_sampled_tokens: np.ndarray | None = None,
+        activate_lora: bool = True,
     ):
+        if num_sampled_tokens is None:
+            num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
+
         if lora_config is None:
             yield
         else:
@@ -142,7 +151,15 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+            if activate_lora:
+                prompt_lora_mapping = (
+                    np.arange(num_reqs, dtype=np.int32) % num_loras
+                ) + 1
+            else:
+                prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
+
+            # Make sample lora mapping
+            sample_lora_mapping = np.repeat(prompt_lora_mapping, num_sampled_tokens)
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
@@ -158,10 +175,10 @@ class LoRAModelRunnerMixin:
             }
 
             self._set_active_loras(
-                tuple(prompt_lora_mapping),
-                tuple(token_lora_mapping),
-                lora_requests,
-                mapping_type,
+                tuple(sample_lora_mapping), 
+                tuple(token_lora_mapping), 
+                lora_requests, 
+                mapping_type
             )
 
             yield
@@ -171,13 +188,15 @@ class LoRAModelRunnerMixin:
         self,
         lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray,
+        activate_lora: bool = True,
         remove_lora: bool = True,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
             self.maybe_select_dummy_loras(
-                lora_config, num_scheduled_tokens, mapping_type
+                lora_config, num_scheduled_tokens, mapping_type, num_sampled_tokens, activate_lora
             ),
         ):
             yield

@@ -97,9 +97,15 @@ class JinaVLForSequenceClassification(
         self.score = JinaVLScorer(vllm_config.model_config)
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
-                "score": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
 

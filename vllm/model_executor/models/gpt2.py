@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from ..layers.pooler import DispatchPooler, Pooler
-from .interfaces import SupportsPP
+from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -213,7 +213,7 @@ class GPT2Model(nn.Module):
             ["hidden_states"], config.n_embd
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
@@ -225,7 +225,7 @@ class GPT2Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                inputs_embeds = self.get_input_embeddings(input_ids)
+                inputs_embeds = self.embed_input_ids(input_ids)
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
@@ -293,8 +293,8 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -321,7 +321,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         return loader.load_weights(weights)
 
 
-class GPT2ForSequenceClassification(nn.Module):
+class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """GPT2 Model for sequence classification.
 
     This class expands GPT2Model with pooling and score functions - last token
@@ -353,10 +353,20 @@ class GPT2ForSequenceClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

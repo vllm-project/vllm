@@ -75,7 +75,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -97,28 +96,19 @@ class MolmoImageInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
-        - nc: Number of crops (dynamic)
+        - bnc: Batch size * number of images * number of crops (dynamic)
         - np: Number of patches
         - tp: Token sequence positions
         - pd: Patch dimension
     """
 
-    images: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "nc", "np", "pd", dynamic_dims={"nc"}),
-    ]
-    # Number of crops may vary per batch and image, so pass it as a list.
+    images: Annotated[torch.Tensor, TensorShape("bnc", "np", "pd")]
 
-    image_masks: Annotated[
-        torch.Tensor | list[torch.Tensor] | None,
-        TensorShape("bn", "nc", "np", dynamic_dims={"nc"}),
-    ]
+    image_masks: Annotated[torch.Tensor | None, TensorShape("bnc", "np")]
 
-    image_input_idx: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "nc", "tp", dynamic_dims={"nc"}),
-    ]
-    # An index tensor that maps image features to their corresponding patch tokens.
+    image_input_idx: Annotated[torch.Tensor, TensorShape("bnc", "tp")]
+    """An index tensor that maps image features to their corresponding patch tokens."""
+
     num_crops: Annotated[torch.Tensor, TensorShape("bn")]
 
 
@@ -420,7 +410,6 @@ class MolmoAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
 
         # Attention input projection. Projects x -> (q, k, v)
         self.qkv_proj = QKVParallelLinear(
@@ -447,7 +436,7 @@ class MolmoAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=config.rope_parameters,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -842,7 +831,7 @@ class MolmoModel(nn.Module, SupportsQuant):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -1274,13 +1263,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
     ) -> list[int]:
         processor = self.info.get_hf_processor()
 
-        # Apply the chat template to the tokens
+        # The chat template is already applied to the prompt tokens
+        # Use message_format="none" to avoid applying it again
+        # Prepend an empty space if `always_start_with_space` is True
         tokens = processor.processor.get_tokens_input(  # type: ignore
             self.info.get_tokenizer().decode(prompt_tokens),
-            message_format=processor.message_format,
+            message_format="none",
             always_start_with_space=processor.always_start_with_space,
         )
 
+        # Prepend a BOS token id to the tokens
         processed_data = self.info.ctx.call_hf_processor(
             processor,  # type: ignore
             dict(tokens=tokens),
@@ -1363,6 +1355,8 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 class MolmoForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsQuant
 ):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping
@@ -1409,10 +1403,9 @@ class MolmoForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
         self.multimodal_config = multimodal_config
-        self.lora_config = lora_config
 
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config, quant_config)
@@ -1451,18 +1444,12 @@ class MolmoForCausalLM(
         if images is None:
             return None
 
-        if not isinstance(num_crops, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of num_crops. Got type: {type(num_crops)}"
-            )
-        num_crops = flatten_bn(num_crops, concat=True)
-
         img_patch_id = kwargs.pop("img_patch_id", None)
-        if not isinstance(img_patch_id, torch.Tensor):
-            raise ValueError(
-                f"Incorrect type of img_patch_id. Got type: {type(img_patch_id)}"
-            )
-        self.img_patch_id = img_patch_id.flatten().unique().item()
+        if isinstance(img_patch_id, torch.Tensor):
+            img_patch_id = img_patch_id.item()
+
+        assert isinstance(img_patch_id, int)
+        self.img_patch_id = img_patch_id
 
         return MolmoImageInputs(
             images=images,
@@ -1481,17 +1468,9 @@ class MolmoForCausalLM(
         num_crops = image_input["num_crops"]
 
         # Call the vision backbone on the whole batch at once
-        images_flat = flatten_bn(images, concat=True)
-        image_masks_flat = (
-            None if image_masks is None else flatten_bn(image_masks, concat=True)
-        )
-        image_input_idx_flat = flatten_bn(image_input_idx, concat=True)
-
-        image_features_flat = self.vision_backbone(
-            images=images_flat.unsqueeze(0),
-            image_masks=(
-                None if image_masks_flat is None else image_masks_flat.unsqueeze(0)
-            ),
+        image_features = self.vision_backbone(
+            images=images.unsqueeze(0),
+            image_masks=None if image_masks is None else image_masks.unsqueeze(0),
         ).squeeze(0)
 
         # Only the features corresponding to patch tokens are relevant
@@ -1499,8 +1478,8 @@ class MolmoForCausalLM(
         results = []
         num_crops_list = num_crops.tolist()
         for feats, img_idx in zip(
-            image_features_flat.split(num_crops_list),
-            image_input_idx_flat.split(num_crops_list),
+            image_features.split(num_crops_list),
+            image_input_idx.split(num_crops_list),
         ):
             is_valid = img_idx >= 0
             valid_img_idx = img_idx[is_valid]
@@ -1511,7 +1490,7 @@ class MolmoForCausalLM(
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

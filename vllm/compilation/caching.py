@@ -3,6 +3,7 @@
 
 import hashlib
 import inspect
+import os
 import pickle
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 
 try:
@@ -114,7 +116,8 @@ class VllmSerializableFunction(SerializableCallable):
             the AOT compiled path.
             """
             compile_inputs = [
-                inp or example_inputs[i] for i, inp in enumerate(fn.example_inputs)
+                inp if inp is not None else example_inputs[i]
+                for i, inp in enumerate(fn.example_inputs)
             ]
             with tracing(TracingContext(fake_mode)):
                 fn.optimized_call = vllm_backend(
@@ -137,7 +140,7 @@ def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors = []
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = envs.compute_hash()
+    env_hash = hash_factors(envs.compile_factors())
     factors.append(env_hash)
 
     # 1. factors come from the vllm_config (it mainly summarizes how the
@@ -168,7 +171,8 @@ def _compute_code_hash(files: set[str]) -> str:
     )
     file_contents = {}
     for filepath in files:
-        if filepath == "<string>":
+        # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
+        if not os.path.isfile(filepath):
             file_contents[filepath] = ""
         else:
             with open(filepath) as f:

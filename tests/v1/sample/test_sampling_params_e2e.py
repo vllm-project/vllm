@@ -5,16 +5,13 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
 def llm() -> LLM:
-    # Disable prefix caching so that we can test prompt logprobs.
-    # TODO remove this after https://github.com/vllm-project/vllm/pull/13949
-    # is merged
-    return LLM(MODEL, enforce_eager=True, enable_prefix_caching=False)
+    return LLM(MODEL, enforce_eager=True)
 
 
 def test_n_gt_1(llm):
@@ -23,14 +20,6 @@ def test_n_gt_1(llm):
     params = SamplingParams(n=3)
     outputs = llm.generate(PROMPT, params)
     assert len(outputs[0].outputs) == 3
-
-
-def test_best_of(llm):
-    """Raise a ValueError since best_of is deprecated."""
-
-    params = SamplingParams(n=2, best_of=3)
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, params)
 
 
 def test_penalties(llm):

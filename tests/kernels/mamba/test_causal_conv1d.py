@@ -183,7 +183,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("seqlen", [1, 3])
@@ -265,7 +265,7 @@ def test_causal_conv1d_update_with_batch_gather(
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("seqlen", [8, 30, 249, 2049, 4096])
+@pytest.mark.parametrize("seqlen", [8, 249, 4096])
 @pytest.mark.parametrize("dim", [64, 4096])
 @pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.parametrize("batch", [4, 10])

@@ -16,6 +16,7 @@ from transformers.utils import torch_int
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -43,7 +44,7 @@ class InternS1VisionPatchEmbeddings(nn.Module):
         self.num_patches = num_patches
         self.patch_shape = patch_shape
 
-        self.projection = nn.Conv2d(
+        self.projection = Conv2dLayer(
             num_channels, hidden_size, kernel_size=patch_size, stride=patch_size
         )
 
@@ -217,16 +218,15 @@ class InternSdpaAttention(nn.Module):
         self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, C = x.shape
+        """x shape: (B, N, C)"""
 
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
 
         if self.qk_normalization:
-            B_, N_, H_, D_ = q.shape
-            q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
-            k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # Use unified MultiHeadAttention with automatic backend selection
         x = self.attn(q, k, v)

@@ -23,6 +23,12 @@ TOP_KS = [2, 6, 8]
 EP_SIZE = [1, 4, 16]
 current_platform.seed_everything(0)
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "moe_permute_unpermute_supported is not defined for ROCm",
+        allow_module_level=True,
+    )
+
 
 def torch_permute(
     hidden_states: torch.Tensor,
@@ -217,7 +223,7 @@ def test_moe_permute_unpermute(
     expert_map = None
     n_local_expert = n_expert
     if ep_size != 1:
-        n_local_expert, expert_map = determine_expert_map(ep_size, ep_rank, n_expert)
+        n_local_expert, expert_map, _ = determine_expert_map(ep_size, ep_rank, n_expert)
         expert_map = expert_map.cuda()
     start_expert = n_local_expert * ep_rank
     current_platform.seed_everything(0)

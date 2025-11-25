@@ -16,7 +16,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     tensorize_vllm_model,
     tensorizer_kwargs_arg,
 )
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = logging.getLogger()
 
@@ -84,7 +84,7 @@ directly to load models:
 from vllm import LLM
 llm = LLM(
     "s3://my-bucket/vllm/facebook/opt-125m/v1", 
-    load_format="tensorizer"
+    load_format="tensorizer",
 )
 ```
 

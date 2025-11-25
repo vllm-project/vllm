@@ -691,7 +691,9 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
-        self.mlp1 = self._init_mlp1(config)
+        self.mlp1 = self._init_mlp1(
+            config, quant_config, prefix=maybe_prefix(prefix, "mlp1")
+        )
 
         self.img_context_token_id = None
         self.visual_token_mask = None
@@ -738,7 +740,12 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             return InternVisionPatchModel(config.vision_config)
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig,
+        prefix: str = "",
+    ) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 
@@ -748,9 +755,17 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 vit_hidden_size * int(1 / self.downsample_ratio) ** 2,
                 llm_hidden_size,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.1",
             ),
             nn.GELU(),
-            ReplicatedLinear(llm_hidden_size, llm_hidden_size, return_bias=False),
+            ReplicatedLinear(
+                llm_hidden_size,
+                llm_hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.3",
+            ),
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -799,8 +814,11 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             return SkyworkR1VImagePixelInputs(
@@ -854,14 +872,14 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -874,9 +892,9 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,

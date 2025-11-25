@@ -21,7 +21,7 @@ def get_cache_dir() -> Path:
 @lru_cache
 def get_vllm_public_assets(filename: str, s3_prefix: str | None = None) -> Path:
     """
-    Download an asset file from ``s3://vllm-public-assets``
+    Download an asset file from `s3://vllm-public-assets`
     and return the path to the downloaded file.
     """
     asset_directory = get_cache_dir() / "vllm_public_assets"

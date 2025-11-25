@@ -9,17 +9,15 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.config import VllmConfig
 else:
-    ModelConfig = None
     VllmConfig = None
-    _Backend = None
+    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -44,15 +42,15 @@ class XPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
@@ -62,45 +60,24 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
-        use_v1 = envs.VLLM_USE_V1
-        if not use_v1:
-            raise ValueError("XPU backend only supports V1.")
-        TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-        FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-        if selected_backend == _Backend.TRITON_ATTN:
-            logger.info_once("Using Triton backend on V1 engine.")
-            return TRITON_ATTN
-        elif selected_backend == _Backend.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
-            return FLASH_ATTN
+        if selected_backend == AttentionBackendEnum.TRITON_ATTN:
+            logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend.")
+            return AttentionBackendEnum.FLASH_ATTN.get_path()
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
-                f"with use_v1: {use_v1} use_mla: {use_mla}"
+                f"with use_mla: {use_mla}"
             )
 
-        logger.info("Using Flash Attention backend on V1 engine.")
-        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Check if the kv_cache_dtype is supported.
-        XPU only support fp8 kv cache with triton backend.
-        """
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
-        ):
-            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
-
-        return False
+        logger.info("Using Flash Attention backend.")
+        return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -124,12 +101,24 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        xpu_use_triton_kernel = os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"
+        if not xpu_use_triton_kernel:
+            return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        else:
+            return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> "AttentionBackendEnum":
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
+        return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod
     def inference_mode(cls):
@@ -144,7 +133,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationMode, CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -155,11 +144,13 @@ class XPUPlatform(Platform):
         )
 
         if vllm_config.lora_config is not None:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        if vllm_config.kv_transfer_config is not None:
+            vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
@@ -168,7 +159,7 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':``
+            # spawn needs calling `if __name__ == '__main__':`
             # fork is not supported for xpu start new process.
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -193,10 +184,9 @@ class XPUPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod
@@ -236,8 +226,8 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:

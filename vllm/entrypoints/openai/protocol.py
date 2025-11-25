@@ -47,6 +47,15 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
+
+from vllm.config.pooler import get_use_activation
+from vllm.tasks import PoolingTask
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -63,13 +72,13 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
 )
 
-from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
 from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
@@ -81,7 +90,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.utils import random_uuid
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -187,7 +197,7 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     strict: bool | None = None
 
 
-class StructuralTag(OpenAIBaseModel):
+class LegacyStructuralTag(OpenAIBaseModel):
     begin: str
     # schema is the field, but that causes conflicts with pydantic so
     # instead use structural_tag_schema with an alias
@@ -195,10 +205,20 @@ class StructuralTag(OpenAIBaseModel):
     end: str
 
 
+class LegacyStructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[LegacyStructuralTag]
+    triggers: list[str]
+
+
 class StructuralTagResponseFormat(OpenAIBaseModel):
     type: Literal["structural_tag"]
-    structures: list[StructuralTag]
-    triggers: list[str]
+    format: Any
+
+
+AnyStructuralTagResponseFormat: TypeAlias = (
+    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat
+)
 
 
 class ResponseFormat(OpenAIBaseModel):
@@ -207,7 +227,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: JsonSchemaResponseFormat | None = None
 
 
-AnyResponseFormat: TypeAlias = ResponseFormat | StructuralTagResponseFormat
+AnyResponseFormat: TypeAlias = (
+    ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
+)
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -355,7 +377,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -363,10 +385,15 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for non-streaming "
+            "response object. Currently only supported for"
             "non-background and gpt-oss only. "
         ),
     )
+    # similar to input_messages / output_messages in ResponsesResponse
+    # we take in previous_input_messages (ie in harmony format)
+    # this cannot be used in conjunction with previous_response_id
+    # TODO: consider supporting non harmony messages as well
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -447,16 +474,54 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
+        return data
+
+    @model_validator(mode="before")
+    def function_call_parsing(cls, data):
+        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
+        This ensures Pydantic can properly resolve union types in the input field.
+        Function calls provided as dicts are converted to ResponseFunctionToolCall
+        objects before validation, while invalid structures are left for Pydantic
+        to reject with appropriate error messages.
+        """
+
+        input_data = data.get("input")
+
+        # Early return for None, strings, or bytes
+        # (strings are iterable but shouldn't be processed)
+        if input_data is None or isinstance(input_data, (str, bytes)):
+            return data
+
+        # Convert iterators (like ValidatorIterator) to list
+        if not isinstance(input_data, list):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                # Not iterable, leave as-is for Pydantic to handle
+                return data
+
+        processed_input = []
+        for item in input_data:
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                try:
+                    processed_input.append(ResponseFunctionToolCall(**item))
+                except ValidationError:
+                    # Let Pydantic handle validation for malformed function calls
+                    logger.debug(
+                        "Failed to parse function_call to ResponseFunctionToolCall, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+            else:
+                processed_input.append(item)
+
+        data["input"] = processed_input
         return data
 
 
@@ -500,7 +565,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
-    best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
@@ -588,62 +652,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
-    guided_json: str | dict | BaseModel | None = Field(
-        default=None,
-        description=(
-            "`guided_json` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `json` to `structured_outputs` instead."
-        ),
-    )
-    guided_regex: str | None = Field(
-        default=None,
-        description=(
-            "`guided_regex` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `regex` to `structured_outputs` instead."
-        ),
-    )
-    guided_choice: list[str] | None = Field(
-        default=None,
-        description=(
-            "`guided_choice` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `choice` to `structured_outputs` instead."
-        ),
-    )
-    guided_grammar: str | None = Field(
-        default=None,
-        description=(
-            "`guided_grammar` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `grammar` to `structured_outputs` instead."
-        ),
-    )
-    structural_tag: str | None = Field(
-        default=None,
-        description=(
-            "`structural_tag` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `structural_tag` to `structured_outputs` instead."
-        ),
-    )
-    guided_decoding_backend: str | None = Field(
-        default=None,
-        description=(
-            "`guided_decoding_backend` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please remove it from your request."
-        ),
-    )
-    guided_whitespace_pattern: str | None = Field(
-        default=None,
-        description=(
-            "`guided_whitespace_pattern` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `whitespace_pattern` to `structured_outputs` instead."
-        ),
-    )
     priority: int = Field(
         default=0,
         description=(
@@ -699,7 +707,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -707,10 +715,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
@@ -777,47 +785,31 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        # Forward deprecated guided_* parameters to structured_outputs
-        if self.structured_outputs is None:
-            kwargs = dict[str, Any](
-                json=self.guided_json,
-                regex=self.guided_regex,
-                choice=self.guided_choice,
-                grammar=self.guided_grammar,
-                whitespace_pattern=self.guided_whitespace_pattern,
-                structural_tag=self.structural_tag,
-            )
-            kwargs = {k: v for k, v in kwargs.items() if v is not None}
-            if len(kwargs) > 0:
-                self.structured_outputs = StructuredOutputsParams(**kwargs)
-
         response_format = self.response_format
-        json_schema_from_tool = self._get_json_schema_from_tool()
-        if response_format is not None or json_schema_from_tool is not None:
+        if response_format is not None:
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if self.structured_outputs is None:
                 self.structured_outputs = StructuredOutputsParams()
 
             # Set structured output params for response format
-            if response_format is not None:
-                if response_format.type == "json_object":
-                    self.structured_outputs.json_object = True
-                elif response_format.type == "json_schema":
-                    json_schema = response_format.json_schema
-                    assert json_schema is not None
-                    self.structured_outputs.json = json_schema.json_schema
-                elif response_format.type == "structural_tag":
-                    structural_tag = response_format
-                    assert structural_tag is not None and isinstance(
-                        structural_tag, StructuralTagResponseFormat
-                    )
-                    s_tag_obj = structural_tag.model_dump(by_alias=True)
-                    self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
-
-            # Set structured output params for tool calling
-            if json_schema_from_tool is not None:
-                self.structured_outputs.json = json_schema_from_tool
+            if response_format.type == "json_object":
+                self.structured_outputs.json_object = True
+            elif response_format.type == "json_schema":
+                json_schema = response_format.json_schema
+                assert json_schema is not None
+                self.structured_outputs.json = json_schema.json_schema
+            elif response_format.type == "structural_tag":
+                structural_tag = response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag,
+                    (
+                        LegacyStructuralTagResponseFormat,
+                        StructuralTagResponseFormat,
+                    ),
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -825,7 +817,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -858,72 +849,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
         )
 
-    def _get_json_schema_from_tool(self) -> str | dict | None:
-        # user has chosen to not use any tool
-        if self.tool_choice == "none" or self.tools is None:
-            return None
-
-        # user has chosen to use a named tool
-        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
-            tool_name = self.tool_choice.function.name
-            tools = {tool.function.name: tool.function for tool in self.tools}
-            if tool_name not in tools:
-                raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-            tool = tools[tool_name]
-            return tool.parameters
-
-        if self.tool_choice == "required":
-            # Pydantic schema generation cannot be used since the JSON schema
-            # has to be constructed for a specific instantiation of a tool list
-            # so that parameters of a function are correctly generated
-            # based on the chosen function name
-            def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
-                return {
-                    "properties": {
-                        "name": {"type": "string", "enum": [tool.function.name]},
-                        # parameters are always generated as '{}' in the final
-                        # output if they are missing from the request
-                        # (i.e. are None or '{}') so the schema is
-                        # updated to produce an empty object in that case
-                        "parameters": tool.function.parameters
-                        if tool.function.parameters
-                        else {"type": "object", "properties": {}},
-                    },
-                    "required": ["name", "parameters"],
-                }
-
-            def get_tool_schema_defs(tools: list[ChatCompletionToolsParam]) -> dict:
-                all_defs = dict[str, dict[str, Any]]()
-                for tool in tools:
-                    if tool.function.parameters is None:
-                        continue
-                    defs = tool.function.parameters.pop("$defs", {})
-                    for def_name, def_schema in defs.items():
-                        if def_name in all_defs and all_defs[def_name] != def_schema:
-                            raise ValueError(
-                                f"Tool definition '{def_name}' has "
-                                "multiple schemas, which is not "
-                                "supported."
-                            )
-                        else:
-                            all_defs[def_name] = def_schema
-                return all_defs
-
-            json_schema = {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "anyOf": [get_tool_schema(tool) for tool in self.tools],
-                },
-            }
-            json_schema_defs = get_tool_schema_defs(self.tools)
-            if json_schema_defs:
-                json_schema["$defs"] = json_schema_defs
-            return json_schema
-
-        return None
-
     @model_validator(mode="before")
     @classmethod
     def validate_stream_options(cls, data):
@@ -943,10 +868,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
                 raise ValueError("`top_logprobs` must be a positive value or -1.")
@@ -1080,16 +1001,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
@@ -1098,7 +1015,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
     prompt: list[int] | list[list[int]] | str | list[str] | None = None
-    best_of: int | None = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -1152,54 +1068,6 @@ class CompletionRequest(OpenAIBaseModel):
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
-    )
-    guided_json: str | dict | BaseModel | None = Field(
-        default=None,
-        description=(
-            "`guided_json` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `json` to `structured_outputs` instead."
-        ),
-    )
-    guided_regex: str | None = Field(
-        default=None,
-        description=(
-            "`guided_regex` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `regex` to `structured_outputs` instead."
-        ),
-    )
-    guided_choice: list[str] | None = Field(
-        default=None,
-        description=(
-            "`guided_choice` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `choice` to `structured_outputs` instead."
-        ),
-    )
-    guided_grammar: str | None = Field(
-        default=None,
-        description=(
-            "`guided_grammar` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `grammar` to `structured_outputs` instead."
-        ),
-    )
-    guided_decoding_backend: str | None = Field(
-        default=None,
-        description=(
-            "`guided_decoding_backend` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please remove it from your request."
-        ),
-    )
-    guided_whitespace_pattern: str | None = Field(
-        default=None,
-        description=(
-            "`guided_whitespace_pattern` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `whitespace_pattern` to `structured_outputs` instead."
-        ),
     )
     priority: int = Field(
         default=0,
@@ -1258,7 +1126,7 @@ class CompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -1345,25 +1213,31 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        # Forward deprecated guided_* parameters to structured_outputs
-        if self.structured_outputs is None:
-            kwargs = dict[str, Any](
-                json=self.guided_json,
-                regex=self.guided_regex,
-                choice=self.guided_choice,
-                grammar=self.guided_grammar,
-                whitespace_pattern=self.guided_whitespace_pattern,
-            )
-            kwargs = {k: v for k, v in kwargs.items() if v is not None}
-            if len(kwargs) > 0:
-                self.structured_outputs = StructuredOutputsParams(**kwargs)
+        response_format = self.response_format
+        if response_format is not None:
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if self.structured_outputs is None:
+                self.structured_outputs = StructuredOutputsParams()
 
-        if (
-            self.structured_outputs is not None
-            and self.response_format is not None
-            and self.response_format.type == "json_object"
-        ):
-            self.structured_outputs.json_object = True
+            # Set structured output params for response format
+            if response_format.type == "json_object":
+                self.structured_outputs.json_object = True
+            elif response_format.type == "json_schema":
+                json_schema = response_format.json_schema
+                assert json_schema is not None
+                self.structured_outputs.json = json_schema.json_schema
+            elif response_format.type == "structural_tag":
+                structural_tag = response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag,
+                    (
+                        LegacyStructuralTagResponseFormat,
+                        StructuralTagResponseFormat,
+                    ),
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1371,7 +1245,6 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1432,10 +1305,6 @@ class CompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1470,16 +1339,12 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
@@ -1488,7 +1353,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str | None = None
     input: list[int] | list[list[int]] | str | list[str]
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1517,8 +1382,26 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
-
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: EmbedDType = Field(
+        default="float32",
+        description=(
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
@@ -1533,7 +1416,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     model: str | None = None
     messages: list[ChatCompletionMessageParam]
 
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
     user: str | None = None
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
@@ -1594,7 +1477,26 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: EmbedDType = Field(
+        default="float32",
+        description=(
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1617,8 +1519,58 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
+
+class PoolingCompletionRequest(EmbeddingCompletionRequest):
+    task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            use_activation=get_use_activation(self),
+        )
+
+
+class PoolingChatRequest(EmbeddingChatRequest):
+    task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            use_activation=get_use_activation(self),
+        )
+
 
 T = TypeVar("T")
 
@@ -1633,14 +1585,28 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     if the served model does not use priority scheduling.
     """
     data: T
-    """
-    When using plugins IOProcessor plugins, the actual input is processed
-    by the plugin itself. Hence, we use a generic type for the request data
-    """
-    softmax: bool = True
+
+    task: PoolingTask = "plugin"
+    encoding_format: EncodingFormat = "float"
+    embed_dtype: EmbedDType = Field(
+        default="float32",
+        description=(
+            "What dtype to use for encoding. Default to using float32 for base64 "
+            "encoding to match the OpenAI python client behavior. "
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
+    endianness: Endianness = Field(
+        default="native",
+        description=(
+            "What endianness to use for encoding. Default to using native for "
+            "base64 encoding to match the OpenAI python client behavior."
+            "This parameter will affect base64 and binary_response."
+        ),
+    )
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode", softmax=self.softmax)
+        return PoolingParams()
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
@@ -1684,14 +1650,27 @@ class ScoreRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1718,14 +1697,27 @@ class RerankRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1835,6 +1827,12 @@ class EmbeddingResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class EmbeddingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
+
+
 class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
@@ -1848,6 +1846,12 @@ class PoolingResponse(OpenAIBaseModel):
     model: str
     data: list[PoolingResponseData]
     usage: UsageInfo
+
+
+class PoolingBytesResponse(OpenAIBaseModel):
+    body: list[bytes]
+    metadata: str
+    media_type: str = "application/octet-stream"
 
 
 class ScoreResponseData(OpenAIBaseModel):
@@ -1865,10 +1869,10 @@ class ScoreResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
-class ClassificationRequest(OpenAIBaseModel):
+class ClassificationCompletionRequest(OpenAIBaseModel):
     model: str | None = None
     input: list[str] | str
-    truncate_prompt_tokens: int | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     user: str | None = None
 
     # --8<-- [start:classification-extra-params]
@@ -1880,16 +1884,139 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."
+        ),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
-    activation: bool | None = None
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
 
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
+
+
+class ClassificationChatRequest(OpenAIBaseModel):
+    model: str | None = None
+    messages: list[ChatCompletionMessageParam]
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    user: str | None = None
+
+    # --8<-- [start:chat-classification-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
+    )
+
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."
+        ),
+    )
+
+    chat_template: str | None = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "As of transformers v4.44, default chat template is no longer "
+            "allowed, so you must provide a chat template if the tokenizer "
+            "does not define one."
+        ),
+    )
+
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."
+        ),
+    )
+
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
+    # --8<-- [end:chat-classification-extra-params]
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=get_use_activation(self),
+        )
+
+
+ClassificationRequest: TypeAlias = (
+    ClassificationCompletionRequest | ClassificationChatRequest
+)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1954,7 +2081,15 @@ class ChatMessage(OpenAIBaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
     # vLLM-specific fields that are not in OpenAI spec
+    reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
+
+    @model_validator(mode="after")
+    def handle_deprecated_reasoning_content(self):
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
+        return self
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -2008,8 +2143,16 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
+    reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def handle_deprecated_reasoning_content(self):
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
+        return self
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -2050,11 +2193,15 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    input_tokens_per_turn: list[int] = Field(default_factory=list)
+    cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
 
 class OutputTokensDetails(OpenAIBaseModel):
     reasoning_tokens: int = 0
     tool_output_tokens: int = 0
+    output_tokens_per_turn: list[int] = Field(default_factory=list)
+    tool_output_tokens_per_turn: list[int] = Field(default_factory=list)
 
 
 class ResponseUsage(OpenAIBaseModel):
@@ -2063,6 +2210,26 @@ class ResponseUsage(OpenAIBaseModel):
     output_tokens: int
     output_tokens_details: OutputTokensDetails
     total_tokens: int
+
+
+def serialize_message(msg):
+    """
+    Serializes a single message
+    """
+    if isinstance(msg, dict):
+        return msg
+    elif hasattr(msg, "to_dict"):
+        return msg.to_dict()
+    else:
+        # fallback to pyandic dump
+        return msg.model_dump_json()
+
+
+def serialize_messages(msgs):
+    """
+    Serializes multiple messages
+    """
+    return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
 class ResponsesResponse(OpenAIBaseModel):
@@ -2107,35 +2274,13 @@ class ResponsesResponse(OpenAIBaseModel):
     # https://github.com/openai/harmony/issues/78
     @field_serializer("output_messages", when_used="json")
     def serialize_output_messages(self, msgs, _info):
-        if msgs:
-            serialized = []
-            for m in msgs:
-                if isinstance(m, dict):
-                    serialized.append(m)
-                elif hasattr(m, "__dict__"):
-                    serialized.append(m.to_dict())
-                else:
-                    # fallback to pyandic dump
-                    serialized.append(m.model_dump_json())
-            return serialized
-        return None
+        return serialize_messages(msgs)
 
     # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
     # https://github.com/openai/harmony/issues/78
     @field_serializer("input_messages", when_used="json")
     def serialize_input_messages(self, msgs, _info):
-        if msgs:
-            serialized = []
-            for m in msgs:
-                if isinstance(m, dict):
-                    serialized.append(m)
-                elif hasattr(m, "__dict__"):
-                    serialized.append(m.to_dict())
-                else:
-                    # fallback to pyandic dump
-                    serialized.append(m.model_dump_json())
-            return serialized
-        return None
+        return serialize_messages(msgs)
 
     @classmethod
     def from_request(
@@ -2944,3 +3089,80 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+####### Tokens IN <> Tokens OUT #######
+class GenerateRequest(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    token_ids: list[int]
+    """The token ids to generate text from."""
+
+    # features: MultiModalFeatureSpec
+    # TODO (NickLucche): implement once Renderer work is completed
+    features: str | None = None
+    """The processed MM inputs for the model."""
+
+    sampling_params: SamplingParams
+    """The sampling parameters for the model."""
+
+    model: str | None = None
+
+    stream: bool | None = False
+    stream_options: StreamOptions | None = None
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+
+class GenerateResponseChoice(BaseModel):
+    index: int
+    logprobs: ChatCompletionLogProbs | None = None
+    # per OpenAI spec this is the default
+    finish_reason: str | None = "stop"
+    token_ids: list[int] | None = None
+
+
+class GenerateResponse(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    choices: list[GenerateResponseChoice]
+
+    prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )

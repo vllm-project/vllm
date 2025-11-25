@@ -15,7 +15,7 @@ from safetensors.torch import save as safetensors_save
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
-from vllm.utils import join_host_port, make_zmq_path, split_host_port
+from vllm.utils.network_utils import join_host_port, make_zmq_path, split_host_port
 
 logger = init_logger(__name__)
 NONE_INT = -150886311
@@ -236,6 +236,7 @@ class MooncakePipe(KVPipeBase):
         self.config = config
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
+        assert self.kv_rank is not None
         if device is None:
             self.device = self._select_device(self.config.kv_buffer_device)
         else:

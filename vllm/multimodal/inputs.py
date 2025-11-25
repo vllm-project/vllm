@@ -22,7 +22,8 @@ from typing import (
 import numpy as np
 from typing_extensions import NotRequired, TypeVar, deprecated
 
-from vllm.utils import LazyLoader, full_groupby, is_list_of
+from vllm.utils.collection_utils import full_groupby, is_list_of
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 
 if TYPE_CHECKING:
@@ -247,6 +248,19 @@ class MultiModalFeatureSpec:
 
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
+
+    @staticmethod
+    def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
+        kwargs = defaultdict[str, list[NestedTensors]](list)
+
+        for f in features:
+            item = f.data
+            if item is not None:
+                for k in keys:
+                    if k in item:
+                        kwargs[k].append(item[k].data)
+
+        return dict(kwargs)
 
 
 @dataclass

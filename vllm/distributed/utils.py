@@ -29,7 +29,8 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -276,7 +277,7 @@ class StatelessProcessGroup:
             # Check for timeout
             cur_time = time.time()
             if cur_time - start_time > timeout:
-                raise RuntimeError("Barrier timed out after %f seconds", timeout)
+                raise RuntimeError(f"Barrier timed out after {timeout:.2f} seconds")
 
             # Check for each process
             for i in range(self.world_size):
@@ -323,7 +324,9 @@ class StatelessProcessGroup:
         while len(processes_departed) < self.world_size:
             # Check for timeout
             if time.time() - start_time > timeout:
-                raise RuntimeError("Barrier departure timed out after %f s", timeout)
+                raise RuntimeError(
+                    f"Barrier departure timed out after {timeout:.2f} seconds"
+                )
 
             # Check for each process
             for i in range(self.world_size):
@@ -415,7 +418,6 @@ class StatelessProcessGroup:
 
 
 def init_gloo_process_group(
-    backend: Backend,
     prefix_store: PrefixStore,
     group_rank: int,
     group_size: int,
@@ -432,7 +434,7 @@ def init_gloo_process_group(
             group_size,
         )
     else:
-        options = ProcessGroup.Options(backend=backend)
+        options = ProcessGroup.Options(backend="gloo")
         pg = ProcessGroup(
             prefix_store,
             group_rank,
@@ -504,24 +506,25 @@ def stateless_init_torch_distributed_process_group(
     # Use a PrefixStore to avoid accidental overrides of keys used by
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
+    try:
+        from vllm.platforms import current_platform
 
-    if backend == "gloo":
-        return init_gloo_process_group(
+        return current_platform.stateless_init_device_torch_dist_pg(
             backend=backend,
             prefix_store=prefix_store,
             group_rank=group_rank,
             group_size=group_size,
             timeout=timeout,
         )
-    from vllm.platforms import current_platform
-
-    return current_platform.stateless_init_device_torch_dist_pg(
-        backend=backend,
-        prefix_store=prefix_store,
-        group_rank=group_rank,
-        group_size=group_size,
-        timeout=timeout,
-    )
+    except NotImplementedError:
+        # If platform doesn't implement stateless_init_device_torch_dist_pg, it
+        # will raise a NotImplementedError. In this case, we fall back to gloo.
+        return init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=group_rank,
+            group_size=group_size,
+            timeout=timeout,
+        )
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:

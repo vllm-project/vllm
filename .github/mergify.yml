@@ -108,7 +108,7 @@ pull_request_rules:
       - files~=^benchmarks/
       - files~=^vllm/benchmarks/
       - files~=^tests/benchmarks/
-      - files~=^\.buildkite/nightly-benchmarks/
+      - files~=^\.buildkite/performance-benchmarks/
   actions:
     label:
       add:
@@ -150,6 +150,23 @@ pull_request_rules:
     label:
       add:
         - gpt-oss
+
+- name: label-nvidia
+  description: Automatically apply nvidia label
+  conditions:
+    - label != stale
+    - or:
+      - files~=cuda
+      - files~=cutlass
+      - files~=flashinfer
+      - files~=trtllm
+      - title~=(?i)NVIDIA
+      - title~=(?i)CUDA
+      - title~=(?i)CUTLASS
+  actions:
+    label:
+      add:
+        - nvidia
 
 - name: label-rocm
   description: Automatically apply rocm label

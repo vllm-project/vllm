@@ -25,6 +25,7 @@ from transformers.tokenization_utils_base import TextInput
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -58,7 +59,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .qwen import QWenBaseModel, QWenModel
-from .utils import flatten_bn
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -334,7 +334,7 @@ class VisionTransformer(nn.Module):
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2dLayer(
             in_channels=3,
             out_channels=width,
             kernel_size=patch_size,
@@ -703,6 +703,8 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -750,30 +752,19 @@ class QwenVLForConditionalGeneration(
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             expected_h = expected_w = self.config.visual["image_size"]
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
             return QwenImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values, concat=True),
+                data=pixel_values,
                 resolve_bindings=resolve_bindings,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             return QwenImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         return None
@@ -787,7 +778,7 @@ class QwenVLForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

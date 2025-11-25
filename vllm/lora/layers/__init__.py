@@ -11,6 +11,7 @@ from vllm.lora.layers.column_parallel_linear import (
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
 from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
 from vllm.lora.layers.row_parallel_linear import (
@@ -37,4 +38,6 @@ __all__ = [
     "ReplicatedLinearWithLoRA",
     "LoRAMapping",
     "LoRAMappingType",
+    "FusedMoEWithLoRA",
+    "FusedMoE3DWithLoRA",
 ]

@@ -96,7 +96,8 @@ class WorkerLoRAManager:
                     expected_lora_modules.extend(packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-
+                if module == "experts":
+                    expected_lora_modules.append(module)
             expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
@@ -122,8 +123,7 @@ class WorkerLoRAManager:
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size
-                + self.lora_config.lora_extra_vocab_size,
+                target_embedding_padding=self.vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
@@ -144,12 +144,6 @@ class WorkerLoRAManager:
             # For BadRequestError
             raise e
 
-        if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
-            raise ValueError(
-                f"LoRA added vocab size {lora.extra_vocab_size} "
-                f"is greater than lora_extra_vocab_size "
-                f"{self.lora_config.lora_extra_vocab_size}."
-            )
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
