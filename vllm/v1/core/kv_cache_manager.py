@@ -108,7 +108,9 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
-        # FIXME: make prefix cache stats conditional on log_stats
+        # FIXME: make prefix cache stats conditional on log_stats. We still need
+        # this comment because when the log stats is enabled there are still
+        # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
         self.coordinator = get_kv_cache_coordinator(
