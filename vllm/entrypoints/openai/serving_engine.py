@@ -1242,16 +1242,19 @@ class OpenAIServing:
     ):
         prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
+        sub_request = 0
         while True:
+            # Ensure that each sub-request has a unique request id.
+            sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
-                request_id,
+                sub_request_id,
                 request_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
             engine_request, tokenization_kwargs = await self._process_inputs(
-                request_id,
+                sub_request_id,
                 engine_prompt,
                 sampling_params,
                 lora_request=lora_request,
@@ -1262,7 +1265,7 @@ class OpenAIServing:
             generator = self.engine_client.generate(
                 engine_request,
                 sampling_params,
-                request_id,
+                sub_request_id,
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
@@ -1295,6 +1298,7 @@ class OpenAIServing:
             sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
             # OPTIMIZATION
             priority = orig_priority - 1
+            sub_request += 1
 
     def _get_prompt_components(
         self,
