@@ -36,6 +36,12 @@ def mock_on_gfx9():
 @pytest.mark.parametrize(
     "env_vars, selected_backend, expected_backend_path",
     [
+        # Test Case: Explicit FLEX_ATTENTION backend
+        (
+            {},
+            "FLEX_ATTENTION",
+            AttentionBackendEnum.FLEX_ATTENTION.get_path(),
+        ),
         # Test Case 1: Default (no env vars, no explicit backend)
         (
             {},
