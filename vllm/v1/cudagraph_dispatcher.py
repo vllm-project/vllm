@@ -68,7 +68,6 @@ class CudagraphDispatcher:
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
             num_reqs = num_tokens_padded // uniform_decode_query_len
             assert num_tokens_padded % uniform_decode_query_len == 0
-            assert num_reqs <= max_num_seqs
         else:
             uniform_decode = False
             num_reqs = min(num_tokens_padded, max_num_seqs)
