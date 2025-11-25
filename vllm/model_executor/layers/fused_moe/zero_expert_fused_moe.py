@@ -53,9 +53,19 @@ class ZeroExpertFusedMoE(FusedMoE):
             if user_bias is None or user_bias.shape[0] == router_bias.shape[0]:
                 kwargs["e_score_correction_bias"] = router_bias[:num_real_experts]
 
+        # Pass zero_expert_num=0 to super().__init__() to prevent
+        # torch.ops.vllm.moe_forward from compiling with zero_expert_num > 0,
+        # which would cause it to always return tuple.
+        # We handle zero experts ourselves in forward().
+        kwargs["zero_expert_num"] = 0
+        kwargs["zero_expert_type"] = None
+
         super().__init__(**kwargs)
-        self.zero_expert_num = zero_expert_num
-        self.zero_expert_type = zero_expert_type
+        # Store the actual zero_expert_num and zero_expert_type for our own use
+        # Use a different attribute name to avoid affecting FusedMoE's zero_expert_num
+        # which must remain 0 for torch.ops.vllm.moe_forward to work correctly
+        self._actual_zero_expert_num = zero_expert_num
+        self._actual_zero_expert_type = zero_expert_type
         self._router = router  # Full router (includes zero experts)
 
         # Memoization state for routing results
@@ -82,9 +92,9 @@ class ZeroExpertFusedMoE(FusedMoE):
     ) -> torch.Tensor | None:
         """Compute zero expert results using pre-computed routing."""
         if (
-            self.zero_expert_num is None
-            or self.zero_expert_num <= 0
-            or self.zero_expert_type is None
+            self._actual_zero_expert_num is None
+            or self._actual_zero_expert_num <= 0
+            or self._actual_zero_expert_type is None
         ):
             return None
 
@@ -92,7 +102,7 @@ class ZeroExpertFusedMoE(FusedMoE):
             expert_indices=topk_ids.clone(),
             expert_scales=topk_weights.clone(),
             num_experts=self.logical_num_experts,
-            zero_expert_type=self.zero_expert_type,
+            zero_expert_type=self._actual_zero_expert_type,
             hidden_states=hidden_states,
         )
 
@@ -121,12 +131,36 @@ class ZeroExpertFusedMoE(FusedMoE):
                 self, "e_score_correction_bias", self._router.e_score_correction_bias
             )
 
+        # Temporarily disable custom_routing_function for the first routing computation
+        # (it requires memoized results which don't exist yet)
+        original_custom_routing_function = self.custom_routing_function
+        object.__setattr__(self, "custom_routing_function", None)
+
+        # Temporarily set zero_expert_num and zero_expert_type to actual values
+        # so that select_experts can compute zero_expert_result
+        # (but we'll set them back to 0 before calling super().forward())
+        original_zero_expert_num = self.zero_expert_num
+        original_zero_expert_type = self.zero_expert_type
+        object.__setattr__(self, "zero_expert_num", self._actual_zero_expert_num)
+        object.__setattr__(self, "zero_expert_type", self._actual_zero_expert_type)
+
         # Compute routing once (using full logits to include zero experts)
         # This ensures zero experts can be properly identified in topk_ids
         # select_experts now returns (topk_weights, topk_ids, zero_expert_result)
         topk_weights, topk_ids, zero_expert_result = self.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,  # Full logits (includes zero experts)
+        )
+
+        # Restore zero_expert_num and zero_expert_type to 0/None before
+        # calling super().forward(). This ensures torch.ops.vllm.moe_forward
+        # doesn't see zero_expert_num > 0
+        object.__setattr__(self, "zero_expert_num", original_zero_expert_num)
+        object.__setattr__(self, "zero_expert_type", original_zero_expert_type)
+
+        # Restore custom_routing_function for reuse in super().forward()
+        object.__setattr__(
+            self, "custom_routing_function", original_custom_routing_function
         )
 
         # Restore original bias
@@ -139,10 +173,8 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Slice router_logits for real experts only
         router_logits_sliced = router_logits[..., : self.logical_num_experts]
 
-        # Temporarily set zero_expert_num to 0 to prevent FusedMoE from
-        # trying to handle zero experts (we handle them ourselves)
-        original_zero_expert_num = self.zero_expert_num
-        object.__setattr__(self, "zero_expert_num", 0)
+        # zero_expert_num should already be 0 (from original_zero_expert_num
+        # restored above), so FusedMoE won't handle zero experts
 
         # Compute real expert results (will reuse memoized routing via
         # custom_routing_function)
@@ -151,18 +183,11 @@ class ZeroExpertFusedMoE(FusedMoE):
             router_logits=router_logits_sliced,
         )
 
-        # Restore original zero_expert_num
-        object.__setattr__(self, "zero_expert_num", original_zero_expert_num)
-
         # Combine results
+        # Both zero_expert_result and fused_out are computed from the same
+        # hidden_states, so they should be on the same device.
+        # No device alignment needed.
         if zero_expert_result is not None:
-            # Ensure zero_expert_result is on the same device as fused_out
-            # (important for expert parallel where fused_out may be on different devices)
-            # Also ensure they have the same dtype
-            if zero_expert_result.device != fused_out.device:
-                zero_expert_result = zero_expert_result.to(fused_out.device)
-            if zero_expert_result.dtype != fused_out.dtype:
-                zero_expert_result = zero_expert_result.to(dtype=fused_out.dtype)
             fused_out = fused_out + zero_expert_result
 
         # Clear memoization after use
