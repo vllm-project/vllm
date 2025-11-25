@@ -128,7 +128,7 @@ class PiecewiseBackend:
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
                 args,
-                self.compilation_config.inductor_compile_config,
+                self.vllm_backend.inductor_config,
                 self.compilation_config,
                 compile_range=range_entry.compile_range,
                 graph_index=self.piecewise_compile_index,

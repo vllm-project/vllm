@@ -42,7 +42,10 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
     parse_safetensors_file_metadata,
+    split_remote_gguf,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -86,6 +89,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -452,51 +456,55 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    # Retrieve rope_parameters differently based on Transformers version
+    # Patch rope_parameters differently based on Transformers version
     if Version(version("transformers")) >= Version("5.0.0.dev0"):
-        from transformers.modeling_rope_utils import RopeParameters
-
-        rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
-            config, "rope_parameters", None
+        from transformers.modeling_rope_utils import (
+            rope_config_validation,
+            standardize_rope_params,
         )
-    elif hasattr(config, "rope_parameters"):
-        # We are in Transformers v4 and rope_parameters
-        # has already been patched for this config
-        return
+
+        # When Transformers v5 is installed, legacy rope_theta may be present
+        # when using custom code models written for Transformers v4
+        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+            standardize_rope_params(config, rope_theta=rope_theta)
+            rope_config_validation(config)
+            # Delete rope_theta to avoid confusion in downstream code
+            del config.rope_theta
     else:
-        # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
-        rope_theta: float | None = getattr(config, "rope_theta", None)
-        rope_scaling: dict | None = getattr(config, "rope_scaling", None)
-        rope_parameters = rope_scaling
-        # Move rope_theta into rope_parameters
-        if rope_theta is not None:
-            rope_parameters = rope_parameters or {"rope_type": "default"}
-            rope_parameters["rope_theta"] = rope_theta
-        # Add original_max_position_embeddings if present
-        if rope_parameters and (
-            ompe := getattr(config, "original_max_position_embeddings", None)
-        ):
-            rope_parameters["original_max_position_embeddings"] = ompe
-        # Write back to config
-        config.rope_parameters = rope_parameters
+        # When Transformers v4 is installed, legacy rope_scaling may be present
+        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
+            config.rope_parameters = rope_scaling
+        # When Transformers v4 is installed, legacy rope_theta may be present
+        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+            if not hasattr(config, "rope_parameters"):
+                config.rope_parameters = {"rope_type": "default"}
+            config.rope_parameters["rope_theta"] = rope_theta
 
     # No RoPE parameters to patch
-    if rope_parameters is None:
+    if not hasattr(config, "rope_parameters"):
         return
 
+    # Add original_max_position_embeddings if present
+    if ompe := getattr(config, "original_max_position_embeddings", None):
+        config.rope_parameters["original_max_position_embeddings"] = ompe
+
     # Handle nested rope_parameters in interleaved sliding attention models
-    if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
-        for rope_parameters_layer_type in rope_parameters.values():
+    if set(config.rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        for rope_parameters_layer_type in config.rope_parameters.values():
             patch_rope_parameters_dict(rope_parameters_layer_type)
     else:
-        patch_rope_parameters_dict(rope_parameters)
+        patch_rope_parameters_dict(config.rope_parameters)
 
 
 def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
     if "rope_type" in rope_parameters and "type" in rope_parameters:
         rope_type = rope_parameters["rope_type"]
         rope_type_legacy = rope_parameters["type"]
-        if rope_type != rope_type_legacy:
+        if (rope_type_legacy == "su" and rope_type == "longrope") or (
+            rope_type_legacy == "mrope" and rope_type == "default"
+        ):
+            pass  # No action needed
+        elif rope_type != rope_type_legacy:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
                 f"field) and 'type={rope_type_legacy}' (legacy field). "
@@ -547,6 +555,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
         return False
 
     return uses_mrope(thinker_text_config)
+
+
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
@@ -611,10 +636,12 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    if check_gguf_file(model):
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+    elif is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        gguf_model_repo = Path(repo_id)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -660,10 +687,18 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        model = Path(model).parent
+    _is_gguf = is_gguf(model)
+    _is_remote_gguf = is_remote_gguf(model)
+    if _is_gguf:
+        if check_gguf_file(model):
+            # Local GGUF file
+            kwargs["gguf_file"] = Path(model).name
+            model = Path(model).parent
+        elif _is_remote_gguf:
+            # Remote GGUF - extract repo_id from repo_id:quant_type format
+            # The actual GGUF file will be downloaded later by GGUFModelLoader
+            # Keep model as repo_id:quant_type for download, but use repo_id for config
+            model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
@@ -671,10 +706,25 @@ def get_config(
             # Transformers implementation.
             if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
-            elif is_gguf or file_or_path_exists(
+            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
             ):
                 config_format = "hf"
+            # Remote GGUF models must have config.json in repo,
+            # otherwise the config can't be parsed correctly.
+            # FIXME(Isotr0py): Support remote GGUF repos without config.json
+            elif _is_remote_gguf and not file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                err_msg = (
+                    "Could not find config.json for remote GGUF model repo. "
+                    "To load remote GGUF model through `<repo_id>:<quant_type>`, "
+                    "ensure your model has config.json (HF format) file. "
+                    "Otherwise please specify --hf-config-path <original_repo> "
+                    "in engine args to fetch config from unquantized hf model."
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
@@ -695,9 +745,6 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
-                "   Loading GGUF from a remote repo directly is not yet "
-                "supported.\n"
             ).format(model=model)
 
             raise ValueError(error_message) from e
@@ -711,7 +758,7 @@ def get_config(
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
-    if is_gguf:
+    if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
@@ -871,6 +918,8 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
     """
+    if is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
 
     modules_file_name = "modules.json"
 
@@ -1090,6 +1139,8 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
+    elif is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
