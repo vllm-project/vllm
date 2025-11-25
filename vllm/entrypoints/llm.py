@@ -1760,3 +1760,12 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        results = self.llm_engine.collective_rpc("get_model_inspection")
+        # In distributed settings, we get results from all workers
+        # Just return the first one (they should all be the same)
+        if results:
+            return results[0]
+        return f"LLM(model={self.model_config.model!r})"
