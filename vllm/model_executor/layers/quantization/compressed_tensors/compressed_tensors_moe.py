@@ -200,7 +200,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self, moe: FusedMoEConfig, layer_name=None):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
@@ -220,12 +220,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
-                " for CompressedTensorsW4A4Nvfp4MoeMethod."
+                " for CompressedTensorsW4A4Nvfp4MoEMethod."
             )
         elif self.use_marlin:
-            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoeMethod.")
+            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoEMethod.")
         else:
-            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoeMethod.")
+            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoEMethod.")
 
     def create_weights(
         self,
@@ -559,7 +559,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         ):
             if enable_eplb:
                 raise NotImplementedError(
-                    "EPLB not supported for `CompressedTensorsW4A4MoeMethod` yet."
+                    "EPLB not supported for `CompressedTensorsW4A4MoEMethod` yet."
                 )
 
             return flashinfer_trtllm_fp4_moe(
