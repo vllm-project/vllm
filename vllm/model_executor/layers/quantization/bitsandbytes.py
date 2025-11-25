@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEParams,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -498,8 +499,8 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
         router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -511,9 +512,9 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         )
         # TODO(bnell): Do these need to be called on the hot path?
         if self.quant_config.load_in_8bit:
-            w13, w2 = self._apply_8bit_dequant(layer)
+            w13, w2 = self._apply_8bit_dequant(params)
         else:
-            w13, w2 = self._apply_4bit_dequnt(layer)
+            w13, w2 = self._apply_4bit_dequnt(params)
         return fused_experts(
             hidden_states=x,
             w1=w13,
@@ -521,10 +522,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            activation=params.activation,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
             quant_config=self.moe_quant_config,
         )
 

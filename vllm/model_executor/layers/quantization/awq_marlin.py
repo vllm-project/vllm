@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEParams,
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
@@ -759,12 +760,12 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
         router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
+        assert params.activation == "silu", "Only SiLU activation is supported."
 
         topk_weights, topk_ids, _ = router.select_experts(
             hidden_states=x,
@@ -773,23 +774,23 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
 
         return fused_marlin_moe(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
+            params.w13_qweight,
+            params.w2_qweight,
+            getattr(params, "w13_bias", None),
+            getattr(params, "w2_bias", None),
+            params.w13_scales,
+            params.w2_scales,
             router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),
             input_global_scale2=getattr(layer, "w2_input_global_scale", None),
             quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            w1_zeros=layer.w13_qzeros,
-            w2_zeros=layer.w2_qzeros,
-            workspace=layer.workspace,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
+            w1_zeros=params.w13_qzeros,
+            w2_zeros=params.w2_qzeros,
+            workspace=params.workspace,
             input_dtype=self.input_dtype,
         )

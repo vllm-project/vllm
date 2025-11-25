@@ -10,6 +10,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_params import (
+    FusedMoEParams,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_router import (
     FusedMoERouter,
 )
@@ -99,8 +102,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:

@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_params import (
+    FusedMoEParams,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
@@ -94,8 +97,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -106,18 +109,18 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
         result = self.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=params.w13_weight,
+            w2=params.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=self.allow_inplace,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            expert_map=None if self.disable_expert_map else layer.expert_map,
+            activation=params.activation,
+            global_num_experts=params.global_num_experts,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            expert_map=None if self.disable_expert_map else params.expert_map,
         )
 
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
+        if params.zero_expert_num != 0 and params.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )

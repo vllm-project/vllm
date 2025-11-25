@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEParams,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -626,13 +627,13 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
         router: FusedMoERouter,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
-        if layer.apply_router_weight_on_input:
+        assert params.activation == "silu", "Only SiLU activation is supported."
+        if params.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
                 "fused GGUF MoE method."
@@ -644,13 +645,13 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         )
         return fused_moe_gguf(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
+            params.w13_qweight,
+            params.w2_qweight,
             topk_weights,
             topk_ids,
-            layer.w13_qweight_type.weight_type,
-            layer.w2_qweight_type.weight_type,
-            layer.activation,
+            params.w13_qweight_type.weight_type,
+            params.w2_qweight_type.weight_type,
+            params.activation,
         )
 
 

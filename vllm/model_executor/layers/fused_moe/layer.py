@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
+from vllm.model_executor.layers.fused_moe.fused_moe_params import FusedMoEParams
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
@@ -320,7 +321,7 @@ class FusedMoERouterImpl(FusedMoERouter):
 
 
 @CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+class FusedMoE(CustomOp, FusedMoEParams):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -1833,8 +1834,8 @@ class FusedMoE(CustomOp):
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
-                layer=self,
                 router=self.router,
+                params=self,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
             )
@@ -1977,8 +1978,8 @@ class FusedMoE(CustomOp):
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
-                layer=self,
                 router=self.router,
+                params=self,
                 x=hidden_states_combined
                 if do_naive_dispatch_combine
                 else hidden_states,
