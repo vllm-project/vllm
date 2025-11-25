@@ -86,6 +86,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -547,6 +548,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
         return False
 
     return uses_mrope(thinker_text_config)
+
+
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
