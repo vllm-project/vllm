@@ -409,11 +409,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
-            # After DCP distribution, each rank gets at most ceil(L / N) elements
+            # After DCP distribution, the maximum number of tokens for any rank is
+            # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
+            # and I is cp_kv_cache_interleave_size.
             # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
+            num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
             max_dcp_context_kv_len = (
-                max_seq_len + self.dcp_world_size - 1
-            ) // self.dcp_world_size
+                (max_seq_len + num_partitions - 1) // num_partitions
+            ) * self.cp_kv_cache_interleave_size
 
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
