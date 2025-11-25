@@ -89,9 +89,8 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
         return num_tokens_across_dp.cpu()
 
 
-# Should be called after attention metadata creation. This just pads
-# the second ubatch slice out to the total number of tokens
-# (num_tokens + padding)
+# This just pads the second ubatch slice out to the total number of tokens
+# (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
 def _pad_out_ubatch_slice(ubatch_slices: UBatchSlices, num_total_tokens: int):
     padded_second_ubatch_slice = slice(
         ubatch_slices[1].token_slice.start, num_total_tokens
