@@ -110,6 +110,71 @@ The number of this test is less stable compared to the delay and latency benchma
 
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
+#### New JSON Format
+
+Serving tests now support an enhanced format that includes a default section.  
+Values defined in this section are applied globally to all tests unless explicitly overridden in a specific test case.  
+Each test may also specify a tier. Tests assigned to the "full" tier will only be executed when RUN_FULL_TESTS is set to 1.  
+
+<details>
+<summary> An Example of New JSON Format </summary>
+
+```json
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
+    "server_environment_variables": {
+      "VLLM_RPC_TIMEOUT": 100000,
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+      "VLLM_CPU_SGL_KERNEL": 1,
+      "VLLM_CPU_KVCACHE_SPACE": 40
+    },
+    "server_parameters": {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "distributed_executor_backend": "mp",
+      "block_size": 128,
+      "trust_remote_code": "",
+      "disable_log_stats": "",
+      "enforce_eager": "",
+      "max_num_batched_tokens": 2048,
+      "max_num_seqs": 256,
+      "load_format": "dummy"
+    },
+    "client_parameters": {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "backend": "vllm",
+      "num_prompts": 200
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_llama3B_tp2_random_128_128",
+      "tier": "full",
+      "server_parameters": {
+        "model": "meta-llama/Llama-3.2-3B-Instruct",
+        "tensor_parallel_size": 2,
+        "enable_chunked_prefill": ""
+      },
+      "client_parameters": {
+        "model": "meta-llama/Llama-3.2-3B-Instruct",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128,
+        "ignore-eos": ""
+      }
+    }
+  ]
+}
+```
+
+</details>
+
 ### Visualizing the results
 
 The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](performance-benchmarks-descriptions.md) with real benchmarking results.

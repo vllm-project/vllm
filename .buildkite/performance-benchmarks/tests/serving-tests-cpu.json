@@ -260,7 +260,7 @@
       }
     },
     {
-      "test_name": "serving_granite-2B_tp4_random_128_128",
+      "test_name": "serving_granite2B_tp4_random_128_128",
       "tier": "full",
       "server_parameters": {
         "model": "ibm-granite/granite-3.2-2b-instruct",
