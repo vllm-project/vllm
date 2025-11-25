@@ -98,6 +98,7 @@ class Mamba2AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
+    query_start_loc_d: torch.Tensor
     query_start_loc_p: torch.Tensor
     seq_lens: torch.Tensor
 
@@ -321,11 +322,14 @@ class Mamba2AttentionMetadataBuilder(
             ]
             block_idx_last_computed_token[num_decodes:] = 0
 
+        query_start_loc_d = common_attn_metadata.query_start_loc[: (1 + num_decodes)]
+
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
+            query_start_loc_d=query_start_loc_d,
             query_start_loc_p=query_start_loc_p,
             seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,

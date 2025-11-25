@@ -462,6 +462,9 @@ def causal_conv1d_fn(
     bias: torch.Tensor | None,
     conv_states: torch.Tensor,
     query_start_loc: torch.Tensor,
+    nums_dict: dict,
+    batch_ptr: torch.Tensor,
+    token_chunk_offset_ptr: torch.Tensor,
     cache_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
@@ -470,7 +473,6 @@ def causal_conv1d_fn(
     initial_state_idx: torch.Tensor | None = None,
     num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align=0,
-    metadata=None,
     validate_data=False,
 ):
     """support varlen + continuous batching when x is 2D tensor
@@ -521,16 +523,10 @@ def causal_conv1d_fn(
     if isinstance(activation, bool) and activation:
         activation = "silu"
 
-    args = None
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
     x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
-
-    nums_dict = metadata.nums_dict
-    args = nums_dict
-    batch_ptr = metadata.batch_ptr
-    token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
 
     is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
     dim, cu_seqlen = x.shape
@@ -614,7 +610,7 @@ def causal_conv1d_fn(
 
     def grid(META):
         return (
-            num_program(META, args),
+            num_program(META, nums_dict),
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 

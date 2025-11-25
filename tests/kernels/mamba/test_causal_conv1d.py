@@ -7,12 +7,12 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
 
 def causal_conv1d_ref(
@@ -122,7 +122,6 @@ def causal_conv1d_opcheck_fn(
     has_initial_state: torch.Tensor | None = None,
     conv_states: torch.Tensor | None = None,
     activation: str | None = "silu",
-    pad_slot_id: int = PAD_SLOT_ID,
 ):
     """
     x: (batch, dim, seqlen)
@@ -208,25 +207,24 @@ def test_causal_conv1d_update_with_batch_gather(
     # total_entries = number of cache line
     total_entries = 10 * batch_size
 
-    # x will be (batch, dim, seqlen) with contiguous along dim-axis
-    x = torch.randn(
-        padded_batch_size, seqlen, dim, device=device, dtype=itype
-    ).transpose(1, 2)
+    num_tokens = batch_size * seqlen
+    padded_num_tokens = padded_batch_size * seqlen
 
-    x_ref = x.clone()
+    x = torch.randn(padded_batch_size, seqlen, dim, device=device, dtype=itype)
 
-    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(
+    # x_ref will be (padded_batch_size, dim, seqlen) with contiguous along dim-axis
+    x_ref = x.clone().transpose(1, 2)
+
+    # x will be (num_tokens, dim) with contiguous along dim-axis
+    x = x.view(padded_num_tokens, dim)
+
+    padded_state_indices = torch.randperm(total_entries)[:padded_batch_size].to(
         dtype=torch.int32, device=device
     )
+    conv_state_indices = padded_state_indices[:batch_size]
+
     unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
     unused_states_bool[conv_state_indices] = False
-    padded_state_indices = torch.concat(
-        [
-            conv_state_indices,
-            torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
-        ],
-        dim=0,
-    )
 
     # conv_state will be (cache_lines, dim, state_len)
     # with contiguous along dim-axis
@@ -241,6 +239,17 @@ def test_causal_conv1d_update_with_batch_gather(
     conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
     activation = None if not silu_activation else "silu"
 
+    seq_lens = torch.concat(
+        [
+            torch.full(size=(1,), fill_value=0, dtype=torch.int32, device=device),
+            torch.full(
+                size=(batch_size,), fill_value=seqlen, dtype=torch.int32, device=device
+            ),
+            torch.full(size=(padding,), fill_value=0, dtype=torch.int32, device=device),
+        ]
+    )
+    query_start_loc = torch.cumsum(seq_lens, dim=0)
+
     out = causal_conv1d_update(
         x,
         conv_state,
@@ -248,7 +257,8 @@ def test_causal_conv1d_update_with_batch_gather(
         bias,
         activation=activation,
         conv_state_indices=padded_state_indices,
-        pad_slot_id=PAD_SLOT_ID,
+        query_start_loc=query_start_loc,
+        max_query_len=seqlen,
     )
     out_ref = causal_conv1d_update_ref(
         x_ref[:batch_size], conv_state_ref, weight, bias, activation=activation
@@ -258,7 +268,12 @@ def test_causal_conv1d_update_with_batch_gather(
     assert torch.equal(
         conv_state[unused_states_bool], conv_state_for_padding_test[unused_states_bool]
     )
-    assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(
+        out[:num_tokens],
+        out_ref.transpose(1, 2).reshape(num_tokens, dim),
+        rtol=rtol,
+        atol=atol,
+    )
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
@@ -267,10 +282,9 @@ def test_causal_conv1d_update_with_batch_gather(
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize("seqlen", [8, 249, 4096])
 @pytest.mark.parametrize("dim", [64, 4096])
-@pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.parametrize("batch", [4, 10])
 def test_causal_conv1d_varlen(
-    batch, with_padding, dim, seqlen, width, has_bias, silu_activation, itype
+    batch, dim, seqlen, width, has_bias, silu_activation, itype
 ):
     device = "cuda"
     torch.cuda.empty_cache()
@@ -281,9 +295,7 @@ def test_causal_conv1d_varlen(
     current_platform.seed_everything(0)
     seqlens = []
     batch_size = batch
-    padding = 3 if with_padding else 0
-    padded_batch_size = batch_size + padding
-    nsplits = padded_batch_size - 1
+    nsplits = batch_size - 1
 
     eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
 
@@ -320,23 +332,22 @@ def test_causal_conv1d_varlen(
     state_indices = torch.randperm(total_entries, dtype=torch.int32, device=x.device)[
         :batch_size
     ]
-    padded_state_indices = torch.concat(
-        [
-            state_indices,
-            torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
-        ],
-        dim=-1,
+    query_start_loc = cumsum.cuda()
+    nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+        query_start_loc
     )
     out = causal_conv1d_fn(
         x.squeeze(0),
         weight,
         bias=bias,
         conv_states=final_states,
-        query_start_loc=cumsum.cuda(),
-        cache_indices=padded_state_indices,
+        query_start_loc=query_start_loc,
+        nums_dict=nums_dict,
+        batch_ptr=batch_ptr,
+        token_chunk_offset_ptr=token_chunk_offset_ptr,
+        cache_indices=state_indices,
         has_initial_state=has_initial_states,
         activation=activation,
-        pad_slot_id=PAD_SLOT_ID,
     )
 
     out_ref = []
@@ -345,8 +356,6 @@ def test_causal_conv1d_varlen(
     splits = [torch.split(var, seqlens[0], dim=-1) for var in (x_ref)]
     for i in range(len(seqlens[0])):
         x_s = [v[i].unsqueeze(0) for v in splits][0]
-        if padded_state_indices[i] == PAD_SLOT_ID:
-            continue
         out_ref_b.append(
             causal_conv1d_ref(
                 x_s,
@@ -354,8 +363,8 @@ def test_causal_conv1d_varlen(
                 bias_ref,
                 activation=activation,
                 return_final_states=True,
-                final_states_out=final_states_ref[padded_state_indices[i]].unsqueeze(0),
-                initial_states=final_states_ref[padded_state_indices[i]].unsqueeze(0)
+                final_states_out=final_states_ref[state_indices[i]].unsqueeze(0),
+                initial_states=final_states_ref[state_indices[i]].unsqueeze(0)
                 if has_initial_states[i]
                 else None,
             )
