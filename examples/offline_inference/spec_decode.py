@@ -133,7 +133,7 @@ def main(args):
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
