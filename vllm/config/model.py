@@ -978,19 +978,13 @@ class ModelConfig:
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
 
-        # For GGUF models, ignore quantization info from HF config
-        # GGUF quantization is handled separately
-
         # Parse quantization method from the HF model config, if available.
-        if self.quantization == "gguf" or is_gguf(self.model):
-            quant_cfg = None
-        else:
-            quant_cfg = self._parse_quant_hf_config(self.hf_config)
-            if quant_cfg is None and (
-                text_config := getattr(self.hf_config, "text_config", None)
-            ):
-                # Check the text config as well for multi-modal models.
-                quant_cfg = self._parse_quant_hf_config(text_config)
+        quant_cfg = self._parse_quant_hf_config(self.hf_config)
+        if quant_cfg is None and (
+            text_config := getattr(self.hf_config, "text_config", None)
+        ):
+            # Check the text config as well for multi-modal models.
+            quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'
