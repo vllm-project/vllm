@@ -233,7 +233,7 @@ class BaiChuanDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=getattr(config, "rope_parameters", None),
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
