@@ -538,8 +538,13 @@ class VllmBackend:
                 )
             else:
                 # Config should automatically wrap all inductor passes
-                assert isinstance(self.inductor_config[self.pass_key], InductorPass)
-                self.pass_manager.add(self.inductor_config[self.pass_key])
+                assert isinstance(
+                    self.compilation_config.inductor_compile_config[self.pass_key],
+                    InductorPass,
+                )
+                self.pass_manager.add(
+                    self.compilation_config.inductor_compile_config[self.pass_key]
+                )
         self.inductor_config[self.pass_key] = self.pass_manager
 
     def __call__(
