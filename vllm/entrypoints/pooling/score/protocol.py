@@ -42,15 +42,8 @@ class ScoreRequest(
 ):
     model: str | None = None
 
-    text_1: list[str] | str | ScoreMultiModalParam | None = None
-    text_2: list[str] | str | ScoreMultiModalParam | None = None
-
-    data_1: list[str] | str | ScoreMultiModalParam | None = None
-    data_2: list[str] | str | ScoreMultiModalParam | None = None
-
-    def __post_init__(self):
-        self.data_1 = self.data_1 if self.data_1 is not None else self.text_1
-        self.data_2 = self.data_2 if self.data_2 is not None else self.text_2
+    text_1: list[str] | str | ScoreMultiModalParam
+    text_2: list[str] | str | ScoreMultiModalParam
 
 
 class RerankRequest(
