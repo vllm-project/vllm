@@ -531,8 +531,9 @@ class VllmBackend:
     sym_tensor_indices: list[int]
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
+    # Copy of CompilationConfig.inductor_compile_config +
+    # an entry for PostGradPassManager
     inductor_config: dict[str, Any]
-    """Merged CompilationConfig.inductor_compile_config and PostGradPassManager"""
 
     def __init__(
         self,
@@ -560,6 +561,11 @@ class VllmBackend:
             self.compilation_config
         )
 
+        # Deepcopy the inductor config to detach the post-grad custom pass
+        # from CompilationConfig.
+        # We want to avoid PostGradPassManager in CompilationConfig because
+        # in future we need PostGradPassManager.uuid() to be executed
+        # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -569,12 +575,6 @@ class VllmBackend:
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
-
-        # Deepcopy the inductor config to detach the post-grad custom pass
-        # from CompilationConfig.
-        # We want to avoid PostGradPassManager in CompilationConfig because
-        # in future we need PostGradPassManager.uuid() to be executed only
-        # at compile time.
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in self.inductor_config:
             if isinstance(self.inductor_config[PASS_KEY], PostGradPassManager):
