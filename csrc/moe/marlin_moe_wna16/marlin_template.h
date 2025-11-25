@@ -643,6 +643,7 @@ __global__ void Marlin(
     __syncthreads();
 
     block_num_valid_tokens = reinterpret_cast<int*>(sh_new)[0];
+    __syncthreads();
   };
 
   // when move to next moe block, find the next block_id and expert_id
@@ -652,9 +653,8 @@ __global__ void Marlin(
 
     old_expert_id = expert_id;
     if (num_invalid_blocks > 0) {
-      int skip_count = block_id == -1 ? par_id : 0;
-      block_id++;
-      for (int i = block_id; i < num_tokens_past_padded / moe_block_size; i++) {
+      int skip_count = par_id;
+      for (int i = 0; i < num_tokens_past_padded / moe_block_size; i++) {
         expert_id = expert_ids_ptr[i];
         if (expert_id != -1) {
           if (skip_count == 0) {
