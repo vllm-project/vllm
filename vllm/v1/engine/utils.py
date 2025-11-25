@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -20,7 +20,6 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -884,22 +883,11 @@ def launch_core_engines(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
         from vllm.v1.engine.core import EngineCoreProc
-        from vllm.v1.streaming.engine.core import StreamingEngineCoreProc
-        from vllm.v1.streaming.streaming_scheduler import StreamingScheduler
-
-        sched_cls = vllm_config.scheduler_config.scheduler_cls
-        if isinstance(sched_cls, str):
-            sched_cls = resolve_obj_by_qualname(sched_cls)
-        engine_core_proc = (
-            StreamingEngineCoreProc
-            if issubclass(cast(type, sched_cls), StreamingScheduler)
-            else EngineCoreProc
-        )
 
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                engine_core_proc.run_engine_core,
+                EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,
