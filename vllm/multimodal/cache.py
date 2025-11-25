@@ -206,6 +206,50 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     """
 
     @abstractmethod
+    def peek_item(
+        self,
+        mm_item: _I,
+        mm_hash: str,
+    ) -> _O | None:
+        """
+        Get a multi-modal item from the cache, if it exists.
+        This should be used to check for the existence of an item in the cache,
+        as the cache can be changed by other threads.
+
+        This **DOES NOT** update the cache eviction order.
+
+        Args:
+            mm_hash: The hash of the item to fetch.
+
+        Returns:
+            The multi-modal item, if it is cached, otherwise None.
+        """
+        raise NotImplementedError
+
+    def peek(
+        self,
+        mm_items: Sequence[_I],
+        mm_hashes: list[str],
+    ) -> list[_O | None]:
+        """
+        Get a sequence of multi-modal items from the cache, if they exist.
+        This should be used to check for the existence of items in the cache,
+        as the cache can be changed by other threads.
+
+        This **DOES NOT** update the cache eviction order.
+
+        Args:
+            mm_hash: The hash of the item to fetch.
+
+        Returns:
+            For each item, the multi-modal item if it is cached, otherwise None.
+        """
+        return [
+            self.peek_item(mm_item, mm_hash)
+            for mm_item, mm_hash in zip(mm_items, mm_hashes)
+        ]
+
+    @abstractmethod
     def get_and_update_item(
         self,
         mm_item: _I,
@@ -273,45 +317,6 @@ class BaseMultiModalProcessorCache(
     """The required interface for caches on P0."""
 
     @abstractmethod
-    def peek_item(
-        self,
-        mm_hash: str,
-    ) -> _O | None:
-        """
-        Get a multi-modal item from the cache, if it exists.
-        This should be used to check for the existence of an item in the cache,
-        as the cache can be changed by other threads.
-
-        This **DOES NOT** update the cache eviction order.
-
-        Args:
-            mm_hash: The hash of the item to fetch.
-
-        Returns:
-            The multi-modal item, if it is cached, otherwise None.
-        """
-        raise NotImplementedError
-
-    def peek(
-        self,
-        mm_hashes: list[str],
-    ) -> list[_O | None]:
-        """
-        Get a sequence of multi-modal items from the cache, if they exist.
-        This should be used to check for the existence of items in the cache,
-        as the cache can be changed by other threads.
-
-        This **DOES NOT** update the cache eviction order.
-
-        Args:
-            mm_hash: The hash of the item to fetch.
-
-        Returns:
-            For each item, the multi-modal item if it is cached, otherwise None.
-        """
-        return [self.peek_item(mm_hash) for mm_hash in mm_hashes]
-
-    @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
         Get (and reset) the multi-modal cache stats.
@@ -344,7 +349,9 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+    def peek_item(
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
+    ) -> MultiModalProcessorCacheOutItem | None:
         if (cached_item := self._cache.peek(mm_hash)) is not None:
             return cached_item.item, cached_item.prompt_updates
 
@@ -401,9 +408,11 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+    def peek_item(
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
+    ) -> MultiModalProcessorCacheOutItem | None:
         if (cached_item := self._cache.peek(mm_hash)) is not None:
-            return None, cached_item.prompt_updates
+            return mm_item, cached_item.prompt_updates
 
         return None
 
@@ -478,7 +487,9 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return info
 
     @override
-    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+    def peek_item(
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
+    ) -> MultiModalProcessorCacheOutItem | None:
         # SHM cache is FIFO, so calling the standard get_cached method will not
         # change the cache eviction order
 
@@ -638,8 +649,18 @@ class BaseMultiModalReceiverCache(
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
         """Update multimodal features with cached encoder outputs."""
-        for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data, feature.identifier)
+        mm_precached_features = [
+            self.peek_item(feature.data, feature.identifier) for feature in mm_features
+        ]
+
+        for idx, feature in enumerate(mm_features):
+            data = (
+                mm_precached_features[idx]
+                if mm_precached_features[idx] is not None
+                else feature.data
+            )
+
+            feature.data = self.get_and_update_item(data, feature.identifier)
         return mm_features
 
 
@@ -663,6 +684,15 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
             mm_config.mm_processor_cache_gb,
             MultiModalKwargsItem,
         )
+
+    @override
+    def peek_item(
+        self, mm_item: MultiModalKwargsItem | None, mm_hash: str
+    ) -> MultiModalProcessorCacheOutItem | None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
+            return cached_item
+
+        return None
 
     @override
     def get_and_update_item(
@@ -715,6 +745,12 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             serde_class=MsgpackSerde,
             reader_lock=shared_worker_lock,
         )
+
+    @override
+    def peek_item(
+        self, mm_item: MultiModalKwargsItem | None, mm_hash: str
+    ) -> MultiModalProcessorCacheOutItem | None:
+        return self.get_and_update_item(mm_item, mm_hash)
 
     @override
     def get_and_update_item(
