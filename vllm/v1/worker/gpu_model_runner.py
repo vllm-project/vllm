@@ -50,16 +50,21 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    MRotaryEmbedding,
+    XDRotaryEmbedding,
+)
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsXDRoPE,
     is_mixture_of_experts,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
     supports_transcription,
+    supports_xdrope,
 )
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -324,6 +329,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_xdrope_dim = model_config.uses_xdrope_dim
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -375,7 +381,9 @@ class GPUModelRunner(
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
-                    self.use_aux_hidden_state_outputs = True
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state
+                    )
             elif self.speculative_config.method == "medusa":
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
@@ -393,6 +401,9 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: dict[str, int] = {}
         self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
@@ -507,6 +518,13 @@ class GPUModelRunner(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
 
+        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+        if self.uses_xdrope_dim > 0:
+            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
+            self.xdrope_positions = self._make_buffer(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+            )
+
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
 
@@ -588,10 +606,14 @@ class GPUModelRunner(
         if isinstance(num_tokens, int):
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, :num_tokens]
+            if self.uses_xdrope_dim > 0:
+                return self.xdrope_positions.gpu[:, :num_tokens]
             return self.positions.gpu[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
+            if self.uses_xdrope_dim > 0:
+                return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions.gpu[num_tokens]
 
     def _make_buffer(
@@ -687,6 +709,7 @@ class GPUModelRunner(
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.num_prompt_logprobs.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -755,9 +778,20 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
 
+            if sampling_params and sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[req_id] = (
+                    self.input_batch.vocab_size
+                    if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs
+                )
+
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
+
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            if self.uses_xdrope_dim > 0:
+                self._init_xdrope_positions(req_state)
 
             reqs_to_add.append(req_state)
 
@@ -972,6 +1006,19 @@ class GPUModelRunner(
                 req_state.prompt_token_ids,
                 req_state.mm_features,
             )
+        )
+
+    def _init_xdrope_positions(self, req_state: CachedRequestState):
+        model = self.get_model()
+        xdrope_model = cast(SupportsXDRoPE, model)
+        assert req_state.prompt_token_ids is not None, (
+            "XD-RoPE requires prompt_token_ids to be available."
+        )
+        assert supports_xdrope(model), "XD-RoPE support is not implemented."
+
+        req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
+            req_state.prompt_token_ids,
+            req_state.mm_features,
         )
 
     def _extract_mm_kwargs(
@@ -1218,6 +1265,11 @@ class GPUModelRunner(
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
+        # Calculate XD-RoPE positions.
+        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+        if self.uses_xdrope_dim > 0:
+            self._calc_xdrope_positions(scheduler_output)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -1349,6 +1401,12 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True,
+            )
+        elif self.uses_xdrope_dim > 0:
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
         else:
@@ -1780,6 +1838,53 @@ class GPUModelRunner(
 
                 mrope_pos_ptr += completion_part_len
 
+    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
+        xdrope_pos_ptr = 0
+        for index, req_id in enumerate(self.input_batch.req_ids):
+            req = self.requests[req_id]
+            assert req.xdrope_positions is not None
+
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                req.prompt_token_ids, req.prompt_embeds
+            )
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's xdrope_positions are pre-computed
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.xdrope_positions.cpu[:, dst_start:dst_end] = req.xdrope_positions[
+                    :, src_start:src_end
+                ]
+                xdrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's xdrope_positions on-the-fly
+                dst_start = xdrope_pos_ptr
+                dst_end = xdrope_pos_ptr + completion_part_len
+
+                XDRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.xdrope_positions.np,
+                    out_offset=dst_start,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
+
+                xdrope_pos_ptr += completion_part_len
+
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -2024,6 +2129,7 @@ class GPUModelRunner(
 
         req_start_idx = 0
         should_sync_mrope_positions = False
+        should_sync_xdrope_positions = False
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -2096,6 +2202,10 @@ class GPUModelRunner(
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        if should_sync_xdrope_positions:
+            self._calc_xdrope_positions(scheduler_output)
+            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
@@ -2371,8 +2481,11 @@ class GPUModelRunner(
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs(num_input_tokens)
+
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
@@ -2466,7 +2579,9 @@ class GPUModelRunner(
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
+        logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
+        cu_num_new_tokens: list[int] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2479,6 +2594,12 @@ class GPUModelRunner(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                 )
+                if logprobs_tensors:
+                    # Needed for extracting logprobs when spec decoding.
+                    # This must be done prior to discarding sampled tokens.
+                    cu_num_new_tokens = [0]
+                    for toks in valid_sampled_token_ids:
+                        cu_num_new_tokens.append(cu_num_new_tokens[-1] + len(toks))
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()
@@ -2506,10 +2627,6 @@ class GPUModelRunner(
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        logprobs_tensors = sampler_output.logprobs_tensors
-        cu_num_accepted_tokens = (
-            [0] if spec_decode_metadata and logprobs_tensors else None
-        )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
@@ -2517,11 +2634,6 @@ class GPUModelRunner(
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
             num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
-
-            if cu_num_accepted_tokens is not None:
-                cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + num_sampled_ids
-                )
 
             if not sampled_ids:
                 continue
@@ -2544,7 +2656,7 @@ class GPUModelRunner(
             req_state.output_token_ids.extend(sampled_ids)
 
         logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_accepted_tokens)
+            logprobs_tensors.tolists(cu_num_new_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
@@ -2672,7 +2784,7 @@ class GPUModelRunner(
                         scheduler_output, self.vllm_config
                     )
                 if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.input_batch.num_prompt_logprobs, (
+                    assert not self.num_prompt_logprobs, (
                         "--kv-sharing-fast-prefill produces incorrect "
                         "logprobs for prompt tokens, tokens, please disable "
                         "it when the requests need prompt logprobs"
@@ -3360,6 +3472,8 @@ class GPUModelRunner(
                 old_global_expert_indices,
                 rank_mapping,
             )
+            if self.eplb_state.is_async:
+                self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
         if (
             self.vllm_config.compilation_config.mode
@@ -3437,7 +3551,7 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         num_scheduled_tokens: dict[str, int],
     ) -> dict[str, LogprobsTensors | None]:
-        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+        num_prompt_logprobs_dict = self.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
@@ -3448,7 +3562,10 @@ class GPUModelRunner(
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
         for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
-            num_tokens = num_scheduled_tokens[req_id]
+            num_tokens = num_scheduled_tokens.get(req_id)
+            if num_tokens is None:
+                # This can happen if the request was preempted in prefill stage.
+                continue
 
             # Get metadata for this request.
             request = self.requests[req_id]
@@ -3727,6 +3844,31 @@ class GPUModelRunner(
             dp_rank = self.parallel_config.data_parallel_rank
             num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
+        # filter out the valid batch descriptor
+        _cg_mode, batch_descriptor = (
+            self.cudagraph_dispatcher.dispatch(
+                BatchDescriptor(
+                    num_tokens=num_tokens_after_padding,
+                    uniform_decode=uniform_decode,
+                    has_lora=activate_lora and self.lora_config is not None,
+                )
+            )
+            if not is_profile
+            else (CUDAGraphMode.NONE, None)
+        )
+        if cudagraph_runtime_mode is not None:
+            # we allow forcing NONE when the dispatcher disagrees to support
+            # warm ups for cudagraph capture
+            assert (
+                cudagraph_runtime_mode == CUDAGraphMode.NONE
+                or cudagraph_runtime_mode == _cg_mode
+            ), (
+                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
+            )
+        else:
+            cudagraph_runtime_mode = _cg_mode
+
         attn_metadata: PerLayerAttnMetadata | None = None
 
         # If force_attention is True, we always capture attention. Otherwise,
@@ -3782,6 +3924,8 @@ class GPUModelRunner(
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
+            elif self.uses_xdrope_dim > 0:
+                positions = self.xdrope_positions.gpu[:, :num_tokens_after_padding]
             else:
                 positions = self.positions.gpu[:num_tokens_after_padding]
 
@@ -3800,31 +3944,6 @@ class GPUModelRunner(
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens_after_padding, None, False
                 )
-
-            # filter out the valid batch descriptor
-            _cg_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    BatchDescriptor(
-                        num_tokens=num_tokens_after_padding,
-                        uniform_decode=uniform_decode,
-                        has_lora=activate_lora and self.lora_config is not None,
-                    )
-                )
-                if not is_profile
-                else (CUDAGraphMode.NONE, None)
-            )
-            if cudagraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for cudagraph capture
-                assert (
-                    cudagraph_runtime_mode == CUDAGraphMode.NONE
-                    or cudagraph_runtime_mode == _cg_mode
-                ), (
-                    f"Cudagraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
-                )
-            else:
-                cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
                 # Adjust values to reflect a single ubatch.
@@ -4618,7 +4737,7 @@ class GPUModelRunner(
             """
             for backend in backends:
                 is_supported = False
-                for supported_size in backend.supported_kernel_block_sizes:
+                for supported_size in backend.get_supported_kernel_block_sizes():
                     if isinstance(supported_size, int):
                         if block_size == supported_size:
                             is_supported = True
@@ -4649,7 +4768,7 @@ class GPUModelRunner(
         all_int_supported_sizes = set(
             supported_size
             for backend in backends
-            for supported_size in backend.supported_kernel_block_sizes
+            for supported_size in backend.get_supported_kernel_block_sizes()
             if isinstance(supported_size, int)
         )
 
