@@ -27,7 +27,7 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 from packaging.version import Version
-from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -87,8 +87,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32=DeepseekV3Config,
+    deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -207,7 +208,19 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
+
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
         # to int and add the layer_types list[str] to make it HF compatible
@@ -538,6 +551,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
         return False
 
     return uses_mrope(thinker_text_config)
+
+
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
