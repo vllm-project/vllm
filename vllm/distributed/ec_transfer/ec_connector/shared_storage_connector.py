@@ -117,24 +117,6 @@ class ECSharedStorageConnector(ECConnectorBase):
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def has_caches(
-        self,
-        request: "Request",
-    ) -> list[bool]:
-        """
-        Check if cache exist externally for each mm_data of request
-
-        Args:
-            request (Request): the request object.
-
-        Returns:
-            List of bool indicate that ith mm_data exist in cache or not
-        """
-        result = []
-        for feature in request.mm_features:
-            result.append(self._found_match_for_mm_data(feature.identifier))
-        return result
-
     def has_cache_item(
         self,
         identifier: str,

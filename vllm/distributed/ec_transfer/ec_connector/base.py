@@ -182,23 +182,6 @@ class ECConnectorBase(ABC):
     # ==============================
 
     @abstractmethod
-    def has_caches(
-        self,
-        request: "Request",
-    ) -> list[bool]:
-        """
-        Check if encoder cache exists for each mm data of requests
-
-        Args:
-            request (Request): the request object.
-
-        Returns:
-            A list bool where ith value is True if cache exist for
-            ith mm_data of requests
-        """
-        pass
-
-    @abstractmethod
     def has_cache_item(
         self,
         identifier: str,
