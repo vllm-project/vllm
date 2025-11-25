@@ -623,18 +623,6 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-        ):
-            logger.info(
-                "Cudagraph mode %s is not compatible with compilation mode %s. "
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
