@@ -15,7 +15,7 @@ from flashinfer import (
 )
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import FP4Tensor, determine_attention_backend, PosEncodingMode
 
 from vllm import envs
 from vllm.attention.backends.abstract import (
@@ -1526,28 +1526,42 @@ def fast_plan_decode(
 
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
+    backend = determine_attention_backend(
+        self.device,
+        PosEncodingMode[pos_encoding_mode].value,
+        use_fp16_qk_reductions = False,
+        use_custom_mask = False,
+        dtype_q = q_data_type,
+        dtype_kv = kv_data_type,
+    )
+
+    # Make sure we pass exactly 18 arguments for tensor core version
+    args = (
+        self._float_workspace_buffer,
+        self._int_workspace_buffer,
+        self._pin_memory_int_workspace_buffer,
+        qo_indptr_host,
+        indptr_cpu,
+        seq_lens_cpu,
+        batch_size,  # total_num_rows
+        batch_size,
+        num_qo_heads,
+        num_kv_heads,
+        page_size,
+        self.is_cuda_graph_enabled,
+        head_dim,
+        head_dim,
+        False,  # causal
+        window_left,
+        fixed_split_size,
+        disable_split_kv,
+    )
+
+    if backend == "fa2":
+        # Adding another argument (num_colocated_ctas) for fa2 backend
+        args = args + (0,)
     try:
-        # Make sure we pass exactly 18 arguments for tensor core version
-        self._plan_info = self._cached_module.plan(
-            self._float_workspace_buffer,
-            self._int_workspace_buffer,
-            self._pin_memory_int_workspace_buffer,
-            qo_indptr_host,
-            indptr_cpu,
-            seq_lens_cpu,
-            batch_size,  # total_num_rows
-            batch_size,
-            num_qo_heads,
-            num_kv_heads,
-            page_size,
-            self.is_cuda_graph_enabled,
-            head_dim,
-            head_dim,
-            False,  # causal
-            window_left,
-            fixed_split_size,
-            disable_split_kv,
-        )
+        self._plan_info = self._cached_module.plan(*args)
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
 
