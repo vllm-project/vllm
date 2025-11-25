@@ -38,8 +38,8 @@ class TopKTopPSampler(nn.Module):
                 capability = current_platform.get_device_capability()
                 if not FlashInferBackend.supports_compute_capability(capability):
                     raise RuntimeError(
-                        "FlashInfer sampler is not supported "
-                        f"on compute capability {capability}."
+                        "FlashInfer is not supported on "
+                        f"compute capability {capability}."
                     )
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
                 logger.info_once(
