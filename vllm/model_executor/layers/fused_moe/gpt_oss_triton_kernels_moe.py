@@ -13,9 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
@@ -128,8 +126,7 @@ def triton_kernel_fused_experts(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
-    intermediate_cache13: torch.Tensor | None = None,
-    intermediate_cache2: torch.Tensor | None = None,
+    intermediate_cache: torch.Tensor | None = None,
     a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
@@ -152,16 +149,16 @@ def triton_kernel_fused_experts(
     if global_num_experts == -1:
         global_num_experts = E
 
-    if intermediate_cache13 is None:
-        intermediate_cache13 = torch.empty(
+    if intermediate_cache is None:
+        intermediate_cache = torch.empty(
             (batch_dim, M * topk, N // 2),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
 
     # Add batch_dim to output buffer because matmul_ogs expects 3D output
-    intermediate_cache13 = _resize_cache(
-        intermediate_cache13, (batch_dim, M * topk, N // 2)
+    intermediate_cache = _resize_cache(
+        intermediate_cache, (batch_dim, M * topk, N // 2)
     )
     output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
@@ -181,11 +178,11 @@ def triton_kernel_fused_experts(
         precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
-        y=intermediate_cache13,
+        y=intermediate_cache,
     )
 
     matmul_ogs(
-        intermediate_cache13.view(M * topk, N // 2),
+        intermediate_cache.view(M * topk, N // 2),
         w2,
         quant_config.w2_bias,
         routing_data,
@@ -194,7 +191,8 @@ def triton_kernel_fused_experts(
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
-    return output_tensor.view(M, K)
+    output_tensor = output_tensor.view(M, K)
+    return output_tensor
 
 
 def make_routing_data(
@@ -375,9 +373,6 @@ class OAITritonExperts(BaseOAITritonExperts):
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
             expert_map=None,  # applied already
-            # Workspaces are swapped in workspace_shapes() to account for proper
-            # output buffer allocation.
-            intermediate_cache13=workspace2,
-            intermediate_cache2=workspace13,
+            intermediate_cache=workspace2,
             a1q_scale=a1q_scale,
         )
