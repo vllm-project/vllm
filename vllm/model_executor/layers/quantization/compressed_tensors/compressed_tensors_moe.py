@@ -176,7 +176,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     quant_config, layer.moe_config, layer_name
                 )
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config)
+            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -200,7 +200,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name=None):
+    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
