@@ -409,12 +409,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
-            # Use upper bound to avoid GPU->CPU sync
-            # Context length = seq_len - query_len, so max context ≤ max_seq_len
-            # This is conservative but eliminates sync point while maintaining
-            # correctness. The actual sequence lengths are passed via
-            # dcp_context_kv_lens (GPU tensor).
-            max_dcp_context_kv_len = max_seq_len
+            # After DCP distribution, each rank gets at most ceil(L / N) elements
+            # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
+            max_dcp_context_kv_len = (
+                max_seq_len + self.dcp_world_size - 1
+            ) // self.dcp_world_size
 
             scheduler_metadata = schedule(
                 batch_size=num_reqs,
