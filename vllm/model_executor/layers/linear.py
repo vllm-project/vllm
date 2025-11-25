@@ -91,8 +91,8 @@ def adjust_bitsandbytes_4bit_shard(param: Parameter,
 def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
     """For fused modules (QKV and MLP) we have an array of length
     N that holds 1 scale for each "logical" matrix. So the param
-    is an array of length N. The loaded_weight corresponds to 
-    one of the shards on disk. Here, we slice the param based on 
+    is an array of length N. The loaded_weight corresponds to
+    one of the shards on disk. Here, we slice the param based on
     the shard_id for loading.
     """
     qkv_idxs = {"q": 0, "k": 1, "v": 2}
@@ -119,13 +119,13 @@ def left_shift_bitsandbytes_4bit_shard(bnb_weight_attrs: dict[str, Any]):
 
     For example, given bnb weight attributes as below:
     {
-        'bnb_shard_offsets': array([0, 4, 8, 16]), 
+        'bnb_shard_offsets': array([0, 4, 8, 16]),
         'bnb_quant_state': {0: ..., 1: ..., 2: ...},
     }
 
     The function will return:
     {
-        'bnb_shard_offsets': array([0, 4]), 
+        'bnb_shard_offsets': array([0, 4]),
         'bnb_quant_state': {0: ...},
     }
     and
@@ -157,13 +157,13 @@ class LinearMethodBase(QuantizeMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        """Create weights for a linear layer. 
+        """Create weights for a linear layer.
            The weights will be set as attributes of the layer.
 
         Args:
             layer: The layer that is using the LinearMethodBase factory.
             input_size_per_partition: Size of the weight input dim on rank X.
-            output_partition_sizes: Sizes of the output dim of each logical 
+            output_partition_sizes: Sizes of the output dim of each logical
                 weight on rank X. E.g., output_partition_sizes for QKVLinear
                 is a list contains the width of Wq, Wk, Wv on rank X.
             input_size: Size of the input dim of the weight across all ranks.
@@ -202,7 +202,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import (
                 dispatch_cpu_unquantized_gemm)
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -448,7 +448,7 @@ class ColumnParallelLinear(LinearBase):
         output_sizes: list of output sizes packed into one output, like for QKV
                        the list would be size 3.
         prefix: The name of the layer in the state dict, including all parents
-                        (e.g. model.layers.0.qkv_proj) 
+                        (e.g. model.layers.0.qkv_proj)
     """
 
     def __init__(
@@ -921,7 +921,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self.num_kv_heads * self.head_size * tp_size,  # v_proj
         ]
 
         super().__init__(input_size=input_size,
@@ -954,7 +954,7 @@ class QKVParallelLinear(ColumnParallelLinear):
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
                                            loaded_weight: torch.Tensor):
         """
-        Handle special case for models where QKV layers are already 
+        Handle special case for models where QKV layers are already
         fused on disk. In this case, we have no shard id. This function
         determmines the shard id by splitting these layers and then calls
         the weight loader using the shard id.
@@ -1537,7 +1537,7 @@ class QKVCrossParallelLinear(LinearBase):
         param: nn.Parameter,
     ) -> nn.Parameter:
         """
-        Given the placeholder param, 
+        Given the placeholder param,
         return the corresponding param in the proj layers.
         """
         target_param_list = [

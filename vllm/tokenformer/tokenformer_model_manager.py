@@ -13,6 +13,7 @@ from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
 from vllm.lora.models import get_lora_id
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 from vllm.adapter_commons.models import AdapterModel, AdapterModelManager
 from vllm.attention import AttentionMetadata, AttentionType
@@ -56,7 +57,6 @@ class TokenformerModel(AdapterModel):
 
         return cls(tokenformers)
 
-
 class TokenformerModelManager(AdapterModelManager):
     """A manager that manages tokenformer models."""
 
@@ -69,6 +69,7 @@ class TokenformerModelManager(AdapterModelManager):
             self.model = TokenformerSurgeon(model, device).insert_adapter_modules()
         else:
             self.model = model
+
         self._registered_adapters: Dict[int, Any] = {}
         self._active_adapter: Any = None
         self.tokenformer_model_cls = TokenformerModel
@@ -89,13 +90,15 @@ class TokenformerModelManager(AdapterModelManager):
         logger.info(f"Activating Tokenformer - {adapter_id}")
 
         model_state_dict = self.model.state_dict()
+
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
         # Save original tensors if not already saved
         for key in tokenformers:
             if key not in self.original_tensors:
                 logger.info(f"Saving original tensor {key} before loading adapter {adapter_id}")
-                self.original_tensors[key] = copy.deepcopy(model_state_dict[key])
+                if key in model_state_dict:
+                    self.original_tensors[key] = copy.deepcopy(model_state_dict[key])
 
         for key, value in self.original_tensors.items():
             logger.info(f"Loading original tensor {key} from adapter {adapter_id}")
@@ -105,7 +108,8 @@ class TokenformerModelManager(AdapterModelManager):
             logger.info(f"Loading {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
-        self.model.load_state_dict(model_state_dict, strict=False)
+        self.model.load_weights(model_state_dict.items())
+        process_weights_after_loading(self.model, self.model.model_config, self.device)
 
         self._active_adapter = adapter_id
 
