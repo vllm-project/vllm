@@ -36,10 +36,12 @@ class TopKTopPSampler(nn.Module):
                 from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
                 capability = current_platform.get_device_capability()
+                assert capability is not None
                 if not FlashInferBackend.supports_compute_capability(capability):
+                    capability_str = capability.as_version_str()
                     raise RuntimeError(
-                        "FlashInfer is not supported on "
-                        f"compute capability {capability}."
+                        "FlashInfer does not support compute capability "
+                        f"{capability_str}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
                     )
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
                 logger.info_once(
