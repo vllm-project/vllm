@@ -290,12 +290,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.mamba_block_size is None:
-            if cache_config.block_size is None:
-                cache_config.block_size = 16
-            cache_config.mamba_block_size = cache_config.block_size
-            logger.info(
-                "Setting mamba block size to %d tokens", cache_config.mamba_block_size
-            )
+            cache_config.mamba_block_size = model_config.max_model_len
 
         if cache_config.enable_prefix_caching:
             if model_config.supports_mamba_prefix_caching:
