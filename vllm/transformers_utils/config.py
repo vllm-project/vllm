@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import json
 import os
 import time
@@ -26,7 +27,7 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 from packaging.version import Version
-from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -83,8 +84,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32=DeepseekV3Config,
+    deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -203,7 +205,19 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
+
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
         # to int and add the layer_types list[str] to make it HF compatible
@@ -355,6 +369,41 @@ def list_repo_files(
     return with_retry(lookup_files, "Error retrieving file list")
 
 
+def list_filtered_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> list[str]:
+    try:
+        all_files = list_repo_files(
+            repo_id=model_name_or_path,
+            revision=revision,
+            token=token,
+            repo_type=repo_type,
+        )
+    except Exception:
+        logger.error(
+            "Error retrieving file list. Please ensure your `model_name_or_path`"
+            "`repo_type`, `token` and `revision` arguments are correctly set. "
+            "Returning an empty list."
+        )
+        return []
+
+    file_list = []
+    # Filter patterns on filenames
+    for pattern in allow_patterns:
+        file_list.extend(
+            [
+                file
+                for file in all_files
+                if fnmatch.fnmatch(os.path.basename(file), pattern)
+            ]
+        )
+    return file_list
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -501,6 +550,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
     return uses_mrope(thinker_text_config)
 
 
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
+
+
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
 
@@ -619,10 +685,14 @@ def get_config(
 
     if config_format == "auto":
         try:
-            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
-                config_format = "hf"
-            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            # First check for Mistral to avoid defaulting to
+            # Transformers implementation.
+            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
+            elif is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                config_format = "hf"
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "

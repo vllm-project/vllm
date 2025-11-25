@@ -36,7 +36,14 @@ def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
     * None otherwise
     """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else AttentionBackendEnum[backend_name]
+    if backend_name is None:
+        return None
+    if backend_name == "XFORMERS":
+        raise ValueError(
+            "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+            "details). Please select a supported attention backend."
+        )
+    return AttentionBackendEnum[backend_name]
 
 
 # Global state allows a particular choice of backend

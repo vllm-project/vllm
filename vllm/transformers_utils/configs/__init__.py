@@ -5,7 +5,12 @@ Model configs may be defined in this directory for the following reasons:
 
 - There is no configuration file defined by HF Hub or Transformers library.
 - There is a need to override the existing config to support vLLM.
+- The HF model_type isn't recognized by the Transformers library but can
+  be mapped to an existing Transformers config, such as
+  deepseek-ai/DeepSeek-V3.2-Exp.
 """
+
+from transformers import DeepseekV3Config
 
 from vllm.transformers_utils.configs.afmoe import AfmoeConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
@@ -18,6 +23,11 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
+from vllm.transformers_utils.configs.hunyuan_vl import (
+    HunYuanVLConfig,
+    HunYuanVLTextConfig,
+    HunYuanVLVisionConfig,
+)
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
@@ -44,9 +54,13 @@ __all__ = [
     "AfmoeConfig",
     "ChatGLMConfig",
     "DeepseekVLV2Config",
+    "DeepseekV3Config",
     "DotsOCRConfig",
     "EAGLEConfig",
     "FlexOlmoConfig",
+    "HunYuanVLConfig",
+    "HunYuanVLTextConfig",
+    "HunYuanVLVisionConfig",
     "RWConfig",
     "JAISConfig",
     "Lfm2MoeConfig",
