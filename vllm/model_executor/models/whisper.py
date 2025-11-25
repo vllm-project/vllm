@@ -530,7 +530,8 @@ class WhisperEncoder(nn.Module):
                 embeds.dtype
             )
             hidden_states.append(embeds)
-        hidden_states = torch.cat(hidden_states)
+        # Input to MHA must be B x T x D
+        hidden_states = torch.stack(hidden_states, dim=0)
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
@@ -878,8 +879,6 @@ class WhisperForConditionalGeneration(
         quant_config = vllm_config.quant_config
         self.config = config
         self.dtype = vllm_config.model_config.dtype
-        # Whisper encoder input is fixed (padded or truncated) to this number of tokens
-        self.encoder_item_size = config.max_source_positions
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
 
@@ -918,7 +917,7 @@ class WhisperForConditionalGeneration(
         # Split concatenated encoder outputs into one tensor per audio input
         enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
         # The assumption is we can only process whole mm items (audios)
-        return enc_output.split(self.encoder_item_size, dim=0)
+        return enc_output.unbind(dim=0)
 
     def embed_input_ids(
         self,
