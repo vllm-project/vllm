@@ -14,7 +14,7 @@ import os
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import regex as re
@@ -23,7 +23,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
     InsufficientMemoryError, TensorMemoryPool)
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
@@ -60,20 +59,18 @@ class MooncakeStoreConfig:
     fast_transfer_buffer_size: int
 
     @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
-        """Load the config from a JSON file."""
-        with open(file_path) as fin:
-            config = json.load(fin)
+    def from_config(config: dict[str, Any]) -> "MooncakeStoreConfig":
+        """Load the mooncake store config"""
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
-            metadata_server=config.get("metadata_server"),
+            local_hostname=config.get("local_hostname", "localhost"),
+            metadata_server=config.get("metadata_server", ""),
             global_segment_size=config.get("global_segment_size",
                                            DEFAULT_GLOBAL_SEGMENT_SIZE),
             local_buffer_size=config.get("local_buffer_size",
                                          DEFAULT_LOCAL_BUFFER_SIZE),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=config.get("master_server_address", ""),
             storage_root_dir=config.get("storage_root_dir", ""),
             transfer_timeout=int(config.get("transfer_timeout", 1)),
             replica_num=int(config.get("replica_num", 1)),
@@ -123,9 +120,8 @@ class ECMooncakeStore:
                     "ec_transfer_config must be set for ECConnectorBase")
 
             self.store = MooncakeDistributedStore()
-            self.config = MooncakeStoreConfig.from_file(
-                vllm_config.ec_transfer_config.
-                ec_connector_extra_config["ec_mooncake_config_file_path"])
+            self.config = MooncakeStoreConfig.from_config(
+                vllm_config.ec_transfer_config.ec_connector_extra_config)
             logger.debug("Mooncake Configuration loaded successfully.")
 
             # Check if storage_root_dir exists and set environment variable
@@ -342,9 +338,6 @@ class ECMooncakeStore:
 
     async def _batch_put_async(self, keys: list[str],
                                tensors: list[torch.Tensor]) -> None:
-        device = get_world_group().local_rank
-        if hasattr(torch, "npu") and torch.npu.is_available():
-            torch.npu.set_device(device)
         async with self.put_queue_cv:
             self.put_queue.update(keys)
 
