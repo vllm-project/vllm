@@ -88,6 +88,7 @@ from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     get_dtype_size,
@@ -2734,6 +2735,14 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
+
+        # Enable layerwise NVTX tracing for the model
+        # Position the registration here after CUDA graph has been captured
+        # and models have been torch compiled
+        if self.observability_config.enable_layerwise_nvtx_tracing:
+            pyt_hooks = PytHooks()
+            pyt_hooks.register_hooks(self.model, module_prefix="model")
+
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3576,6 +3585,7 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
+
         prepare_communication_buffer_for_model(self.model)
         if (drafter := getattr(self, "drafter", None)) and (
             drafter_model := getattr(drafter, "model", None)
