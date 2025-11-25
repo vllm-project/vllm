@@ -136,7 +136,7 @@ elseif(HIP_FOUND)
 
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
+      Torch_VERSION VERSION_LESS ${TORCH_SUPPORTED_VERSION_ROCM})
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
