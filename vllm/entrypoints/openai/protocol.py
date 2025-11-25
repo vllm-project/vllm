@@ -49,6 +49,8 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 
+from vllm.config.pooler import get_use_activation
+from vllm.tasks import PoolingTask
 from vllm.utils.serial_utils import (
     EmbedDType,
     EncodingFormat,
@@ -77,7 +79,6 @@ from pydantic import (
     model_validator,
 )
 
-from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
 from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
@@ -376,7 +377,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -473,16 +474,12 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
     @model_validator(mode="before")
@@ -568,7 +565,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
-    best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
@@ -767,7 +763,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -775,10 +771,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
@@ -892,7 +888,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -944,10 +939,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
                 raise ValueError("`top_logprobs` must be a positive value or -1.")
@@ -1081,16 +1072,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
@@ -1099,7 +1086,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
     prompt: list[int] | list[list[int]] | str | list[str] | None = None
-    best_of: int | None = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -1263,7 +1249,7 @@ class CompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -1386,7 +1372,6 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1447,10 +1432,6 @@ class CompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1485,16 +1466,12 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
@@ -1669,8 +1646,58 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
+
+class PoolingCompletionRequest(EmbeddingCompletionRequest):
+    task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            use_activation=get_use_activation(self),
+        )
+
+
+class PoolingChatRequest(EmbeddingChatRequest):
+    task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "If it is a classify or token_classify task, the default is True; "
+        "for other tasks, this value should be None.",
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize,
+            use_activation=get_use_activation(self),
+        )
+
 
 T = TypeVar("T")
 
@@ -1686,6 +1713,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     """
     data: T
 
+    task: PoolingTask = "plugin"
     encoding_format: EncodingFormat = "float"
     embed_dtype: EmbedDType = Field(
         default="float32",
@@ -1749,14 +1777,27 @@ class ScoreRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1783,14 +1824,27 @@ class RerankRequest(OpenAIBaseModel):
         ),
     )
 
-    activation: bool | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1942,10 +1996,10 @@ class ScoreResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
-class ClassificationRequest(OpenAIBaseModel):
+class ClassificationCompletionRequest(OpenAIBaseModel):
     model: str | None = None
     input: list[str] | str
-    truncate_prompt_tokens: int | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     user: str | None = None
 
     # --8<-- [start:classification-extra-params]
@@ -1957,16 +2011,139 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."
+        ),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
 
-    activation: bool | None = None
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
 
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation,
+            use_activation=get_use_activation(self),
         )
+
+
+class ClassificationChatRequest(OpenAIBaseModel):
+    model: str | None = None
+    messages: list[ChatCompletionMessageParam]
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    user: str | None = None
+
+    # --8<-- [start:chat-classification-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
+    )
+
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."
+        ),
+    )
+
+    chat_template: str | None = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "As of transformers v4.44, default chat template is no longer "
+            "allowed, so you must provide a chat template if the tokenizer "
+            "does not define one."
+        ),
+    )
+
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."
+        ),
+    )
+
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
+    # --8<-- [end:chat-classification-extra-params]
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=get_use_activation(self),
+        )
+
+
+ClassificationRequest: TypeAlias = (
+    ClassificationCompletionRequest | ClassificationChatRequest
+)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -2031,7 +2208,15 @@ class ChatMessage(OpenAIBaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
     # vLLM-specific fields that are not in OpenAI spec
+    reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
+
+    @model_validator(mode="after")
+    def handle_deprecated_reasoning_content(self):
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
+        return self
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -2085,8 +2270,16 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
+    reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def handle_deprecated_reasoning_content(self):
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
+        return self
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -3023,3 +3216,80 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+####### Tokens IN <> Tokens OUT #######
+class GenerateRequest(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    token_ids: list[int]
+    """The token ids to generate text from."""
+
+    # features: MultiModalFeatureSpec
+    # TODO (NickLucche): implement once Renderer work is completed
+    features: str | None = None
+    """The processed MM inputs for the model."""
+
+    sampling_params: SamplingParams
+    """The sampling parameters for the model."""
+
+    model: str | None = None
+
+    stream: bool | None = False
+    stream_options: StreamOptions | None = None
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+
+class GenerateResponseChoice(BaseModel):
+    index: int
+    logprobs: ChatCompletionLogProbs | None = None
+    # per OpenAI spec this is the default
+    finish_reason: str | None = "stop"
+    token_ids: list[int] | None = None
+
+
+class GenerateResponse(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    choices: list[GenerateResponseChoice]
+
+    prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )

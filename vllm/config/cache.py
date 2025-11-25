@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -21,9 +20,18 @@ else:
 logger = init_logger(__name__)
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
-CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+CacheDType = Literal[
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    "fp8_e5m2",
+    "fp8_inc",
+    "fp8_ds_mla",
+]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
@@ -128,6 +136,17 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    kv_offloading_size: float | None = None
+    """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
+    the total buffer size summed across all TP ranks. By default, this is set
+    to None, which means no KV offloading is enabled. When set with
+    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+
+    kv_offloading_backend: KVOffloadingBackend | None = None
+    """The backend to use for KV cache offloading. Supported backends include
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    together with kv_offloading_size."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -140,13 +159,29 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        factors.append(self.mamba_cache_dtype)
-        factors.append(self.mamba_ssm_cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/derived knobs that don't affect compiled graph shape
+            "gpu_memory_utilization",
+            "swap_space",
+            "is_attention_free",
+            "num_gpu_blocks_override",
+            "enable_prefix_caching",
+            "prefix_caching_hash_algo",
+            # `cpu_offload_gb` does not use `torch.compile` yet.
+            "cpu_offload_gb",
+            "cpu_kvcache_space_bytes",
+            "mamba_page_size_padded",
+            # Post-init/derived counters
+            "num_gpu_blocks",
+            "num_cpu_blocks",
+            # WIP feature toggle not impacting compiled graph shape
+            "kv_sharing_fast_prefill",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -185,11 +220,3 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-    @model_validator(mode="after")
-    def validate_mamba_block_size(self) -> "CacheConfig":
-        if self.mamba_block_size is not None and not self.enable_prefix_caching:
-            raise ValueError(
-                "--mamba-block-size can only be set with --enable-prefix-caching"
-            )
-        return self

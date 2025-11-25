@@ -23,6 +23,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     is_init_field,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -31,7 +32,6 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -67,6 +67,7 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -258,7 +259,9 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(mode=compilation_config)
+                compilation_config_instance = CompilationConfig(
+                    mode=CompilationMode(compilation_config)
+                )
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{
@@ -289,7 +292,11 @@ class LLM:
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
-        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher":
+        if (
+            _dp_size > 1
+            and not _distributed_executor_backend == "external_launcher"
+            and not current_platform.is_tpu()
+        ):
             raise ValueError(
                 f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
@@ -332,7 +339,6 @@ class LLM:
 
         log_non_default_args(engine_args)
 
-        # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -459,7 +465,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (
@@ -1491,8 +1497,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> None:
-        self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         """
@@ -1583,20 +1589,27 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
-        for i, prompt in enumerate(it):
-            if isinstance(prompt, dict):
-                self._validate_mm_data_and_uuids(
-                    prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
-                )
+        added_request_ids: list[str] = []
 
-            self._add_request(
-                prompt,
-                params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request[i]
-                if isinstance(lora_request, Sequence)
-                else lora_request,
-                priority=priority[i] if priority else 0,
-            )
+        try:
+            for i, prompt in enumerate(it):
+                if isinstance(prompt, dict):
+                    self._validate_mm_data_and_uuids(
+                        prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
+                    )
+                request_id = self._add_request(
+                    prompt,
+                    params[i] if isinstance(params, Sequence) else params,
+                    lora_request=lora_request[i]
+                    if isinstance(lora_request, Sequence)
+                    else lora_request,
+                    priority=priority[i] if priority else 0,
+                )
+                added_request_ids.append(request_id)
+        except Exception as e:
+            if added_request_ids:
+                self.llm_engine.abort_request(added_request_ids)
+            raise e
 
     def _validate_mm_data_and_uuids(
         self,
@@ -1679,7 +1692,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
-    ) -> None:
+    ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
@@ -1700,6 +1713,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
+        return request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True

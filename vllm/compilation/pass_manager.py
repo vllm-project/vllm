@@ -17,6 +17,8 @@ if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
+    from .qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
@@ -24,7 +26,6 @@ if current_platform.is_cuda():
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -109,30 +110,12 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_attn_fusion:
                 self.passes += [AttnFusionPass(config)]
 
+            if self.pass_config.enable_qk_norm_rope_fusion:
+                self.passes += [QKNormRoPEFusionPass(config)]
+
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
-
-        # [HACK: Bug with Inductor graph partition and torch.compile cache]
-        # In PyTorch 2.9, torch.compile has a bug where the graph
-        # partition is not taken into account during caching.
-        # Because vLLM's Mode.VLLM_COMPILE is the only mode that uses
-        # Inductor graph partition, and VLLM_COMPILE implies there
-        # is a PostGradPassManager, we put the list of operators to graph
-        # partition into the PostGradPassManager's uuid (which
-        # then gets incorporated into Inductor's FX graph cache key).
-        # Remove this hack whenever torch.compile fixes it.
-
-        # This is the list of operators that vLLM asks Inductor to split.
-        self.inductor_splitting_ops = []
-        if (
-            config.compilation_config.use_inductor_graph_partition
-            and config.compilation_config.splitting_ops is not None
-        ):
-            # Sort them so we're not dependent on the ordering.
-            self.inductor_splitting_ops = sorted(
-                config.compilation_config.splitting_ops
-            )
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
@@ -144,16 +127,9 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {
-            "pass_config": self.pass_config.uuid(),
-            "passes": [],
-            "inductor_splitting_ops": [],
-        }
+        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
-
-        # See [HACK: Bug with Inductor graph partition and torch.compile cache]
-        state["inductor_splitting_ops"].extend(self.inductor_splitting_ops)
 
         return InductorPass.hash_dict(state)
