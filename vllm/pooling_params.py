@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Annotated, Any, Optional
 
 import msgspec
+import torch
 
 from vllm.config import ModelConfig, PoolerConfig
 from vllm.config.pooler import get_use_activation
@@ -60,6 +61,9 @@ class PoolingParams(
     skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+
+    # for chunked prefill with ALL pooling
+    hidden_states_cache: list[torch.Tensor] = msgspec.field(default_factory=list)
 
     @property
     def all_parameters(self) -> list[str]:
