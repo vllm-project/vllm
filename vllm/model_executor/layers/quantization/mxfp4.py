@@ -132,12 +132,15 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             )
 
         # If FlashInfer is not available, try either Marlin or Triton
-        if (
-            envs.VLLM_MXFP4_USE_MARLIN
-            or current_platform.get_device_capability()[0] < 9
-            or not has_triton_kernels()
-            or not is_torch_equal_or_newer("2.8.0")
-        ):
+        triton_kernels_supported = (
+            has_triton_kernels()
+            and is_torch_equal_or_newer("2.8.0")
+            # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+            # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+            # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+            and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+        )
+        if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
             logger.info_once("Using Marlin backend")
             return Mxfp4Backend.MARLIN
         else:
@@ -862,7 +865,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -887,18 +890,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            topk_weights, topk_ids, _ = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
             )
 
             return fused_marlin_moe(
@@ -989,17 +983,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            topk_weights, topk_ids, _ = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
             )
 
             # Backend-specific preparation
