@@ -731,6 +731,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT": lambda: int(
         os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")
     ),
+    # Maximum seconds for a request is allowed to stay in the scheduler's waiting
+    # Default is None
+    "VLLM_SCHEDULER_MAX_WAIT_TIME_S": lambda: (
+        float(os.environ["VLLM_SCHEDULER_MAX_WAIT_TIME_S"])
+        if "VLLM_SCHEDULER_MAX_WAIT_TIME_S" in os.environ
+        else None
+    ),
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(

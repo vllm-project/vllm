@@ -10,6 +10,7 @@ from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self, deprecated
 
+from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -69,6 +70,10 @@ class SchedulerConfig:
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
+
+    max_wait_time_s: float = None
+    """Maximum seconds for a request may stay in the waiting queue before it is
+    automatically aborted. Set to 0 or None to disable."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
@@ -190,6 +195,14 @@ class SchedulerConfig:
         return handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        if self.max_wait_time_s is None:
+            env_sched_timeout = envs.VLLM_SCHEDULER_MAX_WAIT_TIME_S
+            if env_sched_timeout is not None:
+                self.max_wait_time_s = env_sched_timeout
+
+        if self.max_wait_time_s is not None and self.max_wait_time_s <= 0:
+            self.max_wait_time_s = None
+
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True

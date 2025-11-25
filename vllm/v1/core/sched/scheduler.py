@@ -49,6 +49,12 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_WAITING_STATUSES = (
+    RequestStatus.WAITING,
+    RequestStatus.WAITING_FOR_FSM,
+    RequestStatus.WAITING_FOR_REMOTE_KVS,
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -404,6 +410,19 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting.peek_request()
 
+                # Check if request has exceeded max wait time.
+                if self._is_request_expired(request):
+                    self.waiting.pop_request()
+                    logger.info(
+                        "Aborting request %s waiting longer than %.2fs.",
+                        request.request_id,
+                        self.scheduler_config.max_wait_time_s,
+                    )
+                    self.finish_requests(
+                        request.request_id, RequestStatus.FINISHED_ABORTED
+                    )
+                    continue
+
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -630,6 +649,10 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
+
+            # Abort requests that exceed the configured wait time
+            self._expire_waiting_requests()
+
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
@@ -1255,6 +1278,42 @@ class Scheduler(SchedulerInterface):
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
+
+    def _expire_waiting_requests(self) -> None:
+        """Abort requests that exceed the configured wait time."""
+        timeout_s = self.scheduler_config.max_wait_time_s
+        if not timeout_s:
+            return
+
+        now = time.time()
+        expired_ids = [
+            request.request_id
+            for request in list(self.waiting)
+            if request.status in _WAITING_STATUSES
+            and now - request.arrival_time >= timeout_s
+        ]
+
+        if not expired_ids:
+            return
+
+        logger.info(
+            "Aborting %d request(s) waiting longer than %.2fs.",
+            len(expired_ids),
+            timeout_s,
+        )
+        self.finish_requests(expired_ids, RequestStatus.FINISHED_ABORTED)
+
+    def _is_request_expired(self, request: Request) -> bool:
+        """Check if a request has exceeded the configured wait time."""
+        timeout_s = self.scheduler_config.max_wait_time_s
+        if not timeout_s:
+            return False
+
+        if request.status not in _WAITING_STATUSES:
+            return False
+
+        now = time.time()
+        return now - request.arrival_time >= timeout_s
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
