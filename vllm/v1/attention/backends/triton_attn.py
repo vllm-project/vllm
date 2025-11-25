@@ -234,12 +234,10 @@ class TritonAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-
-        if attn_type == AttentionType.ENCODER or sliding_window is None:
+        if sliding_window is None:
             self.sliding_window = (-1, -1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
-
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -249,14 +247,10 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type == AttentionType.ENCODER:
-            if sinks is not None:
-                raise ValueError("Sinks are not supported for encoder attention")
-            if sliding_window is not None and sliding_window > 0:
-                raise ValueError(
-                    "Sliding window is not supported for encoder attention"
-                )
-
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
+            raise NotImplementedError(
+                "Encoder self-attention is not implemented for TritonAttentionImpl"
+            )
         self.attn_type = attn_type
         self.fp8_dtype = current_platform.fp8_dtype()
 
@@ -317,10 +311,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
-        is_causal = self.attn_type in [
-            AttentionType.DECODER,
-            AttentionType.ENCODER_DECODER,
-        ]
 
         if (
             self.kv_sharing_target_layer_name is None
@@ -372,7 +362,7 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=is_causal,
+            causal=True,
             alibi_slopes=self.alibi_slopes,
             window_size=self.sliding_window,
             block_table=block_table,
@@ -380,7 +370,7 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
-            sinks=self.sinks if is_causal else None,
+            sinks=self.sinks,
             output_scale=output_scale,
         )
 

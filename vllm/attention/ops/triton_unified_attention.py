@@ -85,7 +85,6 @@ def kernel_unified_attention_2d(
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
-    USE_CAUSAL: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
@@ -271,10 +270,7 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        if USE_CAUSAL:
-            seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
-        else:
-            seq_mask = seq_offset[None, :] < seq_len
+        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -288,7 +284,7 @@ def kernel_unified_attention_2d(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
 
-        if USE_CAUSAL and SLIDING_WINDOW > 0:
+        if SLIDING_WINDOW > 0:
             S = tl.where(
                 (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
                 S,
@@ -388,7 +384,6 @@ def kernel_unified_attention_3d(
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
-    USE_CAUSAL: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
@@ -564,10 +559,7 @@ def kernel_unified_attention_3d(
         else:
             V = V_load
 
-        if USE_CAUSAL:
-            seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
-        else:
-            seq_mask = seq_offset[None, :] < seq_len
+        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -580,7 +572,7 @@ def kernel_unified_attention_3d(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
 
-        if USE_CAUSAL and SLIDING_WINDOW > 0:
+        if SLIDING_WINDOW > 0:
             S = tl.where(
                 (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
                 S,
@@ -768,7 +760,6 @@ def unified_attention(
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
-        assert causal, "Sinks are only supported for causal attention"
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -803,7 +794,7 @@ def unified_attention(
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128 or not causal:
+    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
@@ -840,8 +831,7 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
-            USE_CAUSAL=causal,
-            SLIDING_WINDOW=(1 + window_size[0]) if causal else 0,
+            SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
             stride_k_cache_2=k.stride(2),
@@ -857,7 +847,6 @@ def unified_attention(
             USE_FP8=output_scale is not None,
         )
     else:
-        assert causal, "3D kernel only supports causal attention"
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
         # value that showed good performance in tests
         NUM_SEGMENTS = 16
@@ -915,8 +904,7 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
-            USE_CAUSAL=causal,
-            SLIDING_WINDOW=(1 + window_size[0]) if causal else 0,
+            SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
             stride_k_cache_2=k.stride(2),
