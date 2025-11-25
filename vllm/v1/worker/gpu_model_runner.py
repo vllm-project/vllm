@@ -3746,6 +3746,7 @@ class GPUModelRunner(
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
         activate_lora: bool = False,
+        is_graph_capturing: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3981,7 +3982,7 @@ class GPUModelRunner(
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 use_cudagraphs = (
-                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    cudagraph_runtime_mode.has_mode(CUDAGraphMode.PIECEWISE)
                     and not self.speculative_config.enforce_eager
                 )
 
@@ -3995,6 +3996,7 @@ class GPUModelRunner(
                 self.drafter.dummy_run(
                     num_tokens,
                     use_cudagraphs=use_cudagraphs,
+                    is_graph_capturing=is_graph_capturing,
                 )
 
         # This is necessary to avoid blocking DP.
@@ -4427,6 +4429,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 activate_lora=activate_lora,
+                is_graph_capturing=True,
             )
         self.maybe_remove_all_loras(self.lora_config)
 
