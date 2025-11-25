@@ -125,11 +125,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             # Select the CUDA Graph capture size closest to self.seq_threshold_3D
             # as threshold. This ensures that each captured graph covers the
             # correct execution path.
-            upd_seq_threshold_3D = min(
+            self.seq_threshold_3D = min(
                 capture_sizes,
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
-            self.seq_threshold_3D = upd_seq_threshold_3D
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
