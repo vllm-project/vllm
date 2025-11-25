@@ -29,7 +29,6 @@ from openai.types.responses import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponsePrompt,
-    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -304,9 +303,7 @@ def get_logits_processors(
     return None
 
 
-ResponseInputOutputItem: TypeAlias = (
-    ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
-)
+ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
 class ResponsesRequest(OpenAIBaseModel):
