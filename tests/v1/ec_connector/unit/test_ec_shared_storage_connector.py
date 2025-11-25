@@ -363,7 +363,6 @@ class TestCacheSaving:
         connector.save_caches(encoder_cache, mm_hash)
 
         # Verify file doesn't exist using has_cache_item
-        _ = MockRequest("req_consumer", [mm_hash], [10])
         result = connector.has_cache_item(mm_hash)
         assert not result, "Consumer should not save caches"
 
