@@ -58,7 +58,7 @@ for BACK in "${BACKENDS[@]}"; do
   wait_for_server $PORT
 
   TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
-  OUT="${OUT_DIR}/${TAG}_${BACK}.json"
+  OUT="${OUT_DIR}/${TAG}_${BACK}_async_eplb.json"
   python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port $PORT --num-questions ${NUM_Q} --save-results ${OUT}
   python3 - <<PY
 import json; acc=json.load(open('${OUT}'))['accuracy']
