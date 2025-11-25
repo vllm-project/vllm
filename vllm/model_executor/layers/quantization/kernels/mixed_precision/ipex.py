@@ -17,46 +17,12 @@ class IPEXwNa16LinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        # TODO: add zero point support in the future
-        if c.zero_points:
-            return False, "Zero points not supported for Now"
-
         if not (current_platform.is_xpu() or current_platform.is_cpu()):
             return False, "IPEX wNa16 only supported on XPU/CPU devices"
-        return True, None
 
-        if not current_platform.is_device_capability(90):
-            return False, "CUTLASS W4A8 requires compute capability of 90 (Hopper)"
-
-        if c.act_type != torch.float8_e4m3fn:
-            return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
-
-        if c.has_g_idx:
-            return False, "Act reordering not supported by CUTLASS W4A8"
-
-        if c.weight_type != scalar_types.int4:
-            return (
-                False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CUTLASS W4A8, only supported int4",
-            )
-
-        # TODO(czhu): support -1 (column-wise)
-        if c.group_size != 128:
-            return False, "Only group_size 128 is supported"
-
-        in_features, out_features = c.partition_weight_shape
-        if in_features % 128 or out_features % 128:
-            return (
-                False,
-                f"K and N must be divisible by 128, got {c.partition_weight_shape}",
-            )
-
-        if c.out_type != torch.bfloat16:
-            return (
-                False,
-                f"Only bfloat16 output type currently supportedgot {c.out_type=}",
-            )
+        # TODO: (yiliu30) relax these restrictions in later PRs
+        if c.zero_points:
+            return False, "Zero points not supported for Now"
 
         return True, None
 
@@ -89,7 +55,6 @@ class IPEXwNa16LinearKernel(MPLinearKernel):
         weight_dtype = ipex.quantization.WoqWeightDtype.INT4
         # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH
-        # act_quant_mode = ipex.quantization.WoqActQuantMode.NONE
 
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
             weight_dtype=weight_dtype,
@@ -102,10 +67,12 @@ class IPEXwNa16LinearKernel(MPLinearKernel):
         layer.ipex_output_size = qweight.shape[-1]
         g_idx = layer.weight_g_idx if self.config.has_g_idx else None
         scales = layer.weight_scale
-        qzeros = layer.weight_zero_point if self.config.zero_points else None
+        qzeros = None
+        if self.config.zero_points:
+            qzeros = layer.weight_zero_point.contiguous()
         ipex_output_size = qweight.shape[0]
-        qweight = qweight.t()
-        scales = scales.t()
+        qweight = qweight.t().contiguous()
+        scales = scales.t().contiguous()
         ipex_in_size = qweight.size(0)
         layer.ipex_output_size = ipex_output_size
         layer.ipex_qlinear = (
