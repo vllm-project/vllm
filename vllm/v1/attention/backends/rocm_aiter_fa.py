@@ -186,16 +186,13 @@ class AiterFlashAttentionPrefillMetadata:
 
 @dataclass
 class AiterChunkSlidingWindowMetadata:
-    swa_seqlens: list[torch.Tensor]
-    swa_cu_seqlens: list[torch.Tensor]
-    swa_cu_querylens: list[torch.Tensor]
-    swa_seq_starts: list[torch.Tensor]
-    swa_token_to_batch: list[torch.Tensor]
-    swa_max_seqlens: list[int]
-    swa_max_query_lens: list[int]
-    swa_total_tokens: list[int]
-    swa_chunk_starts: list[int]
-    swa_chunk_ends: list[int]
+    swa_seqlens: torch.Tensor
+    swa_cu_seqlens: torch.Tensor
+    swa_seq_starts: torch.Tensor
+    swa_token_to_batch: torch.Tensor
+    swa_max_seqlens: int
+    swa_total_tokens: int
+    swa_workspace: torch.Tensor
 
 
 @dataclass
@@ -376,126 +373,53 @@ class AiterFlashAttentionMetadataBuilder(
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
             swa_metadata = None
             if self.aot_sliding_window is not None:
-                # When sliding window attention have been activated, we chunking the
-                # query len dim rather than kv len dim to make sure our allocated
-                # workspace can fit in the exact kv len for each chunk. And all the
-                # other chunked metadata from `AiterChunkContextMetadata` will not
-                # be used during SWA calculation
-                swa_seqlens_for_extend = torch.minimum(
-                    query_lens_for_extend + self.aot_sliding_window[0] + 1,
+                swa_seqlen_for_extend = torch.minimum(
                     seq_lens_for_extend,
+                    query_lens_for_extend + self.aot_sliding_window[0] + 1,
                 )
-                if torch.any(swa_seqlens_for_extend > _CP_TOKENS_PER_ITER_ROCM):
-                    raise RuntimeError(
-                        f"Each query length + sliding window size must be less than "
-                        f"{_CP_TOKENS_PER_ITER_ROCM} for ROCM AITER FLASH ATTENTION "
-                        f"backend, but got max(query_len + sliding_window_size) = "
-                        f"{swa_seqlens_for_extend.max().item()}. Pease try to increase "
-                        f"the `max-num-batched-tokens` or `_CP_TOKENS_PER_ITER_ROCM` "
-                        f"to make sure the funcitonality works fine."
-                    )
-                token_budgets = _CP_TOKENS_PER_ITER_ROCM
-                swa_seqlens = []
-                swa_cu_seqlens = []
-                swa_cu_querylens = []
-                swa_seq_starts = []
-                swa_token_to_batch = []
-                swa_total_tokens = []
-                swa_chunk_starts = []
-                swa_chunk_ends = []
-                swa_max_seqlens = []
-                swa_max_querylens = []
-                swa_chunk_start = 0
-                chunk_swa_seqlens: list[int] = []
-                chunk_seqlens: list[int] = []
-                chunk_querylens: list[int] = []
-                for i in range(num_extends):
-                    token_budgets -= swa_seqlens_for_extend[i].item()
-                    chunk_swa_seqlens.append(swa_seqlens_for_extend[i].item())
-                    chunk_seqlens.append(seq_lens_for_extend[i].item())
-                    chunk_querylens.append(query_lens_for_extend[i].item())
-                    if (
-                        i == num_extends - 1
-                        or token_budgets < swa_seqlens_for_extend[i + 1].item()
-                    ):
-                        chunk_swa_total_tokens = (
-                            _CP_TOKENS_PER_ITER_ROCM - token_budgets
-                        )
-                        chunk_batches = len(chunk_swa_seqlens)
-                        chunk_swa_querylens_tensor = torch.tensor(chunk_querylens)
-                        chunk_swa_seqlens_tensor = torch.tensor(chunk_swa_seqlens)
-                        chunk_seqlens_tensor = torch.tensor(chunk_seqlens)
-                        chunk_swa_seq_starts = torch.clamp(
-                            chunk_seqlens_tensor - chunk_swa_seqlens_tensor, min=0
-                        )
-                        chunk_swa_cu_seqlens = torch.zeros(
-                            chunk_batches + 1, dtype=torch.int
-                        )
-                        chunk_swa_cu_querylens = torch.zeros(
-                            chunk_batches + 1, dtype=torch.int
-                        )
-                        torch.cumsum(
-                            chunk_swa_seqlens_tensor,
-                            dim=0,
-                            out=chunk_swa_cu_seqlens[1:],
-                        )
-                        torch.cumsum(
-                            chunk_swa_querylens_tensor,
-                            dim=0,
-                            out=chunk_swa_cu_querylens[1:],
-                        )
-                        chunk_swa_max_seqlens = chunk_swa_seqlens_tensor.max().item()
-                        chunk_swa_max_querylens = (
-                            chunk_swa_querylens_tensor.max().item()
-                        )
-                        token_to_batch = torch.arange(
-                            swa_chunk_start,
-                            i + 1,
-                            dtype=torch.int,
-                            device=query_lens_for_extend.device,
-                        )
-                        token_to_batch = torch.repeat_interleave(
-                            token_to_batch, chunk_swa_seqlens_tensor
-                        )
-                        swa_seqlens.append(
-                            chunk_swa_seqlens_tensor.to(self.device, non_blocking=True)
-                        )
-                        swa_cu_seqlens.append(
-                            chunk_swa_cu_seqlens.to(self.device, non_blocking=True)
-                        )
-                        swa_cu_querylens.append(
-                            chunk_swa_cu_querylens.to(self.device, non_blocking=True)
-                        )
-                        swa_seq_starts.append(
-                            chunk_swa_seq_starts.to(self.device, non_blocking=True)
-                        )
-                        swa_token_to_batch.append(
-                            token_to_batch.to(self.device, non_blocking=True)
-                        )
-                        swa_total_tokens.append(chunk_swa_total_tokens)
-                        swa_chunk_starts.append(swa_chunk_start)
-                        swa_chunk_ends.append(i + 1)
-                        swa_max_seqlens.append(chunk_swa_max_seqlens)
-                        swa_max_querylens.append(chunk_swa_max_querylens)
-                        swa_chunk_start = i + 1
-                        token_budgets = _CP_TOKENS_PER_ITER_ROCM
-                        chunk_swa_seqlens = []
-                        chunk_seqlens = []
-                        chunk_querylens = []
+                cu_seq_lens = torch.zeros(
+                    num_extends + 1,
+                    dtype=torch.int32,
+                    device=seq_lens_for_extend.device,
+                )
+                torch.cumsum(
+                    swa_seqlen_for_extend,
+                    dim=0,
+                    dtype=cu_seq_lens.dtype,
+                    out=cu_seq_lens[1:],
+                )
+                token_to_seq = torch.arange(
+                    0,
+                    num_extends,
+                    dtype=torch.int32,
+                    device=seq_lens_for_extend.device,
+                )
+                token_to_seq = torch.repeat_interleave(
+                    token_to_seq, swa_seqlen_for_extend
+                )
+                fetched_shape = cu_seq_lens[-1].item()
+                # TODO(ganyi): Maybe reuse these 2 buffer from extend_workspace
+                swa_workspace = torch.empty(
+                    (2, fetched_shape, self.num_heads_kv, self.headdim),
+                    dtype=self.vllm_config.model_config.dtype,
+                    device=self.device,
+                )
+
+                seq_starts = seq_lens_for_extend - swa_seqlen_for_extend
+                max_seqlen_k = swa_seqlen_for_extend.max().item()
+                total_tokens = cu_seq_lens[-1].item()
 
                 swa_metadata = AiterChunkSlidingWindowMetadata(
-                    swa_seqlens=swa_seqlens,
-                    swa_cu_seqlens=swa_cu_seqlens,
-                    swa_cu_querylens=swa_cu_querylens,
-                    swa_seq_starts=swa_seq_starts,
-                    swa_token_to_batch=swa_token_to_batch,
-                    swa_max_seqlens=swa_max_seqlens,
-                    swa_max_query_lens=swa_max_querylens,
-                    swa_total_tokens=swa_total_tokens,
-                    swa_chunk_starts=swa_chunk_starts,
-                    swa_chunk_ends=swa_chunk_ends,
+                    swa_seqlens=swa_seqlen_for_extend.to(
+                        self.device, non_blocking=True
+                    ),
+                    swa_cu_seqlens=cu_seq_lens.to(self.device, non_blocking=True),
+                    swa_seq_starts=seq_starts.to(self.device, non_blocking=True),
+                    swa_token_to_batch=token_to_seq.to(self.device, non_blocking=True),
+                    swa_max_seqlens=max_seqlen_k,
+                    swa_total_tokens=total_tokens,
+                    swa_workspace=swa_workspace,
                 )
-                print("swa metadata:", swa_metadata, flush=True)
 
             # allocate the equal amount of workspace for
             # each chunk prefill request
@@ -689,70 +613,47 @@ class AiterFlashAttentionImpl(AttentionImpl):
         swa_metadata = chunked_metadata.swa_metadata
         assert swa_metadata is not None
         swa_cu_seqlens = swa_metadata.swa_cu_seqlens
-        swa_cu_querylens = swa_metadata.swa_cu_querylens
         swa_seq_starts = swa_metadata.swa_seq_starts
         swa_token_to_batch = swa_metadata.swa_token_to_batch
         swa_max_seqlens = swa_metadata.swa_max_seqlens
         swa_total_tokens = swa_metadata.swa_total_tokens
-        swa_chunk_starts = swa_metadata.swa_chunk_starts
-        swa_chunk_ends = swa_metadata.swa_chunk_ends
-        swa_max_querylens = swa_metadata.swa_max_query_lens
         key_fetched, value_fetched = (
-            chunked_metadata.workspace[0],
-            chunked_metadata.workspace[1],
+            swa_metadata.swa_workspace[0],
+            swa_metadata.swa_workspace[1],
         )
-        for i in range(len(swa_chunk_starts)):
-            # torch.cuda.synchronize()
-            # print(f"into swa chunk {i}", flush=True)
-            # # torch.save(key_cache, f"./key_cache_chunk_{i}.pt")
-            # # torch.save(value_cache, f"./value_cache_chunk_{i}.pt")
-            # # torch.save(key_fetched, f"./key_fetched_chunk_{i}.pt")
-            # # torch.save(value_fetched, f"./value_fetched_chunk_{i}.pt")
-            # torch.save(k_scale, f"./k_scale_chunk_{i}.pt")
-            # torch.save(v_scale, f"./v_scale_chunk_{i}.pt")
-            # torch.save(block_table, f"./block_table_chunk_{i}.pt")
-            # torch.save(swa_cu_seqlens[i], f"./swa_cu_seqlens_chunk_{i}.pt")
-            # torch.save(swa_token_to_batch[i], f"./swa_token_to_batch_chunk_{i}.pt")
-            # torch.save(swa_seq_starts[i], f"./swa_seq_starts_chunk_{i}.pt")
-            # print(f"total tokens: {swa_total_tokens}", flush=True)
-            # torch.cuda.synchronize()
-            cp_mha_gather_cache(
-                key_cache=key_cache,
-                value_cache=value_cache,
-                key=key_fetched,
-                value=value_fetched,
-                block_tables=block_table,
-                k_scales=k_scale,
-                v_scales=v_scale,
-                cu_seqlens_kv=swa_cu_seqlens[i],
-                token_to_batch=swa_token_to_batch[i],
-                seq_starts=swa_seq_starts[i],
-                dequant=False,
-                kv_cache_layout="NHD",
-                total_tokens=swa_total_tokens[i],
-            )
-            # torch.cuda.synchronize()
-            # print(f"after gather cache for swa chunk {i}", flush=True)
+        cp_mha_gather_cache(
+            key_cache=key_cache,
+            value_cache=value_cache,
+            key=key_fetched,
+            value=value_fetched,
+            block_tables=block_table,
+            k_scales=k_scale,
+            v_scales=v_scale,
+            cu_seqlens_kv=swa_cu_seqlens,
+            token_to_batch=swa_token_to_batch,
+            seq_starts=swa_seq_starts,
+            dequant=False,
+            kv_cache_layout="NHD",
+            total_tokens=swa_total_tokens,
+        )
 
-            aiter.flash_attn_varlen_func(
-                q=query[swa_chunk_starts[i] : swa_chunk_ends[i]],
-                k=key_fetched,
-                v=value_fetched,
-                cu_seqlens_q=swa_cu_querylens[i],
-                cu_seqlens_k=swa_cu_seqlens[i],
-                max_seqlen_q=swa_max_querylens[i],
-                max_seqlen_k=swa_max_seqlens[i],
-                min_seqlen_q=1,
-                dropout_p=0.0,
-                softmax_scale=self.scale,
-                causal=True,
-                window_size=self.sliding_window,
-                alibi_slopes=self.alibi_slopes,
-                return_lse=False,
-                out=output[swa_chunk_starts[i] : swa_chunk_ends[i]],
-            )
-            # torch.cuda.synchronize()
-            # print(f"after varlen {i}", flush=True)
+        aiter.flash_attn_varlen_func(
+            q=query,
+            k=key_fetched,
+            v=value_fetched,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=swa_cu_seqlens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=swa_max_seqlens,
+            min_seqlen_q=1,
+            dropout_p=0.0,
+            softmax_scale=self.scale,
+            causal=True,
+            window_size=self.sliding_window,
+            alibi_slopes=self.alibi_slopes,
+            return_lse=False,
+            out=output,
+        )
 
     def extend_forward(
         self,
@@ -773,8 +674,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         v_scale: float,
     ):
         if self.sliding_window[0] != -1:
-            # torch.cuda.synchronize()
-            # print("into extend swa path", flush=True)
             self.extend_for_sliding_window(
                 attn_metadata,
                 query,
@@ -787,8 +686,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 k_scale,
                 v_scale,
             )
-            # torch.cuda.synchronize()
-            # print("out of extend swa path", flush=True)
             return
         out, lse = aiter.flash_attn_varlen_func(
             q=query,
