@@ -302,16 +302,17 @@ class AiterFlashAttentionMetadataBuilder(
             self.dcp_rank = 0
 
         self.page_size = kv_cache_spec.block_size
-        if self.dcp_world_size > 1:
-            self.dcp_local_block_size = self.page_size // self.dcp_world_size
-            self.dcp_virtual_block_size = self.page_size
-        else:
-            self.dcp_local_block_size = self.page_size
-            self.dcp_virtual_block_size = self.page_size
 
         self.dcp_kv_cache_interleave_size = (
             self.parallel_config.dcp_kv_cache_interleave_size
         )
+
+        # Reassign global _CP_TOKENS_PER_ITER_ROCM for DCP
+        global _CP_TOKENS_PER_ITER_ROCM
+        if self.dcp_world_size > 1:
+            _CP_TOKENS_PER_ITER_ROCM = (
+                _CP_TOKENS_PER_ITER_ROCM * 2 // self.dcp_world_size
+            )
 
         # Workspace for extend (chunked prefill context)
         self.extend_workspace = torch.empty(
@@ -320,12 +321,21 @@ class AiterFlashAttentionMetadataBuilder(
             device=device,
         )
 
+        # Workspace for dcp
         if self.dcp_world_size > 1:
-            max_local_decode_tokens = (
-                self.model_config.max_model_len // self.dcp_world_size
-            ) + self.page_size
+            scheduler_config = vllm_config.scheduler_config
+            cache_config = vllm_config.cache_config
+            model_config = vllm_config.model_config
+            decode_workspace_size = (
+                2
+                * max(
+                    8 * model_config.max_model_len,
+                    4 * scheduler_config.max_num_seqs * cache_config.block_size,
+                )
+            ) // self.dcp_world_size
+
             self.decode_workspace = torch.empty(
-                [2, max_local_decode_tokens, self.num_heads_kv, self.headdim],
+                [2, decode_workspace_size, self.num_heads_kv, self.headdim],
                 dtype=self.model_config.dtype,
                 device=device,
             )
@@ -518,15 +528,9 @@ class AiterFlashAttentionMetadataBuilder(
                     cu_seq_lens_chunk=cu_seq_lens_cpu.to(
                         self.device, non_blocking=True
                     ),
-                    chunk_starts=chunk_starts.to(
-                        self.device, non_blocking=True
-                    ),  # Global chunk starts
-                    seq_tot=chunk_seq_lens.sum(
-                        dim=1
-                    ).tolist(),  # Global total for flash_attn
-                    max_seq_lens=chunk_seq_lens.max(
-                        dim=1
-                    ).values.tolist(),  # Global max for flash_attn
+                    chunk_starts=chunk_starts.to(self.device, non_blocking=True),
+                    seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
+                    max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     seq_lens=chunk_seq_lens,
                     token_to_batch=token_to_batch_tensor.to(
                         self.device, non_blocking=True
@@ -749,12 +753,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # AllGather queries across DCP ranks
             query = query.contiguous()
             query_for_context = get_dcp_group().all_gather(query, dim=1)
-
-            # Use DCP-specific metadata for cp_gather_cache (local)
             cu_seqlens_kv = chunk_context_metadata.dcp_cu_seq_lens_chunk
-
-            # Use global metadata for flash_attn
-            cu_seqlens_kv_attn = chunk_context_metadata.cu_seq_lens_chunk
 
         max_seqlens = chunk_context_metadata.max_seq_lens
         chunk_starts = chunk_context_metadata.chunk_starts
@@ -866,10 +865,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         dcp_max_seq_len = dcp_metadata.max_seq_len
         # Calculate total tokens needed for gathered cache
         total_cache_tokens = cu_seqlens_kv[-1].item()
-        key_fetched, value_fetched = (
-            workspace[0, :total_cache_tokens],
-            workspace[1, :total_cache_tokens],
-        )
+        key_fetched, value_fetched = workspace[0], workspace[1]
 
         # Gather the paged cache into contiguous format
         cp_mha_gather_cache(
@@ -905,7 +901,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             return_lse=True,
         )
 
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
         context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
             context_attn_out,
             context_lse.transpose(0, 1),
