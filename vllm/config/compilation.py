@@ -1038,10 +1038,7 @@ class CompilationConfig:
         if self.compile_ranges_split_points is None:
             return []
         split_points = sorted(set(self.compile_ranges_split_points))
-        compile_ranges = []
-        for i, s in enumerate(split_points):
-            if i == 0:
-                compile_ranges.append(Range(start=1, end=s))
-            else:
-                compile_ranges.append(Range(start=split_points[i - 1] + 1, end=s))
-        return compile_ranges
+        return [
+            Range(start=s + 1, end=e)
+            for s, e in zip([0] + split_points[:-1], split_points)
+        ]
