@@ -79,3 +79,6 @@ num2words==0.5.14
     # via lm-eval
 pqdm==0.2.0
     # via lm-eval
+
+# Required for suffix decoding test
+arctic-inference == 0.1.1
