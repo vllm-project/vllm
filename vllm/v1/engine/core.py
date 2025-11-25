@@ -1333,6 +1333,38 @@ class DPEngineCoreProc(EngineCoreProc):
                     # if the model didn't execute any ready requests.
                     # Masked ranks also run dummy to maintain EPLB state synchronization.
                     self.execute_dummy_batch()
+                
+                # Test fault injection AFTER execute_dummy_batch
+                # (global_step has incremented, prevents double injection)
+                import os
+                if os.getenv("VLLM_TEST_INJECT_ERROR_DP_RANK"):
+                    target_rank = int(os.getenv("VLLM_TEST_INJECT_ERROR_DP_RANK"))
+                    target_step = int(os.getenv("VLLM_TEST_INJECT_ERROR_STEP", "0"))
+                    
+                    # Get global_step from EPLB (consistent with mask_out_gpu_after)
+                    try:
+                        eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+                        current_global_step = eplb_state.global_step if eplb_state else 0
+                    except:
+                        current_global_step = 0
+                    
+                    # Debug log to track global_step
+                    logger.debug(
+                        "[TEST_INJECT] DP rank %d: current_global_step=%d, target_step=%d",
+                        self.dp_rank,
+                        current_global_step,
+                        target_step
+                    )
+                    
+                    if self.dp_rank == target_rank and current_global_step == target_step:
+                        logger.warning(
+                            "[TEST_INJECT] DP rank %d: Injecting error NOW at global_step %d",
+                            self.dp_rank,
+                            current_global_step
+                        )
+                        raise RuntimeError(
+                            f"TEST: Injected error on DP rank {target_rank} at global_step {target_step}"
+                        )
 
                 # 3) All-reduce operation to determine global unfinished reqs.
                 self.engines_running = self._has_global_unfinished_reqs(
