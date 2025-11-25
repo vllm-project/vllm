@@ -798,7 +798,10 @@ def unified_attention(
     TILE_SIZE_PREFILL = 32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
-    # if batch contains a prefill or number of sequences is larger than threshold
+    # Launch the 2D kernel if
+    # 1. The batch includes at least one prefill request, or
+    # 2. The number of sequences exceeds the configured threshold, or
+    # 3. No intermediate tiled softmax buffers for the 3D kernel have been allocated
     if (
         max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
