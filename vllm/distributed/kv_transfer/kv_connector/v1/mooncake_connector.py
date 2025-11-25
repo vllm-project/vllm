@@ -53,6 +53,7 @@ EngineId = str
 ReqId = str
 
 TRANS_DONE = b"trans_done"
+TRANS_ERROR = b"trans_error"
 
 logger = init_logger(__name__)
 
@@ -259,7 +260,8 @@ class MooncakeConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            count = len(request.prompt_token_ids) - num_computed_tokens
+            token_ids = request.prompt_token_ids or []
+            count = len(token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
 
@@ -421,21 +423,26 @@ class MooncakeConnectorWorker:
 
         assert vllm_config.kv_transfer_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.num_workers = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "num_workers", 10
+        )
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: SendReqMeta = SendReqMeta(reqs={}, lock=threading.Lock())
 
+        # For kv_both, we will act both prefiller and decoder.
         if self.kv_role != "kv_consumer":
             # Background thread for sending kvcaches to D.
             self._mooncake_sender_t: threading.Thread | None = None
             # Background thread for processing new sending requests.
             self._sender_executor = ThreadPoolExecutor(
-                max_workers=10, thread_name_prefix="vllm-mooncake-sender"
+                max_workers=self.num_workers, thread_name_prefix="vllm-mooncake-sender"
             )
         if self.kv_role != "kv_producer":
             self._receiver_executor = ThreadPoolExecutor(
-                max_workers=10, thread_name_prefix="vllm-mooncake-receiver"
+                max_workers=self.num_workers,
+                thread_name_prefix="vllm-mooncake-receiver",
             )
 
         self.finished_sending_reqs: FinishedReqSet = FinishedReqSet(
@@ -480,6 +487,9 @@ class MooncakeConnectorWorker:
         self._decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
 
     def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
         """Cleanup background threads on destruction."""
         self.zmq_ctx.term()
         if self.kv_role != "kv_consumer":
@@ -517,7 +527,7 @@ class MooncakeConnectorWorker:
                 if frontend in sockets:
                     identity, _, metadata_bytes = frontend.recv_multipart()
                     self._sender_executor.submit(
-                        self._handle_handshake,
+                        self._sender_worker,
                         identity,
                         metadata_bytes,
                         backend_path,
@@ -535,17 +545,17 @@ class MooncakeConnectorWorker:
             frontend.close()
             backend.close()
 
-    def _handle_handshake(
+    def _sender_worker(
         self, identity: bytes, metadata_bytes: bytes, worker_channel_path: str
     ):
-        status = TRANS_DONE
+        status = TRANS_ERROR
 
         try:
             metadata = self._decoder.decode(metadata_bytes)
             self.send_kv_to_decode(metadata)
+            status = TRANS_DONE
         except Exception as e:
             logger.error("Error processing Mooncake handshake: %s", e)
-            status = b"ERROR"
         finally:
             pusher = make_zmq_socket(self.zmq_ctx, worker_channel_path, zmq.PUSH)
             try:
@@ -582,19 +592,19 @@ class MooncakeConnectorWorker:
     def _send_blocks(
         self,
         send_reqs: list[tuple[ReqId, SendBlockMeta]],
-        agentmeta: MooncakeAgentMetadata,
+        agent_meta: MooncakeAgentMetadata,
     ):
         src_ptrs = []
         dst_ptrs = []
         lengths = []
         local_base_addr = self.kv_caches_base_addr
-        remote_base_addr = agentmeta.kv_caches_base_addr
+        remote_base_addr = agent_meta.kv_caches_base_addr
         block_len = self.block_len
-        remote_session = f"{agentmeta.remote_hostname}:{agentmeta.remote_port}"
+        remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
-        assert len(send_reqs) == len(agentmeta.block_ids)
+        assert len(send_reqs) == len(agent_meta.block_ids)
         for (req_id, send_meta), remote_block_ids in zip(
-            send_reqs, agentmeta.block_ids
+            send_reqs, agent_meta.block_ids
         ):
             send_meta.ready.wait()
 
@@ -635,13 +645,18 @@ class MooncakeConnectorWorker:
                 remote_session,
             )
 
+        start_time = time.perf_counter()
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
         )
         if ret_value != 0:
             raise RuntimeError(f"Error in batch_transfer_sync_write: {ret_value}")
 
-        logger.debug("Sending to %s done", remote_session)
+        logger.debug(
+            "Sending to %s done, toke %s",
+            remote_session,
+            time.perf_counter() - start_time,
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
@@ -675,6 +690,8 @@ class MooncakeConnectorWorker:
                 assert tensor_size_bytes == curr_tensor_size_bytes, (
                     "All kv cache tensors must have the same size"
                 )
+                kernel_block_size = cache.shape[-2 if self.use_mla else -3]
+                assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(tensor_size_bytes)
 
@@ -690,7 +707,7 @@ class MooncakeConnectorWorker:
         self.block_len = tensor_size_bytes // self.num_blocks
         self.device_kv_caches = kv_caches
         logger.debug(
-            "regiestered num_blocks=%d block_len=%d", self.num_blocks, self.block_len
+            "registered num_blocks=%d block_len=%d", self.num_blocks, self.block_len
         )
 
         # No need to launch server for D node.

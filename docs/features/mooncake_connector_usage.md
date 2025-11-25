@@ -14,7 +14,6 @@ Install mooncake through pip: `uv pip install mooncake-transfer-engine`.
 
 Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
-
 ## Usage
 
 ### Prefiller Node (192.168.0.2)
