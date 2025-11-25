@@ -15,7 +15,7 @@ from flashinfer import (
 )
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor, determine_attention_backend, PosEncodingMode
+from flashinfer.utils import FP4Tensor
 
 from vllm import envs
 from vllm.attention.backends.abstract import (
@@ -1525,15 +1525,6 @@ def fast_plan_decode(
     self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu, non_blocking=True)
 
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-
-    backend = determine_attention_backend(
-        self.device,
-        PosEncodingMode[pos_encoding_mode].value,
-        use_fp16_qk_reductions = False,
-        use_custom_mask = False,
-        dtype_q = q_data_type,
-        dtype_kv = kv_data_type,
-    )
 
     try:
         # Make sure we pass exactly 19 arguments for tensor core version
