@@ -8,6 +8,7 @@ import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
+from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.metrics.reader import Metric
 
@@ -118,7 +119,10 @@ def run_tests(
 
     with monkeypatch.context() as m:
         # avoid precision errors
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+        if current_platform.is_rocm():
+            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
+        else:
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
