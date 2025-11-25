@@ -14,7 +14,7 @@
 #include "utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16 };
+enum class ISA { AMX, VEC, VEC16, NEON };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -142,6 +142,12 @@ struct AttentionMetadata {
         break;
       case ISA::VEC:
         ss << "VEC, ";
+        break;
+      case ISA::VEC16:
+        ss << "VEC16, ";
+        break;
+      case ISA::NEON:
+        ss << "NEON, ";
         break;
     }
     ss << "workitem_group_num: " << workitem_group_num
@@ -841,7 +847,7 @@ struct VecTypeTrait<c10::BFloat16> {
 };
 #endif
 
-#if !defined(__powerpc__)
+#if !defined(__powerpc__) && !defined(__s390x__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
