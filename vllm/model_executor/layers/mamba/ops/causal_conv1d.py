@@ -5,10 +5,8 @@
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
 
-import numpy as np
 import torch
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import tl, triton
 
 
@@ -47,14 +45,11 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
     stride_block_m: tl.constexpr,  # Stride block to align divided by BLOCK_M
-    # others
-    pad_slot_id: tl.constexpr,
     # Meta-parameters
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
-    USE_PAD_SLOT: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -78,13 +73,13 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # BLOCK_N elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    if idx_seq == pad_slot_id:
-        return
-
     sequence_start_index = tl.load(query_start_loc_ptr + idx_seq)
     sequence_end_index = tl.load(query_start_loc_ptr + idx_seq + 1)
     # find the actual sequence length
     seqlen = sequence_end_index - sequence_start_index
+
+    if seqlen == 0:
+        return
 
     B_size: tl.constexpr = stride_block_m * BLOCK_M
 
@@ -133,10 +128,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         conv_state_indices_ptr + idx_seq * stride_cache_indices + conv_state_init_index
     ).to(tl.int64)
 
-    if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
-            # not processing as this is not the actual sequence
-            return
     conv_states_base = (
         conv_states_ptr
         + (conv_states_input_coord * stride_conv_state_seq)
@@ -474,7 +465,6 @@ def causal_conv1d_fn(
     cache_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
-    pad_slot_id: int = PAD_SLOT_ID,
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
@@ -516,12 +506,6 @@ def causal_conv1d_fn(
         [single boolean for each sequence in the batch: True or False]
     bias: (dim,)
     activation: either None or "silu" or "swish" or True
-    pad_slot_id: int
-        if cache_indices is passed, lets the kernel identify padded
-        entries that will not be processed,
-        for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-        in this case, the kernel will not process entries at
-        indices 0 and 3
     block_idx_first_scheduled_token: (batch,), dtype int32
         The pointer into cache_indices, where the first cache block to be filled is located.
     block_idx_last_scheduled_token: (batch,), dtype int32
@@ -542,22 +526,11 @@ def causal_conv1d_fn(
     original_x_dtype = x.dtype
     x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
-    if metadata is not None:
-        nums_dict = metadata.nums_dict
-        args = nums_dict
-        batch_ptr = metadata.batch_ptr
-        token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
-    else:
-        seqlens = query_start_loc.diff().to("cpu")
-        args = seqlens
-        MAX_NUM_PROGRAMS = 1024
 
-        batch_ptr = torch.full(
-            (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=x.device
-        )  # tracking which seq-idx the Triton program is handling
-        token_chunk_offset_ptr = torch.full(
-            (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=x.device
-        )  # tracking BLOCK_M-based index in the sequence the Triton program is handling
+    nums_dict = metadata.nums_dict
+    args = nums_dict
+    batch_ptr = metadata.batch_ptr
+    token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
 
     is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
     dim, cu_seqlen = x.shape
@@ -580,7 +553,6 @@ def causal_conv1d_fn(
         # 1. conv_states is used to replaced initial_states
         # 2. conv_states serve as a cache with num cache lines can be larger than batch size
         # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
-        # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
         num_cache_lines = conv_states.size(0)
         assert (
             num_cache_lines == conv_states.shape[0]
@@ -625,66 +597,20 @@ def causal_conv1d_fn(
         else:
             block_size_to_align = BLOCK_M
 
-    if metadata is None:
+    def num_program(META, nums_dict):
+        tot = nums_dict[META["BLOCK_M"]]["tot"]
 
-        def num_program(META, seqlens):
-            tot = 0
+        mlist = nums_dict[META["BLOCK_M"]]["mlist"]
+        mlist_len = nums_dict[META["BLOCK_M"]]["mlist_len"]
 
-            mlist = []
-            offsetlist = []  # type: ignore
+        offsetlist = nums_dict[META["BLOCK_M"]]["offsetlist"]
 
-            nums = -(-seqlens // META["BLOCK_M"])
+        META["batch_ptr"] = nums_dict[META["BLOCK_M"]]["batch_ptr"]
+        META["token_chunk_offset_ptr"] = nums_dict[META["BLOCK_M"]][
+            "token_chunk_offset_ptr"
+        ]
 
-            tot = nums.sum().item()
-            mlist = np.repeat(np.arange(len(nums)), nums)
-            for idx, num in enumerate(nums):
-                offsetlist.extend(
-                    range(num)
-                )  # chunk-idx if a sequence is split into multiple chunks
-
-            if META["batch_ptr"].nelement() < len(mlist):
-                newlen = len(mlist) + 1
-                META["batch_ptr"].resize_(newlen).fill_(PAD_SLOT_ID)
-                META["token_chunk_offset_ptr"].resize_(newlen).fill_(PAD_SLOT_ID)
-
-            if META["batch_ptr"].nelement() >= len(mlist):
-                META["batch_ptr"][0 : len(mlist)].copy_(
-                    torch.from_numpy(np.array(mlist))
-                )
-                META["token_chunk_offset_ptr"][0 : len(mlist)].copy_(
-                    torch.from_numpy(np.array(offsetlist))
-                )
-
-            META["batch_ptr"] = META["batch_ptr"].to(META["x_ptr"].device)
-            META["token_chunk_offset_ptr"] = META["token_chunk_offset_ptr"].to(
-                META["x_ptr"].device
-            )
-            return tot
-    else:
-
-        def num_program(META, nums_dict):
-            tot = nums_dict[META["BLOCK_M"]]["tot"]
-
-            mlist = nums_dict[META["BLOCK_M"]]["mlist"]
-            mlist_len = nums_dict[META["BLOCK_M"]]["mlist_len"]
-
-            offsetlist = nums_dict[META["BLOCK_M"]]["offsetlist"]
-
-            if nums_dict[META["BLOCK_M"]]["batch_ptr"] is not None:
-                META["batch_ptr"] = nums_dict[META["BLOCK_M"]]["batch_ptr"]
-                META["token_chunk_offset_ptr"] = nums_dict[META["BLOCK_M"]][
-                    "token_chunk_offset_ptr"
-                ]
-            else:
-                if META["batch_ptr"].nelement() < mlist_len:
-                    newlen = mlist_len + 1
-                    META["batch_ptr"].resize_(newlen).fill_(PAD_SLOT_ID)
-                    META["token_chunk_offset_ptr"].resize_(newlen).fill_(PAD_SLOT_ID)
-
-                if META["batch_ptr"].nelement() >= mlist_len:
-                    META["batch_ptr"][0:mlist_len].copy_(mlist)
-                    META["token_chunk_offset_ptr"][0:mlist_len].copy_(offsetlist)
-            return tot
+        return tot
 
     def grid(META):
         return (
@@ -728,14 +654,11 @@ def causal_conv1d_fn(
         stride_o_dim,
         stride_o_token,
         block_size_to_align // BLOCK_M,
-        # others
-        pad_slot_id,
         # META
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
-        USE_PAD_SLOT=pad_slot_id is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
@@ -777,8 +700,6 @@ def _causal_conv1d_update_kernel(
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
-    # others
-    pad_slot_id: tl.constexpr,
     # Meta-parameters
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
@@ -787,7 +708,6 @@ def _causal_conv1d_update_kernel(
     IS_APC_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
-    USE_PAD_SLOT: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     # ruff: noqa: E501
@@ -810,11 +730,6 @@ def _causal_conv1d_update_kernel(
     conv_states_input_coord = tl.load(
         conv_state_indices_ptr + idx_seq * stride_state_indices + conv_state_init
     ).to(tl.int64)
-
-    if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
-            # not processing as this is not the actual sequence
-            return
 
     if IS_VARLEN:
         query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
@@ -1076,7 +991,6 @@ def causal_conv1d_update(
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
-    pad_slot_id: int = PAD_SLOT_ID,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
@@ -1111,16 +1025,9 @@ def causal_conv1d_update(
     max_query_len: int
         If query_start_loc is not None, this indicates the maximum query
         length in the batch.
-    pad_slot_id: int
-            if conv_state_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: conv_state_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     if validate_data:
-        assert pad_slot_id is not None
         assert x.stride(1) == 1
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
@@ -1222,8 +1129,6 @@ def causal_conv1d_update(
         stride_o_seq,
         stride_o_dim,
         stride_o_token,
-        # others
-        pad_slot_id,
         # META
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
@@ -1232,7 +1137,6 @@ def causal_conv1d_update(
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
-        USE_PAD_SLOT=pad_slot_id is not None,
         BLOCK_N=256,
     )
     if unsqueeze:
