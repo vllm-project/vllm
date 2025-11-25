@@ -193,6 +193,7 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
+    @classmethod
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
