@@ -249,14 +249,13 @@ def test_compilation_config():
     args = parser.parse_args(
         [
             "-O",
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"use_inductor": false}',
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], "backend": "eager"}',
         ]
     )
     assert (
         args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
-        and not args.compilation_config.use_inductor
+        and args.compilation_config.backend == "eager"
     )
 
     # set to string form of a dict
@@ -264,13 +263,13 @@ def test_compilation_config():
         [
             "--compilation-config="
             '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"use_inductor": true}',
+            '"backend": "inductor"}',
         ]
     )
     assert (
         args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
-        and args.compilation_config.use_inductor
+        and args.compilation_config.backend == "inductor"
     )
 
 
