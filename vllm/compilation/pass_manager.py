@@ -23,6 +23,9 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
+if current_platform.is_rocm():
+    from .qk_norm_mrope_fusion import QKNormMRoPEFusionPass
+
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
@@ -113,6 +116,8 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [QKNormRoPEFusionPass(config)]
 
+            if self.pass_config.enable_qk_norm_mrope_fusion:
+                self.passes += [QKNormMRoPEFusionPass(config)]
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)

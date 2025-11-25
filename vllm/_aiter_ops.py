@@ -432,6 +432,73 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_aiter_qknorm_mrope_impl(
+    qkv: torch.Tensor,
+    qw: torch.Tensor,
+    kw: torch.Tensor,
+    cos_sin: torch.Tensor,
+    positions: torch.Tensor,
+    num_tokens: int,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_size: int,
+    is_neox_style: bool,
+    mrope_section: list[int],
+    is_interleaved: bool,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter import fused_mrope_3d_rms
+
+    fused_mrope_3d_rms(
+        qkv,
+        qw,
+        kw,
+        cos_sin,
+        positions,
+        num_tokens,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_size,
+        is_neox_style,
+        mrope_section,
+        is_interleaved,
+        eps,
+    )
+
+    q_size = num_heads_q * head_size
+    k_size = num_heads_k * head_size
+    v_size = num_heads_v * head_size
+
+    qkv = qkv.view(num_tokens, q_size + k_size + v_size)
+    q, k, v = qkv.split([q_size, k_size, v_size], dim=-1)
+    return q, k, v
+
+
+def _rocm_aiter_qknorm_mrope_impl_fake(
+    qkv: torch.Tensor,
+    qw: torch.Tensor,
+    kw: torch.Tensor,
+    cos_sin: torch.Tensor,
+    positions: torch.Tensor,
+    num_tokens: int,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_size: int,
+    is_neox_style: bool,
+    mrope_section: list[int],
+    is_interleaved: bool,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(num_tokens, num_heads_q * head_size),
+        torch.empty(num_tokens, num_heads_k * head_size),
+        torch.empty(num_tokens, num_heads_v * head_size),
+    )
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -630,6 +697,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_qknorm_mrope",
+                op_func=_rocm_aiter_qknorm_mrope_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_qknorm_mrope_impl_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -648,6 +723,40 @@ class rocm_aiter_ops:
         x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
+
+    @staticmethod
+    def qknorm_mrope(
+        qkv: torch.Tensor,
+        qw: torch.Tensor,
+        kw: torch.Tensor,
+        cos_sin: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens: int,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_size: int,
+        is_neox_style: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_qknorm_mrope(
+            qkv,
+            qw,
+            kw,
+            cos_sin,
+            positions,
+            num_tokens,
+            num_heads_q,
+            num_heads_k,
+            num_heads_v,
+            head_size,
+            is_neox_style,
+            mrope_section,
+            is_interleaved,
+            eps,
+        )
 
     @staticmethod
     def gemm_a8w8(

@@ -259,11 +259,17 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
             return super()._compute_cos_sin_cache()
         return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
 
-    def forward_native(
-        self,
+    @staticmethod
+    def forward_static(
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        mrope_section: list[int] | None,
+        mrope_interleaved: bool,
+        is_neox_style: bool,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward().
@@ -278,39 +284,59 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
-        self._match_cos_sin_cache_dtype(query)
+        # self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if positions.ndim == 2:
-            assert self.mrope_section
-            if self.mrope_interleaved:
-                cos = apply_interleaved_rope(cos, self.mrope_section)
-                sin = apply_interleaved_rope(sin, self.mrope_section)
+            assert mrope_section
+            if mrope_interleaved:
+                cos = apply_interleaved_rope(cos, mrope_section)
+                sin = apply_interleaved_rope(sin, mrope_section)
             else:
                 cos = torch.cat(
-                    [m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
+                    [m[i] for i, m in enumerate(cos.split(mrope_section, dim=-1))],
                     dim=-1,
                 )
                 sin = torch.cat(
-                    [m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
+                    [m[i] for i, m in enumerate(sin.split(mrope_section, dim=-1))],
                     dim=-1,
                 )
 
         query_shape = query.shape
-        query = query.view(num_tokens, -1, self.head_size)
-        query_rot = query[..., : self.rotary_dim]
-        query_pass = query[..., self.rotary_dim :]
-        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, self.is_neox_style)
+        query = query.view(num_tokens, -1, head_size)
+        query_rot = query[..., :rotary_dim]
+        query_pass = query[..., rotary_dim:]
+        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
-        key_rot = key[..., : self.rotary_dim]
-        key_pass = key[..., self.rotary_dim :]
-        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, self.is_neox_style)
+        key = key.view(num_tokens, -1, head_size)
+        key_rot = key[..., :rotary_dim]
+        key_pass = key[..., rotary_dim:]
+        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return MRotaryEmbedding.forward_static(
+            positions,
+            query,
+            key,
+            head_size=self.head_size,
+            rotary_dim=self.rotary_dim,
+            cos_sin_cache=self.cos_sin_cache,
+            mrope_section=self.mrope_section,
+            mrope_interleaved=self.mrope_interleaved,
+            is_neox_style=self.is_neox_style,
+            offsets=offsets,
+        )
 
     def forward_cuda(
         self,

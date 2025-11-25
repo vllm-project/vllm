@@ -20,6 +20,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Quant,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.mrope import (
+    MRotaryEmbedding,
+)
 from vllm.platforms import current_platform
 
 _USE_AITER_RMS_NORM = current_platform.is_rocm() and rocm_aiter_ops.is_rmsnorm_enabled()
@@ -146,6 +149,105 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             self.rotary_dim,
             cos_sin_cache,
             self.is_neox,
+        )
+
+
+class MatcherMRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mrope_section: list[int],
+        mrope_interleaved: bool,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = MRotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+        self.rotary_op = ROTARY_OP
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(3, 5)
+        query = self.empty(5, self.q_size)
+        key = self.empty(5, self.kv_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # need custom op for mrope so that pattern match can be applied
+        # see https://github.com/vllm-project/vllm/issues/28042
+        result = auto_functionalized(
+            self.rotary_op,
+            positions=positions,
+            query=query,
+            key=key,
+            head_size=self.head_size,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+        )
+        query_out = result[1]
+        key_out = result[2] if len(result) > 2 else None
+        return query_out, key_out
+        # # Currently MRoPE custom implementation uses a triton kernel,
+        # # but pattern match failed
+        # assert positions.ndim == 2
+        # assert key is not None
+
+        # cos_sin = cos_sin_cache[positions]
+        # cos, sin = cos_sin.chunk(2, dim=-1)
+        # query_shape = query.shape
+        # key_shape = key.shape
+        # if positions.ndim == 2:
+
+        #     q, k = triton_mrope(
+        #         query,
+        #         key,
+        #         cos,
+        #         sin,
+        #         self.mrope_section,
+        #         self.head_size,
+        #         self.rotary_dim,
+        #         self.mrope_interleaved,
+        #     )
+
+        #     return q.reshape(query_shape), k.reshape(key_shape)
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return MRotaryEmbedding.forward_static(
+            positions,
+            query,
+            key,
+            head_size=self.head_size,
+            rotary_dim=self.rotary_dim,
+            cos_sin_cache=cos_sin_cache,
+            mrope_section=self.mrope_section,
+            mrope_interleaved=self.mrope_interleaved,
+            is_neox_style=self.is_neox,
+            offsets=None,
         )
 
 
