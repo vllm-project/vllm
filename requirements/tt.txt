@@ -1,6 +1,9 @@
 # Common dependencies
 -r common.txt
 
+# Offline test dependencies
+-r tt_test.txt
+
 # TT-NN works with older torch versions, but vLLM requires torch >= 2.7.0
 torch==2.7.1+cpu
 torchvision==0.22.1

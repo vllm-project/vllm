@@ -139,7 +139,13 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
                 "Multi-image inputs not supported yet for Qwen2.5-VL"
             )
             # Lazy import only when needed
-            from qwen_vl_utils import process_vision_info
+            try:
+                from qwen_vl_utils import process_vision_info
+            except ModuleNotFoundError as err:
+                raise ModuleNotFoundError(
+                    "`qwen-vl-utils` is required for Qwen2.5-VL models. "
+                    "Install it with: pip install qwen-vl-utils"
+                ) from err
 
             image_inputs, video_inputs = process_vision_info(prompt)
             assert video_inputs is None, "Video inputs not supported yet"
