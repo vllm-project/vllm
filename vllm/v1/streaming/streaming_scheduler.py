@@ -157,8 +157,7 @@ class StreamingScheduler(Scheduler):
                 continue
             assert request.close_streaming_session, "session should be in close state"
             outputs[request.client_index].append(
-                self._make_engine_core_output(
-                    request,
+                EngineCoreOutput(
                     new_token_ids=[],
                     request_id=req_id,
                     finish_reason=request.get_finished_reason(),
@@ -166,6 +165,7 @@ class StreamingScheduler(Scheduler):
                     events=request.take_events(),
                     trace_headers=request.trace_headers,
                     num_cached_tokens=request.num_cached_tokens,
+                    close_streaming_session=True,
                 )
             )
             self._free_request(request)

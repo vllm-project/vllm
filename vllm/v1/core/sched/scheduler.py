@@ -51,9 +51,6 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
-    engine_core_output_cls: type[EngineCoreOutput] = EngineCoreOutput
-    engine_core_outputs_cls: type[EngineCoreOutputs] = EngineCoreOutputs
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1148,8 +1145,7 @@ class Scheduler(SchedulerInterface):
             if new_token_ids or pooler_output is not None or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
-                    self._make_engine_core_output(
-                        request,
+                    EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
@@ -1162,6 +1158,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        close_streaming_session=request.close_streaming_session,
                     )
                 )
             else:
@@ -1201,7 +1198,7 @@ class Scheduler(SchedulerInterface):
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
-            client_index: self.engine_core_outputs_cls(outputs=outs)
+            client_index: EngineCoreOutputs(outputs=outs)
             for client_index, outs in outputs.items()
         }
 
@@ -1214,7 +1211,7 @@ class Scheduler(SchedulerInterface):
                 if (eco := engine_core_outputs.get(client_index)) is not None:
                     eco.finished_requests = finished_set
                 else:
-                    engine_core_outputs[client_index] = self.engine_core_outputs_cls(
+                    engine_core_outputs[client_index] = EngineCoreOutputs(
                         finished_requests=finished_set
                     )
             finished_req_ids.clear()
@@ -1226,7 +1223,7 @@ class Scheduler(SchedulerInterface):
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
                 # outputs this step.
-                engine_core_outputs[0] = eco = self.engine_core_outputs_cls()
+                engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
 
         return engine_core_outputs
@@ -1250,13 +1247,6 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
-
-    def _make_engine_core_output(
-        self,
-        request: Request,
-        **kwargs: Any,
-    ) -> EngineCoreOutput:
-        return self.engine_core_output_cls(**kwargs)
 
     def _handle_stopped(
         self,
