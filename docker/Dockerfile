@@ -85,7 +85,20 @@ ARG GET_PIP_URL
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo python3-pip libibverbs-dev \
+    && apt-get install -y --no-install-recommends \
+        ccache \
+        software-properties-common \
+        git \
+        curl \
+        sudo \
+        python3-pip \
+        libibverbs-dev \
+        # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+        # as it was causing spam when compiling the CUTLASS kernels
+        gcc-10 \
+        g++-10 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
@@ -110,10 +123,6 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-# as it was causing spam when compiling the CUTLASS kernels
-RUN apt-get install -y gcc-10 g++-10
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
 RUN <<EOF
 gcc --version
 EOF
@@ -268,7 +277,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
@@ -305,8 +314,15 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y software-properties-common curl sudo python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        curl \
+        sudo \
+        python3-pip \
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        libgl1 \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
@@ -321,7 +337,12 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         done ; \
     fi \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        libibverbs-dev \
+    && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
