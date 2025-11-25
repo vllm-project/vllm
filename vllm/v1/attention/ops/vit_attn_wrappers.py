@@ -30,6 +30,7 @@ def flash_attn_maxseqlen_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
 ) -> torch.Tensor:
     kwargs = {}
     if is_rocm_aiter:
@@ -96,6 +97,7 @@ def vit_flash_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
         q,
@@ -107,6 +109,7 @@ def vit_flash_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        softmax_scale,
     )
 
 
@@ -134,6 +137,7 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
 ) -> torch.Tensor:
     # Never remove the contiguous logic for ROCm
     # Without it, hallucinations occur with the backend
@@ -181,5 +185,6 @@ def vit_torch_sdpa_wrapper(
     v: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, scale, cu_seqlens)
