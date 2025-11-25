@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_pcp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -947,6 +948,7 @@ class FusedMoE(CustomOp):
         tp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
         dp_size: Optional[int] = None,
+        pcp_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
@@ -982,7 +984,7 @@ class FusedMoE(CustomOp):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
-
+        pcp_size_ = pcp_size if pcp_size is not None else get_pcp_group().world_size
         self.is_sequence_parallel = is_sequence_parallel
         self.sp_size = tp_size_ if is_sequence_parallel else 1
 
@@ -990,6 +992,7 @@ class FusedMoE(CustomOp):
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
                 dp_size_=dp_size_,
+                pcp_size_=pcp_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
@@ -1184,6 +1187,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.dp_size
 
     @property
+    def pcp_size(self):
+        return self.moe_parallel_config.pcp_size
+
+    @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
 
@@ -1194,6 +1201,10 @@ class FusedMoE(CustomOp):
     @property
     def dp_rank(self):
         return self.moe_parallel_config.dp_rank
+
+    @property
+    def pcp_rank(self):
+        return self.moe_parallel_config.pcp_rank
 
     @property
     def ep_rank(self):
@@ -2020,7 +2031,18 @@ class FusedMoE(CustomOp):
             if do_naive_dispatch_combine:
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel)
-
+            # NOTE: Similar with DP, PCP also needs dispatch and combine. For
+            # simplicity, AgRsAll2All was added separately for PCP here. Maybe
+            # we should modify All2AllManager abstract to better support PCP.
+            if self.pcp_size > 1:
+                hidden_states = get_pcp_group().all_gather(
+                    hidden_states,
+                    dim=0,
+                )
+                router_logits = get_pcp_group().all_gather(
+                    router_logits,
+                    dim=0,
+                )
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -2061,7 +2083,11 @@ class FusedMoE(CustomOp):
                 if do_naive_dispatch_combine and do_combine:
                     states = get_ep_group().combine(states,
                                                     self.is_sequence_parallel)
-
+                if self.pcp_size > 1:
+                    states = get_pcp_group().reduce_scatter(
+                        states,
+                        dim=0,
+                    )
                 if (not self.is_sequence_parallel and self.reduce_results
                         and (self.tp_size > 1 or self.ep_size > 1)):
                     states = self.maybe_all_reduce_tensor_model_parallel(

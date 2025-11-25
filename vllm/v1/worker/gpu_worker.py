@@ -17,7 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -594,6 +594,7 @@ class Worker(WorkerBase):
             module.global_num_experts = module.moe_config.num_experts
             module.moe_parallel_config = FusedMoEParallelConfig.make(
                 tp_size_=get_tp_group().world_size,
+                pcp_size_=get_pcp_group().world_size,
                 dp_size_=get_dp_group().world_size,
                 vllm_parallel_config=parallel_config,
             )
@@ -705,6 +706,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
+        parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)

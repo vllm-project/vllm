@@ -68,6 +68,8 @@ class ParallelConfig:
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
     """Number of tensor parallel groups."""
+    prefill_context_parallel_size: int = 1
+    """Number of prefill context parallel groups."""
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
@@ -199,6 +201,27 @@ class ParallelConfig:
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
+
+    dcp_kv_cache_interleave_size: int = 1
+    """
+    Interleave size of kv_cache storage while using DCP.
+    dcp_kv_cache_interleave_size has been replaced by cp_kv_cache_interleave_size,
+    and will be deprecated when PCP is fully supported.
+    """
+    cp_kv_cache_interleave_size: int = 1
+    """Interleave size of kv_cache storage while using DCP or PCP.
+    For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
+        and `total_cp_world_size = pcp_world_size * dcp_world_szie`.
+    store interleave_size tokens on total_cp_rank i,
+    then store next interleave_size tokens on taotal_cp_rank i+1.
+    Interleave_size=1: token-level alignment, where token `i` is stored on
+        total_cp_rank `i % total_cp_world_size`.
+    Interleave_size=block_size: block-level alignment, where tokens are
+        first populated to the preceding ranks. Tokens are then stored
+        in (rank i+1, block j) only after (rank i, block j) is fully occupied.
+    Block_size should be greater than or equal to cp_kv_cache_interleave_size.
+    Block_size should be divisible by cp_kv_cache_interleave_size.
+    """
 
     _api_process_count: int = 1
     """
@@ -374,7 +397,7 @@ class ParallelConfig:
 
         # Continue with the rest of the initialization
         self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
+            self.tensor_parallel_size * self.prefill_context_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")

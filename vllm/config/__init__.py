@@ -458,6 +458,29 @@ class VllmConfig:
                            "Modify KVEventsConfig.enable_kv_cache_events"
                            "to True to enable.")
         current_platform.check_and_update_config(self)
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
+                assert (
+                self.parallel_config.cp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.cp_kv_cache_interleave_size
+                == 0), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size}).")
 
         # final check of cudagraph mode after platform-specific update
         if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():

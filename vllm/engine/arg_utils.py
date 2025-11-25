@@ -318,8 +318,14 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    prefill_context_parallel_size: int = \
+        ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = \
         ParallelConfig.decode_context_parallel_size
+    dcp_kv_cache_interleave_size: int \
+        = ParallelConfig.dcp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int \
+        = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
     data_parallel_start_rank: Optional[int] = None
@@ -657,6 +663,19 @@ class EngineArgs:
         parallel_group.add_argument(
             "--decode-context-parallel-size", "-dcp",
             **parallel_kwargs["decode_context_parallel_size"])
+        parallel_group.add_argument(
+            "--cp-kv-cache-interleave-size",
+            **parallel_kwargs["cp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--dcp-kv-cache-interleave-size",
+            **parallel_kwargs["dcp_kv_cache_interleave_size"],
+        )
+        parallel_group.add_argument(
+            "--prefill-context-parallel-size",
+            "-pcp",
+            **parallel_kwargs["prefill_context_parallel_size"],
+        )
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
@@ -1316,6 +1335,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
@@ -1340,6 +1360,8 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
@@ -1569,6 +1591,7 @@ class EngineArgs:
 
             action = "Enabling" if \
                 incremental_prefill_supported else "Disabling"
+            
 
             if self.enable_chunked_prefill is None:
                 self.enable_chunked_prefill = incremental_prefill_supported
