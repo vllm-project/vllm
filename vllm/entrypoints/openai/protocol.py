@@ -2409,7 +2409,6 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseCodeInterpreterCallCompletedEvent
 )
 
-
 BatchRequestInputBody: TypeAlias = (
     ChatCompletionRequest | EmbeddingRequest | ScoreRequest | RerankRequest
 )
