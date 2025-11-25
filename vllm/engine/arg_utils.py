@@ -250,8 +250,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 if default.default_factory is None:
                     default = default.default
                 else:
-                    # A default vllm_config will be constructed here.
-                    # Info logs will be output, which is confusing.
+                    # VllmConfig's Fields have default_factory set to config classes.
+                    # These could emit logs on init, which would be confusing.
                     with suppress_logging():
                         default = default.default_factory()
         elif field.default_factory is not MISSING:
