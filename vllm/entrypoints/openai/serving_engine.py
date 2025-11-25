@@ -296,11 +296,7 @@ class OpenAIServing:
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
-        logger.info(
-            '"auto" tool choice has been enabled please note that while'
-            " the parallel_tool_calls client option is preset for "
-            "compatibility reasons, it will be ignored."
-        )
+        logger.info('"auto" tool choice has been enabled.')
 
         try:
             if tool_parser_name == "pythonic" and self.model_config.model.startswith(
