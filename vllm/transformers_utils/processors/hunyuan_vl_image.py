@@ -4,10 +4,13 @@
 # adapted from https://github.com/ManaEstras/transformers/blob/v4.57.1.hyvl/src/transformers/models/hunyuan_vl/image_processing_hunyuan_vl.py
 """Image processor class for HunYuanVL."""
 
+# isort conflicts with ruff for transformers imports
+# isort: skip_file
 import math
 
 import numpy as np
 import torchvision.transforms as transforms
+from transformers import AutoImageProcessor
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -23,10 +26,8 @@ from transformers.image_utils import (
     valid_images,
     validate_preprocess_arguments,
 )
-from transformers.video_utils import VideoInput, make_batched_videos
-
-from transformers import AutoImageProcessor
 from transformers.utils import TensorType, logging
+from transformers.video_utils import VideoInput, make_batched_videos
 
 logger = logging.get_logger(__name__)
 
