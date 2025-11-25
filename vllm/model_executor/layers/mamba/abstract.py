@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
 from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -51,7 +52,9 @@ class MambaBase(AttentionLayerBase):
             raise NotImplementedError(
                 "Mamba with speculative decoding is not supported yet."
             )
-        mamba_block_size = vllm_config.cache_config.mamba_block_size
+        mamba_block_size = (vllm_config.cache_config.mamba_block_size 
+                            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                            else vllm_config.cache_config.block_size)
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
         return MambaSpec(
             shapes=self.get_state_shape(),
@@ -64,6 +67,7 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
+            enable_caching=vllm_config.cache_config.enable_prefix_caching,
         )
 
     def get_attn_backend(self) -> type["AttentionBackend"]:

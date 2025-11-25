@@ -232,7 +232,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
-
+    VLLM_USE_LIGHTER_MAMBA_CACHE: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -1526,6 +1526,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
+    "VLLM_USE_LIGHTER_MAMBA_CACHE": lambda: bool(
+        int(os.getenv("VLLM_USE_LIGHTER_MAMBA_CACHE", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1637,6 +1640,7 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        "VLLM_USE_LIGHTER_MAMBA_CACHE",
     }
 
     from vllm.config.utils import normalize_value

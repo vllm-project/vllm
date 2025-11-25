@@ -6,6 +6,7 @@ from typing import ClassVar, TypeVar
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
@@ -40,7 +41,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.compilation_config.max_cudagraph_capture_size,
         )
 
-        if self.vllm_config.cache_config.enable_prefix_caching:
+        if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and self.vllm_config.cache_config.enable_prefix_caching
+        ):
             self.state_indices_tensor = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,

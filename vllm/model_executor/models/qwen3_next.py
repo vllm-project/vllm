@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -1186,9 +1187,10 @@ class Qwen3NextForCausalLM(
         cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
+        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            assert not cache_config.enable_prefix_caching, (
+                "Qwen3NextMTP currently does not support prefix caching"
+            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
