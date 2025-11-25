@@ -581,6 +581,18 @@ class LoRAModelManager:
             # aims to prevent this error
             if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
                 continue
+            # Skip registration if from_layer failed to wrap the module with LoRA
+            # (e.g., due to incompatible quantization like Marlin-compressed MoE layers).
+            # This prevents crashes when replace_submodule returns the original module
+            # instead of a BaseLayerWithLoRA instance.
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                logger.warning(
+                    "Skipping LoRA registration for %s: module could not be "
+                    "wrapped with LoRA (may be incompatible quantization or "
+                    "unsupported layer type)",
+                    module_name,
+                )
+                continue
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
