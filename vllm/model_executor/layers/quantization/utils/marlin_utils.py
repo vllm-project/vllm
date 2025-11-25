@@ -218,26 +218,6 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )
 
 
-def get_marlin_input_dtype(prefix):
-    if envs.VLLM_MARLIN_INPUT_DTYPE is None:
-        return
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
-        return torch.int8
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "fp8":
-        if not current_platform.is_device_capability(
-            89
-        ) and not current_platform.is_device_capability(120):
-            raise ValueError(
-                "Marlin W4A8-FP8 only support SM89 or SM120 device "
-                "(It is slower than Marlin W4A16 on other devices). "
-                "You can consider using W4A8-INT8 instead"
-                "(set VLLM_MARLIN_INPUT_DTYPE=int8)."
-            )
-        return torch.float8_e4m3fn
-    else:
-        return
-
-
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
     """
     Given Marlin packed weight matrices w1_packed, and w2_packed,
@@ -472,13 +452,39 @@ def should_use_atomic_add_reduce(
     return True
 
 
+_quant_fp8_method: QuantFP8 | None = None
+
+
+def get_marlin_input_dtype(prefix):
+    if envs.VLLM_MARLIN_INPUT_DTYPE is None:
+        return
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
+        return torch.int8
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "fp8":
+        if not current_platform.is_device_capability(
+            89
+        ) and not current_platform.is_device_capability(120):
+            raise ValueError(
+                "Marlin W4A8-FP8 only support SM89 or SM120 device "
+                "(It is slower than Marlin W4A16 on other devices). "
+                "You can consider using W4A8-INT8 instead"
+                "(set VLLM_MARLIN_INPUT_DTYPE=int8)."
+            )
+
+        global _quant_fp8_method
+        _quant_fp8_method = QuantFP8(False, GroupShape.PER_TOKEN)
+        return torch.float8_e4m3fn
+    else:
+        return
+
+
 def marlin_quant_input(x: torch.Tensor, quant_dtype: torch.dtype):
     x = x.reshape(-1, x.shape[-1])
     if quant_dtype == torch.int8:
         return per_token_quant_int8(x)
     elif quant_dtype == torch.float8_e4m3fn:
-        quant_fp8 = QuantFP8(False, GroupShape.PER_TOKEN)
-        return quant_fp8(x)
+        assert _quant_fp8_method is not None
+        return _quant_fp8_method(x)
     else:
         raise ValueError(f"unsupported quant_dtype {quant_dtype}")
 
