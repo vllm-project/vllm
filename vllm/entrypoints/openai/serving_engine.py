@@ -1349,11 +1349,12 @@ class OpenAIServing:
         raw_request: Request | None, default: str | None = None
     ) -> str | None:
         """Pulls the request id to use from a header, if provided"""
-        default = default or random_uuid()
-        if raw_request is None:
-            return default
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            return req_id
 
-        return raw_request.headers.get("X-Request-Id", default)
+        return random_uuid() if default is None else default
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
