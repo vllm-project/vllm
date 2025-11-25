@@ -39,9 +39,11 @@ def __dir__() -> list[str]:
 
 logger = init_logger(__name__)
 
+MASK_64_BITS = (1 << 64) - 1
+
 
 def random_uuid() -> str:
-    return str(uuid.uuid4().hex)
+    return f"{uuid.uuid4().int & MASK_64_BITS:016x}"  # 16 hex chars
 
 
 def length_from_prompt_token_ids_or_embeds(
