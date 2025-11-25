@@ -391,7 +391,10 @@ class RocmPlatform(Platform):
 
         if cache_config and cache_config.block_size is None:
             if (
-                os.environ.get("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION")
+                (
+                    os.environ.get("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION")
+                    and os.environ.get("VLLM_ROCM_USE_AITER")
+                )
                 or get_env_variable_attn_backend()
                 == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
             ):
