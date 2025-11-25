@@ -683,7 +683,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 * self.kv_cache_spec.num_speculative_blocks
             )
         return super().allocate_new_blocks(request_id, num_tokens)
-    
+
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         # Get the number of tokens for which the cache blocks can be freed.
 
@@ -698,9 +698,9 @@ class MambaManager(SingleTypeKVCacheManager):
 
         # Current vLLM block freeing logic operates with num_computed_tokens:
         # last_useful_block = self.get_num_skipped_tokens(num_computed_tokens)
-        #                     // self.block_size        
+        #                     // self.block_size
         # Solution:
-        return num_computed_tokens-1
+        return num_computed_tokens - 1
         # num_computed_tokens == 1023 -> (1022//512=1) --> keep from 1
         # num_computed_tokens == 1024 -> (1023//512=1) --> keep from 1
         # num_computed_tokens == 1025 -> (1024//512=2) --> keep from 2
