@@ -878,6 +878,8 @@ class WhisperForConditionalGeneration(
         quant_config = vllm_config.quant_config
         self.config = config
         self.dtype = vllm_config.model_config.dtype
+        # Whisper encoder input is fixed (padded or truncated) to this number of tokens
+        self.encoder_item_size = config.max_source_positions
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
 
@@ -913,7 +915,10 @@ class WhisperForConditionalGeneration(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
-        return [self.model.get_encoder_outputs(audio_input["input_features"])]
+        # Split concatenated encoder outputs into one tensor per audio input
+        enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        # The assumption is we can only process whole mm items (audios)
+        return enc_output.split(self.encoder_item_size, dim=0)
 
     def embed_input_ids(
         self,
