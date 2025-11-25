@@ -966,6 +966,15 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+def get_prefill_context_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_pcp_group().world_size
+
+
+def get_prefill_context_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_pcp_group().rank_in_group
+
 _PP: Optional[GroupCoordinator] = None
 
 _DP: Optional[GroupCoordinator] = None

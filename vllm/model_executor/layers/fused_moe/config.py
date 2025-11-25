@@ -719,7 +719,7 @@ class FusedMoEParallelConfig:
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         pcp_size = pcp_size_
-        pcp_rank = get_pcp_group().rank_in_group() if pcp_size_ > 1 else 0
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size_ > 1 else 0
         tp_size, tp_rank = flatten_tp_across_dp_and_pcp(dp_rank, pcp_rank)
 
         if not use_ep:
