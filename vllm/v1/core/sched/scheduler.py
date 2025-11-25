@@ -941,15 +941,18 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
+            # Check and update encoder cache accounting.
+            # This ensures proper tracking of freeable entries.
+            is_cached = self.encoder_cache_manager.check_and_update_cache(request, i)
             if not self.is_encoder_decoder:
-                # We are not using the encoder cache for encoder-decoder models,
-                # yet.
+                # We are not using the cache for encoder-decoder models -schedule even
+                # if cached- but we have to update the encoder cache state regardless.
                 if request.mm_features[i].identifier in mm_hashes_to_schedule:
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
 
-                if self.encoder_cache_manager.check_and_update_cache(request, i):
+                if is_cached:
                     # The encoder input is already computed and cached from a
                     # previous step.
                     continue
