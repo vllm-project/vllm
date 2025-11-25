@@ -3,7 +3,6 @@
 """Sampling parameters for text generation."""
 
 import copy
-import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -98,19 +97,6 @@ class StructuredOutputsParams:
                 "json_object",
             )
         )
-
-
-@dataclass
-class GuidedDecodingParams(StructuredOutputsParams):
-    def __post_init__(self):
-        warnings.warn(
-            "GuidedDecodingParams is deprecated. This will be removed in "
-            "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-            "StructuredOutputsParams instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return super().__post_init__()
 
 
 class RequestOutputKind(Enum):
@@ -234,8 +220,6 @@ class SamplingParams(
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
     """Parameters for configuring structured outputs."""
-    guided_decoding: GuidedDecodingParams | None = None
-    """Deprecated alias for structured_outputs."""
     logit_bias: dict[int, float] | None = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -283,7 +267,6 @@ class SamplingParams(
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
-        guided_decoding: GuidedDecodingParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
@@ -295,16 +278,6 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
-        if guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            structured_outputs = guided_decoding
-            guided_decoding = None
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -386,17 +359,6 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
-
-        if self.guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self.structured_outputs = self.guided_decoding
-            self.guided_decoding = None
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
