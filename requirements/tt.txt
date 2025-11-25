@@ -10,3 +10,4 @@ torchvision==0.22.1
 torchaudio==2.7.1
 # Pinned down in https://github.com/tenstorrent/vllm/pull/127 to match tt-metal's requirements
 numpy>=1.24.4,<2
+transformers<=4.57.1
