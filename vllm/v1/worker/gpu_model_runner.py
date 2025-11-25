@@ -2752,8 +2752,8 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        # self._draft_token_ids is None when `input_fits_in_drafter=False`
-        # and there is no draft tokens scheduled. so it need to update the
+        # self._draft_token_ids may be None if speculation was not performed
+        # (e.g., no decode tokens scheduled). In this case, we need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
         # use deepcopy to avoid the modification has influence on the
         # scheduler_output in engine core process.
@@ -3055,44 +3055,14 @@ class GPUModelRunner(
             and spec_config.use_eagle()
             and not spec_config.disable_padded_drafter_batch
         )
-        effective_drafter_max_model_len = self.max_model_len
-        if effective_drafter_max_model_len is None:
-            effective_drafter_max_model_len = self.model_config.max_model_len
-        if (
-            spec_config is not None
-            and spec_config.draft_model_config is not None
-            and spec_config.draft_model_config.max_model_len is not None
-        ):
-            effective_drafter_max_model_len = (
-                spec_config.draft_model_config.max_model_len
-            )
-        input_fits_in_drafter = spec_decode_common_attn_metadata and (
-            spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-            <= effective_drafter_max_model_len
-        )
         if use_padded_batch_for_eagle:
             assert self.speculative_config is not None
             assert isinstance(self.drafter, EagleProposer)
             sampled_token_ids = sampler_output.sampled_token_ids
-            if input_fits_in_drafter:
-                # EAGLE speculative decoding can use the GPU sampled tokens
-                # as inputs, and does not need to wait for bookkeeping to finish.
-                propose_draft_token_ids(sampled_token_ids)
-            elif self.valid_sampled_token_count_event is not None:
-                assert spec_decode_common_attn_metadata is not None
-                next_token_ids, valid_sampled_tokens_count = (
-                    self.drafter.prepare_next_token_ids_padded(
-                        spec_decode_common_attn_metadata,
-                        sampled_token_ids,
-                        self.requests,
-                        self.input_batch,
-                        self.discard_request_indices.gpu,
-                        self.num_discarded_requests,
-                    )
-                )
-                self._copy_valid_sampled_token_count(
-                    next_token_ids, valid_sampled_tokens_count
-                )
+            # EAGLE speculative decoding can use the GPU sampled tokens
+            # as inputs, and does not need to wait for bookkeeping to finish.
+            # The drafter handles max_model_len internally.
+            propose_draft_token_ids(sampled_token_ids)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
@@ -3112,13 +3082,10 @@ class GPUModelRunner(
                 spec_decode_metadata,
             )
 
-        if (
-            self.speculative_config
-            and not use_padded_batch_for_eagle
-            and input_fits_in_drafter
-        ):
+        if self.speculative_config and not use_padded_batch_for_eagle:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
+            # The drafter handles max_model_len internally.
             propose_draft_token_ids(valid_sampled_token_ids)
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
