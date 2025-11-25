@@ -23,7 +23,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
