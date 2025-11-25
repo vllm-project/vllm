@@ -33,6 +33,14 @@ class TopKTopPSampler(nn.Module):
             and current_platform.is_cuda()
         ):
             if envs.VLLM_USE_FLASHINFER_SAMPLER:
+                from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+                capability = current_platform.get_device_capability()
+                if not FlashInferBackend.supports_compute_capability(capability):
+                    raise RuntimeError(
+                        "FlashInfer sampler is not supported "
+                        f"on compute capability {capability}."
+                    )
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
                 logger.info_once(
                     "Using FlashInfer for top-p & top-k sampling.",
