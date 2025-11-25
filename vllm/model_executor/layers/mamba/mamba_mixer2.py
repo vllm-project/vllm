@@ -485,23 +485,6 @@ class MambaMixer2(MambaBase, CustomOp):
         # Shape: [num_spec_tokens, num_heads // tp_size, head_dim, ssm_state_size]
         vllm_config = get_current_vllm_config()
         speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.num_speculative_tokens is not None
-        ):
-            num_spec = speculative_config.num_speculative_tokens
-            # Allocate temp cache for checkpointing during speculation
-            # We'll move it to the correct device after the model is loaded
-            self.spec_temp_cache = torch.zeros(
-                num_spec + 2,
-                num_heads // self.tp_size,
-                head_dim,
-                ssm_state_size,
-                dtype=torch.bfloat16,  # Will be cast to correct dtype in forward
-            )
-
-        else:
-            self.spec_temp_cache = None
 
         self.num_spec = (
             speculative_config.num_speculative_tokens
@@ -996,7 +979,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
                         # 3a. SSM with spec decode support
                         dt_d_spec = dt_d_spec[:, :, None].expand(-1, -1, self.head_dim)
-                        B_d_spec = B_d_spec.reshape(
+                        B_d_spec = B_d_spec.view(
                             -1, n_groups, B_d_spec.shape[1] // n_groups
                         )
                         C_d_spec = C_d_spec.view(
@@ -1005,26 +988,39 @@ class MambaMixer2(MambaBase, CustomOp):
                         hidden_states_d_spec = hidden_states_d_spec.view(
                             -1, self.num_heads // self.tp_size, self.head_dim
                         )
+                        tokens_per_seq = num_spec_decode_tokens // num_spec_decodes
 
                         selective_state_update(
                             ssm_state,
                             hidden_states_d_spec.view(
-                                num_spec_decodes, -1, *hidden_states_d_spec.shape[1:]
+                                num_spec_decodes,
+                                -1,
+                                self.num_heads // self.tp_size,
+                                self.head_dim,
                             ),
-                            dt_d_spec.view(num_spec_decodes, -1, *dt_d_spec.shape[1:]),
+                            dt_d_spec.view(
+                                num_spec_decodes,
+                                -1,
+                                self.num_heads // self.tp_size,
+                                self.head_dim,
+                            ),
                             A_d,
-                            B_d_spec.view(num_spec_decodes, -1, *B_d_spec.shape[1:]),
-                            C_d_spec.view(num_spec_decodes, -1, *C_d_spec.shape[1:]),
+                            B_d_spec.view(
+                                num_spec_decodes, tokens_per_seq, n_groups, -1
+                            ),
+                            C_d_spec.view(
+                                num_spec_decodes, tokens_per_seq, n_groups, -1
+                            ),
                             D_d,
                             z=None,
                             dt_bias=dt_bias_expanded,
                             dt_softplus=True,
                             state_batch_indices=spec_state_indices_tensor[
-                                :, :num_spec_decode_tokens
+                                :num_spec_decodes, :tokens_per_seq
                             ],
                             out=preallocated_ssm_out_d_spec.view(
                                 num_spec_decodes,
-                                num_spec_decode_tokens,
+                                -1,
                                 self.num_heads // self.tp_size,
                                 self.head_dim,
                             ),

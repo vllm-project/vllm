@@ -122,6 +122,8 @@ def _selective_scan_update_kernel(
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
 
+    state_ptr_base = state_ptr
+
     # If HAS_STATE_BATCH_INDICES is true, then the ssm state's batch coordinate
     # is taken from the state_batch_indices_ptr Otherwise, the state coordinate
     # is the same as the batch id.
@@ -132,14 +134,16 @@ def _selective_scan_update_kernel(
         else:
             init_token_idx = 0
 
-        dst_state_batch_indices_ptr += (
-            pid_b * stride_dst_state_indices_batch
-            + init_token_idx * stride_dst_state_indices_T
-        )
-        dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
-        dst_state_ptr = state_ptr + (
-            dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
-        )
+        dst_state_batch_indices_ptr += pid_b * stride_dst_state_indices_batch
+        if not INPLACE_FINAL_STATE:
+            dst_state_batch_idx = tl.load(
+                dst_state_batch_indices_ptr
+                + init_token_idx * stride_dst_state_indices_T
+            ).to(tl.int64)
+            dst_state_ptr = state_ptr + (
+                dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
+            )
+
         state_batch_indices_ptr += (
             pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
         )
@@ -167,9 +171,10 @@ def _selective_scan_update_kernel(
     state_ptrs = state_ptr + (
         offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
     )
-    dst_state_ptrs = dst_state_ptr + (
-        offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
-    )
+    if not INPLACE_FINAL_STATE:
+        dst_state_ptrs = dst_state_ptr + (
+            offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
+        )
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
@@ -225,15 +230,11 @@ def _selective_scan_update_kernel(
         state = state * dA + dB * x[:, None]
 
         if INPLACE_FINAL_STATE:
-            dst_idx_ptr = (
-                dst_state_batch_indices_ptr
-                + pid_b * stride_dst_state_indices_batch
-                + i_t * stride_dst_state_indices_T
-            )
+            dst_idx_ptr = dst_state_batch_indices_ptr + i_t * stride_dst_state_indices_T
             token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
             if token_dst_idx != pad_slot_id:
                 token_dst_ptrs = (
-                    state_ptr
+                    state_ptr_base
                     + token_dst_idx * stride_state_batch
                     + pid_h * stride_state_head
                     + offs_m[:, None] * stride_state_dim
