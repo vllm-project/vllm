@@ -219,6 +219,8 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        self.kv_cache_manager.new_step_started()
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -565,6 +567,8 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    # NOTE(Chen): with the hack in this PR, we may early return here
+                    # though there is still available kv cache slot and token budget.
                     break
 
                 # KVTransfer: the connector uses this info to determine

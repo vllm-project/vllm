@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
@@ -301,6 +301,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         # The default behavior is to not skip any tokens.
         return 0
+
+    def new_step_started(self) -> None:
+        pass
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -617,6 +620,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 
 class MambaManager(SingleTypeKVCacheManager):
+    def __init__(
+        self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
+    ) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        self.new_cache_blocks: set[BlockHashWithGroupId] = set()
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -677,6 +686,14 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.kv_cache_spec.block_size
                 * self.kv_cache_spec.num_speculative_blocks
             )
+        if (
+            len(new_computed_blocks) > 0
+            and new_computed_blocks[-1].block_hash in self.new_cache_blocks
+        ):
+            # If this request relies on a block generated in the current step, it's
+            # better to schedule it into the next step. So return a large number.
+            print("!!!!!!!!!!!!!!!schedule into next step!!!!!!!!!!!!!!!")
+            return self.block_pool.num_gpu_blocks + 100000
         return super().get_num_blocks_to_allocate(
             request_id, num_tokens, new_computed_blocks
         )
@@ -693,6 +710,19 @@ class MambaManager(SingleTypeKVCacheManager):
                 * self.kv_cache_spec.num_speculative_blocks
             )
         return super().allocate_new_blocks(request_id, num_tokens)
+
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
+        super().cache_blocks(request, num_tokens)
+        num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
+        if num_cached_blocks_after > num_cached_blocks_before:
+            for block in self.req_to_blocks[request.request_id][
+                num_cached_blocks_before:num_cached_blocks_after
+            ]:
+                self.new_cache_blocks.add(block.block_hash)
+
+    def new_step_started(self) -> None:
+        self.new_cache_blocks.clear()
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):

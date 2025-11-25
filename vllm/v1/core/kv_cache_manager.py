@@ -427,3 +427,7 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+
+    def new_step_started(self) -> None:
+        """Called when a new step is started."""
+        self.coordinator.new_step_started()
