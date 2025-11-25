@@ -153,7 +153,7 @@ class DPMetadata:
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
         """
-        Context mamager for setting self.local_sizes. Same as self.chunked_sizes
+        Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(

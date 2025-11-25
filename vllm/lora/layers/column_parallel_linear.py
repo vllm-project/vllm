@@ -246,9 +246,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: torch.Tensor | None,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         self.reset_lora(index)
 
