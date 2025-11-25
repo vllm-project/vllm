@@ -66,6 +66,7 @@ def replace_parameter(layer: torch.nn.Module, param_name: str, new_data: torch.T
     old_param: torch.nn.Parameter = getattr(layer, param_name)
     if isinstance(new_data, torch.nn.Parameter):
         new_data = new_data.data
+    new_data = new_data.reshape(old_param.shape)
     new_param = torch.nn.Parameter(new_data, requires_grad=old_param.requires_grad)
 
     if hasattr(old_param, "weight_loader"):
