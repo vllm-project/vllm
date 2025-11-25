@@ -94,9 +94,6 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
-!!! note
-    Cache isolation is not supported in engine V0.
-
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):
