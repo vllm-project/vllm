@@ -321,8 +321,8 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         raise RuntimeError(
-            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-            "to select a supported backend."
+            f"Attention backend {selected_backend.name} is not supported on "
+            "ROCm. Note that V0 attention backends have been removed."
         )
 
     @classmethod
