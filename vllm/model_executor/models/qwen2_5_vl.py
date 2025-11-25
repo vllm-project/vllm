@@ -51,7 +51,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -1316,6 +1315,10 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+
+            from vllm.platforms import current_platform
+
+            set_forward_context = current_platform.get_forward_context_manager()
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
@@ -1371,6 +1374,10 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+
+            from vllm.platforms import current_platform
+
+            set_forward_context = current_platform.get_forward_context_manager()
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
