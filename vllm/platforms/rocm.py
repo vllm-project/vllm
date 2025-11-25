@@ -312,15 +312,14 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend on V1 engine.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-        if selected_backend:
-            logger.warning_once(
-                f"The selected attention backend '{selected_backend.name}' is not "
-                "supported on ROCm. Note that V0 attention backends have been "
-                "removed. Defaulting to Triton Attention backend."
-            )
+            # Default: Triton Unified Attention
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
 
-        logger.info("Using Triton Attention backend on V1 engine.")
-        return AttentionBackendEnum.TRITON_ATTN.get_path()
+        raise RuntimeError(
+            f"Attention backend {selected_backend.name} is not supported on "
+            "ROCm. Note that V0 attention backends have been removed."
+        )
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
