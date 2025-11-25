@@ -177,6 +177,16 @@ class MatcherMRotaryEmbedding(MatcherCustomOp):
         self.mrope_section = mrope_section
         self.mrope_interleaved = mrope_interleaved
         self.rotary_op = ROTARY_OP
+        self.mrotary_emb = MRotaryEmbedding(
+            head_size,
+            rotary_dim=head_size,
+            max_position_embeddings=4096,
+            base=10000,
+            is_neox_style=is_neox,
+            dtype=self.model_dtype,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
+        )
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(3, 5)
@@ -237,17 +247,10 @@ class MatcherMRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return MRotaryEmbedding.forward_static(
+        return self.mrotary_emb.forward_native(
             positions,
             query,
             key,
-            head_size=self.head_size,
-            rotary_dim=self.rotary_dim,
-            cos_sin_cache=cos_sin_cache,
-            mrope_section=self.mrope_section,
-            mrope_interleaved=self.mrope_interleaved,
-            is_neox_style=self.is_neox,
-            offsets=None,
         )
 
 
