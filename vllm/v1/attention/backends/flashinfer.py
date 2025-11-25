@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from typing import ClassVar
+from xxlimited import Str
 
 import numpy as np
 import torch
@@ -57,7 +58,9 @@ from vllm.v1.attention.backends.utils import (
     PrefillContextParallelMetadata,
     get_cp_local_seq_lens,
     get_kv_cache_layout,
+    get_kv_indices,
     get_per_layer_parameters,
+    get_q_indices,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
@@ -171,6 +174,7 @@ class BatchCPPrefillWrapper:
         self,
         dcp_world_size,
         pcp_world_size,
+        max_num_reqs,
         workspace_buffer: torch.Tensor | None = None,
     ):
         self.dcp_world_size = dcp_world_size
@@ -185,10 +189,61 @@ class BatchCPPrefillWrapper:
             self._new_tokens_tail = BatchPrefillWithRaggedKVCacheWrapper(
                 workspace_buffer, get_kv_cache_layout()
             )
+            pin_memory = is_pin_memory_available()
+            self.pcp_q_indptr_cpu = torch.zeros(
+                max_num_reqs + 1, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            )
+            self.pcp_q_indptr_np = self.pcp_q_indptr_cpu.numpy()
+            self.kv_for_head_indptr_cpu = torch.zeros(
+                max_num_reqs + 1, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            )
+            self.kv_for_head_indptr_np = self.kv_for_head_indptr_cpu.numpy()
+            self.kv_for_tail_indptr_cpu = torch.zeros(
+                max_num_reqs + 1, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            )
+            self.kv_for_tail_indptr_np = self.kv_for_tail_indptr_cpu.numpy()
         else:
             self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
                 workspace_buffer, get_kv_cache_layout()
             )
+
+    def _iter_wrappers(self) -> list:
+        wrappers = [self._context]
+        if self.pcp_world_size > 1:
+            wrappers.extend([self._new_tokens_head, self._new_tokens_tail])
+        else:
+            wrappers.append(self._new_tokens)
+        return wrappers
+
+    def _get_consistent_attr(self, attr_name: str):
+        wrappers = self._iter_wrappers()
+        base_value = getattr(wrappers[0], attr_name)
+        for wrapper in wrappers[1:]:
+            value = getattr(wrapper, attr_name)
+            assert (
+                value == base_value
+            ), f"Inconsistent {attr_name} detected across CP prefill wrappers."
+        return base_value
+
+    @property
+    def _window_left(self):
+        return self._get_consistent_attr("_window_left")
+
+    @property
+    def _logits_soft_cap(self):
+        return self._get_consistent_attr("_logits_soft_cap")
+
+    @property
+    def _sm_scale(self):
+        return self._get_consistent_attr("_sm_scale")
+
+    def _assert_causal(self) -> None:
+        assert not self._context._causal
+        if self.pcp_world_size > 1:
+            assert self._new_tokens_head._causal
+            assert self._new_tokens_tail._causal
+        else:
+            assert self._new_tokens._causal
 
     def plan(
         self,
@@ -208,8 +263,8 @@ class BatchCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
-        pcp_metadata: PrefillContextParallelMetadata | None,
-    ):
+        device: str,
+    ) -> PrefillContextParallelMetadata:
         """Plan the prefill operation with given parameters."""
         common_args = [
             num_kv_heads,
@@ -236,13 +291,30 @@ class BatchCPPrefillWrapper:
             **common_kwargs,
         )
         if self.pcp_world_size > 1:
-            assert pcp_metadata is not None
-            qo_indptr_cpu = pcp_metadata.q_head_start_loc
-            kv_for_head_indptr = pcp_metadata.kv_for_head_indptr
-            kv_for_tail_indptr = pcp_metadata.kv_for_tail_indptr
-            self._new_tokens_head.plan(
+            self.pcp_q_indptr_cpu[: qo_indptr_cpu.shape[0]] = qo_indptr_cpu // 2
+            pcp_q_indptr_cpu = self.pcp_q_indptr_cpu[: qo_indptr_cpu.shape[0]]
+            self.kv_for_head_indptr_cpu[: qo_indptr_cpu.shape[0]] = (
+                (self.pcp_rank + 1) * pcp_q_indptr_cpu
+            )
+            self.kv_for_tail_indptr_cpu[: qo_indptr_cpu.shape[0]] = (
+                (2 * self.pcp_world_size - self.pcp_rank) * pcp_q_indptr_cpu
+            )
+            q_head_indices, q_tail_indices = get_q_indices(
                 qo_indptr_cpu,
-                kv_for_head_indptr,
+                self.pcp_q_indptr_np[: qo_indptr_cpu.shape[0]],
+            )
+            q_head_indices_gpu = q_head_indices.to(device)
+            q_tail_indices_gpu = q_tail_indices.to(device)
+            q_full_indices = torch.cat([q_head_indices_gpu, q_tail_indices_gpu]).argsort()
+            kv_for_head_indices, kv_for_tail_indices = get_kv_indices(
+                qo_indptr_cpu * self.pcp_world_size,
+                self.kv_for_head_indptr_np[: qo_indptr_cpu.shape[0]],
+                self.kv_for_tail_indptr_np[: qo_indptr_cpu.shape[0]],
+            )
+            
+            self._new_tokens_head.plan(
+                pcp_q_indptr_cpu,
+                self.kv_for_head_indptr_cpu[: qo_indptr_cpu.shape[0]],
                 num_qo_heads,
                 *common_args,
                 causal=True,
@@ -250,11 +322,18 @@ class BatchCPPrefillWrapper:
             )
             self._new_tokens_tail.plan(
                 qo_indptr_cpu,
-                kv_for_tail_indptr,
+                self.kv_for_tail_indptr_cpu[: qo_indptr_cpu.shape[0]],
                 num_qo_heads,
                 *common_args,
                 causal=True,
                 **common_kwargs,
+            )
+            return PrefillContextParallelMetadata(
+                q_head_indices=q_head_indices,
+                q_tail_indices=q_tail_indices,
+                kv_for_head_indices=kv_for_head_indices.to(device, non_blocking=True),
+                kv_for_tail_indices=kv_for_tail_indices.to(device, non_blocking=True),
+                q_full_indices=q_full_indices,
             )
         else:
             self._new_tokens.plan(
@@ -267,90 +346,86 @@ class BatchCPPrefillWrapper:
                 causal=True,  # This is newtokens run
                 **common_kwargs,
             )
-
-    def _attention_with_head_and_tail(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        metadata: PrefillContextParallelMetadata,
-        return_lse: bool = False,
-    ):
-        """
-        For prompt with tokens [T0, T1, T2, T3], the query on PCP0 is [Q0, Q3]
-        and we all-gather full K as [K0, K1, K2, K3].
-        There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is
-        [Q3]x[K0, K1, K2, K3].
-        """
-        q_head_indices = metadata.q_head_indices
-        q_tail_indices = metadata.q_tail_indices
-        kv_for_head_indices = metadata.kv_for_head_indices
-        kv_for_tail_indices = metadata.kv_for_tail_indices
-        q_full_indices = metadata.q_full_indices
-
-        q_head = torch.index_select(query, 0, q_head_indices)
-        q_tail = torch.index_select(query, 0, q_tail_indices)
-        k_head = torch.index_select(key, 0, kv_for_head_indices)
-        v_head = torch.index_select(value, 0, kv_for_head_indices)
-        k_tail = torch.index_select(key, 0, kv_for_tail_indices)
-        v_tail = torch.index_select(value, 0, kv_for_tail_indices)
-
-        output_head = self._new_tokens_head.run(
-            q_head,
-            k_head,
-            v_head,
-            return_lse=return_lse,
-        )
-        output_tail = self._new_tokens_tail.run(
-            q_tail,
-            k_tail,
-            v_tail,
-            return_lse=return_lse,
-        )
-        if return_lse:
-            output_head, lse_head = output_head
-            output_tail, lse_tail = output_tail
-            output = torch.index_select(
-                torch.cat([output_head, output_tail], dim=0),
-                0,
-                q_full_indices,
-            )
-            lse = torch.index_select(
-                torch.cat([lse_head, lse_tail], dim=0),
-                0,
-                q_full_indices,
-            )
-            return output, lse
-        else:
-            output = torch.index_select(
-                torch.cat([output_head, output_tail], dim=0),
-                0,
-                q_full_indices,
-            )
-            return output
+            return None
 
     def run(
         self,
+        num_actual_tokens: int,
+        num_decode_tokens: int,
         layer: torch.nn.Module,
-        prefill_query: torch.Tensor,
+        query: torch.Tensor,
         kv_cache_permute: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         out: torch.Tensor,
+        allgather_restore_idx: torch.Tensor | None,
         pcp_metadata: PrefillContextParallelMetadata | None,
+        return_lse: bool = False,
     ):
         if self.pcp_world_size > 1:
             assert pcp_metadata is not None
-            out[:], lse_query = self._attention_with_head_and_tail(
-                prefill_query,
-                key,
-                value,
-                pcp_metadata,
-                return_lse=True,
+            # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+            # ignores the padding from CUDA Graph. To be optimized for performance!
+            key_across_pcp = get_pcp_group().all_gather(key.contiguous(), dim=0)
+            value_across_pcp = get_pcp_group().all_gather(value.contiguous(), dim=0)
+            # Reorder kv after pcp allgather.
+            # Note that there are duplicate decoding tokens,
+            # but we only save the first one in kvcache.
+            key = torch.index_select(key_across_pcp, 0, allgather_restore_idx)
+            value = torch.index_select(value_across_pcp, 0, allgather_restore_idx)
+            key = key[: num_actual_tokens * self.pcp_world_size]
+            value = value[: num_actual_tokens * self.pcp_world_size]
+
+            key = key[num_decode_tokens * self.pcp_world_size :]
+            value = value[num_decode_tokens * self.pcp_world_size :]
+            """
+            For prompt with tokens [T0, T1, T2, T3], the query on PCP0 is [Q0, Q3]
+            and we all-gather full K as [K0, K1, K2, K3].
+            There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is
+            [Q3]x[K0, K1, K2, K3].
+            """
+            q_head_indices = pcp_metadata.q_head_indices
+            q_tail_indices = pcp_metadata.q_tail_indices
+            kv_for_head_indices = pcp_metadata.kv_for_head_indices
+            kv_for_tail_indices = pcp_metadata.kv_for_tail_indices
+            q_full_indices = pcp_metadata.q_full_indices
+
+            q_head = torch.index_select(query, 0, q_head_indices)
+            q_tail = torch.index_select(query, 0, q_tail_indices)
+            k_head = torch.index_select(key, 0, kv_for_head_indices)
+            v_head = torch.index_select(value, 0, kv_for_head_indices)
+            k_tail = torch.index_select(key, 0, kv_for_tail_indices)
+            v_tail = torch.index_select(value, 0, kv_for_tail_indices)
+
+            output_head = self._new_tokens_head.run(
+                q_head,
+                k_head,
+                v_head,
+                return_lse=return_lse,
+            )
+            output_tail = self._new_tokens_tail.run(
+                q_tail,
+                k_tail,
+                v_tail,
+                return_lse=return_lse,
+            )
+            if return_lse:
+                output_head, lse_head = output_head
+                output_tail, lse_tail = output_tail
+                lse = torch.index_select(
+                    torch.cat([lse_head, lse_tail], dim=0),
+                    0,
+                    q_full_indices,
+                )
+
+            out[:] = torch.index_select(
+                torch.cat([output_head, output_tail], dim=0),
+                0,
+                q_full_indices,
             )
         else:
             prefill_query_across_dcp = get_dcp_group().all_gather(
-                prefill_query.contiguous(), dim=1
+                query.contiguous(), dim=1
             )
             output_context_tmp, lse_context_tmp = self._context.run(
                 prefill_query_across_dcp,
@@ -365,7 +440,7 @@ class BatchCPPrefillWrapper:
             lse_context = lse_context.transpose(0, 1).contiguous()
 
             output_query, lse_query = self._new_tokens.run(
-                prefill_query,
+                query,
                 key,
                 value,
                 return_lse=True,
@@ -591,6 +666,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cp_kv_cache_interleave_size = 1
         self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.max_num_reqs = max_num_reqs
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
             self.vllm_config.parallel_config
@@ -715,6 +791,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._prefill_wrapper = BatchCPPrefillWrapper(
                     self.dcp_world_size,
                     self.pcp_world_size,
+                    self.max_num_reqs,
                     self._get_workspace_buffer(),
                 )
             else:
@@ -934,7 +1011,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
-            pcp_metadata=common_attn_metadata.pcp_metadata,
         )
 
         paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
@@ -992,7 +1068,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         assert isinstance(
                             attn_metadata.prefill_wrapper, BatchCPPrefillWrapper
                         )
-                        attn_metadata.prefill_wrapper.plan(
+                        pcp_metadata = attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu=qo_indptr_cpu,
                             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
                             paged_kv_indices=paged_kv_indices,
@@ -1009,10 +1085,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             kv_cache_dtype=self.kv_cache_dtype,
                             prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
-                            pcp_metadata=common_attn_metadata.pcp_metadata
-                            if self.pcp_world_size > 1
-                            else None,
+                            device=self.device,
                         )
+                        attn_metadata.pcp_metadata = pcp_metadata
                     else:
                         assert isinstance(
                             attn_metadata.prefill_wrapper,
@@ -1168,6 +1243,7 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
@@ -1279,23 +1355,6 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if self.pcp_world_size > 1:
-            assert attn_metadata.pcp_metadata is not None
-            pcp_allgather_restore_idx = attn_metadata.pcp_metadata.allgather_restore_idx
-            assert pcp_allgather_restore_idx is not None
-            # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
-            # ignores the padding from CUDA Graph. To be optimized for performance!
-            key_across_pcp = get_pcp_group().all_gather(
-                key[:num_actual_tokens].contiguous(), dim=0
-            )
-            value_across_pcp = get_pcp_group().all_gather(
-                value[:num_actual_tokens].contiguous(), dim=0
-            )
-            # Reorder kv after pcp allgather.
-            # Note that there are duplicate decoding tokens,
-            # but we only save the first one in kvcache.
-            key = torch.index_select(key_across_pcp, 0, pcp_allgather_restore_idx)
-            value = torch.index_select(value_across_pcp, 0, pcp_allgather_restore_idx)
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -1325,8 +1384,8 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        key = key[: num_actual_tokens * self.pcp_world_size]
-        value = value[: num_actual_tokens * self.pcp_world_size]
+        key = key[: num_actual_tokens]
+        value = value[: num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1353,34 +1412,29 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
+                expected_logits_soft_cap = self.logits_soft_cap or 0.0
                 if self.total_cp_world_size > 1:
                     assert isinstance(prefill_wrapper, BatchCPPrefillWrapper)
-                    expected_logits_soft_cap = self.logits_soft_cap or 0.0
-
-                    wrappers_to_check = [(prefill_wrapper._context, False)]
-                    if self.pcp_world_size > 1:
-                        wrappers_to_check.extend(
-                            [
-                                (prefill_wrapper._new_tokens_head, True),
-                                (prefill_wrapper._new_tokens_tail, True),
-                            ]
+                    if self.is_debugging_mode:
+                        assert prefill_wrapper._window_left == self.window_left
+                        assert (
+                            prefill_wrapper._logits_soft_cap == expected_logits_soft_cap
                         )
-                    else:
-                        wrappers_to_check.append((prefill_wrapper._new_tokens, True))
-
-                    for wrapper, expected_causal in wrappers_to_check:
-                        assert wrapper._window_left == self.window_left
-                        assert wrapper._logits_soft_cap == expected_logits_soft_cap
-                        assert wrapper._sm_scale == self.scale
-                        assert wrapper._causal == expected_causal
-
+                        assert prefill_wrapper._sm_scale == self.scale
+                        prefill_wrapper._assert_causal()
+                    assert attn_metadata.pcp_metadata is not None
+                    pcp_allgather_restore_idx = attn_metadata.pcp_metadata.allgather_restore_idx
+                    assert pcp_allgather_restore_idx is not None
                     prefill_wrapper.run(
+                        num_actual_tokens,
+                        num_decode_tokens,
                         layer,
                         prefill_query,
                         kv_cache_permute,
-                        key[num_decode_tokens * self.pcp_world_size :],
-                        value[num_decode_tokens * self.pcp_world_size :],
+                        key,
+                        value,
                         out=output[num_decode_tokens:],
+                        allgather_restore_idx=pcp_allgather_restore_idx,
                         pcp_metadata=attn_metadata.pcp_metadata
                         if self.pcp_world_size > 1
                         else None,
@@ -1389,12 +1443,13 @@ class FlashInferImpl(AttentionImpl):
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
-                    assert prefill_wrapper._window_left == self.window_left
-                    assert prefill_wrapper._logits_soft_cap == (
-                        self.logits_soft_cap or 0.0
-                    )
-                    assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal
+                    if self.is_debugging_mode:
+                        assert prefill_wrapper._window_left == self.window_left
+                        assert (
+                            prefill_wrapper._logits_soft_cap == expected_logits_soft_cap
+                        )
+                        assert prefill_wrapper._sm_scale == self.scale
+                        assert prefill_wrapper._causal
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
@@ -1490,14 +1545,17 @@ class FlashInferImpl(AttentionImpl):
                         return_lse=True,
                     )
                     if self.dcp_world_size > 1:
-                        out, lse = cp_lse_ag_out_rs(
+                        out = cp_lse_ag_out_rs(
                             out,
                             lse,
                             get_dcp_group(),
-                            return_lse=True,
+                            return_lse=self.pcp_world_size > 1,
                         )
                     if self.pcp_world_size > 1:
+                        if isinstance(out, tuple):
+                            out, lse = out
                         out = cp_lse_ag_out_ar(out, lse, get_pcp_group())
+                    assert isinstance(out, torch.Tensor)
                     output[:num_decode_tokens] = out
                 else:
                     decode_wrapper.run(

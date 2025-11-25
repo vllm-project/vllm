@@ -526,27 +526,6 @@ class GPUModelRunner(
                 (max_num_tokens,), device="cpu", dtype=torch.bool, pin_memory=True
             )
             self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
-            self.q_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,),
-                device="cpu",
-                dtype=torch.int64,
-                pin_memory=True,
-            )
-            self.q_indptr_cpu = self.q_indptr_cpu_tensor.numpy()
-            self.kv_for_head_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,),
-                device="cpu",
-                dtype=torch.int64,
-                pin_memory=True,
-            )
-            self.kv_for_head_indptr_cpu = self.kv_for_head_indptr_cpu_tensor.numpy()
-            self.kv_for_tail_indptr_cpu_tensor = torch.zeros(
-                (self.max_num_reqs + 1,),
-                device="cpu",
-                dtype=torch.int64,
-                pin_memory=True,
-            )
-            self.kv_for_tail_indptr_cpu = self.kv_for_tail_indptr_cpu_tensor.numpy()
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1064,119 +1043,13 @@ class GPUModelRunner(
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
-    def _get_pcp_metadata(
-        self,
-        q_lens: np.ndarray,
-        kv_lens: np.ndarray,
-        allgather_restore_idx: torch.Tensor,
-    ) -> PrefillContextParallelMetadata:
-        """
-        During the prefill phrase, the attention computation is divided into
-        two parts: q_head and q_tail. Here, we calculate the kv indices
-        corresponding to q_head or q_tail. Meawhile, the q and kv indptr are
-        also computed to build the attention wrapper.
-        If the pcp_size is 2, the variables are following:
-        >>> q_lens [4, 8]  kv_lens [8, 16]
-        >>> pcp_chunk_sizes[2, 4]
-        >>> q_indptr[0, 2, 4]
-        >>> q_head_indices [0, 1, 4, 5, 6, 7] q_tail_indices [2, 3, 8, 9, 10, 11]
-        >>> kv_head_len r0 [2, 4] / r1 [4, 8]
-        >>> kv_for_head_indptr r0 [0, 2, 6] / r1 [0, 4, 12]
-        >>> kv_for_head_indices r0 [0, 1, 8, 9, 10, 11]
-        >>> r1[0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15]
-        >>> kv_tail_len r0 [8, 16] / r1 [6, 12]
-        >>> kv_for_tail_indptr r0 [0, 8, 24] / r1 [0, 6, 18]
-        >>> kv_for_tail_indices r0 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ..., 23]
-        >>> r1[0, 1, 2, 3, 4, 5, 8, 9, ..., 19]
-        """
-        if len(q_lens) == 0:
-            return PrefillContextParallelMetadata(
-                allgather_restore_idx=allgather_restore_idx,
-            )
-
-        def _get_partial_kv_idx(kv_partial_len, kv_partial_indptr, kv_parial_indices):
-            kv_partial_indptr[1 : len(kv_partial_len) + 1], kv_partial_arange = (
-                self._get_cumsum_and_arange(kv_partial_len)
-            )
-            kv_parial_indices.np[: kv_partial_arange.shape[0]] = (
-                kv_partial_arange
-                + np.repeat(
-                    kv_start_loc,
-                    kv_partial_len,
-                )
-            )
-            return kv_partial_arange.shape[0]
-
-        pcp_chunk_sizes = q_lens // 2
-        self.q_indptr_cpu[1 : len(pcp_chunk_sizes) + 1], q_chunk_arange = (
-            self._get_cumsum_and_arange(pcp_chunk_sizes)
-        )
-
-        q_head_start_loc = np.roll(np.cumsum(q_lens), 1)
-        q_head_start_loc[0] = 0
-        self.q_head_indices.np[: q_chunk_arange.shape[0]] = q_chunk_arange + np.repeat(
-            q_head_start_loc,
-            pcp_chunk_sizes,
-        )
-
-        self.q_head_indices.copy_to_gpu(q_chunk_arange.shape[0])
-
-        q_tail_start_loc = q_head_start_loc + pcp_chunk_sizes
-        self.q_tail_indices.np[: q_chunk_arange.shape[0]] = q_chunk_arange + np.repeat(
-            q_tail_start_loc,
-            pcp_chunk_sizes,
-        )
-        self.q_tail_indices.copy_to_gpu(q_chunk_arange.shape[0])
-
-        kv_start_loc = np.roll(np.cumsum(kv_lens), 1)
-        kv_start_loc[0] = 0
-        # kv_for_q_head
-        kv_for_head_len = (self.pcp_rank + 1) * pcp_chunk_sizes
-        kv_head_tokens_sum = _get_partial_kv_idx(
-            kv_for_head_len,
-            self.kv_for_head_indptr_cpu,
-            self.kv_for_head_indices,
-        )
-        self.kv_for_head_indices.copy_to_gpu(kv_head_tokens_sum)
-        # kv_for_q_tail
-        kv_for_tail_len = (2 * self.pcp_world_size - self.pcp_rank) * pcp_chunk_sizes
-        kv_tail_tokens_sum = _get_partial_kv_idx(
-            kv_for_tail_len,
-            self.kv_for_tail_indptr_cpu,
-            self.kv_for_tail_indices,
-        )
-        self.kv_for_tail_indices.copy_to_gpu(kv_tail_tokens_sum)
-
-        q_full_indices = torch.cat(
-            [
-                self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
-                self.q_tail_indices.gpu[: q_chunk_arange.shape[0]],
-            ]
-        ).argsort()
-
-        return PrefillContextParallelMetadata(
-            allgather_restore_idx=allgather_restore_idx,
-            q_head_indices=self.q_head_indices.gpu[: q_chunk_arange.shape[0]],
-            q_tail_indices=self.q_tail_indices.gpu[: q_chunk_arange.shape[0]],
-            q_head_start_loc=self.q_indptr_cpu_tensor[: len(pcp_chunk_sizes) + 1],
-            kv_for_head_indices=self.kv_for_head_indices.gpu[:kv_head_tokens_sum],
-            kv_for_tail_indices=self.kv_for_tail_indices.gpu[:kv_tail_tokens_sum],
-            kv_for_head_indptr=(
-                self.kv_for_head_indptr_cpu_tensor[: len(kv_for_head_len) + 1]
-            ),
-            kv_for_tail_indptr=(
-                self.kv_for_tail_indptr_cpu_tensor[: len(kv_for_tail_len) + 1]
-            ),
-            q_full_indices=q_full_indices,
-        )
-
     def _update_tokens_for_pcp(
         self,
         tokens: np.ndarray,
         dummy_input: bool = False,
         num_reqs: int | None = None,
         num_decode_reqs: int | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, PrefillContextParallelMetadata]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         If prefill context parallelism is enabled, we will update
         the number of `tokens` after sequence splitting.
@@ -1285,11 +1158,6 @@ class GPUModelRunner(
         return (
             pcp_tokens[:num_reqs],
             positions,
-            self._get_pcp_metadata(
-                pcp_tokens[num_decode_reqs:],
-                num_padded_scheduled_tokens[num_decode_reqs:],
-                self.pcp_allgather_restore_idx.gpu[: all_positions.shape[0]],
-            ),
         )
 
     def _get_cumsum_and_arange(
@@ -1500,7 +1368,7 @@ class GPUModelRunner(
 
         pcp_metadata = None
         if self.pcp_world_size > 1:
-            num_scheduled_tokens[:num_reqs], pcp_positions, pcp_metadata = (
+            num_scheduled_tokens[:num_reqs], pcp_positions = (
                 self._update_tokens_for_pcp(num_scheduled_tokens[:num_reqs])
             )
 
@@ -1873,7 +1741,11 @@ class GPUModelRunner(
                 encoder_seq_lens=encoder_seq_lens,
                 cp_local_seq_lens=cp_local_seq_lens,
                 cp_local_seq_lens_cpu=cp_local_seq_lens_cpu,
-                pcp_metadata=pcp_metadata,
+                pcp_allgather_restore_idx=self.pcp_allgather_restore_idx.gpu[
+                    : total_num_scheduled_tokens * self.pcp_world_size
+                ]
+                if self.pcp_world_size > 1
+                else None,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
