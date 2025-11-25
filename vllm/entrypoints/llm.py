@@ -174,9 +174,6 @@ class LLM:
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
             model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
-        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
-            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
-            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -214,7 +211,6 @@ class LLM:
         hf_overrides: HfOverrides | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         pooler_config: PoolerConfig | None = None,
-        override_pooler_config: PoolerConfig | None = None,
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
@@ -330,7 +326,6 @@ class LLM:
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
-            override_pooler_config=override_pooler_config,
             structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
