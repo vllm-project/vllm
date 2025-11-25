@@ -182,12 +182,18 @@ class RMSNormFp8Benchmark(KernelBenchmark):
         self.op = RMSNormFp8Helion()
         self.epsilon = 1e-5
 
-    def get_quick_test_shapes(self) -> list[tuple[list[tuple], torch.dtype]]:
+    def get_quick_test_shapes(
+        self,
+    ) -> list[tuple[list[tuple], torch.dtype, dict[str, list]]]:
         """
         Get test configurations for quick smoke testing.
 
         Returns:
-            List of (shapes, dtype) tuples.
+            List of (shapes, dtype, extra_params) tuples where:
+            - shapes: List of shape tuples to test
+            - dtype: PyTorch dtype (e.g., torch.bfloat16, torch.float16)
+            - extra_params: Dict mapping parameter names to lists of values
+                           to test. Empty dict for this benchmark.
             Input shapes are (num_tokens, hidden_size).
         """
         return [
@@ -201,15 +207,22 @@ class RMSNormFp8Benchmark(KernelBenchmark):
                     (1024, 8192),
                 ],
                 torch.bfloat16,
+                {},
             ),
         ]
 
-    def get_full_test_shapes(self) -> list[tuple[list[tuple], torch.dtype]]:
+    def get_full_test_shapes(
+        self,
+    ) -> list[tuple[list[tuple], torch.dtype, dict[str, list]]]:
         """
         Get test configurations for comprehensive benchmarking.
 
         Returns:
-            List of (shapes, dtype) tuples.
+            List of (shapes, dtype, extra_params) tuples where:
+            - shapes: List of shape tuples to test
+            - dtype: PyTorch dtype (e.g., torch.bfloat16, torch.float16)
+            - extra_params: Dict mapping parameter names to lists of values
+                           to test. Empty dict for this benchmark.
             Input shapes are (num_tokens, hidden_size).
         """
         num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
@@ -225,8 +238,8 @@ class RMSNormFp8Benchmark(KernelBenchmark):
                 shapes_fp16.append(shape)
 
         return [
-            (shapes_bf16, torch.bfloat16),
-            (shapes_fp16, torch.float16),
+            (shapes_bf16, torch.bfloat16, {}),
+            (shapes_fp16, torch.float16, {}),
         ]
 
     def create_inputs(
