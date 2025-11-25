@@ -1066,25 +1066,24 @@ class GPUModelRunner(
         tokens: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        If prefill context parallelism is enabled, we will update
-        the number of `tokens` after sequence splitting.
-        Meanwhile, we will compute:
-        `positions` the new token positions,
-        `self.num_pcp_pads_cpu` the number of padding tokens
-            per request for alignment,
-        `self.pcp_unpad_mask_cpu` the mask for non-padded tokens,
-        `self.pcp_allgather_restore_idx` indices to restore the
-            original vector order after PCP allgather.
+        While using prefill context parallelism, the request sequences is split
+        across multiple PCP ranks. Each rank processes a shard of the sequence.
+        This function updates the number and positions of `new tokens` after
+        splitting sequences.
+        Note: PCP requires tokens to be aligned to a multiple of 2 * pcp_world_size,
+        which necessitates padding. As a result, the total number of tokens across
+        all pcp ranks after splitting will exceed the original sequence length.
+        Args:
+            tokens: The number of new tokens for each request.
+        Returns:
+            pcp_tokens: The number of new tokens for each request after splitting.
+            pcp_positions: The positions of new tokens for each request after splitting.
+
         Example:
-        >>> tokens = [1, 5, 8]
-        >>> pcp_world_size = 2
-        >>> pcp_rank = 0
-        >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
-        >>> pcp_rank = 1
-        >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
-        >>> # the following results are same for each pcp rank
+        >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
+        >>> pcp_rank = 0 get ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
+        >>> pcp_rank = 1 get ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
+        >>> Meanwhile, the following results are same for each pcp rank
         >>> self.num_pcp_pads_cpu
         [1, 3, 0]
         >>> self.pcp_unpad_mask_cpu
@@ -1098,18 +1097,21 @@ class GPUModelRunner(
             "PCP depends on reorder batch to split decode and prefill requests."
         )
         num_decode_reqs = sum(tokens <= self.reorder_batch_threshold)
-
-        self.num_pcp_pads_cpu[:num_reqs] = 0
-
         num_decode_tokens = sum(tokens[:num_decode_reqs])
 
+        # PCP split the sequence using the DualChunkSwap strategy to ensure
+        # load balancing, that requires the input sequence to be split into
+        # 2 * pcp_world_size chunks. So that prefill tokens should be aligned to
+        # a multiple of 2 * pcp_world_size firstly.
         num_padded_scheduled_tokens = np.ceil(
             tokens / (2 * self.pcp_world_size)
         ).astype(np.int32) * (2 * self.pcp_world_size)
-        # we duplicate scheduled tokens of decode reqs to pcp_world_size
+        # PCP will not split decode tokens, so just duplicate scheduled tokens
+        # of decode reqs to pcp_world_size.
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_world_size
         )
+
         self.num_pcp_pads_cpu[:num_reqs] = num_padded_scheduled_tokens - tokens
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
             num_padded_scheduled_tokens

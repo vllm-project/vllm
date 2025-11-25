@@ -1128,6 +1128,18 @@ def pcp_kv_allgather_and_restore(
     pcp_allgather_restore_idx: torch.Tensor,
     pcp_group: GroupCoordinator,
 ):
+    """
+    All-gather key and value tensors across PCP ranks and restore the original order.
+    Args:
+        key: key tensor for the current pcp rank.
+        value: value tensor for the current pcp rank.
+        num_actual_tokens: number of actual tokens (Exclude graph padding tokens).
+        pcp_allgather_restore_idx: indices to restore the original order.
+        pcp_group: PCP group coordinator.
+    Returns:
+        key: all-gathered and restored key tensor.
+        value: all-gathered and restored value tensor.
+    """
     # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
     # ignores the padding from CUDA Graph.
     # TODO(yyj) Batch all-gather operations to reduce launch overhead.
