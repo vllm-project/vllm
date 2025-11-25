@@ -380,6 +380,15 @@ class OAITritonExperts(BaseOAITritonExperts):
 
 
 class UnfusedOAITritonExperts(BaseOAITritonExperts):
+    """
+    A Triton based MoE expert class that operates on expert standard
+    format and explicitly keeps the activation and reduction (moe_sum) steps
+    unfused from the matmul_ogs kernel. This exposes injection points
+    for activation and moe_sum.
+
+    One use case for it is to inject LoRA modules on the activation and moe_sum.
+    """
+
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
