@@ -369,6 +369,52 @@ def get_sparse_attention_config(
     return config
 
 
+def download_gguf(
+    repo_id: str,
+    quant_type: str,
+    cache_dir: str | None = None,
+    revision: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+) -> str:
+    # Use patterns that snapshot_download can handle directly
+    # Patterns to match:
+    # - *-{quant_type}.gguf (root)
+    # - *-{quant_type}-*.gguf (root sharded)
+    # - */*-{quant_type}.gguf (subdir)
+    # - */*-{quant_type}-*.gguf (subdir sharded)
+    allow_patterns = [
+        f"*-{quant_type}.gguf",
+        f"*-{quant_type}-*.gguf",
+        f"*/*-{quant_type}.gguf",
+        f"*/*-{quant_type}-*.gguf",
+    ]
+
+    # Use download_weights_from_hf which handles caching and downloading
+    folder = download_weights_from_hf(
+        model_name_or_path=repo_id,
+        cache_dir=cache_dir,
+        allow_patterns=allow_patterns,
+        revision=revision,
+        ignore_patterns=ignore_patterns,
+    )
+
+    # Find the downloaded file(s) in the folder
+    local_files = []
+    for pattern in allow_patterns:
+        # Convert pattern to glob pattern for local filesystem
+        glob_pattern = os.path.join(folder, pattern)
+        local_files.extend(glob.glob(glob_pattern))
+
+    if not local_files:
+        raise ValueError(
+            f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
+        )
+
+    # Sort to ensure consistent ordering (prefer non-sharded files)
+    local_files.sort(key=lambda x: (x.count("-"), x))
+    return local_files[0]
+
+
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,

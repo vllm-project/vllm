@@ -20,7 +20,12 @@ from vllm.transformers_utils.config import (
     list_filtered_repo_files,
 )
 from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import (
+    check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -180,10 +185,12 @@ def get_tokenizer(
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = check_gguf_file(tokenizer_name)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(tokenizer_name).name
-        tokenizer_name = Path(tokenizer_name).parent
+    if is_gguf(tokenizer_name):
+        if check_gguf_file(tokenizer_name):
+            kwargs["gguf_file"] = Path(tokenizer_name).name
+            tokenizer_name = Path(tokenizer_name).parent
+        elif is_remote_gguf(tokenizer_name):
+            tokenizer_name, _ = split_remote_gguf(tokenizer_name)
 
     # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format
     # first to use official Mistral tokenizer if possible.
