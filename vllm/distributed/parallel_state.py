@@ -1549,6 +1549,16 @@ def get_decode_context_model_parallel_rank():
     return get_dcp_group().rank_in_group
 
 
+def get_prefill_context_model_parallel_world_size():
+    """Return world size for the decode context model parallel group."""
+    return get_pcp_group().world_size
+
+
+def get_prefill_context_model_parallel_rank():
+    """Return my rank for the decode context model parallel group."""
+    return get_pcp_group().rank_in_group
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment."""
     assert _NODE_COUNT is not None, "distributed environment is not initialized"

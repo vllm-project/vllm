@@ -668,7 +668,9 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
-            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
+            cp_local_seq_lens=common_attn_metadata.cp_local_seq_lens,
+            cp_local_seq_lens_cpu=common_attn_metadata.cp_local_seq_lens_cpu,
+            pcp_metadata=common_attn_metadata.pcp_metadata,
         )
 
         token_indices_to_sample = (
@@ -948,7 +950,9 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
-            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
+            cp_local_seq_lens=common_attn_metadata.cp_local_seq_lens,
+            cp_local_seq_lens_cpu=common_attn_metadata.cp_local_seq_lens_cpu,
+            pcp_metadata=common_attn_metadata.pcp_metadata,
         )
 
         return spec_common_attn_metadata, token_indices

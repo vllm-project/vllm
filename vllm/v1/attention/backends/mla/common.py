@@ -225,7 +225,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -765,8 +765,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+        dcp_local_seq_lens = common_attn_metadata.cp_local_seq_lens
+        dcp_local_seq_lens_cpu = common_attn_metadata.cp_local_seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -856,7 +856,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     token_to_seq_tensor_cpu[i, :chunk_len] = chunk_token_to_seq_tensor
 
                 if self.dcp_world_size > 1:
-                    local_context_lens_allranks = get_dcp_local_seq_lens(
+                    local_context_lens_allranks = get_cp_local_seq_lens(
                         context_lens_cpu,
                         self.dcp_world_size,
                         None,
