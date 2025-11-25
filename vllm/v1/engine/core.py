@@ -1333,9 +1333,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     # if the model didn't execute any ready requests.
                     # Masked ranks also run dummy to maintain EPLB state synchronization.
                     self.execute_dummy_batch()
+
+                # 3) All-reduce operation to determine global unfinished reqs.
+                # ALL ranks must participate in this CPU all-reduce!
+                self.engines_running = self._has_global_unfinished_reqs(
+                    local_unfinished_reqs
+                )
                 
-                # Test fault injection AFTER execute_dummy_batch
-                # (global_step has incremented, prevents double injection)
+                # Test fault injection AFTER critical all-reduce
+                # (ensures all ranks complete CPU sync before exception on target rank)
                 import os
                 if os.getenv("VLLM_TEST_INJECT_ERROR_DP_RANK"):
                     target_rank = int(os.getenv("VLLM_TEST_INJECT_ERROR_DP_RANK"))
@@ -1358,18 +1364,13 @@ class DPEngineCoreProc(EngineCoreProc):
                     
                     if self.dp_rank == target_rank and current_global_step == target_step:
                         logger.warning(
-                            "[TEST_INJECT] DP rank %d: Injecting error NOW at global_step %d",
+                            "[TEST_INJECT] DP rank %d: Injecting error NOW at global_step %d (after CPU sync)",
                             self.dp_rank,
                             current_global_step
                         )
                         raise RuntimeError(
                             f"TEST: Injected error on DP rank {target_rank} at global_step {target_step}"
                         )
-
-                # 3) All-reduce operation to determine global unfinished reqs.
-                self.engines_running = self._has_global_unfinished_reqs(
-                    local_unfinished_reqs
-                )
                 
             except Exception as e:
                 # Exception occurred in busy loop
