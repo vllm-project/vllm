@@ -198,7 +198,8 @@ class Mxfp4Config(QuantizationConfig):
             # if you are interested in enabling MXFP4 here.
             logger.debug_once(
                 "MXFP4 linear layer is not implemented - falling back to "
-                "UnquantizedLinearMethod."
+                "UnquantizedLinearMethod.",
+                scope="local"
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
