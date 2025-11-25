@@ -45,7 +45,7 @@ async def test_basic(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_reasoning_item(client: OpenAI, model_name: str):
+async def test_reasoning_and_function_items(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
         input=[

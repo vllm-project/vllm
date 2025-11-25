@@ -12,6 +12,7 @@ from openai.types.responses.response_reasoning_item import (
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class ResponsesParser:
             self.response_messages.append(
                 ResponseReasoningItem(
                     type="reasoning",
-                    id="temp",
+                    id=f"rs_{random_uuid()}",
                     summary=[],
                     content=[
                         Content(
@@ -60,12 +61,15 @@ class ResponsesParser:
             self.response_messages.append(
                 ResponseOutputMessage(
                     type="message",
-                    id="lol",
+                    id=f"msg_{random_uuid()}",
                     status="completed",
                     role="assistant",
                     content=[
                         ResponseOutputText(
-                            type="output_text", text=content, annotations=[]
+                            annotations=[],  # TODO
+                            type="output_text",
+                            text=content,
+                            logprobs=None,  # TODO
                         )
                     ],
                 )
