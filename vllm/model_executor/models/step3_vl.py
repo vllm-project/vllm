@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -667,7 +668,7 @@ class Step3VisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -950,13 +951,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                 prefix=maybe_prefix(prefix, "vision_model"),
                 use_data_parallel=self.use_data_parallel,
             )
-            self.vit_downsampler = nn.Conv2d(
+            self.vit_downsampler = Conv2dLayer(
                 config.vision_config.hidden_size,
                 config.vision_config.output_hidden_size,
                 kernel_size=2,
                 stride=config.understand_projector_stride,
             )
-            self.vit_downsampler2 = nn.Conv2d(
+            self.vit_downsampler2 = Conv2dLayer(
                 config.vision_config.output_hidden_size,
                 config.vision_config.output_hidden_size * 2,
                 kernel_size=3,

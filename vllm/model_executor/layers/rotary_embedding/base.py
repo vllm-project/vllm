@@ -83,6 +83,11 @@ class RotaryEmbeddingBase(CustomOp):
         ):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
 
+    def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cos_sin = self.cos_sin_cache[:seqlen]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        return cos, sin
+
 
 class RotaryEmbedding(RotaryEmbeddingBase):
     def __init__(

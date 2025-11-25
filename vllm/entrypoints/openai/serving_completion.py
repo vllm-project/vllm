@@ -216,6 +216,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request_id=request_id,
                         params=sampling_params,
                         lora_request=lora_request,
+                        trace_headers=trace_headers,
                     )
                 else:
                     engine_request, tokenization_kwargs = await self._process_inputs(
@@ -249,14 +250,8 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
-        # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. Noting that best_of is only supported in V0. In addition,
-        # we do not stream the results when use beam search.
-        stream = (
-            request.stream
-            and (request.best_of is None or request.n == request.best_of)
-            and not request.use_beam_search
-        )
+        # We do not stream the results when using beam search.
+        stream = request.stream and not request.use_beam_search
 
         # Streaming response
         if stream:

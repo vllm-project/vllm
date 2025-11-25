@@ -21,11 +21,14 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_base_embeddding_weights,
+    is_moe_model,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
     process_packed_modules_mapping,
     replace_submodule,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
@@ -93,14 +96,6 @@ class LoRAModel:
             loras=self.loras.copy(),
         )
 
-    @property
-    def extra_vocab_size(self) -> int:
-        return (
-            max(lora.extra_vocab_size for lora in self.loras.values())
-            if self.loras
-            else 0
-        )
-
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
@@ -117,7 +112,6 @@ class LoRAModel:
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: torch.dtype | None = None,
-        embeddings: dict[str, torch.Tensor] | None = None,
         target_embedding_padding: int | None = None,
         embedding_modules: dict[str, str] | None = None,
         embedding_padding_modules: list[str] | None = None,
@@ -127,24 +121,14 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
+            if is_base_embeddding_weights(tensor_name):
+                continue
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
             if module_name not in loras:
-                lora_embeddings_tensor = None
-                if embeddings:
-                    assert embedding_modules is not None
-                    embeddings_module = next(
-                        (k for k in embedding_modules if k in module_name), None
-                    )
-                    if embeddings_module:
-                        lora_embeddings_tensor = embeddings[
-                            embedding_modules[embeddings_module]
-                        ].to(device=device, dtype=dtype)
-                        if pin_memory:
-                            lora_embeddings_tensor = lora_embeddings_tensor.pin_memory()
                 loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, peft_helper, lora_embeddings_tensor
+                    module_name, peft_helper
                 )
 
             if is_lora_a:
@@ -206,15 +190,17 @@ class LoRAModel:
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
-        new_embeddings_tensor_path = os.path.join(
-            lora_dir, "new_embeddings.safetensors"
-        )
-        new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
+        # new_embeddings_tensor_path = os.path.join(
+        #     lora_dir, "new_embeddings.safetensors"
+        # )
+        # new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[list[str] | str] = []
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
+                if is_base_embeddding_weights(lora_module):
+                    continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Handle FSDP file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
@@ -300,21 +286,12 @@ class LoRAModel:
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
-        embeddings = None
-        if os.path.isfile(new_embeddings_tensor_path):
-            embeddings = safetensors.torch.load_file(new_embeddings_tensor_path)
-        elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(
-                new_embeddings_bin_file_path, map_location=device, weights_only=True
-            )
-
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
             tensors=tensors,
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,
-            embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
@@ -381,7 +358,11 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
+        self._is_3d_moe_model = is_moe_model(self.model) and hasattr(
+            self.model, "is_3d_moe_weight"
+        )
         self._create_lora_modules()
+
         self.model.lora_manager = self
 
     def __len__(self) -> int:
@@ -425,22 +406,36 @@ class LoRAModelManager:
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if module_lora:
-                # Note (gnovack) - If MOE lora weights are not split into
-                # num_experts chunks, we split them here
-                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
-                    module_lora.lora_a
-                ):
-                    # Handle FSDP file format where experts.base_layer is the
-                    # gate_up_proj and experts is the down_proj
-                    gate_up_proj_lora = self._get_lora_layer_weights(
-                        lora_model, module_name + ".base_layer"
-                    )
-
-                    assert gate_up_proj_lora is not None
-                    assert module_lora is not None
-
-                    down_proj_lora = module_lora
+            if not module_lora:
+                module.reset_lora(index)
+                continue
+            # Note (gnovack) - If MOE lora weights are not split into
+            # num_experts chunks, we split them here
+            if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+                module_lora.lora_a
+            ):
+                # Handle PEFT file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                gate_up_proj_lora = self._get_lora_layer_weights(
+                    lora_model, module_name + ".base_layer"
+                )
+                down_proj_lora = module_lora
+                # FIXME Edge case where LoRA is not added to gate_up_proj
+                # or down_proj
+                assert gate_up_proj_lora is not None
+                assert down_proj_lora is not None
+                if self._is_3d_moe_model:
+                    module_lora.lora_a = [
+                        gate_up_proj_lora.lora_a,
+                        down_proj_lora.lora_a,
+                    ]
+                    module_lora.lora_b = [
+                        gate_up_proj_lora.lora_b,
+                        down_proj_lora.lora_b,
+                    ]
+                else:
+                    # Some 3D MoE models haven't added the `is_3d_moe_weight`
+                    # attribute yet, so fallback here
                     num_experts = module_lora.lora_a.shape[0] // module_lora.rank
 
                     gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
@@ -469,15 +464,12 @@ class LoRAModelManager:
 
                     module_lora.lora_a = lora_a
                     module_lora.lora_b = lora_b
+            module.set_lora(
+                index,
+                module_lora.lora_a,
+                module_lora.lora_b,
+            )
 
-                module.set_lora(
-                    index,
-                    module_lora.lora_a,
-                    module_lora.lora_b,
-                    module_lora.embeddings_tensor,
-                )
-            else:
-                module.reset_lora(index)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -505,7 +497,6 @@ class LoRAModelManager:
             self.lora_index_to_id,
             self.lora_slots + 1,
             self.vocab_size,
-            self.lora_config.lora_extra_vocab_size,
         )
 
     def remove_all_adapters(self):
@@ -539,6 +530,13 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
+            if isinstance(module, FusedMoE):
+                # packed_moduled_lst is used here to just determine whether to
+                # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
+                # difference between these two LoRA layers is whether the
+                # LoRA weights of w1 and w3 have already been fused on disk.
+
+                packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
             new_module = replace_submodule(
                 self.model,
                 module_name,
@@ -587,6 +585,7 @@ class LoRAModelManager:
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(self.punica_wrapper)
+        pass
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (
@@ -616,7 +615,6 @@ class LoRAModelManager:
                 if parts[-1] in embedding_modules:
                     input_dim = (
                         module.base_layer.org_vocab_size
-                        + self.lora_config.lora_extra_vocab_size
                         if hasattr(module.base_layer, "org_vocab_size")
                         else module.base_layer.weight.shape[1]
                     )
@@ -625,11 +623,6 @@ class LoRAModelManager:
                         if hasattr(module.base_layer, "embedding_dim")
                         else module.base_layer.weight.shape[0]
                     )
-                    embeddings_tensor_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[1]
-                    )
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
@@ -637,8 +630,31 @@ class LoRAModelManager:
                         rank,
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim,
                     )
+                    model.loras[module_name] = lora
+                elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
+                    # Case for 3D moe model
+                    # w2
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w2_input_size,
+                        module.w2_output_size,
+                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        module.w2_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name] = lora
+                    # w13
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w13_input_size,
+                        module.w13_output_size,
+                        rank
+                        * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        module.w13_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name + ".base_layer"] = lora
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
@@ -648,6 +664,7 @@ class LoRAModelManager:
                         module.lora_a_stacked[0].dtype,
                         "cpu",
                     )
+                    model.loras[module_name] = lora
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -663,7 +680,7 @@ class LoRAModelManager:
                     )
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
-            model.loras[module_name] = lora
+                model.loras[module_name] = lora
         return model
 
     def _match_target_modules(self, module_name: str):

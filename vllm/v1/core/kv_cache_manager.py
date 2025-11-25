@@ -100,6 +100,7 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -124,12 +125,9 @@ class KVCacheManager:
                 0
             ].kv_cache_spec.block_size
 
-            if dcp_world_size > 1:
+            if dcp_world_size * pcp_world_size > 1:
                 assert len(kv_cache_config.kv_cache_groups) == 1
-                # Note(hc): need revisit. When both DCP and any future
-                # PCP are enabled, the block_size may need to be scaled
-                # by a factor of dcp_size × pcp_size?
-                self.block_size *= dcp_world_size
+                self.block_size *= dcp_world_size * pcp_world_size
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -138,6 +136,7 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -185,12 +184,11 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-        # Prefix caching is disabled or
-        # When the request requires prompt logprobs, we skip prefix caching.
-        if not self.enable_caching or (
-            request.sampling_params is not None
-            and request.sampling_params.prompt_logprobs is not None
-        ):
+        # We skip finding the prefix cache hit when prefix caching is
+        # disabled or the request is marked as skipping kv cache read
+        # (which happens when the request requires prompt logprobs
+        # or calls a pooling model with all pooling).
+        if not self.enable_caching or request.skip_reading_prefix_cache:
             return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token

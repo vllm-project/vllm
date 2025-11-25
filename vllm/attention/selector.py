@@ -12,7 +12,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.backends.registry import (
+    MAMBA_TYPE_TO_BACKEND_MAP,
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils import STR_BACKEND_ENV_VAR
@@ -32,7 +36,14 @@ def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
     * None otherwise
     """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else AttentionBackendEnum[backend_name]
+    if backend_name is None:
+        return None
+    if backend_name == "XFORMERS":
+        raise ValueError(
+            "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+            "details). Please select a supported attention backend."
+        )
+    return AttentionBackendEnum[backend_name]
 
 
 # Global state allows a particular choice of backend
@@ -76,6 +87,7 @@ def get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -94,6 +106,7 @@ def get_attn_backend(
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
+        attn_type=attn_type,
     )
 
 
@@ -106,6 +119,7 @@ def _cached_get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     # Check whether a particular choice of backend was
     # previously forced.
@@ -159,6 +173,7 @@ def _cached_get_attn_backend(
             use_mla,
             has_sink,
             use_sparse,
+            attn_type,
         )
     else:
         attention_cls = current_platform.get_attn_backend_cls(
@@ -170,6 +185,7 @@ def _cached_get_attn_backend(
             use_mla,
             has_sink,
             use_sparse,
+            attn_type,
         )
     if not attention_cls:
         raise ValueError(
@@ -190,6 +206,33 @@ def _cached_get_attn_backend(
         )
 
     return backend
+
+
+def get_mamba_attn_backend(
+    mamba_type: str,
+) -> type[AttentionBackend]:
+    """Select which mamba attention backend to use and lazily import it."""
+    return _cached_get_mamba_attn_backend(mamba_type)
+
+
+@cache
+def _cached_get_mamba_attn_backend(
+    mamba_type: str,
+) -> type[AttentionBackend]:
+    assert mamba_type and isinstance(mamba_type, str)
+
+    selected_backend = None
+    try:
+        backend_name = MAMBA_TYPE_TO_BACKEND_MAP[mamba_type]
+        selected_backend = MambaAttentionBackendEnum[backend_name]
+    except KeyError as e:
+        raise ValueError(
+            f"Invalid mamba attention backend type: '{backend_name}'. Valid "
+            f"backends are: {list(MambaAttentionBackendEnum.__members__.keys())}"
+        ) from e
+
+    mamba_attn_backend = selected_backend.get_class()
+    return mamba_attn_backend
 
 
 @contextmanager

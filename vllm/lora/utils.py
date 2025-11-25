@@ -23,6 +23,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -62,6 +63,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
+    FusedMoE3DWithLoRA,
 }
 
 
@@ -164,6 +166,16 @@ def parse_fine_tuned_lora_name(
         return new_name, parts[-1] == "lora_embedding_A"
 
     raise ValueError(f"{name} is unsupported LoRA weight")
+
+
+def is_base_embeddding_weights(name: str) -> bool:
+    # hardcoded subfixes for input & output embedding weights
+    input_embedding_subfix = ".embed_tokens.base_layer.weight"
+    output_embedding_subfix = ".lm_head.base_layer.weight"
+
+    return name.endswith(input_embedding_subfix) or name.endswith(
+        output_embedding_subfix
+    )
 
 
 def is_regex_target_modules(
@@ -278,10 +290,12 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-
-            packed_modules_mapping["experts"] = [
-                weight_name.rstrip(".") for _, weight_name, _, _ in moe_packed_mapping
-            ]
+            if not hasattr(model, "is_3d_moe_weight"):
+                # 3D MoE LoRA does not need `packed_modules_mapping`
+                packed_modules_mapping["experts"] = [
+                    weight_name.rstrip(".")
+                    for _, weight_name, _, _ in moe_packed_mapping
+                ]
 
             return packed_modules_mapping
         else:

@@ -153,7 +153,7 @@ class DPMetadata:
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
         """
-        Context mamager for setting self.local_sizes. Same as self.chunked_sizes
+        Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(
@@ -219,6 +219,10 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def is_forward_context_available() -> bool:
+    return _forward_context is not None
 
 
 def create_forward_context(

@@ -15,6 +15,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -129,13 +130,6 @@ class EngineCoreOutput(
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-
-class UtilityResult:
-    """Wrapper for special handling when serializing/deserializing."""
-
-    def __init__(self, r: Any = None):
-        self.result = r
 
 
 class UtilityOutput(

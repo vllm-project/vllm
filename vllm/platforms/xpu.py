@@ -9,7 +9,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
@@ -51,6 +50,7 @@ class XPUPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
@@ -101,7 +101,11 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        xpu_use_triton_kernel = os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"
+        if not xpu_use_triton_kernel:
+            return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        else:
+            return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -180,10 +184,9 @@ class XPUPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod
@@ -248,10 +251,6 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # To support TP_ratio, HOST KV might be initiated with HND
-            # while XPU device KV is with NHD
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
@@ -264,8 +263,4 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
-        if _src_cache.shape[2:] != dst_cache.shape[2:]:
-            # XPU device KV is with NHD while HOST KV
-            # might be initiated with HND for TP_ratio support
-            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
