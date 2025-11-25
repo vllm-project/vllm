@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
-    VLLM_SUPPRESS_C_LIB_OUTPUT: bool = True
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
@@ -628,11 +627,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
     # Standard unix flag for disabling ANSI color codes
     "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
-    # if set, vllm will suppress stdout/stderr from C libraries (like Gloo)
-    # that bypass Python's logging system
-    "VLLM_SUPPRESS_C_LIB_OUTPUT": lambda: bool(
-        int(os.environ.get("VLLM_SUPPRESS_C_LIB_OUTPUT", "1"))
-    ),
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: val

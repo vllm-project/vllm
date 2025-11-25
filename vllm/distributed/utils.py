@@ -30,7 +30,7 @@ from torch.distributed.rendezvous import rendezvous
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.utils.system_utils import suppress_c_lib_output
+from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -428,7 +428,7 @@ def init_gloo_process_group(
     Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
-    with suppress_c_lib_output():
+    with suppress_stdout():
         if is_torch_equal_or_newer("2.6"):
             pg = ProcessGroup(
                 prefix_store,

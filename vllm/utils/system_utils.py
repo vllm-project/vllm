@@ -57,39 +57,35 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def suppress_c_lib_output():
+def suppress_stdout():
     """
-    Suppress stdout/stderr from C libraries at the file descriptor level.
+    Suppress stdout from C libraries at the file descriptor level.
+
+    Only suppresses stdout, not stderr, to preserve error messages.
+    Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
 
     Example:
-        with suppress_c_lib_output():
-            # C library calls that would normally print to stdout/stderr
+        with suppress_stdout():
+            # C library calls that would normally print to stdout
             torch.distributed.new_group(ranks, backend="gloo")
     """
-    if not envs.VLLM_SUPPRESS_C_LIB_OUTPUT:
+    # Don't suppress if logging level is DEBUG
+    if envs.VLLM_LOGGING_LEVEL == "DEBUG":
         yield
         return
 
     stdout_fd = sys.stdout.fileno()
-    stderr_fd = sys.stderr.fileno()
     stdout_dup = os.dup(stdout_fd)
-    stderr_dup = os.dup(stderr_fd)
-
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
 
     try:
         sys.stdout.flush()
-        sys.stderr.flush()
         os.dup2(devnull_fd, stdout_fd)
-        os.dup2(devnull_fd, stderr_fd)
         yield
     finally:
         sys.stdout.flush()
-        sys.stderr.flush()
         os.dup2(stdout_dup, stdout_fd)
-        os.dup2(stderr_dup, stderr_fd)
         os.close(stdout_dup)
-        os.close(stderr_dup)
         os.close(devnull_fd)
 
 
