@@ -66,11 +66,6 @@ class CommonAttentionMetadata:
     """(batch_size + 1,), the start location of each request in query Tensor"""
 
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    num_computed_tokens_cpu: torch.Tensor
     """(batch_size,), the number of computed tokens for each request"""
 
     num_reqs: int
@@ -81,7 +76,7 @@ class CommonAttentionMetadata:
     max_query_len: int
     """Longest query in batch"""
     max_seq_len: int
-    """Longest context length in batch"""
+    """Longest context length (may be an upper bound when seq_lens_cpu is missing)"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -99,6 +94,34 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
+    @property
+    def seq_lens_cpu(self) -> torch.Tensor:
+        """Lazy CPU copy of seq_lens. Accessing this may cause a sync.
+
+        .. deprecated::
+            Prefer using device seq_lens directly to avoid implicit H<>D sync.
+        """
+        if self._seq_lens_cpu is None:
+            self._seq_lens_cpu = self.seq_lens.to("cpu")
+        return self._seq_lens_cpu
+
+    @property
+    def num_computed_tokens_cpu(self) -> torch.Tensor:
+        """Lazy CPU tensor for num computed tokens. Accessing may cause a sync.
+
+        .. deprecated::
+            Prefer using device seq_lens directly to avoid implicit H<>D sync.
+        """
+        if self._num_computed_tokens_cpu is None:
+            query_seq_lens = (
+                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+            )
+            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
+        return self._num_computed_tokens_cpu
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
     def unpadded(
@@ -125,7 +148,6 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
         )
-
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -224,14 +246,14 @@ def _make_metadata_with_slice(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )
 
 
@@ -689,9 +711,7 @@ def make_local_attention_virtual_batches(
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
-        seq_lens_cpu=seq_lens_cpu,
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
-        num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -699,6 +719,8 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
     )
 
 
@@ -749,8 +771,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         query_start_loc=decode_query_start_loc,
         query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.to("cpu", non_blocking=True),
-        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
         max_query_len=decode_max_query_len,
@@ -758,6 +778,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
