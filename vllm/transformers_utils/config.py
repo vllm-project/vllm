@@ -496,7 +496,11 @@ def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
     if "rope_type" in rope_parameters and "type" in rope_parameters:
         rope_type = rope_parameters["rope_type"]
         rope_type_legacy = rope_parameters["type"]
-        if rope_type != rope_type_legacy:
+        if (rope_type_legacy == "su" and rope_type == "longrope") or (
+            rope_type_legacy == "mrope" and rope_type == "default"
+        ):
+            pass  # No action needed
+        elif rope_type != rope_type_legacy:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
                 f"field) and 'type={rope_type_legacy}' (legacy field). "
