@@ -44,7 +44,7 @@ async def test_generate_normal_flow(mock_streaming_llm):
     request_id = "test_request"
     prompt = "Tell me about Paris"
     sampling_params = SamplingParams(max_tokens=10)
-    close_session = False
+    close_streaming_session = False
 
     # Create a mock queue with outputs
     queue = RequestOutputCollector(output_kind=RequestOutputKind.FINAL_ONLY)
@@ -85,7 +85,7 @@ async def test_generate_normal_flow(mock_streaming_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        close_session=close_session,
+        close_streaming_session=close_streaming_session,
     ):
         outputs.append(output)
 
@@ -126,7 +126,7 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
         prompt=prompt1,
         sampling_params=sampling_params,
         request_id=request_id,
-        close_session=False,
+        close_streaming_session=False,
     ):
         outputs1.append(output)
 
@@ -157,7 +157,7 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
         prompt=prompt2,
         sampling_params=sampling_params,
         request_id=request_id,
-        close_session=False,
+        close_streaming_session=False,
     ):
         outputs2.append(output)
 
@@ -195,7 +195,7 @@ async def test_generate_generator_exit(mock_streaming_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        close_session=False,
+        close_streaming_session=False,
     )
 
     # Get first output then close generator

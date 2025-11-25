@@ -533,9 +533,9 @@ class OutputProcessor:
                     request_outputs.append(request_output)
 
             # Free completed requests.
-            if (
-                engine_core_output.finish_reason is not None
-                and engine_core_output.close_session
+            if engine_core_output.finish_reason is not None and (
+                engine_core_output.close_streaming_session is None
+                or engine_core_output.close_streaming_session
             ):
                 self.request_states.pop(req_id)
                 # Remove parent request if applicable.

@@ -394,11 +394,11 @@ class Processor:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        close_session: bool = True,
+        close_streaming_session: bool | None = None,
     ) -> EngineCoreRequest:
-        # For close_session requests, skip input preprocessing
+        # For close_streaming_session requests, skip input preprocessing
         # and create a minimal request to signal session closure
-        if close_session:
+        if close_streaming_session:
             return EngineCoreRequest(
                 request_id=request_id,
                 prompt_token_ids=[],
@@ -411,7 +411,7 @@ class Processor:
                 cache_salt=None,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
-                close_session=True,
+                close_streaming_session=True,
             )
 
         self._validate_lora(lora_request)
@@ -541,7 +541,7 @@ class Processor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
-            close_session=close_session,
+            close_streaming_session=close_streaming_session,
         )
 
     def _validate_model_inputs(

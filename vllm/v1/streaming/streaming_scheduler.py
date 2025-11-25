@@ -13,8 +13,11 @@ from vllm.v1.request import Request, RequestStatus
 
 class StreamingScheduler(Scheduler):
     def add_request(self, request: Request) -> None:
+        assert request.close_streaming_session is not None, (
+            "close_streaming_session must be set for streaming requests"
+        )
         if request.request_id not in self.requests:
-            if request.close_session:
+            if request.close_streaming_session:
                 return
             self.requests[request.request_id] = request
             self.waiting.add_request(request)
@@ -38,10 +41,10 @@ class StreamingScheduler(Scheduler):
         This also guarantees correct calculation of `num_new_tokens` in `schedule`.
         """
         request = session_request.streaming_queue.popleft()
-        if request.close_session:
+        if request.close_streaming_session:
             session_request.status = RequestStatus.FINISHED_STOPPED
-            session_request.close_session = True
-            session_request.stop_reason = "close_session"
+            session_request.close_streaming_session = True
+            session_request.stop_reason = "close_streaming_session"
             self.finished_req_ids.add(session_request.request_id)
             return True
 
@@ -132,7 +135,7 @@ class StreamingScheduler(Scheduler):
         mark_running_stopped: Callable[[Request], None],
         mark_preempted_stopped: Callable[[Request], None],
     ) -> dict[str, Any] | None:
-        assert not request.close_session, "session should already be closed"
+        assert not request.close_streaming_session, "session should already be closed"
         request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         self.waiting.add_request(request)
         kv_transfer_params = None
@@ -152,7 +155,7 @@ class StreamingScheduler(Scheduler):
             if request is None:
                 # This can happen if the request was aborted.
                 continue
-            assert request.close_session, "session should be in close state"
+            assert request.close_streaming_session, "session should be in close state"
             outputs[request.client_index].append(
                 self._make_engine_core_output(
                     request,

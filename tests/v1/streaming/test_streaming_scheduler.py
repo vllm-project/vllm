@@ -32,7 +32,7 @@ class DummyRequest(Request):
     def __init__(
         self,
         request_id,
-        close_session=False,
+        close_streaming_session=False,
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
     ):
@@ -43,7 +43,7 @@ class DummyRequest(Request):
             pooling_params=None,
             eos_token_id=None,
             mm_features=mm_features,
-            close_session=close_session,
+            close_streaming_session=close_streaming_session,
         )
 
 
@@ -80,7 +80,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         request = DummyRequest(
             request_id="test_request",
-            close_session=False,
+            close_streaming_session=False,
         )
 
         scheduler.add_request(request)
@@ -91,7 +91,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         next_request = DummyRequest(
             request_id="test_request",
-            close_session=False,
+            close_streaming_session=False,
         )
         scheduler.add_request(next_request)
 
@@ -202,14 +202,14 @@ class TestStreamingScheduler(unittest.TestCase):
         session_request = DummyRequest(
             request_id="session",
             prompt_token_ids=[1, 2, 3],
-            close_session=False,
+            close_streaming_session=False,
         )
         scheduler.add_request(session_request)
         session_request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
 
         close_request = DummyRequest(
             request_id="session",
-            close_session=True,
+            close_streaming_session=True,
         )
         scheduler.add_request(close_request)
         assert close_request.status == RequestStatus.WAITING
@@ -219,12 +219,12 @@ class TestStreamingScheduler(unittest.TestCase):
 
         assert session_request.status == RequestStatus.FINISHED_STOPPED
 
-    def test_add_request_close_session_as_first_request(self):
+    def test_add_request_close_streaming_session_as_first_request(self):
         scheduler = create_scheduler()
 
         request = DummyRequest(
             request_id="test_request",
-            close_session=True,
+            close_streaming_session=True,
         )
         scheduler.add_request(request)
 
@@ -245,7 +245,7 @@ class TestStreamingScheduler(unittest.TestCase):
         next_request = DummyRequest(
             request_id="session",
             prompt_token_ids=[4, 5],
-            close_session=False,
+            close_streaming_session=False,
         )
 
         scheduler.add_request(next_request)

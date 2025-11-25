@@ -45,7 +45,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        close_session: bool = True,
+        close_streaming_session: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -130,7 +130,7 @@ class Request:
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
         # Used for streaming
-        self.close_session = close_session
+        self.close_streaming_session = close_streaming_session
         self.streaming_queue: deque[Request] = deque()
 
     @classmethod
