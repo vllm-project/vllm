@@ -1,10 +1,16 @@
-# ROCm Attention Backends
+# Attention Backend
 
-vLLM on the AMD ROCm platform supports multiple attention backends to optimize performance across a wide range of hardware architectures (e.g., AMD Instinct MI200/MI300 series, Radeon consumer cards) and model architectures (e.g., Llama, DeepSeek-V3/R1).
+vLLM supports multiple attention backends to optimize performance across different hardware architectures (e.g., NVIDIA, AMD ROCm, TPU, CPU). Users can select the specific backend to achieve the best latency or throughput for their workloads.
+
+You can control the backend selection using the `VLLM_ATTENTION_BACKEND` environment variable.
+
+## ROCm
+
+On the AMD ROCm platform, vLLM supports multiple attention backends to optimize performance across different hardware architectures (e.g., AMD Instinct MI200/MI300 series, Radeon consumer cards) and model architectures (e.g., Llama, DeepSeek-V3/R1).
 
 While vLLM attempts to select the best default backend for your hardware, explicitly selecting a backend allows for fine-grained performance tuning, especially on high-end datacenter GPUs like the MI300X.
 
-## Why Multiple Backends?
+### Why Multiple Backends?
 
 The choice of attention backend affects **latency**, **throughput**, and **memory usage**. The primary difference lies in the underlying kernel implementation:
 
@@ -12,9 +18,9 @@ The choice of attention backend affects **latency**, **throughput**, and **memor
 * **HIP C++ Kernels**: Native AMD ROCm implementations. Historically used for PagedAttention, providing stable performance.
 * **AITER (Assembly/CK) Kernels**: Kernels from the **A**MD **I**nference **Te**nso**R** library. These are highly optimized, low-level kernels (often written in Assembly or Composable Kernel) specifically tuned for **Matrix Core** architectures like CDNA3 (MI300 series). They typically offer the highest performance but have stricter hardware requirements.
 
-## Backend Architecture Explained
+### Backend Architecture Explained
 
-### Standard Attention Backends
+#### Standard Attention Backends
 
 These backends are used for standard Transformers models (Llama 3, Qwen 2, Mistral, etc.).
 
@@ -26,7 +32,7 @@ These backends are used for standard Transformers models (Llama 3, Qwen 2, Mistr
 | **ROCM_AITER_UNIFIED_ATTN** | Uses AITER's unified attention implementation. | Alternative AITER path for unified prefill/decode. |
 | **FLEX_ATTENTION** | Uses vLLM's FlexAttention implementation. | Experimental or specific model requirements. |
 
-### MLA Backends (DeepSeek-V3/R1)
+#### MLA Backends (DeepSeek-V3/R1)
 
 DeepSeek models use **Multi-Head Latent Attention (MLA)**, which requires specialized memory handling.
 
@@ -37,13 +43,13 @@ DeepSeek models use **Multi-Head Latent Attention (MLA)**, which requires specia
 
 ---
 
-## Usage Examples
+### Usage Examples
 
-### Attention Backend on ROCm
+#### Attention Backend on ROCm
 
 You can control the backend selection using the `VLLM_ATTENTION_BACKEND` environment variable.
 
-### 1. TRITON_ATTN (Default)
+#### 1. TRITON_ATTN (Default)
 
 Uses vLLM's triton unified attention backend.
 
@@ -62,7 +68,7 @@ VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0 vllm serve meta-llama/Llama-3.1-
 
 ```
 
-### 2. ROCM_ATTN (Hybrid)
+#### 2. ROCM_ATTN (Hybrid)
 
 Uses vLLM's chunked prefill (Triton) and paged decode (HIP) kernel.
 
@@ -82,7 +88,7 @@ VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0 VLLM_V1_USE_PREFILL_DECODE_ATTEN
 
 ```
 
-### 3. ROCM_AITER_FA (Flash Attention)
+#### 3. ROCM_AITER_FA (Flash Attention)
 
 Use the AITER Flash Attention backend. Requires gfx9 architecture.
 
@@ -96,7 +102,7 @@ VLLM_ROCM_USE_AITER=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
 
 ```
 
-### 4. ROCM_AITER_UNIFIED_ATTN
+#### 4. ROCM_AITER_UNIFIED_ATTN
 
 Use AITER unified attention backend.
 
@@ -113,11 +119,11 @@ VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER_UNIFIED_ATTE
 
 ```
 
-### MLA Backend
+#### MLA Backend
 
 On AMD ROCm, there are TRITON_MLA and ROCM_AITER_MLA
 
-### 5. DeepSeek MLA (TRITON_MLA)
+#### 5. DeepSeek MLA (TRITON_MLA)
 
 Uses vLLM's triton MLA backend. The prefill uses triton flash attention/ CK flash attention varlen, and decode uses triton mla decode kernel. Requires block_size >= 16.
 
@@ -131,7 +137,7 @@ VLLM_ROCM_USE_AITER=1 VLLM_ATTENTION_BACKEND="TRITON_MLA" vllm serve deepseek-ai
 
 ```
 
-### 6. DeepSeek MLA (ROCM_AITER_MLA)
+#### 6. DeepSeek MLA (ROCM_AITER_MLA)
 
 For DeepSeek models, vLLM defaults to ROCM_AITER_MLA on supported hardware.
 
@@ -150,7 +156,7 @@ VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-R1 \
   
 ```
 
-## Selection Priority
+### Selection Priority
 
 When multiple configurations are provided, vLLM follows this strict priority order:
 
@@ -167,3 +173,6 @@ When multiple configurations are provided, vLLM follows this strict priority ord
 
 !!! note
     Explicitly setting `VLLM_ATTENTION_BACKEND` is the recommended way to debug backend issues, as it bypasses complex flag combinations.
+
+## NVIDIA
+## TPU
