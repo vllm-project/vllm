@@ -34,6 +34,7 @@ class ResponsesParser:
         self.num_init_messages = len(response_messages)
         self.tokenizer = tokenizer
         self.request = request
+
         self.reasoning_parser_instance = reasoning_parser(tokenizer)
 
     def process(self, output: CompletionOutput) -> "ResponsesParser":
@@ -85,7 +86,8 @@ def get_responses_parser_for_simple_context(
 
     Args:
         tokenizer: The tokenizer to use for decoding tokens
-        reasoning_parser: Optional reasoning parser class (e.g., MiniMaxM2ReasoningParser)
+        reasoning_parser: Optional reasoning parser class
+          (e.g., MiniMaxM2ReasoningParser)
 
     Returns:
         ResponsesParser instance configured with the provided parser

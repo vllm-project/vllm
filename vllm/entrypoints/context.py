@@ -199,14 +199,13 @@ class ParsableContext(ConversationContext):
         request: ResponsesRequest,
         tool_dicts: list[dict] | None = None,
     ):
-        self.last_output = None
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         # TODO: num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
-        self.all_turn_metrics = []
+        self.all_turn_metrics: list[TurnMetrics] = []
 
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
@@ -224,7 +223,6 @@ class ParsableContext(ConversationContext):
         self.tool_dicts = tool_dicts
 
     def append_output(self, output: RequestOutput) -> None:
-        self.last_output = output
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
