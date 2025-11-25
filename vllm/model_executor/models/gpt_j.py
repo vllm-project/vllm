@@ -100,7 +100,7 @@ class GPTJAttention(nn.Module):
             self.head_size,
             rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=False,
         )
         self.attn = Attention(
