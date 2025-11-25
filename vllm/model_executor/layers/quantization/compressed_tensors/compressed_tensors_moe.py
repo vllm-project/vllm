@@ -105,7 +105,7 @@ __all__ = [
     "CompressedTensorsW8A8Int8MoEMethod",
     "CompressedTensorsWNA16MarlinMoEMethod",
     "CompressedTensorsWNA16MoEMethod",
-    "CompressedTensorsW4A4MoEMethod",
+    "CompressedTensorsW4A4Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
 ]
 
@@ -176,7 +176,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     quant_config, layer.moe_config, layer_name
                 )
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4MoEMethod(layer.moe_config, layer_name)
+            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config)
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -199,8 +199,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
 
 
-class CompressedTensorsW4A4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
+class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
+    def __init__(self, moe: FusedMoEConfig):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
@@ -220,8 +220,12 @@ class CompressedTensorsW4A4MoEMethod(CompressedTensorsMoEMethod):
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
-                " for CompressedTensorsW4A4MoeMethod."
+                " for CompressedTensorsW4A4Nvfp4MoeMethod."
             )
+        elif self.use_marlin:
+            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoeMethod.")
+        else:
+            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoeMethod.")
 
     def create_weights(
         self,
@@ -628,7 +632,7 @@ class CompressedTensorsW4A4MoEMethod(CompressedTensorsMoEMethod):
             assert expert_map is None, (
                 "Expert Parallelism / expert_map "
                 "is currently not supported for "
-                "CompressedTensorsW4A4MoEMethod."
+                "CompressedTensorsW4A4Nvfp4MoEMethod."
             )
             assert self.moe_quant_config is not None
 
