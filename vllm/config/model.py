@@ -39,7 +39,12 @@ from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    is_gguf,
+    is_remote_gguf,
+    maybe_model_redirect,
+    split_remote_gguf,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -294,9 +299,6 @@ class ModelConfig:
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
-    override_pooler_config: dict | PoolerConfig | None = None
-    """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
-    v0.12.0 or v1.0.0, whichever is sooner."""
 
     # Multimodal config and init vars
     multimodal_config: MultiModalConfig | None = None
@@ -354,7 +356,6 @@ class ModelConfig:
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
-            "override_pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
             "media_io_kwargs",
@@ -440,7 +441,8 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            if check_gguf_file(self.model):
+            # Check if this is a GGUF model (either local file or remote GGUF)
+            if is_gguf(self.model):
                 raise ValueError(
                     "Using a tokenizer is mandatory when loading a GGUF model. "
                     "Please specify the tokenizer path or name using the "
@@ -642,18 +644,6 @@ class ModelConfig:
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
-            if self.override_pooler_config is not None:
-                logger.warning_once(
-                    "`override_pooler_config` is deprecated and will be "
-                    "removed in v0.12.0 or v1.0.0, whichever is sooner. "
-                    "Please use `pooler_config` instead."
-                )
-
-                if isinstance(self.override_pooler_config, dict):
-                    self.pooler_config = PoolerConfig(**self.override_pooler_config)
-                else:
-                    self.pooler_config = self.override_pooler_config
-
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
 
@@ -832,7 +822,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
-        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+        model = self.model
+        if is_remote_gguf(model):
+            model, _ = split_remote_gguf(model)
+        return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())

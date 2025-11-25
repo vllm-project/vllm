@@ -475,6 +475,7 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -1202,21 +1203,35 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
-    ) -> np.ndarray | None:
+    ) -> tuple[torch.Tensor | None, np.ndarray | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
-            return None
+            return None, None
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id in scheduled_encoder_inputs:
+        for req_id in num_scheduled_tokens:
             req_index = self.input_batch.req_id_to_index[req_id]
-            encoder_seq_lens[req_index] = self.max_encoder_len
+            req_state = self.requests[req_id]
+            if req_state.mm_features is None:
+                self.encoder_seq_lens.np[req_index] = 0
+                continue
 
-        return encoder_seq_lens
+            # Get the total number of encoder input tokens for running encoder requests
+            # whether encoding is finished or not so that cross-attention knows how
+            # many encoder tokens to attend to.
+            encoder_input_tokens = sum(
+                feature.mm_position.length for feature in req_state.mm_features
+            )
+            self.encoder_seq_lens.np[req_index] = encoder_input_tokens
+
+        self.encoder_seq_lens.copy_to_gpu(num_reqs)
+        encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
+        encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
+
+        return encoder_seq_lens, encoder_seq_lens_cpu
 
     def _prepare_inputs(
         self,
@@ -1482,7 +1497,7 @@ class GPUModelRunner(
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
-        scheduled_encoder_inputs: dict[str, list[int]] | None = None,
+        num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -1547,8 +1562,8 @@ class GPUModelRunner(
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduled_encoder_inputs or {},
+            encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
+                num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs,
             )
@@ -1591,6 +1606,7 @@ class GPUModelRunner(
                 num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
@@ -2828,7 +2844,7 @@ class GPUModelRunner(
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
-                        scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
@@ -3746,6 +3762,7 @@ class GPUModelRunner(
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
         activate_lora: bool = False,
+        is_graph_capturing: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3981,7 +3998,7 @@ class GPUModelRunner(
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 use_cudagraphs = (
-                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    cudagraph_runtime_mode.has_mode(CUDAGraphMode.PIECEWISE)
                     and not self.speculative_config.enforce_eager
                 )
 
@@ -3995,6 +4012,7 @@ class GPUModelRunner(
                 self.drafter.dummy_run(
                     num_tokens,
                     use_cudagraphs=use_cudagraphs,
+                    is_graph_capturing=is_graph_capturing,
                 )
 
         # This is necessary to avoid blocking DP.
@@ -4227,14 +4245,18 @@ class GPUModelRunner(
                     # NOTE: This happens when encoder cache needs to store
                     # the embeddings that encoder outputs are scattered onto.
                     # In this case we create dummy embeddings of size
-                    # (encode_budget, hidden_size) and scatter encoder
-                    # output into it.
+                    # (max_tokens_for_modality, hidden_size) and scatter
+                    # encoder output into it.
                     encoder_output_shape = dummy_encoder_outputs[0].shape
-                    if encoder_output_shape[0] < encoder_budget:
+                    max_mm_tokens_per_item = mm_budget.max_tokens_by_modality[
+                        dummy_modality
+                    ]
+                    if encoder_output_shape[0] < max_mm_tokens_per_item:
+                        encoder_hidden_size = encoder_output_shape[-1]
                         expanded_outputs = []
                         for output in dummy_encoder_outputs:
                             expanded = output.new_zeros(
-                                (encoder_budget, encoder_output_shape[-1])
+                                (max_mm_tokens_per_item, encoder_hidden_size)
                             )
                             num_tokens = output.shape[0]
                             expanded[:num_tokens].copy_(output)
@@ -4427,6 +4449,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 activate_lora=activate_lora,
+                is_graph_capturing=True,
             )
         self.maybe_remove_all_loras(self.lora_config)
 
