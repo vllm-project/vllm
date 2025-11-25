@@ -49,7 +49,7 @@ for BACK in "${BACKENDS[@]}"; do
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --enable-eplb \
-    --eplb-config '{"window_size":200,"step_interval":600,"use_async":"true"}' \
+    --eplb-config '{"window_size":200,"step_interval":600,"use_async":true}' \
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \
     --max-model-len 2048 \
