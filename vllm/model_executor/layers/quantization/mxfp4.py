@@ -210,7 +210,8 @@ class Mxfp4Config(QuantizationConfig):
             # TODO: Add support for MXFP4 Attention.
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
-                "Skipping quantization for this layer."
+                "Skipping quantization for this layer.",
+                scope="local"
             )
         return None
 
