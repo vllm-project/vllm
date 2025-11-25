@@ -18,7 +18,7 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.transformers_utils.utils import check_gguf_file, convert_model_repo_to_path
+from vllm.transformers_utils.utils import convert_model_repo_to_path, is_gguf
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
@@ -236,8 +236,8 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    if check_gguf_file(model_config.model):
-        assert not check_gguf_file(model_config.tokenizer), (
+    if is_gguf(model_config.model):
+        assert not is_gguf(model_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
             "should be used to correctly load processor."
         )
@@ -350,8 +350,8 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
-    if check_gguf_file(model_config.model):
-        assert not check_gguf_file(model_config.tokenizer), (
+    if is_gguf(model_config.model):
+        assert not is_gguf(model_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
             "should be used to correctly load image processor."
         )
