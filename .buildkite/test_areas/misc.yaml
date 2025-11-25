@@ -47,17 +47,6 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Prime-RL Integration (2 GPUs)
-  timeout_in_minutes: 30
-  optional: true
-  num_gpus: 2
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/
-  - .buildkite/scripts/run-prime-rl-test.sh
-  commands:
-    - bash .buildkite/scripts/run-prime-rl-test.sh
-
 - label: Examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
