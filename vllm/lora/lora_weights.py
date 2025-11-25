@@ -152,13 +152,57 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         )
         return obj
 
+    @classmethod
+    def pack_moe(
+        cls, loras: GenericSequence[Optional["LoRALayerWeights"]], module_name: str
+    ) -> "PackedLoRALayerWeights":
+        """Pack a list of LoRAs into a single LoRA.
+
+        If LoRA is None, it signifies that the submodule does not have a LoRA.
+        """
+
+        first_lora = next(lora for lora in loras if lora is not None)
+        assert first_lora is not None
+        rank = first_lora.rank
+
+        assert len(loras) % 3 == 0
+        w1_lora_a_lst = []
+        w2_lora_a_lst = []
+        w3_lora_a_lst = []
+        w1_lora_b_lst = []
+        w2_lora_b_lst = []
+        w3_lora_b_lst = []
+
+        for eid in range(len(loras) // 3):
+            w1_lora_a_lst.append(loras[eid * 3].lora_a)
+            w2_lora_a_lst.append(loras[eid * 3 + 1].lora_a)
+            w3_lora_a_lst.append(loras[eid * 3 + 2].lora_a)
+
+            w1_lora_b_lst.append(loras[eid * 3].lora_b)
+            w2_lora_b_lst.append(loras[eid * 3 + 1].lora_b)
+            w3_lora_b_lst.append(loras[eid * 3 + 2].lora_b)
+
+        w1_lora_a = torch.stack(w1_lora_a_lst, dim=0)  # (num_experts,rank,input_size)
+        w2_lora_a = torch.stack(w2_lora_a_lst, dim=0)
+        w3_lora_a = torch.stack(w3_lora_a_lst, dim=0)
+        w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
+        w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
+        w3_lora_b = torch.stack(w3_lora_b_lst, dim=0)
+
+        obj = cls(
+            module_name,
+            rank,
+            [lora.lora_alpha if lora is not None else None for lora in loras],
+            [w1_lora_a, w2_lora_a, w3_lora_a],
+            [w1_lora_b, w2_lora_b, w3_lora_b],
+            scaling=[
+                1 if lora is not None else None  # type: ignore
+                for lora in loras
+            ],
+        )
+        return obj
+
     def optimize(self) -> "PackedLoRALayerWeights":
-        """Optimize the LoRA by merging the scaling into lora_b."""
-        for i in range(len(self.lora_b)):
-            if self.scaling[i] == 1 or self.lora_b[i] is None:  # type: ignore
-                continue
-            self.lora_b[i] *= self.scaling[i]  # type: ignore
-            self.scaling[i] = 1  # type: ignore
         return self
 
     @property

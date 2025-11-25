@@ -36,7 +36,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig,
+        model_config: PretrainedConfig | None,
     ) -> None:
         self.lora_config = lora_config
         #

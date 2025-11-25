@@ -86,7 +86,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig,
+        model_config: PretrainedConfig | None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if 32000 < self.base_layer.vocab_size > 257024:

@@ -677,7 +677,10 @@ class LoRAModelManager:
                         "cpu",
                     )
                     subloras.append(lora)
-                lora = PackedLoRALayerWeights.pack(subloras)
+                if module.__class__.__name__ == "FusedMoEWithLoRA":
+                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
+                else:
+                    lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
         return model
 
@@ -737,9 +740,14 @@ class LoRAModelManager:
                 replaced_module_name = module_name.replace("model.", "")
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
-            lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
-                replacement_loras
-            )
+            if module_name.endswith(".experts"):
+                lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
+                    replacement_loras, module_name
+                )
+            else:
+                lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
+                    replacement_loras
+                )
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)

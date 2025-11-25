@@ -188,7 +188,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig,
+        model_config: PretrainedConfig | None,
     ) -> None:
         """
         The main reason for overriding this function is to enhance  code
@@ -381,7 +381,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig,
+        model_config: PretrainedConfig | None,
     ) -> None:
         """
         The main reason for overloading this function is to handle inconsistent
