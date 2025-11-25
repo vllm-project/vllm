@@ -81,8 +81,7 @@ class MooncakeStoreConfig:
             replica_num=int(config.get("replica_num", 1)),
             fast_transfer=bool(config.get("fast_transfer", True)),
             fast_transfer_buffer_size=int(
-                float(config.get("fast_transfer_buffer_size", 1))
-                * DEFAULT_TENSOR_POOL_SIZE
+                config.get("fast_transfer_buffer_size", DEFAULT_TENSOR_POOL_SIZE)
             ),
         )
 
@@ -316,7 +315,7 @@ class ECMooncakeStore:
             )
             tensor_loaded = torch.from_numpy(arr_loaded)
 
-            if meta["original_dtype"] != meta["serialized_dtype"]:
+            if meta["original_dtype"].split(".")[-1] != meta["serialized_dtype"].split(".")[-1]:
                 tensor_loaded = tensor_loaded.view(
                     getattr(torch, meta["original_dtype"].split(".")[-1])
                 )  # e.g., 'torch.bfloat16' -> torch.bfloat16
@@ -434,7 +433,7 @@ class ECMooncakeStore:
                 serialized_dtype_str = str(arr.dtype)
             else:
                 arr = tensor.numpy()
-                serialized_dtype_str = original_dtype_str
+                serialized_dtype_str = str(arr.dtype)
 
             data_bytes = arr.tobytes()
             meta = {

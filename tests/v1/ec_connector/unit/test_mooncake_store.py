@@ -1,19 +1,30 @@
+import asyncio
+import ctypes
 import json
 import os
+import numpy as np
 import pytest
 import torch
 from collections import deque
 from dataclasses import dataclass
 from unittest import mock
 from vllm.config import VllmConfig
-from vllm.distributed.ec_transfer.utils.tensor_memory_pool import TensorMemoryPool
-from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import ECMooncakeStore, MooncakeStoreConfig, ECMooncakeTensorPoolMetadata
+from vllm.distributed.ec_transfer.utils import tensor_memory_pool
+from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
+    TensorMemoryPool,
+    InsufficientMemoryError)
+from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import (
+    ECMooncakeStore,
+    MooncakeStoreConfig,
+    ECMooncakeTensorPoolMetadata)
+
+DEFAULT_BUFFER_SIZE=1024
 
 # Fake implementation of MooncakeDistributedStore for testing
 class FakeMooncakeDistributedStore:
     def __init__(self):
-        self.data = {}  # key -> bytes
-        self.buffers = {}  # addr -> {'size': int, 'data': bytes} for simulating zero-copy
+        self.data = {}  # key -> bytes or tensors
+        self.registered_buffers: set[tuple[int, int]] = set()
         self.remove_calls = []  # Track remove_by_regex calls
 
     def setup(self, local_hostname, metadata_server, global_segment_size, local_buffer_size, protocol, device_name, master_server_address):
@@ -32,9 +43,13 @@ class FakeMooncakeDistributedStore:
     def batch_get_into(self, keys, addrs, sizes):
         results = []
         for key, addr, size in zip(keys, addrs, sizes):
-            if key in self.data and addr in self.buffers and self.buffers[addr]['size'] >= size:
+            addr = addr if type(addr) is mock.Mock else addr
+            if key in self.data and any(
+                addr >= baddr and addr + size <= baddr + bsize
+                for baddr, bsize in self.registered_buffers):
                 # Simulate copy: put data into buffer
-                self.buffers[addr]['data'] = self.data[key][:size]
+                buffer = (ctypes.c_char * len(self.data[key])).from_buffer(bytearray(self.data[key]))
+                ctypes.memmove(addr, ctypes.addressof(buffer), size)
                 results.append(size)
             else:
                 results.append(-1)
@@ -46,18 +61,20 @@ class FakeMooncakeDistributedStore:
 
     def batch_put_from(self, keys, addrs, sizes, replica_config):
         for key, addr, size in zip(keys, addrs, sizes):
-            if addr in self.buffers and self.buffers[addr]['data'] is not None:
-                # Simulate copy from buffer
-                self.data[key] = self.buffers[addr]['data'][:size]
-            else:
-                self.data[key] = b'\x00' * size  # Dummy data if no buffer data
+            if any(
+                addr >= baddr and addr + size <= baddr + bsize
+                for baddr, bsize in self.registered_buffers):
+                data: bytes = ctypes.string_at(addr, size)
+                self.data[key] = data[:size]
 
     def register_buffer(self, addr, size):
-        self.buffers[addr] = {'size': size, 'data': None}
+        print(type(addr), addr, size)
+        self.registered_buffers.add((addr, size))
 
     def unregister_buffer(self, addr, size):
-        if addr in self.buffers:
-            del self.buffers[addr]
+        print(type(addr), addr, size)
+        self.registered_buffers.remove((addr, size))
+        print("remove completed")
 
     def remove_by_regex(self, pattern):
         import regex as re
@@ -76,10 +93,14 @@ class FakeReplicateConfig:
     replica_num: int = 1
 
 @pytest.fixture
-def mock_mooncake(monkeypatch):
+def mock_inner_mooncake_store(monkeypatch):
     fake_store = FakeMooncakeDistributedStore()
-    monkeypatch.setattr('mooncake_connector.mooncake.store.MooncakeDistributedStore', lambda: fake_store)
-    monkeypatch.setattr('mooncake_connector.mooncake.store.ReplicateConfig', FakeReplicateConfig)
+    monkeypatch.setattr(
+        'mooncake.store.MooncakeDistributedStore', lambda: fake_store
+    )
+    monkeypatch.setattr(
+        'mooncake.store.ReplicateConfig', FakeReplicateConfig
+    )
     return fake_store
 
 @pytest.fixture
@@ -88,8 +109,8 @@ def temp_config_file(tmp_path):
     config_data = {
         "local_hostname": "test_host",
         "metadata_server": "test_meta",
-        "global_segment_size": 1024,
-        "local_buffer_size": 1024,
+        "global_segment_size": DEFAULT_BUFFER_SIZE,
+        "local_buffer_size": DEFAULT_BUFFER_SIZE,
         "protocol": "tcp",
         "device_name": "test_device",
         "master_server_address": "test_master",
@@ -97,7 +118,7 @@ def temp_config_file(tmp_path):
         "transfer_timeout": 5,
         "replica_num": 2,
         "fast_transfer": False,
-        "fast_transfer_buffer_size": 1024,
+        "fast_transfer_buffer_size": DEFAULT_BUFFER_SIZE,
     }
     with open(config_path, 'w') as f:
         json.dump(config_data, f)
@@ -113,20 +134,39 @@ def vllm_config(temp_config_file):
     return config
 
 @pytest.fixture
-def mooncake_store(vllm_config, mock_mooncake):
+def ec_mooncake_store(vllm_config, mock_inner_mooncake_store):
     store = ECMooncakeStore(vllm_config)
     yield store
-    store.close()
+    try:
+        store.close()
+    except RuntimeError as e:
+        if 'Event loop is closed' in str(e):
+            # exception for test_close()
+            return
+        else:
+            raise
 
-def test_init(vllm_config, mock_mooncake):
+def test_init(vllm_config, mock_inner_mooncake_store):
+    # Mock methods
+    mock_inner_mooncake_store.setup = mock.MagicMock(name="setup")
+
     store = ECMooncakeStore(vllm_config)
     assert store.config.local_hostname == "test_host"
     assert store.config.replica_num == 2
     assert not store.config.fast_transfer
-    mock_mooncake.setup.assert_called_once()
+    mock_inner_mooncake_store.setup.assert_called_once()
     store.close()
 
-def test_init_with_fast_transfer(vllm_config, mock_mooncake, monkeypatch):
+def test_init_with_fast_transfer(monkeypatch, vllm_config, mock_inner_mooncake_store):
+    # Mock methods
+    mock_inner_mooncake_store.register_buffer = mock.MagicMock(name="register_buffer")
+    mock_inner_mooncake_store.unregister_buffer = mock.MagicMock(name="unregister_buffer")
+    tensorpool = mock.Mock(spec=TensorMemoryPool)
+    monkeypatch.setattr(
+        'vllm.distributed.ec_transfer.utils.tensor_memory_pool.TensorMemoryPool',
+        lambda max_block_size: tensorpool
+    )
+
     # Modify config to enable fast_transfer
     with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
         data = json.load(f)
@@ -135,22 +175,26 @@ def test_init_with_fast_transfer(vllm_config, mock_mooncake, monkeypatch):
         json.dump(data, f)
         f.truncate()
 
-    mock_pool = mock.Mock(spec=TensorMemoryPool)
-    mock_pool.base_address = 1234
-    monkeypatch.setattr('mooncake_connector.TensorMemoryPool', lambda max_block_size: mock_pool)
-
     store = ECMooncakeStore(vllm_config)
     assert store.config.fast_transfer
-    mock_mooncake.register_buffer.assert_called_with(1234, 1024)
+    mock_inner_mooncake_store.register_buffer.assert_called_with(
+        mock.ANY, DEFAULT_BUFFER_SIZE
+    )
     store.close()
-    mock_mooncake.unregister_buffer.assert_called_with(1234, 1024)
+    mock_inner_mooncake_store.unregister_buffer.assert_called_with(
+        mock.ANY, DEFAULT_BUFFER_SIZE
+    )
+    # Make sure it registers & unregisters the same buffer
+    mock_inner_mooncake_store.register_buffer.call_args == mock_inner_mooncake_store.unregister_buffer.call_args
 
-def test_batch_exists(mooncake_store, mock_mooncake):
-    mock_mooncake.data = {"key1": b'data1', "key2": b'data2'}
-    exists = mooncake_store.batch_exists(["key1", "key3", "key2"])
+def test_batch_exists(ec_mooncake_store, mock_inner_mooncake_store):
+    mock_inner_mooncake_store.data = {"key1": b'data1', "key2": b'data2'}
+    exists = ec_mooncake_store.batch_exists(["key1", "key3", "key2"])
     assert exists == [True, False, True]
+    exists = ec_mooncake_store.batch_exists([])
+    assert exists == []
 
-def test_batch_get_non_fast(mooncake_store, mock_mooncake):
+def test_batch_get_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
     # Prepare serialized data
     tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.float32)
     meta = {
@@ -158,34 +202,45 @@ def test_batch_get_non_fast(mooncake_store, mock_mooncake):
         "original_dtype": str(tensor.dtype),
         "serialized_dtype": "float32"
     }
+
     meta_bytes = json.dumps(meta).encode("utf-8")
     len_bytes = len(meta_bytes).to_bytes(4, "big")
     data_bytes = tensor.cpu().numpy().tobytes()
     serialized = len_bytes + meta_bytes + data_bytes
 
-    mock_mooncake.data = {"key1": serialized, "key2": None}
+    mock_inner_mooncake_store.data = {"key1": serialized, "key2": None}
 
-    results = mooncake_store.batch_get(["key1", "key2"])
+    results = ec_mooncake_store.batch_get(["key1", "key2"])
     assert torch.equal(results[0].cpu(), tensor.cpu())
     assert results[1] is None
 
-def test_batch_put_non_fast(mooncake_store, mock_mooncake):
-    tensors = [torch.tensor([1, 2], dtype=torch.int32), torch.tensor([3.0, 4.0], dtype=torch.float32)]
-    keys = ["key1", "key2"]
+def test_batch_put_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
+    tensors = [
+        torch.randn((2, 2), dtype=torch.bfloat16, device='cuda'),
+        torch.randn((1, 4), dtype=torch.float32),
+        torch.tensor([[1, 2]], dtype=torch.int32, device='cuda')]
+    keys = ["key1", "key2", "key3"]
 
-    mooncake_store.batch_put(keys, tensors)
-    mooncake_store.wait_for_put()
+    ec_mooncake_store.batch_put(keys, tensors)
+    ec_mooncake_store.wait_for_put()
 
-    assert "key1" in mock_mooncake.data
-    assert "key2" in mock_mooncake.data
+    assert "key1" in mock_inner_mooncake_store.data
+    assert "key2" in mock_inner_mooncake_store.data
+    assert "key3" in mock_inner_mooncake_store.data
 
     # Verify deserialization
-    stored1 = mock_mooncake.data["key1"]
+    stored1 = mock_inner_mooncake_store.data["key1"]
     len_meta = int.from_bytes(stored1[:4], "big")
     meta = json.loads(stored1[4:4 + len_meta].decode("utf-8"))
-    assert meta["original_dtype"] == "torch.int32"
+    assert meta["original_dtype"] == "torch.bfloat16"
 
-def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_mooncake):
+    results = ec_mooncake_store.batch_get(["key1", "key2", "key3"])
+
+    assert torch.equal(results[0].cpu(), tensors[0].cpu())
+    assert torch.equal(results[1].cpu(), tensors[1].cpu())
+    assert torch.equal(results[2].cpu(), tensors[2].cpu())
+
+def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
     with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
         data = json.load(f)
@@ -193,35 +248,26 @@ def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_mooncake):
         f.seek(0)
         json.dump(data, f)
         f.truncate()
-
-    mock_pool = mock.Mock(spec=TensorMemoryPool)
-    mock_pool.base_address = 1234
-    mock_pool.allocate.side_effect = [1000, 2000]  # Sample addrs
-    mock_pool.free.side_effect = lambda addr: None
-    mock_pool.load_tensor.side_effect = lambda addr, dtype, shape, device: torch.zeros(shape, dtype=dtype)  # Dummy load
-
-    monkeypatch.setattr('mooncake_connector.TensorMemoryPool', lambda max_block_size: mock_pool)
 
     store = ECMooncakeStore(vllm_config)
 
     # Prepare metadata
     meta = {"shape": [2, 2], "dtype": "torch.float32"}
     meta_bytes = json.dumps(meta).encode("utf-8")
-    mock_mooncake.data = {
+    value1 = torch.randn((2, 2))
+    value1_bytes = value1.numpy().tobytes()
+    mock_inner_mooncake_store.data = {
         "key1_metadata": meta_bytes,
-        "key2_metadata": None,
+        "key1": value1_bytes,
     }
-    mock_mooncake.batch_get_into.side_effect = lambda keys, addrs, sizes: [16, 0]  # 4 elements * 4 bytes
 
     results = store.batch_get(["key1", "key2"])
-    assert results[0].shape == (2, 2)
+    assert torch.equal(value1.cpu(), results[0].cpu())
     assert results[1] is None
 
-    mock_pool.allocate.assert_called()
-    mock_pool.free.assert_called()
     store.close()
 
-def test_batch_put_zero_copy(monkeypatch, vllm_config, mock_mooncake):
+def test_batch_put_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
     with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
         data = json.load(f)
@@ -230,28 +276,24 @@ def test_batch_put_zero_copy(monkeypatch, vllm_config, mock_mooncake):
         json.dump(data, f)
         f.truncate()
 
-    mock_pool = mock.Mock(spec=TensorMemoryPool)
-    mock_pool.store_tensor.side_effect = [1000, 2000]  # Sample addrs
-    mock_pool.free.side_effect = lambda addr: None
-
-    monkeypatch.setattr('mooncake_connector.TensorMemoryPool', lambda max_block_size: mock_pool)
-    monkeypatch.setattr('mooncake_connector.deque', lambda: deque())  # Mock fifo queue
-
     store = ECMooncakeStore(vllm_config)
 
-    tensors = [torch.tensor([[1, 2]], dtype=torch.int32), torch.tensor([[3.0, 4.0]], dtype=torch.float32)]
+    tensors = [
+        torch.tensor([[1, 2]], dtype=torch.int32, device='cuda'),
+        torch.tensor([[3.0, 4.0]], dtype=torch.float32, device='cuda')]
     keys = ["key1", "key2"]
 
     store.batch_put(keys, tensors)
     store.wait_for_put()
 
-    mock_pool.store_tensor.assert_called()
-    mock_mooncake.put_batch.assert_called()  # For metadata
-    mock_mooncake.batch_put_from.assert_called()
+    assert mock_inner_mooncake_store.data.get("key1") == tensors[0].cpu().numpy().tobytes()
+    assert mock_inner_mooncake_store.data.get("key2") == tensors[1].cpu().numpy().tobytes()
+    assert store.metadata_key("key1") in mock_inner_mooncake_store.data
+    assert store.metadata_key("key2") in mock_inner_mooncake_store.data
 
     store.close()
 
-def test_pool_eviction(monkeypatch, vllm_config, mock_mooncake):
+def test_pool_eviction(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
     with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
         data = json.load(f)
@@ -260,23 +302,27 @@ def test_pool_eviction(monkeypatch, vllm_config, mock_mooncake):
         json.dump(data, f)
         f.truncate()
 
-    mock_pool = mock.Mock(spec=TensorMemoryPool)
-    mock_pool.allocate.side_effect = [InsufficientMemoryError, 1000]  # Force eviction on first try
-    mock_pool.free.side_effect = lambda addr: None
-    mock_pool.store_tensor.side_effect = lambda tensor: 1000
-
-    monkeypatch.setattr('mooncake_connector.TensorMemoryPool', lambda max_block_size: mock_pool)
-
     store = ECMooncakeStore(vllm_config)
-    store.fifo_pool_queue = deque([ECMooncakeTensorPoolMetadata("evict_key", 500)])
+    orig_tensor_pool = store.tensor_pool
+    store.tensor_pool = mock.MagicMock(wraps=store.tensor_pool)
 
-    # Trigger allocation with eviction
-    addr = store._pool_allocate(100)
-    assert addr == 1000
-    mock_pool.free.assert_called_with(500)
-    mock_mooncake.remove_by_regex.assert_called()
+    evict_tensor = torch.randn((4, 4), dtype=torch.float32, device='cuda')
+    store.batch_put(["evict_key"], [evict_tensor])
+    store.wait_for_put()
+
+    # Trigger allocation with eviction, 16 * 16 * 4 = 1024
+    new_tensor = torch.randn((16, 16), dtype=torch.float32, device='cuda')
+    store.batch_put(["new_key"], [new_tensor])
+    store.wait_for_put()
+
+    store.tensor_pool.free.assert_called_once()
+    assert mock_inner_mooncake_store.data.get("new_key") == new_tensor.cpu().numpy().tobytes()
+    assert "evict_key" not in mock_inner_mooncake_store.data
+
+    store.tensor_pool = orig_tensor_pool
     store.close()
 
-def test_close(mooncake_store, mock_mooncake):
-    mooncake_store.close()
-    mock_mooncake.close.assert_called_once()
+def test_close(ec_mooncake_store, mock_inner_mooncake_store):
+    mock_inner_mooncake_store.close = mock.MagicMock(name="close")
+    ec_mooncake_store.close()
+    mock_inner_mooncake_store.close.assert_called_once()

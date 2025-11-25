@@ -22,13 +22,13 @@ NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in ben
 
 MOONCAKE_MASTER_PORT=50051
 MOONCAKE_METADATA_PORT=8080
-MOONCAKE_MASTER_IP="localhost"                      # producer
-MOONCAKE_STORE_INSTANCE_IP="localhost"              # consumer
-MOONCAKE_GLOBAL_SEGMENT_SIZE=$((30 * 1073741824))   # 30 GB
-MOONCAKE_LOCAL_BUFFER_SIZE=$((1 * 1073741824))      # 1 GB
+MOONCAKE_MASTER_IP="localhost"                              # producer
+MOONCAKE_STORE_INSTANCE_IP="localhost"                      # consumer
+MOONCAKE_GLOBAL_SEGMENT_SIZE=$((30 * 1073741824))           # 30 GB
+MOONCAKE_LOCAL_BUFFER_SIZE=$((1 * 1073741824))              # 1 GB
 MOONCAKE_REPLICA_NUM=1
 MOONCAKE_FAST_TRANSFER=true
-MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=3                # 3 GB
+MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=$((30 * 1073741824))     # 30 GB
 
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
