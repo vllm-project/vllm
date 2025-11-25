@@ -97,6 +97,7 @@ VLLM_ROCM_USE_AITER=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```
 
 ### 4. ROCM_AITER_UNIFIED_ATTN
+
 Use AITER unified attention backend.
 
 ```bash
@@ -112,10 +113,12 @@ VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER_UNIFIED_ATTE
 
 ```
 
-### MLA Backend:
+### MLA Backend
+
 On AMD ROCm, there are TRITON_MLA and ROCM_AITER_MLA
 
 ### 5. DeepSeek MLA (TRITON_MLA)
+
 Uses vLLM's triton MLA backend. The prefill uses triton flash attention/ CK flash attention varlen, and decode uses triton mla decode kernel. Requires block_size >= 16.
 
 ```bash
@@ -130,6 +133,7 @@ VLLM_ROCM_USE_AITER=1 VLLM_ATTENTION_BACKEND="TRITON_MLA" vllm serve deepseek-ai
 
 
 ### 6. DeepSeek MLA (ROCM_AITER_MLA)
+
 For DeepSeek models, vLLM defaults to ROCM_AITER_MLA on supported hardware.
 
 ```bash
@@ -141,10 +145,11 @@ VLLM_ATTENTION_BACKEND="ROCM_AITER_MLA" vllm serve deepseek-ai/DeepSeek-R1 -tp 8
 VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-R1 -tp 8
 
 # Example 3: Legacy support (block-size 1)
-VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-R1 -tp 8 --block-size 1
-
+VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-R1 \
+  --tp 8 \
+  --block-size 1
+  
 ```
-
 
 ## Selection Priority
 
@@ -152,12 +157,10 @@ When multiple configurations are provided, vLLM follows this strict priority ord
 
 1.  **Explicit Selection**:
     * `VLLM_ATTENTION_BACKEND` takes the highest precedence. If set, other flags are ignored.
-
 2.  **Implicit Flags** (only checked if no explicit backend is set):
     * **Priority 1**: `ROCM_AITER_UNIFIED_ATTN` (if `VLLM_ROCM_USE_AITER=1` AND `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`).
     * **Priority 2**: `ROCM_AITER_FA` (if `VLLM_ROCM_USE_AITER=1` AND hardware is `gfx9`).
     * **Priority 3**: `ROCM_ATTN` (if `VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1`).
-
 3.  **Default**:
     * Falls back to `TRITON_ATTN`.
 
