@@ -183,7 +183,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self,
         model_runner_output: ModelRunnerOutput,
         sampled_token_ids: torch.Tensor,
-        logprobs_tensors: torch.Tensor | None,
+        logprobs_tensors: LogprobsTensors | None,
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
@@ -219,28 +219,29 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         This function blocks until the copy is finished.
         """
+        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         self.async_copy_ready_event.synchronize()
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
-        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            for i in self._invalid_req_indices:
+                valid_sampled_token_ids[i].clear()
+            cu_num_tokens = None
         else:
-            valid_sampled_token_ids = RejectionSampler.parse_output(
+            valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
                 self.vocab_size,
+                self._invalid_req_indices,
+                return_cu_num_tokens=self._logprobs_tensors_cpu is not None,
             )
-        for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         if self._logprobs_tensors_cpu:
-            # NOTE(nick): this will need to be updated to use cu_num_accepted_tokens
-            # for async sched + spec decode + logprobs compatibility.
-            output.logprobs = self._logprobs_tensors_cpu.tolists()
+            output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
         return output
 
 
@@ -475,6 +476,7 @@ class GPUModelRunner(
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -1202,21 +1204,35 @@ class GPUModelRunner(
 
     def _get_encoder_seq_lens(
         self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
-    ) -> np.ndarray | None:
+    ) -> tuple[torch.Tensor | None, np.ndarray | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
-            return None
+            return None, None
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id in scheduled_encoder_inputs:
+        for req_id in num_scheduled_tokens:
             req_index = self.input_batch.req_id_to_index[req_id]
-            encoder_seq_lens[req_index] = self.max_encoder_len
+            req_state = self.requests[req_id]
+            if req_state.mm_features is None:
+                self.encoder_seq_lens.np[req_index] = 0
+                continue
 
-        return encoder_seq_lens
+            # Get the total number of encoder input tokens for running encoder requests
+            # whether encoding is finished or not so that cross-attention knows how
+            # many encoder tokens to attend to.
+            encoder_input_tokens = sum(
+                feature.mm_position.length for feature in req_state.mm_features
+            )
+            self.encoder_seq_lens.np[req_index] = encoder_input_tokens
+
+        self.encoder_seq_lens.copy_to_gpu(num_reqs)
+        encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
+        encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
+
+        return encoder_seq_lens, encoder_seq_lens_cpu
 
     def _prepare_inputs(
         self,
@@ -1482,7 +1498,7 @@ class GPUModelRunner(
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
-        scheduled_encoder_inputs: dict[str, list[int]] | None = None,
+        num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -1547,8 +1563,8 @@ class GPUModelRunner(
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduled_encoder_inputs or {},
+            encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
+                num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs,
             )
@@ -1591,6 +1607,7 @@ class GPUModelRunner(
                 num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                encoder_seq_lens_cpu=encoder_seq_lens_cpu,
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
@@ -2581,28 +2598,24 @@ class GPUModelRunner(
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
-        cu_num_new_tokens: list[int] | None = None
+        cu_num_tokens: list[int] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
                 # No spec decode tokens.
                 valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                # Mask out the sampled tokens that should not be sampled.
+                for i in discard_sampled_tokens_req_indices:
+                    valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
+                    discard_sampled_tokens_req_indices,
+                    return_cu_num_tokens=logprobs_tensors is not None,
                 )
-                if logprobs_tensors:
-                    # Needed for extracting logprobs when spec decoding.
-                    # This must be done prior to discarding sampled tokens.
-                    cu_num_new_tokens = [0]
-                    for toks in valid_sampled_token_ids:
-                        cu_num_new_tokens.append(cu_num_new_tokens[-1] + len(toks))
-            # Mask out the sampled tokens that should not be sampled.
-            for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[int(i)].clear()
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -2656,7 +2669,7 @@ class GPUModelRunner(
             req_state.output_token_ids.extend(sampled_ids)
 
         logprobs_lists = (
-            logprobs_tensors.tolists(cu_num_new_tokens)
+            logprobs_tensors.tolists(cu_num_tokens)
             if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
@@ -2828,7 +2841,7 @@ class GPUModelRunner(
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
-                        scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
