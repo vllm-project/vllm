@@ -12,14 +12,13 @@ from transformers import Siglip2VisionConfig
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.siglip2navit import Siglip2MLP
 
 from .vision import run_dp_sharded_vision_model
 
@@ -51,9 +50,11 @@ class Siglip2VisionEmbeddings(nn.Module):
             positional_embeddings (`torch.Tensor`):
                 Position embeddings of shape (height, width, embed_dim)
             spatial_shapes (`torch.LongTensor`):
-                Spatial shapes of shape (batch_size, 2) to resize the positional embeddings to
+                Spatial shapes of shape (batch_size, 2) to resize the
+                positional embeddings to.
             max_length (`int`):
-                Maximum length of the positional embeddings to pad resized positional embeddings to
+                Maximum length of the positional embeddings to pad resized
+                positional embeddings to.
 
         Returns:
             `torch.Tensor`: Embeddings of shape (batch_size, max_length, embed_dim)
@@ -71,7 +72,8 @@ class Siglip2VisionEmbeddings(nn.Module):
         # (height, width, embed_dim) -> (1, embed_dim, height, width) for interpolation
         positional_embeddings = positional_embeddings.permute(2, 0, 1).unsqueeze(0)
 
-        # Upcast to float32 on CPU because antialias is not supported for bfloat16/float16 on CPU
+        # Upcast to float32 on CPU because antialias is not supported
+        #   for bfloat16/float16 on CPU
         if positional_embeddings.device.type == "cpu":
             positional_embeddings = positional_embeddings.to(torch.float32)
 
@@ -85,8 +87,6 @@ class Siglip2VisionEmbeddings(nn.Module):
                 align_corners=False,
                 antialias=True,
             )
-
-            # (1, dim, target_height, target_width) -> (target_height * target_width, dim)
             resized_embeddings = resized_embeddings.reshape(
                 embed_dim, height * width
             ).transpose(0, 1)
@@ -105,9 +105,11 @@ class Siglip2VisionEmbeddings(nn.Module):
         """
         Args:
             pixel_values (`torch.FloatTensor`):
-                Pixel values of shape (batch_size, max_num_patches, num_channels * patch_size * patch_size)
+                Pixel values of shape
+                (batch_size, max_num_patches, num_channels * patch_size * patch_size)
             spatial_shapes (`list[tuple[int, int]]`):
-                Spatial shapes of shape (batch_size, 2) to resize the positional embeddings to
+                Spatial shapes of shape (batch_size, 2) to resize the positional
+                embeddings to.
         """
 
         # Apply patch embeddings to already patchified pixel values
@@ -185,39 +187,6 @@ class Siglip2Attention(nn.Module):
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
-
-
-class Siglip2MLP(nn.Module):
-    def __init__(
-        self,
-        config: Siglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        use_data_parallel: bool = False,
-    ):
-        super().__init__()
-        self.config = config
-        self.activation_fn = get_act_fn(config.hidden_act)
-        # TODO(Isotr0py): Enable data parallel after we support
-        # disabling TP on parallel linear layer
-        self.fc1 = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        return hidden_states
 
 
 class Siglip2EncoderLayer(nn.Module):

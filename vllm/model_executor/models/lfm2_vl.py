@@ -548,7 +548,7 @@ class Lfm2VLForConditionalGeneration(
             self.vision_tower = Siglip2Model(
                 config=vision_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.vit",
+                prefix=f"{prefix}.vision_tower",
                 use_data_parallel=self.use_data_parallel,
             )
         else:
@@ -606,8 +606,7 @@ class Lfm2VLForConditionalGeneration(
         pixel_values: torch.FloatTensor,
         spatial_shapes: torch.Tensor,
         pixel_attention_mask: torch.Tensor,
-        num_patches: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> list[torch.Tensor]:
         pixel_values = pixel_values.to(
             dtype=self.vision_tower.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
@@ -651,7 +650,6 @@ class Lfm2VLForConditionalGeneration(
             pixel_values,
             spatial_shapes=spatial_shapes,
             pixel_attention_mask=pixel_attention_mask,
-            num_patches=num_patches,
         )
 
         # total num patches with token length per patch
