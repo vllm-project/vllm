@@ -31,7 +31,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -195,12 +194,6 @@ class AsyncLLM(EngineClient):
             self.profiler = None
 
     @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=(
-            "This argument will have no effect. Use `enable_log_requests` instead."
-        ),
-    )
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
@@ -213,7 +206,6 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -327,14 +319,15 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, parent_params)

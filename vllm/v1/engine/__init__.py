@@ -73,6 +73,14 @@ class EngineCoreRequest(
     trace_headers: Mapping[str, str] | None = None
     close_streaming_session: bool | None = None
 
+    @property
+    def params(self) -> SamplingParams | PoolingParams:
+        """Return the processed params (sampling or pooling)."""
+        if self.sampling_params is not None:
+            return self.sampling_params
+        assert self.pooling_params is not None
+        return self.pooling_params
+
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
