@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
+
 import torch
 from torch import nn
 
@@ -84,6 +86,22 @@ class ZeroExpertFusedMoE(FusedMoE):
 
         self.custom_routing_function = custom_routing_function
 
+    @contextmanager
+    def _temporarily_set_attrs(self, **attrs):
+        """
+        Temporarily set attributes using object.__setattr__ and restore them.
+
+        This bypasses nn.Module.__setattr__ to avoid Dynamo tracing issues.
+        """
+        originals = {key: getattr(self, key) for key in attrs}
+        try:
+            for key, value in attrs.items():
+                object.__setattr__(self, key, value)
+            yield
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(self, key, value)
+
     def _compute_zero_expert_result(
         self,
         hidden_states: torch.Tensor,
@@ -121,50 +139,22 @@ class ZeroExpertFusedMoE(FusedMoE):
         Returns:
             Combined output from real experts and zero experts
         """
-        # Temporarily override e_score_correction_bias to use full bias
-        # (including zero experts) for routing computation
-        # Use object.__setattr__ to bypass nn.Module.__setattr__ which causes
-        # Dynamo tracing issues
-        original_bias = self.e_score_correction_bias
+        # Prepare temporary attribute overrides for routing computation
+        temp_attrs = {
+            "custom_routing_function": None,  # Disable for first routing
+            "zero_expert_num": self._actual_zero_expert_num,
+            "zero_expert_type": self._actual_zero_expert_type,
+        }
         if self._router is not None:
-            object.__setattr__(
-                self, "e_score_correction_bias", self._router.e_score_correction_bias
-            )
+            temp_attrs["e_score_correction_bias"] = self._router.e_score_correction_bias
 
-        # Temporarily disable custom_routing_function for the first routing computation
-        # (it requires memoized results which don't exist yet)
-        original_custom_routing_function = self.custom_routing_function
-        object.__setattr__(self, "custom_routing_function", None)
-
-        # Temporarily set zero_expert_num and zero_expert_type to actual values
-        # so that select_experts can compute zero_expert_result
-        # (but we'll set them back to 0 before calling super().forward())
-        original_zero_expert_num = self.zero_expert_num
-        original_zero_expert_type = self.zero_expert_type
-        object.__setattr__(self, "zero_expert_num", self._actual_zero_expert_num)
-        object.__setattr__(self, "zero_expert_type", self._actual_zero_expert_type)
-
-        # Compute routing once (using full logits to include zero experts)
+        # Compute routing with temporary attributes
         # This ensures zero experts can be properly identified in topk_ids
-        # select_experts now returns (topk_weights, topk_ids, zero_expert_result)
-        topk_weights, topk_ids, zero_expert_result = self.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,  # Full logits (includes zero experts)
-        )
-
-        # Restore zero_expert_num and zero_expert_type to 0/None before
-        # calling super().forward(). This ensures torch.ops.vllm.moe_forward
-        # doesn't see zero_expert_num > 0
-        object.__setattr__(self, "zero_expert_num", original_zero_expert_num)
-        object.__setattr__(self, "zero_expert_type", original_zero_expert_type)
-
-        # Restore custom_routing_function for reuse in super().forward()
-        object.__setattr__(
-            self, "custom_routing_function", original_custom_routing_function
-        )
-
-        # Restore original bias
-        object.__setattr__(self, "e_score_correction_bias", original_bias)
+        with self._temporarily_set_attrs(**temp_attrs):
+            topk_weights, topk_ids, zero_expert_result = self.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,  # Full logits (includes zero experts)
+            )
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
@@ -173,11 +163,9 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Slice router_logits for real experts only
         router_logits_sliced = router_logits[..., : self.logical_num_experts]
 
-        # zero_expert_num should already be 0 (from original_zero_expert_num
-        # restored above), so FusedMoE won't handle zero experts
-
         # Compute real expert results (will reuse memoized routing via
         # custom_routing_function)
+        # zero_expert_num is already 0, so FusedMoE won't handle zero experts
         fused_out = super().forward(
             hidden_states=hidden_states,
             router_logits=router_logits_sliced,
@@ -186,7 +174,6 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Combine results
         # Both zero_expert_result and fused_out are computed from the same
         # hidden_states, so they should be on the same device.
-        # No device alignment needed.
         if zero_expert_result is not None:
             fused_out = fused_out + zero_expert_result
 
