@@ -1028,8 +1028,8 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    # Offload to CPU for comparison to avoid extra GPU memory usage
-                    # in CI testing environments with limited GPU memory
+                    # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                    # usage in CI testing environments with limited GPU memory
                     and torch.equal(
                         target_embed_tokens.weight.cpu(),
                         self.model.model.embed_tokens.weight.cpu(),
@@ -1078,8 +1078,8 @@ class EagleProposer:
                 hasattr(target_language_model, "lm_head")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
-                # Offload to CPU for comparison to avoid extra GPU memory usage
-                # in CI testing environments with limited GPU memory
+                # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                # usage in CI testing environments with limited GPU memory
                 and torch.equal(
                     target_language_model.lm_head.weight.cpu(),
                     self.model.lm_head.weight.cpu(),
