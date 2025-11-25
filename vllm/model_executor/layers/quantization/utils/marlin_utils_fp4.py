@@ -198,7 +198,7 @@ def prepare_fp4_layer_for_marlin(
         size_k=part_size_k,
         size_n=part_size_n,
         group_size=group_size,
-        is_a_8bit=is_a_8bit
+        is_a_8bit=is_a_8bit,
     )
 
     if is_nvfp4:
