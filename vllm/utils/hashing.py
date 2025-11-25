@@ -64,7 +64,7 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
 
-def safe_hash(data: bytes, usedforsecurity: bool = False) -> HASH:
+def safe_hash(data: bytes, usedforsecurity: bool = True) -> HASH:
     """Hash for configs, defaulting to md5 but falling back to sha256
     in FIPS constrained environments.
 
