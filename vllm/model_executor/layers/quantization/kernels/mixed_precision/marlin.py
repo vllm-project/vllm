@@ -128,6 +128,8 @@ class MarlinLinearKernel(MPLinearKernel):
                     "input_global_scale",
                     torch.nn.Parameter(input_global_scale, requires_grad=False),
                 )
+            else:
+                layer.input_global_scale = None
             return x
 
         if c.has_g_idx:
@@ -179,6 +181,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin
+        
         return apply_gptq_marlin_linear(
             input=x,
             weight=w_q,
