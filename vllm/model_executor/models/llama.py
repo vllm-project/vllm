@@ -262,7 +262,7 @@ class LlamaAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor,
         )
@@ -354,7 +354,17 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-@support_torch_compile
+def llama_model_invariants(
+    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
+):
+    """Shape invariants for Llama model compilation, those are translated to
+    runtime assertions for unbacked dynamic shapes and are compiled away for
+    backed"""
+    if input_ids is not None:
+        torch._check(positions.size()[0] == input_ids.size()[0])
+
+
+@support_torch_compile(shape_invariants=llama_model_invariants)
 class LlamaModel(nn.Module):
     def __init__(
         self,

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
@@ -13,6 +14,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
 )
@@ -22,7 +24,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
@@ -35,16 +38,15 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
 ):
-    attn_backends: dict[str, AttentionBackend] = {}
+    attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_metadata_builders: list[AttentionMetadataBuilder] = []
     flashinfer_workspace: torch.Tensor | None = None
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         layer_names = kv_cache_group_spec.layer_names
         any_layer_name = next(iter(layer_names))
 
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config, AttentionLayerBase, layer_names
-        )
+        layer_type = cast(type[Any], AttentionLayerBase)
+        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
         attn_backend = attn_layers[any_layer_name].get_attn_backend()
         for layer_name in layer_names:
             attn_backends[layer_name] = attn_backend
@@ -93,6 +95,7 @@ def _reshape_kv_cache(
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        assert isinstance(kv_cache_spec, AttentionSpec)
         for layer_name in kv_cache_group_spec.layer_names:
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
@@ -143,8 +146,9 @@ def build_attn_metadata(
     num_reqs: int,
     num_tokens: int,
     query_start_loc: CpuGpuBuffer,
-    seq_lens: CpuGpuBuffer,
-    num_computed_tokens_cpu: torch.Tensor,
+    seq_lens: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
@@ -152,9 +156,9 @@ def build_attn_metadata(
     query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
     query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
     max_query_len = int(query_start_loc.np[: num_reqs + 1].max())
-    seq_lens_gpu = seq_lens.gpu[:num_reqs]
-    seq_lens_cpu = seq_lens.cpu[:num_reqs]
-    max_seq_len = int(seq_lens.np[:num_reqs].max())
+    seq_lens = seq_lens[:num_reqs]
+    seq_lens_cpu = torch.from_numpy(seq_lens_np)
+    max_seq_len = int(seq_lens_np.max())
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -165,7 +169,7 @@ def build_attn_metadata(
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens_gpu,
+            seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             max_seq_len=max_seq_len,
             num_computed_tokens_cpu=num_computed_tokens_cpu,
