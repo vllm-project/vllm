@@ -1122,7 +1122,9 @@ class EngineArgs:
         vllm_group.add_argument(
             "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
         )
-        vllm_group.add_argument("--attention-config", **vllm_kwargs["attention_config"])
+        vllm_group.add_argument(
+            "--attention-config", "-ac", **vllm_kwargs["attention_config"]
+        )
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
