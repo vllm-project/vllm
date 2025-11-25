@@ -200,76 +200,7 @@ class PriorityRequestQueue(RequestQueue):
             yield heapq.heappop(heap_copy)
 
 
-class SJFRequestQueue(deque[Request], RequestQueue):
-    """A short-job-first queue that supports deque operations."""
-
-    def __init__(self):
-        deque.__init__(self)
-
-    def add_request(self, request: Request) -> None:
-        """Add a request to the queue according to SJF policy."""
-        self.append(request)
-        self._sort_requests()
-
-    def pop_request(self) -> Request:
-        """Pop a request from the queue according to SJF policy."""
-        return self.popleft()
-
-    def peek_request(self) -> Request:
-        """Peek at the next request in the queue without removing it."""
-        if not self:
-            raise IndexError("peek from an empty queue")
-        self._sort_requests()
-        return self[0]
-
-    def prepend_request(self, request: Request) -> None:
-        """Prepend a request to the front of the queue."""
-        self.appendleft(request)
-
-    def prepend_requests(self, requests: RequestQueue) -> None:
-        """Prepend all requests from another queue to the front of this
-        queue."""
-        self.extendleft(reversed(requests))
-
-    def remove_request(self, request: Request) -> None:
-        """Remove a specific request from the queue."""
-        self.remove(request)
-
-    def remove_requests(self, requests: Iterable[Request]) -> None:
-        """Remove multiple specific requests from the queue."""
-        requests_to_remove = set(requests)
-        filtered_requests = [
-            req for req in self if req not in requests_to_remove
-        ]
-        # deque does not support in-place filtering, so we need to clear
-        # and extend
-        self.clear()
-        self.extend(filtered_requests)
-
-    def _sort_requests(self, reverse = False) -> None:
-        key_func = lambda req: WeightedScoreSorter(request_length=len(req.prompt_token_ids), request_arrival_time=req.arrival_time)
-        sorted_list = sorted(self, key=key_func, reverse=reverse)
-        self.clear()
-        self.extend(sorted_list)
-
-    def __bool__(self) -> bool:
-        """Check if queue has any requests."""
-        return len(self) > 0
-
-    def __len__(self) -> int:
-        """Get number of requests in queue."""
-        return super().__len__()
-
-    def __iter__(self) -> Iterator[Request]:
-        """Iterate over the queue according to SJF policy."""
-        return super().__iter__()
-
-    def __reversed__(self) -> Iterator[Request]:
-        """Iterate over the queue in reverse order."""
-        return super().__reversed__()
-
-
-class SJFRequestQueueInHeap(RequestQueue):
+class SJFRequestQueue(RequestQueue):
     """
     A SJF queue that supports heap operations.
  
