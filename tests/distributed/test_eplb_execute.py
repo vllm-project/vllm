@@ -286,15 +286,17 @@ def _test_async_transfer_layer_without_mtp_worker(
         device,
         old_indices,
     )
+    old_indices_cpu = old_indices.cpu()
+    new_indices_cpu = new_indices.cpu()
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
     cuda_stream = torch.cuda.Stream(device=device)
 
     for layer_idx in range(num_layers):
-        is_unchanged, is_received_locally, experts_recv_loc = asyncio.run(
+        is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
-                old_global_expert_indices=old_indices,
-                new_global_expert_indices=new_indices,
+                old_global_expert_indices=old_indices_cpu,
+                new_global_expert_indices=new_indices_cpu,
                 expert_weights=expert_weights,
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
@@ -302,15 +304,14 @@ def _test_async_transfer_layer_without_mtp_worker(
                 cuda_stream=cuda_stream,
             )
         )
-
         cuda_stream.synchronize()
         move_from_buffer(
-            expert_weights=expert_weights[layer_idx],
-            expert_weights_buffer=expert_buffer,
+            weights_group=[expert_weights[layer_idx]],
+            buffers_group=[expert_buffer],
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
-            experts_recv_loc=experts_recv_loc,
-            new_indices=new_indices[layer_idx].tolist(),
+            recv_metadata=recv_metadata,
+            new_indices_group=new_indices_cpu[layer_idx : layer_idx + 1],
             ep_group=ep_group,
         )
 
@@ -426,8 +427,9 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
+@pytest.mark.parametrize("group_layers", [1, 2])
 def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts
+    world_size, num_layers, num_local_experts, num_logical_experts, group_layers
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
@@ -439,6 +441,7 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        max_grouped_layers=group_layers,
     )
 
 

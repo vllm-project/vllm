@@ -31,6 +31,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
@@ -164,20 +165,24 @@ class EplbModelState:
     """
     Whether the async EPLB needs to poll peers for buffer readiness.
     """
-    is_unchanged: list[bool]
+    is_unchanged: np.ndarray
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     The size is same as the num of physical experts in the current layer.
     """
-    is_received_locally: list[bool]
+    is_received_locally: np.ndarray
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     The size is same as the num of physical experts in the current layer.
     """
-    experts_recv_loc: dict[int, int]
+    recv_metadata: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
+    The tuple contains:
+    - recv_primary_mask: np.ndarray, shape (group_size, num_local_experts)
+    - recv_counts: np.ndarray, shape (group_size,)
+    - recv_expert_ids: np.ndarray, shape (group_size, num_local_experts)
+    - recv_dst_rows: np.ndarray, shape (group_size, num_local_experts)
     """
     is_async_enabled: bool
     """
@@ -498,9 +503,9 @@ class EplbState:
             layer_to_transfer=0,
             rebalanced=False,
             pending_global_ready_check=False,
-            is_unchanged=[],
-            is_received_locally=[],
-            experts_recv_loc={},
+            is_unchanged=np.array([]),
+            is_received_locally=np.array([]),
+            recv_metadata=(np.array([]), np.array([]), np.array([]), np.array([])),
             is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
             new_physical_to_logical_map=new_physical_to_logical_map,
@@ -847,8 +852,6 @@ class EplbState:
                         time_end - time_start,
                     )
             else:
-                device = eplb_model_state.physical_to_logical_map.device
-                new_physical = new_physical_to_logical_map.to(device)
                 max_slots = eplb_model_state.logical_to_physical_map.shape[-1]
                 padded_logical = torch.nn.functional.pad(
                     new_logical_to_physical_map,
@@ -859,7 +862,10 @@ class EplbState:
                     eplb_model_state.logical_replica_count.device
                 )
 
-                eplb_model_state.new_physical_to_logical_map = new_physical
+                # Move map to cpu in advance
+                eplb_model_state.new_physical_to_logical_map = (
+                    new_physical_to_logical_map.cpu()
+                )
                 eplb_model_state.new_logical_to_physical_map = padded_logical
                 eplb_model_state.new_logical_replica_count = new_replica
 
@@ -958,17 +964,21 @@ class EplbState:
                 stream = torch.cuda.current_stream(device=device_index)
                 stream.wait_event(model_state.buffer_ready_event)
                 model_state.buffer_ready_event = None
+            weights_group = [
+                model_state.model.expert_weights[model_state.layer_to_transfer]
+            ]
+            buffers_group = [model_state.expert_buffer]
             move_from_buffer(
-                expert_weights=model_state.model.expert_weights[
-                    model_state.layer_to_transfer
-                ],
-                expert_weights_buffer=model_state.expert_buffer,
+                weights_group=weights_group,
+                buffers_group=buffers_group,
                 is_unchanged=model_state.is_unchanged,
                 is_received_locally=model_state.is_received_locally,
-                experts_recv_loc=model_state.experts_recv_loc,
-                new_indices=model_state.new_physical_to_logical_map[
-                    model_state.layer_to_transfer
-                ].tolist(),
+                recv_metadata=model_state.recv_metadata,
+                new_indices_group=model_state.new_physical_to_logical_map[
+                    model_state.layer_to_transfer : model_state.layer_to_transfer + 1
+                ]
+                .cpu()
+                .numpy(),
                 ep_group=ep_group,
             )
             transferred_layer = model_state.layer_to_transfer
