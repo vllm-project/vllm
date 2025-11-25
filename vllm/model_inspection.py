@@ -76,7 +76,12 @@ def _get_module_info(module: nn.Module) -> str:
     ):
         quant_method = getattr(module, "quant_method", None)
         if quant_method is not None:
-            parts.append(f"quant={type(quant_method).__name__}")
+            quant_name = type(quant_method).__name__
+            # For CompressedTensors, show the underlying scheme instead
+            scheme = getattr(module, "scheme", None)
+            if scheme is not None:
+                quant_name = type(scheme).__name__
+            parts.append(f"quant={quant_name}")
 
     if parts:
         return f"{class_name}({', '.join(parts)})"
@@ -222,7 +227,14 @@ def get_model_summary(model: nn.Module) -> dict[str, Any]:
             module, (LinearBase, FusedMoE, VocabParallelEmbedding, ParallelLMHead)
         ):
             quant_method = getattr(module, "quant_method", None)
-            method_name = type(quant_method).__name__ if quant_method else "None"
+            if quant_method is not None:
+                method_name = type(quant_method).__name__
+                # For CompressedTensors, show the underlying scheme
+                scheme = getattr(module, "scheme", None)
+                if scheme is not None:
+                    method_name = type(scheme).__name__
+            else:
+                method_name = "None"
             counts[f"{class_name}[{method_name}]"] += 1
         elif isinstance(module, (Attention, MultiHeadAttention)):
             backend = getattr(module, "backend", None)
