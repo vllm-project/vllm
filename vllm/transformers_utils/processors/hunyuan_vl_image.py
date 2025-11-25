@@ -195,9 +195,9 @@ class HunYuanVLImageProcessor(BaseImageProcessor):
         processed_images = []
         for image in images:
             if do_resize:
-                resized_width, resized_height = smart_resize(
-                    width,
+                resized_height, resized_width = smart_resize(
                     height,
+                    width,
                     factor=patch_size * merge_size,
                     min_pixels=self.min_pixels,
                     max_pixels=self.max_pixels,
