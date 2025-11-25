@@ -812,19 +812,19 @@ def override_envs_for_invariance():
         # "TRITON_MLA",
     ]
     if curr_attn_backend not in supported_backends:
-        warning = (
-            "Forcibly updating attention backend to"
-            f" {supported_backends[0]} for batch_invariant. "
-            f" Supported backends: {supported_backends}."
+        error = (
+            "VLLM batch_invariant mode requires an attention backend in "
+            f"{supported_backends}, but got '{curr_attn_backend}'. "
+            "Please set the 'VLLM_ATTENTION_BACKEND' environment variable "
+            "to one of the supported backends before enabling batch_invariant."
         )
-        logger.warning_once(warning)
-        os.environ["VLLM_ATTENTION_BACKEND"] = supported_backends[0]
+        raise RuntimeError(error)
     if os.environ["VLLM_ATTENTION_BACKEND"] != supported_backends[0]:
         warning = (
             "You are using a decode-invariant form of batch invariance. "
             "This will not be invariant between prefill and decode."
         )
-        logger.warning_once(warning)
+        logger.warning_once(warning, scope="local")
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
