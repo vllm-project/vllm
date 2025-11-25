@@ -164,7 +164,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
         rank = first_lora.rank
-
+        lora_alpha = first_lora.lora_alpha
         assert len(loras) % 3 == 0
         w1_lora_a_lst = []
         w2_lora_a_lst = []
@@ -192,17 +192,19 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         obj = cls(
             module_name,
             rank,
-            [lora.lora_alpha if lora is not None else None for lora in loras],
+            [lora_alpha, lora_alpha, lora_alpha],
             [w1_lora_a, w2_lora_a, w3_lora_a],
             [w1_lora_b, w2_lora_b, w3_lora_b],
-            scaling=[
-                1 if lora is not None else None  # type: ignore
-                for lora in loras
-            ],
         )
         return obj
 
     def optimize(self) -> "PackedLoRALayerWeights":
+        """Optimize the LoRA by merging the scaling into lora_b."""
+        for i in range(len(self.lora_b)):
+            if self.scaling[i] == 1 or self.lora_b[i] is None:  # type: ignore
+                continue
+            self.lora_b[i] *= self.scaling[i]  # type: ignore
+            self.scaling[i] = 1  # type: ignore
         return self
 
     @property

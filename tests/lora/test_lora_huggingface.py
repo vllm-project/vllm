@@ -32,7 +32,7 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:
             expected_lora_modules.append(module)
-
+    expected_lora_modules = set(expected_lora_modules)
     lora_path = get_adapter_absolute_path(lora_name)
 
     # lora loading should work for either absolute path and huggingface id.

@@ -151,16 +151,13 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        for lora in loras.values():
-            lora.optimize()
-
         return cls(lora_model_id, peft_helper.r, loras)
 
     @classmethod
     def from_local_checkpoint(
         cls,
         lora_dir: str,
-        expected_lora_modules: list[str],
+        expected_lora_modules: set[str],
         peft_helper: PEFTHelper,
         *,
         lora_model_id: int | None = None,
@@ -190,10 +187,7 @@ class LoRAModel:
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
-        # new_embeddings_tensor_path = os.path.join(
-        #     lora_dir, "new_embeddings.safetensors"
-        # )
-        # new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
+
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[list[str] | str] = []
 
@@ -201,18 +195,19 @@ class LoRAModel:
             for lora_module in modules.keys():  # noqa
                 if is_base_embeddding_weights(lora_module):
                     continue
-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                # Handle FSDP file format where experts.base_layer is the
+                # Handle PEFT file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
                 if "base_layer" in lora_module:
                     continue
+                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Case for expert lora weights
                 if ".experts" in module_name:
-                    if not any(
-                        module_name.endswith(ele) for ele in expected_lora_modules
-                    ):
+                    expert_idx = module_name.find(".experts")
+                    expert_suffix = module_name[expert_idx + 1 :]
+                    if expert_suffix not in expected_lora_modules:
                         unexpected_modules.append(module_name)
-                elif module_name.split(".")[-1] not in expected_lora_modules:
+
+                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
                     unexpected_modules.append(module_name)
 
             if unexpected_modules:
@@ -751,6 +746,9 @@ class LoRAModelManager:
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
+
+        for lora in lora_model.loras.values():
+            lora.optimize()
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str

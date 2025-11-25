@@ -34,6 +34,7 @@ def test_load_checkpoints(
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:
             expected_lora_modules.append(module)
+    expected_lora_modules = set(expected_lora_modules)
     if lora_name == "baichuan7B":
         peft_helper = PEFTHelper.from_local_dir(
             baichuan_lora_files, max_position_embeddings=4096
@@ -109,7 +110,7 @@ def test_lora_weights_mapping(baichuan_lora_files):
             expected_lora_modules.extend(packed_modules_mapping[module])
         else:
             expected_lora_modules.append(module)
-
+    expected_lora_modules = set(expected_lora_modules)
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
