@@ -461,7 +461,9 @@ def test_video_recovery_failure_logging(monkeypatch):
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             return np.empty((0, height, width, 3), dtype=np.uint8), 0, []
 
-        def mock_seek_failure(cap, frame_indices, recovery_offset):
+        def mock_seek_failure(
+            cap, frame_indices, recovery_offset, existing_frames=None
+        ):
             # Return empty results - no recovery possible
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
