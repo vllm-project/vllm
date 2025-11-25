@@ -88,7 +88,12 @@ def maybe_get_vit_flash_attn_backend(
         if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
-            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+            from vllm.attention.ops.vit_attn_wrappers import (
+                llama4_flash_attn_wrapper_call,
+            )
+
+            flash_attn_varlen_func = llama4_flash_attn_wrapper_call
+            # from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
