@@ -87,8 +87,8 @@ def main():
     parser.add_argument(
         "--atol",
         type=float,
-        default=1e-3,
-        help="Absolute tolerance for correctness verification (default: 1e-3)",
+        default=1e-5,
+        help="Absolute tolerance for correctness verification (default: 1e-5)",
     )
     parser.add_argument(
         "--rtol",
