@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
-from collections.abc import Generator
-from contextlib import contextmanager
 from functools import cache
 from typing import cast, get_args
 
@@ -12,7 +10,6 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import (
     MAMBA_TYPE_TO_BACKEND_MAP,
-    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 from vllm.config.cache import CacheDType
@@ -145,36 +142,3 @@ def _cached_get_mamba_attn_backend(
 
     mamba_attn_backend = selected_backend.get_class()
     return mamba_attn_backend
-
-
-@contextmanager
-def global_force_attn_backend_context_manager(
-    attn_backend: AttentionBackendEnum,
-) -> Generator[None, None, None]:
-    """
-    Temporarily override the attention backend within a context manager,
-    reverting to the original backend upon exiting.
-
-    Arguments:
-
-    * attn_backend: attention backend to force
-
-    Returns:
-
-    * Generator
-    """
-    from vllm.config import get_current_vllm_config
-
-    # Save the current backend from config
-    vllm_config = get_current_vllm_config()
-    original_value = vllm_config.attention_config.backend
-
-    # Override the backend in config
-    vllm_config.attention_config.backend = attn_backend
-
-    # Yield control back to the enclosed code block
-    try:
-        yield
-    finally:
-        # Revert the original backend
-        vllm_config.attention_config.backend = original_value
