@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
-from functools import cache
 from typing import Any
 
 import torch
@@ -785,16 +784,19 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
-@cache
-def vllm_is_batch_invariant():
-    env_key = "VLLM_BATCH_INVARIANT"
-    is_overridden = False
-    val = os.getenv(env_key, "0")
+def _read_vllm_batch_invariant() -> bool:
+    val = os.getenv("VLLM_BATCH_INVARIANT", "0")
     try:
-        is_overridden = int(val) != 0
+        return int(val) != 0
     except ValueError:
-        is_overridden = False
-    return is_overridden
+        return False
+
+
+VLLM_BATCH_INVARIANT: bool = _read_vllm_batch_invariant()
+
+
+def vllm_is_batch_invariant() -> bool:
+    return VLLM_BATCH_INVARIANT
 
 
 def override_envs_for_invariance():
@@ -803,26 +805,26 @@ def override_envs_for_invariance():
         "FLASH_ATTN",  # best supported backend
         "FLASHINFER",
         "FLASH_ATTN_MLA",
-        "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
         # "FLEX_ATTENTION", # IMA issue even if we disable batch invariance
         # "FLASHINFER_MLA", https://github.com/vllm-project/vllm/pull/28967
+        # "TRITON_MLA",
     ]
     if curr_attn_backend not in supported_backends:
-        warning = (
-            "Forcibly updating attention backend to"
-            f" {supported_backends[0]} for batch_invariant. "
-            f" Supported backends: {supported_backends}."
+        error = (
+            "VLLM batch_invariant mode requires an attention backend in "
+            f"{supported_backends}, but got '{curr_attn_backend}'. "
+            "Please set the 'VLLM_ATTENTION_BACKEND' environment variable "
+            "to one of the supported backends before enabling batch_invariant."
         )
-        logger.warning_once(warning)
-        os.environ["VLLM_ATTENTION_BACKEND"] = supported_backends[0]
+        raise RuntimeError(error)
     if os.environ["VLLM_ATTENTION_BACKEND"] != supported_backends[0]:
         warning = (
             "You are using a decode-invariant form of batch invariance. "
             "This will not be invariant between prefill and decode."
         )
-        logger.warning_once(warning)
+        logger.warning_once(warning, scope="local")
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -850,5 +852,6 @@ def init_batch_invariance():
         enable_batch_invariant_mode()
 
         # Disable TF32 for batch invariance - it causes non-deterministic rounding
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.backends.cudnn.conv.fp32_precision = "ieee"
+        torch.backends.cudnn.rnn.fp32_precision = "ieee"

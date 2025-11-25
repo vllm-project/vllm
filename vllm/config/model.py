@@ -32,8 +32,8 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
-    uses_custom_attention_masks,
     uses_mrope,
+    uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
@@ -82,7 +82,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -131,7 +131,8 @@ class ModelConfig:
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
     """Tokenizer mode:\n
-    - "auto" will use the fast tokenizer if available.\n
+    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
     - "custom" will use --tokenizer to select the preregistered tokenizer."""
@@ -147,9 +148,12 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
-    seed: int | None = None
-    """Random seed for reproducibility. Initialized to None in V0, but
-    initialized to 0 in V1."""
+    seed: int = 0
+    """Random seed for reproducibility.
+
+    We must set the global seed because otherwise,
+    different tensor parallel workers would sample different tokens,
+    leading to inconsistent results."""
     hf_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
@@ -239,8 +243,8 @@ class ModelConfig:
     first one."""
     config_format: str | ConfigFormat = "auto"
     """The format of the model config to load:\n
-    - "auto" will try to load the config in hf format if available else it
-    will try to load in mistral format.\n
+    - "auto" will try to load the config in hf format if available after trying
+    to load in mistral format.\n
     - "hf" will load the config in hf format.\n
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
@@ -416,7 +420,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
-        limit_mm_per_prompt: dict[str, int] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -429,23 +433,6 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V1, we use separate processes for workers (unless
-        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
-        # doesn't affect the user process. However, without a consistent seed,
-        # different tensor parallel workers would sample different tokens,
-        # leading to inconsistent results.
-        if self.seed is None:
-            self.seed = 0
-            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
-                logger.warning(
-                    "The global random seed is set to %d. Since "
-                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
-                    "affect the random state of the Python process that "
-                    "launched vLLM.",
-                    self.seed,
-                )
-
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
@@ -599,16 +586,26 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
-                debug_info = {
-                    "architectures": architectures,
-                    "is_generative_model": is_generative_model,
-                    "is_pooling_model": is_pooling_model,
-                }
-                raise AssertionError(
-                    "The model should be a generative or "
-                    "pooling model when task is set to "
-                    f"{self.task!r}. Found: {debug_info}"
-                )
+                # Neither generative nor pooling model - try to convert if possible
+                if is_pooling_task:
+                    runner = "pooling"
+                    convert = _task_to_convert(self.task)
+                    msg_hint = (
+                        "Please replace this option with `--runner pooling "
+                        f"--convert {convert}` to continue using this model "
+                        "as a pooling model."
+                    )
+                else:
+                    debug_info = {
+                        "architectures": architectures,
+                        "is_generative_model": is_generative_model,
+                        "is_pooling_model": is_pooling_model,
+                    }
+                    raise AssertionError(
+                        "The model should be a generative or "
+                        "pooling model when task is set to "
+                        f"{self.task!r}. Found: {debug_info}"
+                    )
 
             self.runner = runner
             self.convert = convert
@@ -1152,12 +1149,6 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
-        if parallel_config.distributed_executor_backend == "external_launcher":
-            assert self.seed is not None, (
-                "Seed must be set when using external launcher backend to "
-                "make sure sampling results are the same across workers."
-            )
-
         total_num_attention_heads = getattr(
             self.hf_text_config, "num_attention_heads", 0
         )
@@ -1626,8 +1617,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_custom_attention_masks(self) -> bool:
-        return uses_custom_attention_masks(self.hf_config)
+    def uses_xdrope_dim(self) -> int:
+        return uses_xdrope_dim(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:

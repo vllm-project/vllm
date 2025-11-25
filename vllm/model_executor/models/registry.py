@@ -157,6 +157,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
+    "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -286,8 +287,16 @@ _MULTIMODAL_MODELS = {
         "GraniteSpeechForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
+    "HunYuanVLForConditionalGeneration": (
+        "hunyuan_vision",
+        "HunYuanVLForConditionalGeneration",
+    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "OpenCUAForConditionalGeneration": (
+        "opencua",
+        "OpenCUAForConditionalGeneration",
+    ),
     "InternS1ForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
