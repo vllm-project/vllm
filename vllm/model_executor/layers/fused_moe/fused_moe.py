@@ -1197,6 +1197,26 @@ def grouped_topk(
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
+    num_experts = scores.size(-1)
+    if num_experts <= num_expert_group or num_experts % num_expert_group != 0:
+        logger.warning(
+            (
+                "Grouped topk is not applied since num_experts (%d) <= "
+                "num_expert_group (%d) or num_experts %% num_expert_group != 0."
+                "Falling back to normal topk computation."
+            ),
+            num_experts,
+            num_expert_group,
+        )
+        # fallback to normal topk computation
+        topk_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
+        topk_weights = scores.gather(1, topk_indices)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
     num_token = scores.size(0)
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
