@@ -151,6 +151,9 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        print("prefix cache enabled", self.enable_caching)
+        print("kv cache config", self.kv_cache_config)
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -202,6 +205,13 @@ class KVCacheManager:
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
             )
+        )
+        print(
+            "num_computed_tokens",
+            request.request_id,
+            request.num_prompt_tokens,
+            request.num_tokens,
+            num_new_computed_tokens,
         )
 
         if self.log_stats:

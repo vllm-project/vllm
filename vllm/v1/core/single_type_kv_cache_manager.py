@@ -156,6 +156,14 @@ class SingleTypeKVCacheManager(ABC):
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
+        print(
+            "cache_blocks",
+            request.request_id,
+            num_cached_blocks,
+            num_full_blocks,
+            self.block_size,
+        )
+
         if num_cached_blocks >= num_full_blocks:
             return
 
@@ -621,6 +629,7 @@ class MambaManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        print("call find_longest_cache_hit mamba", max_length, block_hashes)
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
@@ -631,6 +640,7 @@ class MambaManager(SingleTypeKVCacheManager):
         )
 
         max_num_blocks = max_length // kv_cache_spec.block_size
+        print("max_num_blocks", max_num_blocks)
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
