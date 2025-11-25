@@ -512,7 +512,6 @@ class Lfm2MoeModel(nn.Module):
             if ".conv." in name:
                 name = name.replace(".conv.", ".short_conv.", 1)
 
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
