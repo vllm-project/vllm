@@ -1,0 +1,281 @@
+# =============================================================================
+# vLLM Prefill-Decode Disaggregated Deployment Configuration
+# =============================================================================
+# This configuration file defines the settings for deploying vLLM with
+# Prefill-Decode (PD) disaggregation using Ray for distributed orchestration.
+#
+# Usage: vllm pdjob --config=/path/to/this/config.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# -----------------------------------------------------------------------------
+
+# Timeout in seconds for service startup and health checks
+# If services don't become healthy within this time, the job will fail
+timeout: 3600
+
+# Total number of GPUs available in the Ray cluster
+# This should match the sum of GPUs allocated to prefill and decode workers
+num_gpus: 8
+
+# Number of GPUs per vLLM worker process
+# For tensor parallelism, this should match tensor_parallel_size
+# For data parallelism with TP=1, this is typically 1
+gpus_per_worker: 1
+
+# Working directory for Ray runtime
+# Logs and temporary files will be stored here
+working_dir: /tmp/vllm
+
+# Global environment variables applied to all workers
+# These are passed to Ray's runtime_env
+envs: {}
+
+# -----------------------------------------------------------------------------
+# Scheduler (Proxy Server) Configuration
+# -----------------------------------------------------------------------------
+# The scheduler acts as a load balancer between clients and vLLM instances,
+# routing requests to appropriate prefill or decode workers.
+
+scheduler:
+  # Port for the proxy server to listen on
+  # Clients should connect to this port
+  port: 8021
+  
+  # Backend port for internal communication (used by some proxy implementations)
+  backend_port: 8079
+  
+  # Load balancing policy type
+  # Options: LoadBalance, RoundRobin, ConsistentHash, etc.
+  policy_type: LoadBalance
+  
+  # Weight factor for token-based load balancing
+  # Higher values give more weight to token count in scheduling decisions
+  token_weight: 0.7
+  
+  # Number of GPUs allocated to prefill workers (informational for scheduler)
+  prefill_num_gpus: 8
+  
+  # Number of GPUs allocated to decode workers (informational for scheduler)
+  decode_num_gpus: 8
+  
+  # Data parallelism size for prefill workers
+  prefill_dp: 1
+  
+  # Data parallelism size for decode workers
+  decode_dp: 8
+  
+  # Tensor parallelism size for prefill workers
+  prefill_tp: 8
+  
+  # Tensor parallelism size for decode workers
+  decode_tp: 1
+  
+  # ==========================================================================
+  # REQUIRED: Custom command to start the proxy scheduler
+  # ==========================================================================
+  # The command will be executed by the ProxyServer actor on the Ray head node.
+  #
+  # Available Placeholders (automatically replaced before execution):
+  # -------------------------------------------------------------------------
+  # {PORT}              - The scheduler port defined above
+  #
+  # $PREFILL_HOST_N     - Hostname of prefill service N (N starts from 1)
+  # $PREFILL_PORT_N     - Port of prefill service N
+  # $PREFILL_URL_N      - Full URL of prefill service N (http://host:port)
+  #
+  # $DECODE_HOST_N      - Hostname of decode service N (N starts from 1)
+  # $DECODE_PORT_N      - Port of decode service N
+  # $DECODE_URL_N       - Full URL of decode service N (http://host:port)
+  #
+  # Note: Both $VAR and ${VAR} syntax are supported
+  #
+  # Examples:
+  # -------------------------------------------------------------------------
+  # For toy_proxy_server.py (hosts and ports separately):
+  #   command: "python toy_proxy_server.py --port {PORT} \
+  #             --prefiller-hosts $PREFILL_HOST_1 $PREFILL_HOST_2 \
+  #             --prefiller-ports $PREFILL_PORT_1 $PREFILL_PORT_2 \
+  #             --decoder-hosts $DECODE_HOST_1 $DECODE_HOST_2 \
+  #             --decoder-ports $DECODE_PORT_1 $DECODE_PORT_2"
+  #
+  # For cargo-based proxy (full URLs):
+  #   command: "cargo run --release -- --policy consistent_hash \
+  #             --vllm-pd-disaggregation \
+  #             --prefill $PREFILL_URL_1 --prefill $PREFILL_URL_2 \
+  #             --decode $DECODE_URL_1 --decode $DECODE_URL_2 \
+  #             --host 0.0.0.0 --port {PORT}"
+  # -------------------------------------------------------------------------
+  command: "python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port {PORT} --prefiller-hosts $PREFILL_HOST_1 $PREFILL_HOST_2 --prefiller-ports $PREFILL_PORT_1 $PREFILL_PORT_2 --decoder-hosts $DECODE_HOST_1 $DECODE_HOST_2 --decoder-ports $DECODE_PORT_1 $DECODE_PORT_2"
+
+# -----------------------------------------------------------------------------
+# General Parameters (Shared by Prefill and Decode)
+# -----------------------------------------------------------------------------
+# These parameters are applied to all vLLM instances unless overridden
+# in the prefill or decode sections.
+
+general:
+  params:
+    # Path to the model weights directory or HuggingFace model name
+    model: /apdcephfs_qy2/share_303477892/hunyuan/common/deepseek/DeepSeek-R1-0528-w4a8/checkpoint_packed
+    
+    # Host address for the vLLM server to bind to
+    # 0.0.0.0 allows connections from any network interface
+    host: 0.0.0.0
+    
+    # Port for the vLLM server (use {PORT} placeholder for auto-assignment)
+    # Each worker will get a unique port assigned by Ray
+    port: '{PORT}'
+    
+    # Speculative decoding configuration (JSON string)
+    # Enables MTP (Multi-Token Prediction) for faster decoding
+    speculative_config: '{"num_speculative_tokens": 1, "method": "deepseek_mtp"}'
+    
+    # Model name to use in the API responses
+    # Clients can specify this name when making requests
+    served_model_name: deepseek_r1
+    
+    # Additional CLI arguments passed directly to vllm serve
+    # These are appended to the command line after parsed parameters
+    # Format: space-separated arguments as you would type in terminal
+    _extra_params: --block-size 64 --trust-remote-code --system-prompt-num 2 --enable-auto-tool-choice --tool-call-parser
+      deepseek_v3 -q fp8 --no-enable-prefix-caching --enable-expert-parallel --kv-cache-dtype fp8_e4m3 --disable-log-requests
+
+# -----------------------------------------------------------------------------
+# Prefill Worker Configuration
+# -----------------------------------------------------------------------------
+# Prefill workers handle the initial processing of input tokens.
+# They are compute-intensive and benefit from high tensor parallelism.
+
+prefill:
+  # Environment variables specific to prefill workers
+  envs:
+    # Attention backend to use (FLASHMLA for DeepSeek models)
+    VLLM_ATTENTION_BACKEND: FLASHMLA
+    # Enable MLA sequence parallelism optimization
+    VLLM_ENABLE_MLA_SP: '1'
+  
+  # Total GPUs allocated to all prefill replicas combined
+  # Must be: num_gpus = replicas * tensor_parallel_size * data_parallel_size
+  num_gpus: 8
+  
+  # Number of prefill worker replicas
+  # Each replica is an independent vLLM instance
+  replicas: 1
+  
+  # vLLM serve parameters specific to prefill workers
+  params:
+    # Disable CUDA graphs for more predictable memory usage during prefill
+    enforce_eager: true
+    
+    # Tensor parallelism size - splits model across GPUs
+    # Higher TP reduces memory per GPU but increases communication overhead
+    tensor_parallel_size: 8
+    
+    # Data parallelism size - runs multiple model copies
+    # Each copy processes different requests independently
+    data_parallel_size: 1
+    
+    # Fraction of GPU memory to use for model and KV cache
+    # Leave headroom (0.85) to avoid OOM errors
+    gpu_memory_utilization: 0.85
+    
+    # Maximum concurrent sequences (batch size)
+    # Lower for prefill to ensure fast processing of each request
+    max_num_seqs: 1
+    
+    # Maximum total sequence length (input + output tokens)
+    max_model_len: 65536
+    
+    # Maximum input prompt length
+    max_prompt_len: 32768
+    
+    # Enable chunked prefill for long sequences
+    # Splits long prefills into smaller chunks to reduce memory spikes
+    enable_chunked_prefill: true
+    
+    # KV Transfer Configuration (JSON string)
+    # Defines how KV cache is transferred between prefill and decode workers
+    # -------------------------------------------------------------------------
+    # kv_connector: Connector type (NixlConnector for NIXL-based transfer)
+    # kv_role: Worker role (kv_producer for prefill, kv_consumer for decode)
+    # kv_buffer_size: Buffer size in bytes for KV cache transfer
+    # kv_ip: IP address for KV transfer (use {KV_IP} for auto-detection)
+    # kv_connector_extra_config: Additional connector-specific settings
+    #   - store_timeout: Timeout for KV store operations
+    #   - proxy: Address of the KV transfer proxy
+    #   - http_port: HTTP port for health checks (use {PORT})
+    #   - node_name: Unique node identifier (use {NODE_NAME})
+    # -------------------------------------------------------------------------
+    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"30.221.162.206:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
+    
+    # Maximum tokens to process in a single prefill batch
+    max_num_batched_tokens: 8192
+    
+    # Distributed execution backend
+    # mp: multiprocessing (recommended for single-node)
+    # ray: Ray-based distribution (for multi-node)
+    distributed_executor_backend: mp
+    
+    # Additional CLI arguments specific to prefill workers
+    _extra_params: ''
+
+# -----------------------------------------------------------------------------
+# Decode Worker Configuration
+# -----------------------------------------------------------------------------
+# Decode workers handle the token generation phase.
+# They are memory-bandwidth intensive and benefit from data parallelism.
+
+decode:
+  # Environment variables specific to decode workers
+  envs:
+    # Attention backend to use
+    VLLM_ATTENTION_BACKEND: FLASHMLA
+    # Enable CPU-GPU overlap for better throughput
+    VLLM_CPU_GPU_OVERLAP: '1'
+    # Enable QKV merge optimization for MLA
+    VLLM_ENABLE_MLA_QKV_MERGE: '1'
+  
+  # Total GPUs allocated to all decode replicas combined
+  num_gpus: 8
+  
+  # Number of decode worker replicas
+  replicas: 1
+  
+  # vLLM serve parameters specific to decode workers
+  params:
+    # Tensor parallelism size for decode
+    # Lower TP for decode allows more data parallelism
+    tensor_parallel_size: 2
+    
+    # Data parallelism size for decode
+    # Higher DP enables processing more concurrent requests
+    data_parallel_size: 4
+    
+    # GPU memory utilization
+    gpu_memory_utilization: 0.85
+    
+    # Maximum concurrent sequences
+    # Higher for decode to maximize throughput
+    max_num_seqs: 32
+    
+    # Maximum sequence length
+    max_model_len: 65536
+    
+    # Maximum prompt length
+    max_prompt_len: 32768
+    
+    # KV Transfer Configuration for decode workers
+    # Note: kv_role is set to "kv_consumer" to receive KV cache from prefill
+    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"30.221.162.206:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
+    
+    # Maximum tokens per batch for decode
+    # Lower than prefill since decode is memory-bound
+    max_num_batched_tokens: 64
+    
+    # Distributed execution backend
+    distributed_executor_backend: mp
+    
+    # Additional CLI arguments specific to decode workers
+    _extra_params: ''
