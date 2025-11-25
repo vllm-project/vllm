@@ -1365,7 +1365,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 200 8030
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60
@@ -1374,4 +1374,4 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.25 200 8040
+  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.25 1319 8040
