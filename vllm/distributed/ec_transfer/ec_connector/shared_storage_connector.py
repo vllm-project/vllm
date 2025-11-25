@@ -135,6 +135,21 @@ class ECSharedStorageConnector(ECConnectorBase):
             result.append(self._found_match_for_mm_data(feature.identifier))
         return result
 
+    def has_cache_item(
+        self,
+        identifier: str,
+    ) -> bool:
+        """
+        Check if cache exist externally for the media
+
+        Args:
+            identifier (str): the identifier of the media.
+
+        Returns:
+            Bool indicate that media exists in cache or not
+        """
+        return self._found_match_for_mm_data(identifier)
+
     def update_state_after_alloc(
         self,
         request: "Request",
