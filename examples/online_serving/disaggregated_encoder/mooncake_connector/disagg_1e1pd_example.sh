@@ -6,7 +6,7 @@ declare -a PIDS=()
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
-MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
+MODEL="${MODEL:-/models/Qwen2.5-VL-3B-Instruct}"
 LOG_PATH="${LOG_PATH:-./logs}"
 mkdir -p $LOG_PATH
 
@@ -14,8 +14,8 @@ ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
 
-GPU_E="${GPU_E:-0}"
-GPU_PD="${GPU_PD:-1}"
+GPU_E="${GPU_E:-6}"
+GPU_PD="${GPU_PD:-7}"
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in benchmark
@@ -105,25 +105,6 @@ PIDS+=($!)
 
 export MC_MS_AUTO_DISC=0
 
-sed -e "s/\${MOONCAKE_MASTER_IP}/$MOONCAKE_MASTER_IP/"\
-    -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
-    -e "s/\${MOONCAKE_GLOBAL_SEGMENT_SIZE}/$MOONCAKE_GLOBAL_SEGMENT_SIZE/"\
-    -e "s/\${MOONCAKE_LOCAL_BUFFER_SIZE}/$MOONCAKE_LOCAL_BUFFER_SIZE/"\
-    -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
-    -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
-    -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
-    -e "s/\${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}/$MOONCAKE_FAST_TRANSFER_BUFFER_SIZE/"\
-    mooncake_config/producer_template.json > producer.json
-sed -e "s/\${MOONCAKE_MASTER_IP}/$MOONCAKE_MASTER_IP/"\
-    -e "s/\${MOONCAKE_STORE_INSTANCE_IP}/$MOONCAKE_STORE_INSTANCE_IP/"\
-    -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
-    -e "s/\${MOONCAKE_LOCAL_BUFFER_SIZE}/$MOONCAKE_LOCAL_BUFFER_SIZE/"\
-    -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
-    -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
-    -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
-    -e "s/\${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}/$MOONCAKE_FAST_TRANSFER_BUFFER_SIZE/"\
-    mooncake_config/consumer_template.json > consumer.json
-
 ###############################################################################
 # Encoder worker
 ###############################################################################
@@ -135,14 +116,22 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 4096 \
     --max-num-seqs 128 \
-    --ec-transfer-config '{
-        "ec_connector":"ECMooncakeStorageConnector",
-        "ec_role":"ec_producer",
-        "ec_connector_extra_config": {
-            "ec_mooncake_config_file_path":"'${SCRIPT_DIR}'/producer.json",
-            "ec_max_num_scheduled_tokens": "1000000000000000000"
+    --ec-transfer-config "{
+        \"ec_connector\": \"ECMooncakeStorageConnector\",
+        \"ec_role\": \"ec_producer\",
+        \"ec_connector_extra_config\": {
+            \"local_hostname\": \"$MOONCAKE_MASTER_IP\",
+            \"metadata_server\": \"http://localhost:$MOONCAKE_METADATA_PORT/metadata\",
+            \"global_segment_size\": $MOONCAKE_GLOBAL_SEGMENT_SIZE,
+            \"local_buffer_size\": $MOONCAKE_LOCAL_BUFFER_SIZE,
+            \"protocol\": \"tcp\",
+            \"device_name\": \"\",
+            \"master_server_address\": \"localhost:$MOONCAKE_MASTER_PORT\",
+            \"replica_num\": $MOONCAKE_REPLICA_NUM,
+            \"fast_transfer\": $MOONCAKE_FAST_TRANSFER,
+            \"fast_transfer_buffer_size\": $MOONCAKE_FAST_TRANSFER_BUFFER_SIZE
         }
-    }' \
+    }" \
     >"${ENC_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -156,13 +145,22 @@ CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MOD
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs 128 \
-    --ec-transfer-config '{
-        "ec_connector":"ECMooncakeStorageConnector",
-        "ec_role":"ec_consumer",
-        "ec_connector_extra_config": {
-            "ec_mooncake_config_file_path":"'${SCRIPT_DIR}'/consumer.json"
+    --ec-transfer-config "{
+        \"ec_connector\": \"ECMooncakeStorageConnector\",
+        \"ec_role\": \"ec_consumer\",
+        \"ec_connector_extra_config\": {
+            \"local_hostname\": \"$MOONCAKE_STORE_INSTANCE_IP\",
+            \"metadata_server\": \"http://localhost:$MOONCAKE_METADATA_PORT/metadata\",
+            \"global_segment_size\": 0,
+            \"local_buffer_size\": $MOONCAKE_LOCAL_BUFFER_SIZE,
+            \"protocol\": \"tcp\",
+            \"device_name\": \"\",
+            \"master_server_address\": \"localhost:$MOONCAKE_MASTER_PORT\",
+            \"replica_num\": $MOONCAKE_REPLICA_NUM,
+            \"fast_transfer\": $MOONCAKE_FAST_TRANSFER,
+            \"fast_transfer_buffer_size\": $MOONCAKE_FAST_TRANSFER_BUFFER_SIZE
         }
-    }' \
+    }" \
     >"${PD_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -190,14 +188,20 @@ echo "All services are up!"
 ###############################################################################
 # Benchmark
 vllm bench serve \
-  --model               $MODEL \
-  --backend             openai-chat \
-  --endpoint            /v1/chat/completions \
-  --dataset-name        hf \
-  --dataset-path        lmarena-ai/VisionArena-Chat \
-  --seed                0 \
-  --num-prompts         $NUM_PROMPTS \
-  --port                $PROXY_PORT
+    --model $MODEL \
+    --dataset-name random-mm \
+    --num-prompts 100 \
+    --random-input-len 150 \
+    --random-output-len 100 \
+    --random-range-ratio 0.0 \
+    --random-mm-base-items-per-request 1 \
+    --random-mm-num-mm-items-range-ratio 0 \
+    --random-mm-limit-mm-per-prompt '{"image":2,"video":0}' \
+    --random-mm-bucket-config '{(700, 728, 1): 1.0}' \
+    --ignore-eos \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --port $PROXY_PORT
 
 PIDS+=($!)
 ###############################################################################

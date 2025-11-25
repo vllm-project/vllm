@@ -66,12 +66,6 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         assert isinstance(metadata, ECMooncakeStorageConnectorMetadata)
         assert encoder_cache is not None
         if not metadata:
-            logger.warning(
-                (
-                    "In connector.start_load_caches, ",
-                    "but the connector metadata is None",
-                )
-            )
             return
 
         mm_hashes = [
@@ -79,7 +73,8 @@ class ECMooncakeStorageConnector(ECConnectorBase):
             for mm_data in metadata.mm_datas
             if mm_data.mm_hash not in encoder_cache
         ]
-        tensors = self.store.batch_get(mm_hashes)
+        device = self._vllm_config.device_config.device
+        tensors = self.store.batch_get(mm_hashes, device)
 
         for mm_hash, ec_cache in zip(mm_hashes, tensors):
             encoder_cache[mm_hash] = ec_cache

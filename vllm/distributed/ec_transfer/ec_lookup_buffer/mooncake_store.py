@@ -14,6 +14,7 @@ import os
 import threading
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import regex as re
@@ -60,13 +61,11 @@ class MooncakeStoreConfig:
     fast_transfer_buffer_size: int
 
     @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
+    def from_config(config: dict[str, Any]) -> "MooncakeStoreConfig":
         """Load the config from a JSON file."""
-        with open(file_path) as fin:
-            config = json.load(fin)
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
-            metadata_server=config.get("metadata_server"),
+            local_hostname=config.get("local_hostname", "localhost"),
+            metadata_server=config.get("metadata_server", ""),
             global_segment_size=config.get(
                 "global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE
             ),
@@ -75,7 +74,7 @@ class MooncakeStoreConfig:
             ),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=config.get("master_server_address", ""),
             storage_root_dir=config.get("storage_root_dir", ""),
             transfer_timeout=int(config.get("transfer_timeout", 1)),
             replica_num=int(config.get("replica_num", 1)),
@@ -124,11 +123,8 @@ class ECMooncakeStore:
                 raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
             self.store = MooncakeDistributedStore()
-            self.config = MooncakeStoreConfig.from_file(
-                vllm_config.ec_transfer_config.ec_connector_extra_config[
-                    "ec_mooncake_config_file_path"
-                ]
-            )
+            self.config = MooncakeStoreConfig.from_config(
+                vllm_config.ec_transfer_config.ec_connector_extra_config)
             logger.debug("Mooncake Configuration loaded successfully.")
 
             # Check if storage_root_dir exists and set environment variable
@@ -230,13 +226,13 @@ class ECMooncakeStore:
             "Single get is not supported. Use batch_get([key]) instead."
         )
 
-    def batch_get(self, keys: list[str]) -> list[torch.Tensor | None]:
+    def batch_get(self, keys: list[str], device) -> list[torch.Tensor | None]:
         if self.config.fast_transfer:
-            return self._zero_copy_batch_get(keys)
+            return self._zero_copy_batch_get(keys, device)
 
-        return self._batch_get(keys)
+        return self._batch_get(keys, device)
 
-    def _zero_copy_batch_get(self, keys: list[str]) -> list[torch.Tensor | None]:
+    def _zero_copy_batch_get(self, keys: list[str], device) -> list[torch.Tensor | None]:
         if not keys:
             return []
 
@@ -288,13 +284,13 @@ class ECMooncakeStore:
             exist_ids, buffer_addrs, buffer_dtypes, buffer_shapes, read_bytes
         ):
             if read_byte > 0:
-                results[id] = self.tensor_pool.load_tensor(addr, dtype, shape, "cuda")
+                results[id] = self.tensor_pool.load_tensor(addr, dtype, shape, device)
 
             self.tensor_pool.free(addr)
 
         return results
 
-    def _batch_get(self, keys: list[str]) -> list[torch.Tensor | None]:
+    def _batch_get(self, keys: list[str], device) -> list[torch.Tensor | None]:
         try:
             bytes_list = self.store.get_batch(keys)
         except Exception as e:
@@ -318,8 +314,8 @@ class ECMooncakeStore:
             if meta["original_dtype"].split(".")[-1] != meta["serialized_dtype"].split(".")[-1]:
                 tensor_loaded = tensor_loaded.view(
                     getattr(torch, meta["original_dtype"].split(".")[-1])
-                )  # e.g., 'torch.bfloat16' -> torch.bfloat16
-            tensors.append(tensor_loaded.cuda())
+                )
+            tensors.append(tensor_loaded.to(device))
 
         return tensors
 
