@@ -331,9 +331,9 @@ class CompilationConfig:
     We use string to avoid serialization issues when using compilation in a
     distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation mode is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph). The backend can not be custom for compilation
-    mode 3, i.e. the backend must be either eager or inductor. Furthermore,
+    compilation mode is 3, the backend supports both whole graph and piecewise 
+    compilation, available backends include eager, inductor, and custom backends, 
+    the latter of which can be defined via `get_compile_backend`. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
@@ -768,7 +768,7 @@ class CompilationConfig:
             self.backend = "inductor" if self.use_inductor else "eager"
 
         if self.backend == "":
-            self.backend = current_platform.simple_compile_backend
+            self.backend = current_platform.get_compile_backend()
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
@@ -800,9 +800,7 @@ class CompilationConfig:
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
+            logger.info("Using OOT custom backend for compilation.")
 
         from vllm.compilation.backends import VllmBackend
 
