@@ -197,12 +197,110 @@ def rebalance_experts_hierarchical(
     return pphy2log, pphyrank, logcnt
 
 
+def preserve_intragpu_slots(
+    phy2log: torch.Tensor,
+    phyrank: torch.Tensor,
+    num_gpus: int,
+    old_global_expert_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Reorder the new mapping per GPU so that experts that remain on the same GPU
+    keep their previous slot positions when possible. Incoming experts to that GPU
+    fill any remaining available slots. This is applied only when the number of GPUs
+    is unchanged and the slots per GPU remain the same between the old and new mappings.
+    """
+    device = phy2log.device
+    new_num_phy = phy2log.shape[1]
+    old_num_phy = old_global_expert_indices.shape[1]
+    if (
+        num_gpus <= 0
+        or new_num_phy % num_gpus != 0
+        or old_num_phy % num_gpus != 0
+        or (new_num_phy // num_gpus) != (old_num_phy // num_gpus)
+    ):
+        return phy2log, phyrank
+
+    # Move to CPU and convert to NumPy for processing
+    phy2log_np = phy2log.cpu().numpy()
+    phyrank_np = phyrank.cpu().numpy()
+    old_np = old_global_expert_indices.cpu().numpy()
+
+    slots_per_gpu = new_num_phy // num_gpus
+    num_layers = phy2log_np.shape[0]
+
+    post_phy2log_np = phy2log_np.copy()
+    post_phyrank_np = phyrank_np.copy()
+
+    for gpu_idx in range(num_gpus):
+        start = gpu_idx * slots_per_gpu
+        end = start + slots_per_gpu
+        # Segments across all layers for this GPU
+        old_seg = old_np[:, start:end]  # [L, S]
+        new_seg = phy2log_np[:, start:end]  # [L, S]
+        new_rnk = phyrank_np[:, start:end]  # [L, S]
+
+        used_new_indices = np.zeros((num_layers, slots_per_gpu), dtype=bool)
+        preserved_positions = np.zeros((num_layers, slots_per_gpu), dtype=bool)
+
+        # First pass: preserve same-logical experts in their previous slots
+        for pos in range(slots_per_gpu):
+            # matches: [L, S], True where new_seg has the same logical value
+            # as the old slot 'pos' and not used
+            matches = (new_seg == old_seg[:, pos][:, None]) & (~used_new_indices)
+            has_any = matches.any(axis=1)
+            if np.any(has_any):
+                first_idx = np.argmax(matches, axis=1)
+                rows = np.nonzero(has_any)[0]
+                cols = first_idx[rows]
+                post_phy2log_np[rows, start + pos] = new_seg[rows, cols]
+                post_phyrank_np[rows, start + pos] = new_rnk[rows, cols]
+                used_new_indices[rows, cols] = True
+                preserved_positions[rows, pos] = True
+
+        # Second pass: fill remaining slots with remaining new experts
+        remaining_mask = ~used_new_indices  # [L, S]
+        fill_mask = ~preserved_positions  # [L, S]
+        if remaining_mask.any() and fill_mask.any():
+            idx_base = np.broadcast_to(
+                np.arange(slots_per_gpu), (num_layers, slots_per_gpu)
+            )
+            large = slots_per_gpu + 1
+            remaining_priority = np.where(remaining_mask, idx_base, large)
+            fill_priority = np.where(fill_mask, idx_base, large)
+            # Sort to get per-row ordered indices of True positions
+            remaining_indices = np.argsort(remaining_priority, axis=1)
+            fill_indices = np.argsort(fill_priority, axis=1)
+            # How many to fill per row
+            remaining_counts = remaining_mask.sum(axis=1)
+            fill_counts = fill_mask.sum(axis=1)
+            take_counts = np.minimum(remaining_counts, fill_counts)
+            # Assign per row
+            for layer_idx in range(num_layers):
+                k = int(take_counts[layer_idx])
+                if k <= 0:
+                    continue
+                src_pos = remaining_indices[layer_idx, :k]
+                dst_pos = fill_indices[layer_idx, :k]
+                post_phy2log_np[layer_idx, start + dst_pos] = new_seg[
+                    layer_idx, src_pos
+                ]
+                post_phyrank_np[layer_idx, start + dst_pos] = new_rnk[
+                    layer_idx, src_pos
+                ]
+
+    # Convert back to torch and move to original device
+    post_phy2log = torch.from_numpy(post_phy2log_np).to(device)
+    post_phyrank = torch.from_numpy(post_phyrank_np).to(device)
+    return post_phy2log, post_phyrank
+
+
 def rebalance_experts(
     weight: torch.Tensor,
     num_replicas: int,
     num_groups: int,
     num_nodes: int,
     num_gpus: int,
+    old_global_expert_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
@@ -239,6 +337,14 @@ def rebalance_experts(
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
             weight, num_replicas, 1, 1, num_gpus
         )
+
+    # Optional postprocessing to preserve slots for experts moving within the same GPU
+    # Only apply when the number of GPUs and slots per GPU remain unchanged.
+    # Helps to avoid unnecessary weight copying when experts move within the same GPU.
+    if old_global_expert_indices is not None:
+        phy2log, phyrank = preserve_intragpu_slots(
+            phy2log, phyrank, num_gpus, old_global_expert_indices
+        )
     num_redundant_experts = num_replicas - num_logical_experts
     maxlogcnt = num_redundant_experts + 1
     log2phy: torch.Tensor = torch.full(
@@ -257,4 +363,4 @@ def rebalance_experts(
     return phy2log, log2phy, logcnt
 
 
-__all__ = ["rebalance_experts"]
+__all__ = ["rebalance_experts", "preserve_intragpu_slots"]
