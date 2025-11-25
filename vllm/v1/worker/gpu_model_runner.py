@@ -2702,7 +2702,10 @@ class GPUModelRunner(
         use_cascade_attn: bool,
         allow_microbatching: bool = True,
         force_eager: bool = False,
+        # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
+        # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
+        force_has_lora: bool | None = None,
     ) -> tuple[
         CUDAGraphMode, BatchDescriptor, UBatchSlices | None, torch.Tensor | None
     ]:
@@ -2716,10 +2719,16 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+        has_lora = (
+            len(self.input_batch.lora_id_to_lora_request) > 0
+            if force_has_lora is None
+            else force_has_lora
+        )
+
         dispatch_cudagraph = (
             lambda num_tokens: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
-                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                has_lora=has_lora,
                 use_cascade_attn=use_cascade_attn,
                 uniform_decode=uniform_decode,
             )
@@ -3887,6 +3896,10 @@ class GPUModelRunner(
                 # num_tokens == num_reqs which looks like a uniform decode batch to the
                 # dispatcher; but we actually want to capture a piecewise cudagraph
                 force_uniform_decode=uniform_decode,
+                # `force_has_lora` is used for cudagraph capture; because LoRA is
+                # activated later in the context manager, but we need to know the
+                # LoRA state when determining the batch descriptor for capture
+                force_has_lora=activate_lora,
             )
         )
 
