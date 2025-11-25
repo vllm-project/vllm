@@ -749,7 +749,7 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
-    seq_threshold_3D,
+    seq_threshold_3D=None,
     num_par_softmax_segments=None,
     softmax_segm_output=None,
     softmax_segm_max=None,
@@ -799,13 +799,13 @@ def unified_attention(
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # Launch the 2D kernel if
-    # 1. The batch includes at least one prefill request, or
-    # 2. The number of sequences exceeds the configured threshold, or
-    # 3. No intermediate tiled softmax buffers for the 3D kernel have been allocated
+    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+    # 2. The batch includes at least one prefill request, or
+    # 3. The number of sequences exceeds the configured threshold
     if (
-        max_seqlen_q > 1
+        num_par_softmax_segments is None
+        or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
-        or num_par_softmax_segments is None
     ):
         kernel_unified_attention_2d[
             (
