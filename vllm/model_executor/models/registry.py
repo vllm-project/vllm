@@ -287,6 +287,10 @@ _MULTIMODAL_MODELS = {
         "GraniteSpeechForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
+    "HunYuanVLForConditionalGeneration": (
+        "hunyuan_vision",
+        "HunYuanVLForConditionalGeneration",
+    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "OpenCUAForConditionalGeneration": (

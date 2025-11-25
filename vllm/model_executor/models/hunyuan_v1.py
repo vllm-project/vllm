@@ -576,7 +576,16 @@ class HunYuanDecoderLayer(nn.Module):
         return hidden_states, residual, ori_kv_states
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (xd, seq_len) if xdrope is enabled for hunyuan-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class HunYuanModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
