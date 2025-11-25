@@ -562,10 +562,12 @@ class LoRAModelManager:
         target_wrapper = self.punica_wrapper
 
         if self.supports_mm_lora:
-            if mapping.type == LoRAMappingType.TOWER:
+            if mapping.type == LoRAMappingType.TOWER and self.mm_mapping.tower_model:
                 target_name = self.mm_mapping.tower_model[0]
                 target_wrapper = self.mm_punica_wrapper_mapping[target_name]
-            elif mapping.type == LoRAMappingType.CONNECTOR:
+            elif (
+                mapping.type == LoRAMappingType.CONNECTOR and self.mm_mapping.connector
+            ):
                 target_name = self.mm_mapping.connector[0]
                 target_wrapper = self.mm_punica_wrapper_mapping[target_name]
             else:

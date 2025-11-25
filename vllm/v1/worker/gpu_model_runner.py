@@ -2075,7 +2075,9 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                num_tokens = self.info.get_num_mm_encoder_tokens(pos_info.length)
+                num_tokens = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
+                    pos_info.length
+                )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
 
@@ -2095,16 +2097,18 @@ class GPUModelRunner(
             if hasattr(self.info, "get_num_mm_connector_tokens"):
                 num_post_op_tokens = []
                 for _, pos_info in mm_hashes_pos:
-                    mm_token_count = self.info.get_num_mm_encoder_tokens(
+                    mm_token_count = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                         pos_info.length
                     )
-                    post_op_count = self.info.get_num_mm_connector_tokens(
+                    post_op_count = self.info.get_num_mm_connector_tokens(  # type: ignore[attr-defined]
                         mm_token_count
                     )
                     num_post_op_tokens.append(post_op_count)
 
+                last_mapping = self.lora_manager._adapter_manager._last_mapping
+                assert last_mapping is not None
                 lora_ids = np.array(
-                    self.lora_manager._adapter_manager._last_mapping.prompt_mapping,
+                    last_mapping.prompt_mapping,
                     dtype=np.int32,
                 )
                 post_op_counts_np = np.array(num_post_op_tokens, dtype=np.int32)
@@ -2112,8 +2116,8 @@ class GPUModelRunner(
 
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(new_token_indices.tolist()),
-                    prompt_mapping=self.lora_manager._adapter_manager._last_mapping.prompt_mapping,
-                    is_prefill=self.lora_manager._adapter_manager._last_mapping.is_prefill,
+                    prompt_mapping=last_mapping.prompt_mapping,
+                    is_prefill=last_mapping.is_prefill,
                     type=LoRAMappingType.CONNECTOR,
                 )
 
