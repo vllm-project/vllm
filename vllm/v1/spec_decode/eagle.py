@@ -40,6 +40,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -65,6 +66,7 @@ class EagleProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
@@ -83,6 +85,9 @@ class EagleProposer:
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config()
+        )
 
         self.use_cuda_graph = False
 
@@ -268,15 +273,24 @@ class EagleProposer:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
+        )
+
         cudagraph_runtime_mode = CUDAGraphMode.NONE
         if (
             self.use_cuda_graph
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            and num_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            num_input_tokens = num_tokens
+            num_input_tokens = num_tokens_dp_padded
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -300,6 +314,7 @@ class EagleProposer:
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
@@ -362,15 +377,23 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
+        batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=batch_size,
+            num_tokens_padded=batch_size,
+        )
+
         if (
             self.use_cuda_graph
-            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+            and batch_size_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            input_batch_size = batch_size
+            input_batch_size = batch_size_dp_padded
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        if batch_size_across_dp is not None:
+            batch_size_across_dp[self.dp_rank] = input_batch_size
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -471,6 +494,7 @@ class EagleProposer:
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
+                num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
@@ -1113,36 +1137,56 @@ class EagleProposer:
         self,
         num_tokens: int,
         use_cudagraphs=True,
+        is_graph_capturing=False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if (
-            cudagraphs_enabled
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=(
-                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
-            ),
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
+        for fwd_idx in range(
+            self.num_speculative_tokens if not is_graph_capturing else 1
         ):
-            if self.supports_mm_inputs:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
+            if fwd_idx <= 1:
+                num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    num_tokens_padded=num_tokens,
+                )
+                if (
+                    cudagraphs_enabled
+                    and num_tokens_dp_padded
+                    <= self.compilation_config.max_cudagraph_capture_size
+                ):
+                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                        num_tokens_dp_padded
+                    )
+                else:
+                    num_input_tokens = num_tokens_dp_padded
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-            self.model(
-                input_ids=input_ids,
-                positions=self._get_positions(num_tokens),
-                hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=inputs_embeds,
-            )
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+                if cudagraphs_enabled
+                else CUDAGraphMode.NONE,
+            ):
+                if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                else:
+                    input_ids = self.input_ids[:num_input_tokens]
+                    inputs_embeds = None
+
+                self.model(
+                    input_ids=input_ids,
+                    positions=self._get_positions(num_input_tokens),
+                    hidden_states=self.hidden_states[:num_input_tokens],
+                    inputs_embeds=inputs_embeds,
+                )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
@@ -1169,6 +1213,22 @@ class EagleProposer:
         )
         return builder
 
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        return use_aux_hidden_state
+
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all eagle layers belong to the same KVCacheGroup.
@@ -1191,6 +1251,28 @@ class EagleProposer:
             )
             == 1
         ), "All eagle layers should belong to the same kv cache group"
+
+    def _pad_batch_across_dp(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+    ) -> tuple[int, torch.Tensor]:
+        # TODO(Flechman): support DBO ubatching
+        ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=False,
+            allow_dp_padding=self.use_cuda_graph,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=None,
+            num_scheduled_tokens_per_request=None,
+        )
+        assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
+
+        num_tokens_dp_padded = num_tokens_padded
+        if num_toks_across_dp is not None:
+            num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
+        return num_tokens_dp_padded, num_toks_across_dp
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
