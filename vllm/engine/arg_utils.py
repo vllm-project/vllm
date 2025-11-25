@@ -1833,9 +1833,11 @@ class EngineArgs:
         if model_config.runner_type != "pooling":
             default_chunked_prefill = True
 
-            # Disable prefix caching default for hybrid models
-            # since the feature is still experimental.
-            default_prefix_caching = not model_config.is_hybrid
+            # Disable prefix caching default for hybrid models and mamba-only
+            # models since the feature is still experimental.
+            default_prefix_caching = not (
+                model_config.is_hybrid or model_config.is_attention_free
+            )
         else:
             assert model_config.pooler_config is not None
 
