@@ -89,7 +89,8 @@ class CommonAttentionMetadata:
     num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: np.ndarray | None = None
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
