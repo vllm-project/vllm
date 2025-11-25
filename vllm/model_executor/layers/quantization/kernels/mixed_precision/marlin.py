@@ -181,7 +181,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin
-        
+
         return apply_gptq_marlin_linear(
             input=x,
             weight=w_q,
