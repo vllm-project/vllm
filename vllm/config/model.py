@@ -345,7 +345,6 @@ class ModelConfig:
             "logprobs_mode",
             "disable_cascade_attn",
             "skip_tokenizer_init",
-            "enable_prompt_embeds",
             "served_model_name",
             "config_format",
             "hf_token",
