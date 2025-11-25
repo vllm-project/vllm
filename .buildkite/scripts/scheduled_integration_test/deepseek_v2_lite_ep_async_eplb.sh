@@ -4,7 +4,7 @@ set -euxo pipefail
 # args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT]
 THRESHOLD=${1:-0.25}
 NUM_Q=${2:-1319}
-PORT=${3:-8010}
+PORT=${3:-8030}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
 mkdir -p "${OUT_DIR}"
 
@@ -50,7 +50,7 @@ for BACK in "${BACKENDS[@]}"; do
     --data-parallel-size 2 \
     --enable-expert-parallel \
     --enable-eplb \
-    --eplb-config '{"window_size":200,"step_interval":600}' \
+    --eplb-config '{"window_size":200,"step_interval":600,"use_async":"true"}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --port $PORT &
