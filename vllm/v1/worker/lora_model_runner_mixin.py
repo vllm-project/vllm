@@ -175,10 +175,10 @@ class LoRAModelRunnerMixin:
             }
 
             self._set_active_loras(
-                tuple(sample_lora_mapping), 
-                tuple(token_lora_mapping), 
-                lora_requests, 
-                mapping_type
+                tuple(sample_lora_mapping),
+                tuple(token_lora_mapping),
+                lora_requests,
+                mapping_type,
             )
 
             yield
@@ -196,7 +196,11 @@ class LoRAModelRunnerMixin:
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
             self.maybe_select_dummy_loras(
-                lora_config, num_scheduled_tokens, mapping_type, num_sampled_tokens, activate_lora
+                lora_config,
+                num_scheduled_tokens,
+                mapping_type,
+                num_sampled_tokens,
+                activate_lora,
             ),
         ):
             yield

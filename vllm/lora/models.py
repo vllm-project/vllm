@@ -13,7 +13,12 @@ from torch import nn
 
 from vllm.config.lora import LoRAConfig, ModelConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.lora.layers import (
+    BaseLayerWithLoRA,
+    FusedMoEWithLoRA,
+    LoRAMapping,
+    LoRAMappingType,
+)
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
@@ -25,7 +30,6 @@ from vllm.lora.utils import (
     is_moe_model,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
-    process_packed_modules_mapping,
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -36,7 +40,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.utils import is_pin_memory_available
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
 
