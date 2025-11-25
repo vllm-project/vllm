@@ -471,7 +471,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # Per-channel int4 weight scales
-        w13_weight_scale2 = torch.nn.Parameter(
+        w13_weight_scale_2 = torch.nn.Parameter(
             torch.ones(
                 num_experts,
                 2 * intermediate_size_per_partition,
@@ -479,17 +479,17 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             ),
             requires_grad=False,
         )
-        w2_weight_scale2 = torch.nn.Parameter(
+        w2_weight_scale_2 = torch.nn.Parameter(
             torch.ones(num_experts, hidden_size, dtype=torch.float32),
             requires_grad=False,
         )
-        layer.register_parameter("w13_weight_scale2", w13_weight_scale2)
-        layer.register_parameter("w2_weight_scale2", w2_weight_scale2)
+        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
+        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
         extra_weight_attrs.update({
             "quant_method": FusedMoeWeightScaleSupported.CHANNEL.value
         })
-        set_weight_attrs(w13_weight_scale2, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale2, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
@@ -504,7 +504,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         # instead we adjust half of INT4 w13_weight_scale1 numbers
         shard_size = layer.intermediate_size_per_partition
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        for expert_id in range(layer.num_local_experts):
+        for expert_id in range(layer.local_num_experts):
             start = 0
             max_w13_scale_fp8 = max_w13_scales[expert_id]
             for shard_id in range(2):
@@ -512,7 +512,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
                     int4_rescale = (
                         layer.w13_weight_scale[expert_id][shard_id] / max_w13_scale_fp8
                     )
-                    layer.w13_weight_scale2[expert_id][
+                    layer.w13_weight_scale_2[expert_id][
                         start : start + shard_size
                     ] *= int4_rescale
                 start += shard_size
@@ -521,14 +521,14 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
         # special hack to asm_moe, which takes (weight_scale1 * weight_scale) as post GEMM scaling
         # optimal design - shall apply per-column weight_scale1 before GEMM, and weight_scale post
-        for expert_id in range(layer.num_local_experts):
-            layer.w13_weight_scale2[expert_id] *= max_w13_scales[expert_id]
-            layer.w2_weight_scale2[expert_id] *= layer.w2_weight_scale[expert_id]
+        for expert_id in range(layer.local_num_experts):
+            layer.w13_weight_scale_2[expert_id] *= max_w13_scales[expert_id]
+            layer.w2_weight_scale_2[expert_id] *= layer.w2_weight_scale[expert_id]
 
     def get_fused_moe_quant_config(self, layer):
         return fp8_w8a8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale2,
-            w2_scale=layer.w2_weight_scale2,
+            w1_scale=layer.w13_weight_scale_2,
+            w2_scale=layer.w2_weight_scale_2,
             per_out_ch_quant=True,
         )
 
