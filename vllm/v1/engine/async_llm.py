@@ -328,8 +328,6 @@ class AsyncLLM(EngineClient):
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
         parent_params = params
         assert isinstance(parent_params, SamplingParams)
 
