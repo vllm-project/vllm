@@ -83,12 +83,16 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     if not current_platform.is_cuda():
         return Mxfp4Backend.NONE
 
-    if (
-        envs.VLLM_MXFP4_USE_MARLIN
-        or current_platform.get_device_capability()[0] < 9
-        or not has_triton_kernels()
-        or not is_torch_equal_or_newer("2.8.0")
-    ):
+    # If FlashInfer is not available, try either Marlin or Triton
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and is_torch_equal_or_newer("2.8.0")
+        # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+        # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+        # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+        and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+    )
+    if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
         logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
         return Mxfp4Backend.MARLIN
 

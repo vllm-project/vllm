@@ -462,11 +462,12 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         # Shape check, only check non-mxfp4
+        assert hidden_states.ndim == 2
         assert hidden_states.shape[-1] == w1.shape[-2]
         assert w2.shape[-1] == w1.shape[1]
 
-        batch_dim = hidden_states.shape[0] if hidden_states.ndim == 3 else 1
-        M, K = hidden_states.shape[-2:]
+        batch_dim = 1
+        M, K = hidden_states.shape
         E, _, N = w1.shape
 
         if global_num_experts == -1:
@@ -495,7 +496,9 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
-        n_expts_act = routing_data.n_expts_act
+        # matmul_ogs grouped reduction fuse sum across multiple experts:
+        # y[dst_ind // n_expts_act, :] += x[src_ind, :]
+        # Need to set n_expts_act to 1 to unfuse moe_sum
         routing_data.n_expts_act = 1
 
         matmul_ogs(
@@ -510,6 +513,3 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
-
-        # Set the original n_expts_act back
-        routing_data.n_expts_act = n_expts_act
