@@ -136,9 +136,9 @@ class BlockPool:
         num_gpu_blocks: The number of blocks in the pool.
         enable_caching: Whether to enable prefix caching.
         hash_block_size: The block size of which the block hashes are computed.
-        The actual block size usually equals hash_block_size, but in cases where
-        different KV cache groups have different block sizes, the actual block size
-        can be a multiple of hash_block_size.
+            The actual block size usually equals hash_block_size, but in cases
+            where different KV cache groups have different block sizes, the
+            actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
     """
 

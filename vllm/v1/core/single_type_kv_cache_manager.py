@@ -234,8 +234,8 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
             alignment_tokens: The returned cache hit length (in tokens) should
-            be a multiple of this value (in tokens). By default, it should be
-            set to the block_size.
+                be a multiple of this value (in tokens). By default, it should
+                be set to the block_size.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
 
@@ -549,7 +549,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
-            be a multiple of this value (in tokens).
+                be a multiple of this value (in tokens).
 
         Returns:
             A list of cached blocks
