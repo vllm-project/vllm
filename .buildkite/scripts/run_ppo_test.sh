@@ -36,6 +36,13 @@ else
     git clone --branch "${VERL_BRANCH}" --single-branch "${VERL_REPO}" "${VERL_DIR}"
 fi
 
+# Install UV if not available
+if ! command -v uv &> /dev/null; then
+    echo "Installing UV package manager..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.local/bin/env
+fi
+
 echo "Entering ${VERL_DIR} ..."
 cd "${VERL_DIR}"
 uv pip install --no-deps -e .
@@ -79,8 +86,11 @@ python3 -m verl.trainer.main_ppo \
  trainer.save_freq=10 \
  trainer.test_freq=10 \
  trainer.total_epochs="${train_epochs}" 
+
 echo "===== End PPO Training ====="
+
 echo "===== Model Restoration ====="
+
 # steps_per_epoch = 7473 samples(GSM8K: ~7473 samples) / 256 global batch size ≈ 29
 step=$((29 * train_epochs))
 merge_LOCAL_DIR="${TARGET_DIR}/checkpoints/verl_examples/gsm8k/global_step_${step}/actor"
