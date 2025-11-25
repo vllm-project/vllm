@@ -2810,6 +2810,14 @@ class TranscriptionRequest(OpenAIBaseModel):
     """When set, it will enable output to be streamed in a similar fashion
     as the Chat Completion endpoint.
     """
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "throughout the inference process and returned in responses."
+        ),
+    )
     # --8<-- [start:transcription-extra-params]
     # Flattened stream option to simplify form data.
     stream_include_usage: bool | None = False
@@ -3103,6 +3111,14 @@ class TranslationRequest(OpenAIBaseModel):
     it will enable output to be streamed in a similar fashion as the Chat
     Completion endpoint.
     """
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "throughout the inference process and returned in responses."
+        ),
+    )
     # Flattened stream option to simplify form data.
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
