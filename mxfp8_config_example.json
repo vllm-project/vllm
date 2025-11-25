@@ -1,0 +1,125 @@
+{
+    "architectures": [
+        "NemotronHForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "auto_map": {
+        "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+        "AutoModel": "modeling_nemotron_h.NemotronHForCausalLM",
+        "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"
+    },
+    "bos_token_id": 1,
+    "chunk_size": 128,
+    "conv_kernel": 4,
+    "dtype": "bfloat16",
+    "eos_token_id": 2,
+    "expand": 2,
+    "head_dim": 128,
+    "hidden_dropout": 0.0,
+    "hidden_size": 2688,
+    "hybrid_override_pattern": "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME",
+    "initializer_range": 0.02,
+    "intermediate_size": 1856,
+    "layer_norm_epsilon": 1e-05,
+    "mamba_head_dim": 64,
+    "mamba_hidden_act": "silu",
+    "mamba_num_heads": 64,
+    "mamba_proj_bias": false,
+    "max_position_embeddings": 262144,
+    "mlp_bias": false,
+    "mlp_hidden_act": "relu2",
+    "model_type": "nemotron_h",
+    "moe_intermediate_size": 1856,
+    "moe_shared_expert_intermediate_size": 3712,
+    "n_group": 1,
+    "n_groups": 8,
+    "n_routed_experts": 128,
+    "n_shared_experts": 1,
+    "norm_eps": 1e-05,
+    "norm_topk_prob": true,
+    "num_attention_heads": 32,
+    "num_experts_per_tok": 6,
+    "num_hidden_layers": 52,
+    "num_key_value_heads": 2,
+    "num_logits_to_keep": 1,
+    "pad_token_id": 0,
+    "partial_rotary_factor": 1.0,
+    "rescale_prenorm_residual": true,
+    "residual_in_fp32": false,
+    "rope_theta": 10000,
+    "routed_scaling_factor": 2.5,
+    "sliding_window": null,
+    "ssm_state_size": 128,
+    "tie_word_embeddings": false,
+    "time_step_floor": 0.0001,
+    "time_step_limit": [
+        0.0,
+        Infinity
+    ],
+    "time_step_max": 0.1,
+    "time_step_min": 0.001,
+    "topk_group": 1,
+    "transformers_version": "4.57.1",
+    "use_bias": false,
+    "use_cache": true,
+    "use_conv_bias": true,
+    "use_mamba_kernels": true,
+    "vocab_size": 131072,
+    "quantization_config": {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "dynamic": true,
+                    "num_bits": 8,
+                    "type": "float",
+                    "is_mx": true
+                },
+                "weights": {
+                    "dynamic": false,
+                    "num_bits": 8,
+                    "type": "float",
+                    "is_mx": "true"
+                },
+                "targets": [
+                    "Linear"
+                ]
+            }
+        },
+        "ignore": [
+            "backbone.layers.0.mixer.conv1d",
+            "backbone.layers.11.mixer.conv1d",
+            "backbone.layers.14.mixer.conv1d",
+            "backbone.layers.16.mixer.conv1d",
+            "backbone.layers.18.mixer.conv1d",
+            "backbone.layers.2.mixer.conv1d",
+            "backbone.layers.21.mixer.conv1d",
+            "backbone.layers.23.mixer.conv1d",
+            "backbone.layers.25.mixer.conv1d",
+            "backbone.layers.28.mixer.conv1d",
+            "backbone.layers.30.mixer.conv1d",
+            "backbone.layers.32.mixer.conv1d",
+            "backbone.layers.35.mixer.conv1d",
+            "backbone.layers.37.mixer.conv1d",
+            "backbone.layers.39.mixer.conv1d",
+            "backbone.layers.4.mixer.conv1d",
+            "backbone.layers.41.mixer.conv1d",
+            "backbone.layers.44.mixer.conv1d",
+            "backbone.layers.46.mixer.conv1d",
+            "backbone.layers.48.mixer.conv1d",
+            "backbone.layers.50.mixer.conv1d",
+            "backbone.layers.7.mixer.conv1d",
+            "backbone.layers.9.mixer.conv1d",
+            "lm_head",
+            "lm_head"
+        ],
+        "quant_algo": "FP8",
+        "producer": {
+            "name": "modelopt",
+            "version": "0.40.0.dev49+g7d0f7a95f"
+        },
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "is_mx": true
+    }
+}
