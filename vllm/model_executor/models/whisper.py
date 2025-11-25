@@ -520,24 +520,14 @@ class WhisperEncoder(nn.Module):
                 sinusoids(*self.embed_positions.weight.shape)
             )
 
-    def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
-        hidden_states = []
-        input_is_batched = False
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
-            hidden_states.append(embeds)
-            input_is_batched = embeds.ndim > 2
+    def forward(self, input_features: torch.Tensor):
+        embeds = nn.functional.gelu(self.conv1(input_features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+        embeds = embeds.transpose(-1, -2)
         # Input to MHA must be B x T x D
-        if input_is_batched:
-            # Models using WhisperEncoder may handle batching internally.
-            hidden_states = torch.cat(hidden_states)
-        else:
-            hidden_states = torch.stack(hidden_states, dim=0)
+        hidden_states = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+            embeds.dtype
+        )
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
@@ -620,7 +610,7 @@ class WhisperModel(nn.Module):
 
     def get_encoder_outputs(
         self,
-        input_features: torch.Tensor | list[torch.Tensor] | None,
+        input_features: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if input_features is None:
             return None
@@ -941,7 +931,6 @@ class WhisperForConditionalGeneration(
 
         if input_features is not None:
             input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
-
         return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
