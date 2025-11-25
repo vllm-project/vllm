@@ -1177,12 +1177,14 @@ When run, benchmark script generates results under **benchmark/results** folder,
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
+- `TEST_MODE`: set the value to '1' to only dump run commands into result folder without benchmarking. Default value is empty string.
+- `RUN_FULL_TESTS`: set the value to '1' to run tests labeled as tier "full". Default value is empty string.
 
-For more results visualization, check the [visualizing the results](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md#visualizing-the-results).
+For more results visualization, check the [visualizing the results](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks/README.md#visualizing-the-results).
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks/README.md) and [performance benchmark description](../../.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
 
 ### Continuous Benchmarking
 
