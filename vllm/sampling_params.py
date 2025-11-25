@@ -238,7 +238,7 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    skip_reading_prefix_cache: bool = None
+    skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
     def from_optional(
