@@ -784,7 +784,7 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     - Config with ignore list containing specific MoE layers
     - Multiple MoE layers where some are quantized and some are not
     """
-    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only"
+    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
 
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
