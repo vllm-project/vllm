@@ -1361,7 +1361,6 @@ def _auto_fit_max_model_len(
     else:
         # Need to reduce max_model_len to fit in memory
         vllm_config.model_config.max_model_len = auto_fit_max
-        vllm_config.scheduler_config.max_model_len = auto_fit_max
         logger.info(
             "Auto-fit max_model_len: reduced from %d to %d to fit in "
             "available GPU memory (%.2f GiB available for KV cache)",
