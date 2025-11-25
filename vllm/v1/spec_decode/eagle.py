@@ -83,12 +83,15 @@ class EagleProposer:
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config()
+        )
 
         self.use_cuda_graph = False
 
-        compilation_config = self.vllm_config.compilation_config
-        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = compilation_config.cudagraph_mode
+        self.compilation_config = self.vllm_config.compilation_config
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
             ):
@@ -103,13 +106,6 @@ class EagleProposer:
                 and not self.speculative_config.enforce_eager
             )
 
-        self.cudagraph_batch_sizes = (
-            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
-            if self.use_cuda_graph
-            else []
-        )
-
-        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -276,7 +272,10 @@ class EagleProposer:
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
         cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -366,7 +365,10 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
+        if (
+            self.use_cuda_graph
+            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+        ):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
@@ -777,7 +779,10 @@ class EagleProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            if (
+                self.use_cuda_graph
+                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            ):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
                 cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
@@ -1114,7 +1119,10 @@ class EagleProposer:
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            cudagraphs_enabled
+            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+        ):
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
@@ -1163,6 +1171,22 @@ class EagleProposer:
             "Failed to find attention metadata builder for EAGLE layers."
         )
         return builder
+
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """

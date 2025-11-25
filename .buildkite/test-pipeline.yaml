@@ -346,6 +346,18 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: Batch Invariance Tests (H100) # 10min
+  timeout_in_minutes: 25
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
@@ -679,6 +691,7 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
+  - vllm/transformers_utils/
   - tests/models/test_initialization.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
@@ -1328,11 +1341,20 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy
+- label: Qwen3-30B-A3B-FP8-block Accuracy (H100)
   timeout_in_minutes: 60
   gpu: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
