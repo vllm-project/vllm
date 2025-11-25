@@ -703,7 +703,7 @@ class FlashAttentionImpl(AttentionImpl):
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
-                    num_splits=attn_metadata.max_num_splits,
+                    num_splits=1 if self.batch_invariant_enabled else 0,
                     s_aux=self.sinks,
                 )
                 return output
