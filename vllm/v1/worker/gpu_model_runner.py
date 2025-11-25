@@ -3141,10 +3141,9 @@ class GPUModelRunner(
             assert isinstance(self.drafter, NgramProposerGPU)
             sampled_token_ids = sampler_output.sampled_token_ids
             if input_fits_in_drafter:
-                # Fast path: GPU-only operation when input fits in drafter
                 propose_draft_token_ids(sampled_token_ids)
             elif self.valid_sampled_token_count_event is not None:
-                # Slow path: prepare tokens with async transfer
+                assert spec_decode_common_attn_metadata is not None
                 next_token_ids, valid_sampled_tokens_count, _ = (
                     self.drafter.prepare_next_token_ids_padded(
                         spec_decode_common_attn_metadata,

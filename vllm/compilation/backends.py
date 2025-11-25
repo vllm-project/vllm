@@ -642,6 +642,13 @@ class VllmBackend:
             self.compilation_config.inductor_compile_config
         )
 
+        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        is_ngram_gpu_enabled = (
+            vllm_config.speculative_config
+            and vllm_config.speculative_config.method == "ngram_gpu"
+        )
+        disable_cache = disable_cache or is_ngram_gpu_enabled
+
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
         else:

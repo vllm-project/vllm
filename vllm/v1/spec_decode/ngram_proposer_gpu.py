@@ -27,10 +27,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 @support_torch_compile(
     dynamic_arg_dims={
-        "num_tokens_no_spec": 0,  # batch dimension is dynamic
-        "token_ids_gpu": [0, 1],  # both batch and sequence length are dynamic
-        "sampled_flags": 0,  # batch dimension is dynamic
-        "valid_mask": 0,  # batch dimension is dynamic
+        "num_tokens_no_spec": 0,
+        "token_ids_gpu": [0, 1],
+        "combined_mask": 0,
     }
 )
 class NgramGPUKernel(nn.Module):
@@ -100,6 +99,10 @@ class NgramGPUKernel(nn.Module):
         all_windows = data.unfold(1, max_pattern_len, 1)  # [B, num_windows, max_n]
         num_windows = all_windows.shape[1]
         window_starts = torch.arange(num_windows, device=device)
+        pattern_lengths = torch.arange(
+            min_pattern_len, max_pattern_len + 1, device=device
+        )
+        batch_indices = torch.arange(batch_size, device=device)
 
         all_first_matches = torch.full(
             (batch_size, num_patterns), -1, dtype=torch.long, device=device
@@ -120,17 +123,42 @@ class NgramGPUKernel(nn.Module):
             matches = (current_windows == patterns.unsqueeze(1)).all(dim=-1)
 
             # Validity check: ensure enough space for result extraction
-            max_valid_start = seq_lengths - pattern_len - result_len
-            valid_mask = window_starts <= max_valid_start.unsqueeze(1)
+            max_valid_pattern_start = seq_lengths - pattern_len - result_len
+            pattern_start_positions = window_starts + offset
+            valid_mask = pattern_start_positions <= max_valid_pattern_start.unsqueeze(1)
             final_matches = matches & valid_mask
+
+            # Handle prefix positions that fall before the available windows
+            prefix_positions = torch.arange(offset, device=device)
+            gather_indices = prefix_positions.view(1, -1, 1) + torch.arange(
+                pattern_len, device=device
+            ).view(1, 1, -1)
+            gather_indices = gather_indices.clamp(min=0, max=max_seq_len - 1)
+            expanded_indices = gather_indices.expand(batch_size, -1, -1)
+            prefix_tokens = torch.gather(
+                data.unsqueeze(1).expand(-1, offset, -1),
+                2,
+                expanded_indices,
+            )
+            prefix_matches = (
+                prefix_tokens == patterns.unsqueeze(1).expand(-1, offset, -1)
+            ).all(dim=-1)
+            prefix_valid_mask = prefix_positions <= max_valid_pattern_start.unsqueeze(1)
+            prefix_final_matches = prefix_matches & prefix_valid_mask
+
+            combined_matches = torch.cat([prefix_final_matches, final_matches], dim=1)
+            start_positions = torch.cat(
+                [prefix_positions, pattern_start_positions], dim=0
+            )
 
             # Find first match
             # (if no match, argmax returns 0, but we verify with has_match)
-            first_indices = torch.argmax(final_matches.int(), dim=1)
-            has_match = final_matches[torch.arange(batch_size), first_indices]
+            first_indices = torch.argmax(combined_matches.int(), dim=1)
+            has_match = combined_matches[batch_indices, first_indices]
+            match_positions = start_positions[first_indices]
 
             # Store valid match positions
-            all_first_matches[:, i] = torch.where(has_match, first_indices, -1)
+            all_first_matches[:, i] = torch.where(has_match, match_positions, -1)
 
         # Select the longest valid match,
         # from back to front, prioritizing longer patterns
@@ -138,19 +166,19 @@ class NgramGPUKernel(nn.Module):
         best_pattern_idx = num_patterns - 1 - best_pattern_idx  # Flip back
 
         # Extract corresponding results
-        batch_idx = torch.arange(batch_size, device=device)
-        best_match_pos = all_first_matches[batch_idx, best_pattern_idx]
+        best_match_pos = all_first_matches[batch_indices, best_pattern_idx]
 
         # Handle matched cases - completely avoid data-dependent branching
         has_any_match = best_match_pos >= 0
 
+        best_pattern_lengths = pattern_lengths[best_pattern_idx]
+
         # Calculate result start positions, invalid positions will be
-        # clamped to valid range. Since all windows have size max_pattern_len,
-        # and patterns are matched at the END of windows (due to offset),
-        # the result starts after the full window
+        # clamped to valid range. We now track true start positions, so the
+        # result starts right after the matched n-gram
         result_starts = torch.where(
             has_any_match,
-            best_match_pos + max_pattern_len,
+            best_match_pos + best_pattern_lengths,
             torch.zeros_like(best_match_pos),
         )
 
@@ -177,8 +205,7 @@ class NgramGPUKernel(nn.Module):
         self,
         num_tokens_no_spec: torch.Tensor,  # [batch_size] on GPU
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len] on GPU
-        sampled_flags: torch.Tensor,  # [batch_size] bool on GPU
-        valid_mask: torch.Tensor,  # [batch_size] bool on GPU
+        combined_mask: torch.Tensor,  # [batch_size] bool on GPU
     ) -> torch.Tensor:
         """
         Forward pass for N-gram proposal using GPU tensor operations.
@@ -189,33 +216,23 @@ class NgramGPUKernel(nn.Module):
         Args:
             num_tokens_no_spec: Number of tokens for each sequence [batch_size]
             token_ids_gpu: Token IDs [batch_size, max_len]
-            sampled_flags: Whether each sequence has sampled tokens [batch_size]
-            valid_mask: Whether each sequence is valid for spec decode [batch_size]
+            combined_mask: Whether each sequence is valid for spec decode [batch_size]
+            batch_size: Deprecated parameter, will be inferred from tensor shape
 
         Returns:
             draft_tokens: [batch_size, k] on GPU
         """
-        assert token_ids_gpu.device == self.device
-        assert num_tokens_no_spec.device == self.device
-        assert sampled_flags.device == self.device
-        assert valid_mask.device == self.device
 
-        # Compute combined mask for valid sequences
-        combined_mask = (
-            sampled_flags
-            & valid_mask
-            & (num_tokens_no_spec < self.max_model_len)
-            & (num_tokens_no_spec >= self.min_n)
-        )
-
-        batch_size = token_ids_gpu.size(0)
         device = token_ids_gpu.device
+
+        # Infer batch_size from the input tensor shape to maintain dynamic shape
+        actual_batch_size = token_ids_gpu.shape[0]
 
         # Initialize output tensor - torch.compile will optimize this allocation
         # NOTE(patchy): Do NOT pre-allocate this as a buffer
         #               it would break torch.compile
         draft_tokens = torch.zeros(
-            (batch_size, self.k), dtype=torch.int32, device=device
+            (actual_batch_size, self.k), dtype=torch.int32, device=device
         )
 
         results = self._find_first_and_extract_all_n_parallel(
@@ -226,8 +243,10 @@ class NgramGPUKernel(nn.Module):
             result_len=self.k,
         )
 
-        # Apply combined mask to results
-        draft_tokens = torch.where(combined_mask.unsqueeze(1), results, draft_tokens)
+        # Apply combined mask to results. Expand mask explicitly to avoid
+        # relying on broadcasting behavior that can confuse torch.compile.
+        mask = combined_mask.unsqueeze(1).expand(-1, self.k)
+        draft_tokens = torch.where(mask, results, draft_tokens)
 
         return draft_tokens
 
@@ -295,9 +314,16 @@ class NgramProposerGPU:
             device=self.device,
         )
 
+        combined_mask = (
+            sampled_flags
+            & valid_mask
+            & (num_tokens < self.max_model_len)
+            & (num_tokens >= self.min_n)
+        )
+
         for _ in range(3):
             with set_forward_context(None, self.vllm_config):
-                _ = self.kernel(num_tokens, token_ids, sampled_flags, valid_mask)
+                _ = self.kernel(num_tokens, token_ids, combined_mask)
 
     def _generate_dummy_data(
         self,
@@ -366,12 +392,23 @@ class NgramProposerGPU:
         sampled_flags: torch.Tensor,  # [batch_size] bool on GPU
         valid_mask: torch.Tensor,  # [batch_size] bool on GPU
     ) -> torch.Tensor:
+        assert token_ids_gpu.device == self.device
+        assert num_tokens_no_spec.device == self.device
+        assert sampled_flags.device == self.device
+        assert valid_mask.device == self.device
+
         with set_forward_context(None, self.vllm_config):
+            combined_mask = (
+                sampled_flags
+                & valid_mask
+                & (num_tokens_no_spec < self.max_model_len)
+                & (num_tokens_no_spec >= self.min_n)
+            )
+
             return self.kernel(
                 num_tokens_no_spec,
                 token_ids_gpu,
-                sampled_flags,
-                valid_mask,
+                combined_mask,
             )
 
     def prepare_next_token_ids_cpu(
