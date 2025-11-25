@@ -260,6 +260,12 @@ class EplbState:
         Used to track which ranks are already masked to avoid re-masking.
         """
         self.masked_ranks: set[int] = set()
+        
+        """
+        Set of newly masked ranks from external triggers (e.g., exceptions).
+        Checked each step and triggers immediate rearrangement.
+        """
+        self.newly_masked_from_external: set[int] = set()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -728,9 +734,11 @@ class EplbState:
 
     def _check_mask_out_gpu(self) -> tuple[dict[int, int] | None, bool]:
         """
-        Check if any GPU ranks should be masked out based on mask_out_gpu_after config.
+        Check if any GPU ranks should be masked out.
         
-        This is used for testing fault tolerance by simulating GPU failures/timeouts at specific steps.
+        Checks two sources:
+        1. mask_out_gpu_after config (for testing)
+        2. newly_masked_from_external (from exceptions or external triggers)
         
         The mask_out_gpu_after dict maps rank IDs to global step counts:
         - mask_out_gpu_after = {0: 100, 2: 200} means:
@@ -743,31 +751,40 @@ class EplbState:
               Example: {0: 0, 1: -1, 2: 1, 3: 2} means rank 1 is masked
             - has_new_mask: True if new ranks were masked in this step
         """
-        if not self.mask_out_gpu_after:
-            return None, False
-        
         ep_group = get_ep_group().device_group
         ep_size = ep_group.size()
         
-        # Check if any ranks should be masked at this global step
         newly_masked_ranks = set()
-        for rank_idx, mask_step in self.mask_out_gpu_after.items():
-            if rank_idx >= ep_size:
-                logger.warning(
-                    "Skipping invalid rank %d in mask_out_gpu_after (ep_size=%d)",
-                    rank_idx, ep_size
-                )
-                continue  # Invalid rank index
-            if (self.global_step >= mask_step and 
-                rank_idx not in self.masked_ranks):
-                # Mask out this rank starting from this step
-                newly_masked_ranks.add(rank_idx)
-                self.masked_ranks.add(rank_idx)
-                logger.warning(
-                    "Simulating timeout: Masking out GPU rank %d at global step %d "
-                    "(configured via mask_out_gpu_after[%d]=%d)",
-                    rank_idx, self.global_step, rank_idx, mask_step
-                )
+        
+        # Check config-based masking
+        if self.mask_out_gpu_after:
+            for rank_idx, mask_step in self.mask_out_gpu_after.items():
+                if rank_idx >= ep_size:
+                    logger.warning(
+                        "Skipping invalid rank %d in mask_out_gpu_after (ep_size=%d)",
+                        rank_idx, ep_size
+                    )
+                    continue  # Invalid rank index
+                if (self.global_step >= mask_step and 
+                    rank_idx not in self.masked_ranks):
+                    # Mask out this rank starting from this step
+                    newly_masked_ranks.add(rank_idx)
+                    self.masked_ranks.add(rank_idx)
+                    logger.warning(
+                        "Simulating timeout: Masking out GPU rank %d at global step %d "
+                        "(configured via mask_out_gpu_after[%d]=%d)",
+                        rank_idx, self.global_step, rank_idx, mask_step
+                    )
+        
+        # Check externally-triggered masking (e.g., from exceptions)
+        if self.newly_masked_from_external:
+            newly_masked_ranks.update(self.newly_masked_from_external)
+            logger.info(
+                "[GPU_FT] Processing externally-triggered masks for ranks: %s",
+                sorted(self.newly_masked_from_external)
+            )
+            # Clear after processing
+            self.newly_masked_from_external.clear()
         
         if not self.masked_ranks:
             return None, False
@@ -777,7 +794,7 @@ class EplbState:
         active_rank = 0
         for rank_idx in range(ep_size):
             if rank_idx in self.masked_ranks:
-                rank_mapping[rank_idx] = -1  # Masked (simulating timeout/failure)
+                rank_mapping[rank_idx] = -1  # Masked
             else:
                 rank_mapping[rank_idx] = active_rank
                 active_rank += 1

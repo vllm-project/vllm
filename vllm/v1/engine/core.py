@@ -1131,6 +1131,9 @@ class DPEngineCoreProc(EngineCoreProc):
         self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
+        
+        # Track if exception has occurred (for fault tolerance)
+        self.has_exception = False
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -1168,9 +1171,40 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
+    def trigger_eplb_masking(self):
+        """
+        Add this rank to EPLB masked_ranks to trigger full masking.
+        This causes expert redistribution at next EPLB step.
+        """
+        try:
+            eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+            if eplb_state is None:
+                return
+            
+            # For TP=1: ep_rank == dp_rank
+            my_ep_rank = self.dp_rank
+            
+            if my_ep_rank not in eplb_state.masked_ranks:
+                logger.warning(
+                    "[GPU_FT] DP rank %d: Adding to EPLB masked_ranks (exception-triggered). "
+                    "Expert redistribution will occur at next EPLB step.",
+                    self.dp_rank
+                )
+                eplb_state.masked_ranks.add(my_ep_rank)
+                eplb_state.newly_masked_from_external.add(my_ep_rank)
+        except Exception as e:
+            logger.error(
+                "DP rank %d: Cannot trigger EPLB masking: %s",
+                self.dp_rank, e
+            )
+    
     def check_if_masked_by_eplb(self) -> bool:
         """
-        Check if this DP rank is in EPLB's masked_ranks.
+        Check if this DP rank should be considered masked/unhealthy.
+        
+        Returns True if:
+        1. EPLB has masked this rank (timeout/health check), OR
+        2. An exception has occurred in this rank
         
         NOTE: This implementation supports TP=1 only for now.
         For TP=1: ep_rank == dp_rank, so we check if dp_rank is masked.
@@ -1179,6 +1213,10 @@ class DPEngineCoreProc(EngineCoreProc):
         Returns:
             True if this rank is masked (GPU unhealthy), False otherwise
         """
+        # Check if exception has occurred
+        if self.has_exception:
+            return True
+        
         try:
             # Access EPLB state through model_executor
             # Path: model_executor -> driver_worker -> model_runner -> eplb_state
@@ -1277,28 +1315,59 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
+            try:
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
 
-            # 2) Step the engine core.
-            executed = self._process_engine_step()
-            self._maybe_publish_request_counts()
+                # 2) Step the engine core.
+                executed = self._process_engine_step()
+                self._maybe_publish_request_counts()
 
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if not executed:
-                if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle.
-                    continue
+                local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+                if not executed:
+                    if not local_unfinished_reqs and not self.engines_running:
+                        # All engines are idle.
+                        continue
 
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                # Masked ranks also run dummy to maintain EPLB state synchronization.
-                self.execute_dummy_batch()
+                    # We are in a running state and so must execute a dummy pass
+                    # if the model didn't execute any ready requests.
+                    # Masked ranks also run dummy to maintain EPLB state synchronization.
+                    self.execute_dummy_batch()
 
-            # 3) All-reduce operation to determine global unfinished reqs.
-            self.engines_running = self._has_global_unfinished_reqs(
-                local_unfinished_reqs
-            )
+                # 3) All-reduce operation to determine global unfinished reqs.
+                self.engines_running = self._has_global_unfinished_reqs(
+                    local_unfinished_reqs
+                )
+                
+            except Exception as e:
+                # Exception occurred in busy loop
+                was_already_masked = self.check_if_masked_by_eplb()
+                
+                if was_already_masked:
+                    # Already masked but still getting exceptions
+                    # This means even CPU-only sync is failing - cannot recover
+                    logger.critical(
+                        "[GPU_FT] DP rank %d: Exception in masked rank. "
+                        "CPU synchronization failing, cannot recover. "
+                        "Exception: %s",
+                        self.dp_rank,
+                        str(e),
+                        exc_info=True
+                    )
+                    raise  # Exit process - CPU sync is broken
+                else:
+                    # First exception - mark as unhealthy and trigger EPLB masking
+                    logger.error(
+                        "[GPU_FT] DP rank %d: Exception caught, marking rank as unhealthy. "
+                        "Exception: %s. Triggering EPLB masking and expert redistribution.",
+                        self.dp_rank,
+                        str(e),
+                        exc_info=True
+                    )
+                    self.has_exception = True
+                    
+                    # Trigger full EPLB masking (expert redistribution)
+                    self.trigger_eplb_masking()
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
