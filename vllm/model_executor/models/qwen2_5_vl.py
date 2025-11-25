@@ -1314,10 +1314,9 @@ class Qwen2_5_VLForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"]
-
             from vllm.platforms import current_platform
 
+            pixel_values = image_input["pixel_values"]
             set_forward_context = current_platform.get_forward_context_manager()
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
@@ -1373,10 +1372,9 @@ class Qwen2_5_VLForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"]
-
             from vllm.platforms import current_platform
 
+            pixel_values_videos = video_input["pixel_values_videos"]
             set_forward_context = current_platform.get_forward_context_manager()
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
