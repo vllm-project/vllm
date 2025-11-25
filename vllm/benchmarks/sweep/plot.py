@@ -191,12 +191,8 @@ def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, ob
         converted_record = {}
         for key, value in record.items():
             if isinstance(value, str):
-                if value == "inf":
-                    converted_record[key] = float("inf")
-                elif value == "-inf":
-                    converted_record[key] = float("-inf")
-                elif value == "nan":
-                    converted_record[key] = float("nan")
+                if value in ["inf", "-inf", "nan"]:
+                    converted_record[key] = float(value)
                 else:
                     converted_record[key] = value
             else:
@@ -216,7 +212,7 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
     return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
 
 
-def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str = "FIGURE"):
+def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str):
     parts = list[str]()
     
     # Start with figure name (always provided, defaults to "FIGURE")
@@ -258,7 +254,7 @@ def _plot_fig(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
-    fig_name: str = "FIGURE",
+    fig_name: str,
 ):
     fig_group, fig_data = fig_group_data
 
