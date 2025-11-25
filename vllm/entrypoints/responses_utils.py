@@ -9,7 +9,8 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
@@ -18,6 +19,49 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
+
+
+def construct_input_messages(
+    *,
+    request_instructions: str | None = None,
+    request_input: str | list[ResponseInputOutputItem],
+    prev_msg: list[ChatCompletionMessageParam] | None = None,
+    prev_response_output: list[ResponseOutputItem] | None = None,
+):
+    messages: list[ChatCompletionMessageParam] = []
+    if request_instructions:
+        messages.append(
+            {
+                "role": "system",
+                "content": request_instructions,
+            }
+        )
+
+    # Prepend the conversation history.
+    if prev_msg is not None:
+        # Add the previous messages.
+        messages.extend(prev_msg)
+    if prev_response_output is not None:
+        # Add the previous output.
+        for output_item in prev_response_output:
+            # NOTE: We skip the reasoning output.
+            if isinstance(output_item, ResponseOutputMessage):
+                for content in output_item.content:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content.text,
+                        }
+                    )
+
+    # Append the new input.
+    # Responses API supports simple text inputs without chat format.
+    if isinstance(request_input, str):
+        messages.append({"role": "user", "content": request_input})
+    else:
+        for item in request_input:
+            messages.append(construct_chat_message_with_tool_call(item))
+    return messages
 
 
 def construct_chat_message_with_tool_call(
