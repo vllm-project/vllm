@@ -35,7 +35,7 @@ from transformers import BatchFeature
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import MultiHeadAttention
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -193,6 +193,7 @@ class HunYuanVisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -235,6 +236,7 @@ class HunYuanVisionAttention(nn.Module):
             self.hidden_size_per_attention_head,
             self.scale,
             prefix=f"{prefix}.attn",
+            multimodal_config=multimodal_config,
         )
 
     def forward(
@@ -257,6 +259,7 @@ class HunYuanVisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.gelu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -270,6 +273,7 @@ class HunYuanVisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             use_data_parallel=use_data_parallel,
         )
@@ -435,6 +439,7 @@ class HunYuanVisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        multimodal_config: MultiModalConfig | None = None,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
@@ -461,6 +466,7 @@ class HunYuanVisionTransformer(nn.Module):
                         act_fn=get_act_fn(vision_config.hidden_act),
                         norm_layer=norm_layer,
                         quant_config=quant_config,
+                        multimodal_config=multimodal_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
                         use_data_parallel=use_data_parallel,
                     )
@@ -875,6 +881,7 @@ class HunYuanVLForConditionalGeneration(
                 config.vision_config,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
+                multimodal_config=multimodal_config,
                 attn_backend_override=attn_backend_override,
             )
         else:
