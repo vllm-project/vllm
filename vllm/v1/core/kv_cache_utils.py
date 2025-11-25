@@ -1325,8 +1325,17 @@ def _auto_fit_max_model_len(
         if not kv_cache_spec_one_worker:
             # Skip empty specs (attention-free models)
             continue
+
+        # Make a copy and unify specs to match what get_kv_cache_groups will do.
+        # This ensures the estimate matches the actual allocation strategy.
+        # When hybrid KV cache manager is disabled, all layers are converted
+        # to full attention, so we must estimate based on that.
+        kv_cache_spec_for_estimate = dict(kv_cache_spec_one_worker)
+        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+            unify_hybrid_kv_cache_specs(kv_cache_spec_for_estimate)
+
         estimated = estimate_max_model_len(
-            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
+            vllm_config, kv_cache_spec_for_estimate, available_memory_one_worker
         )
         estimated_max_lens.append(estimated)
 
