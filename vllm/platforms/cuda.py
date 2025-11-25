@@ -407,9 +407,6 @@ class CudaPlatformBase(Platform):
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        logger.info(
-            "Valid backends: %s", [b[0].name for b in valid_backends_priorities]
-        )
         sorted_indices = sorted(
             range(len(valid_backends_priorities)),
             key=lambda i: valid_backends_priorities[i][1],
@@ -417,8 +414,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         logger.info(
-            "Using %s backend.",
+            "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
+            [b[0].name for b in valid_backends_priorities],
         )
 
         return selected_backend.get_path()
