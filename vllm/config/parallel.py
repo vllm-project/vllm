@@ -615,8 +615,17 @@ class ParallelConfig:
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
             ):
+                if not ray_found:
+                    raise ValueError(
+                        "Unable to load Ray: "
+                        f"{ray_utils.ray_import_err}. Ray is "
+                        "required for multi-node inference, "
+                        "please install Ray with `pip install "
+                        "ray`."
+                    )
+                backend = "ray"
                 gpu_count = cuda_device_count_stateless()
-                raise ValueError(
+                logger.warning(
                     f"World size ({self.world_size}) is larger than the number of "
                     f"available GPUs ({gpu_count}) in this node. If this is "
                     "intentional and you are using:\n"
