@@ -4,7 +4,7 @@
 
 // This function assumes that `cpu_tensor` is a CPU tensor allocated with pinned
 // memory, and that UVA (Unified Virtual Addressing) is enabled.
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
+torch::Tensor get_device_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
   // Get raw host pointer from CPU tensor
