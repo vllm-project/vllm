@@ -410,19 +410,6 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting.peek_request()
 
-                # Check if request has exceeded max wait time.
-                if self._is_request_expired(request):
-                    self.waiting.pop_request()
-                    logger.info(
-                        "Aborting request %s waiting longer than %.2fs.",
-                        request.request_id,
-                        self.scheduler_config.max_wait_time_s,
-                    )
-                    self.finish_requests(
-                        request.request_id, RequestStatus.FINISHED_ABORTED
-                    )
-                    continue
-
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -1302,18 +1289,6 @@ class Scheduler(SchedulerInterface):
             timeout_s,
         )
         self.finish_requests(expired_ids, RequestStatus.FINISHED_ABORTED)
-
-    def _is_request_expired(self, request: Request) -> bool:
-        """Check if a request has exceeded the configured wait time."""
-        timeout_s = self.scheduler_config.max_wait_time_s
-        if not timeout_s:
-            return False
-
-        if request.status not in _WAITING_STATUSES:
-            return False
-
-        now = time.time()
-        return now - request.arrival_time >= timeout_s
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
