@@ -172,15 +172,22 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b_lst = []
         w2_lora_b_lst = []
         w3_lora_b_lst = []
-
+        # TODO: Consider the case where some experts don't have LoRA added.
         for eid in range(len(loras) // 3):
-            w1_lora_a_lst.append(loras[eid * 3].lora_a)
-            w2_lora_a_lst.append(loras[eid * 3 + 1].lora_a)
-            w3_lora_a_lst.append(loras[eid * 3 + 2].lora_a)
+            w1_lora = loras[eid * 3]
+            w2_lora = loras[eid * 3 + 1]
+            w3_lora = loras[eid * 3 + 2]
+            assert w1_lora is not None
+            assert w2_lora is not None
+            assert w3_lora is not None
 
-            w1_lora_b_lst.append(loras[eid * 3].lora_b)
-            w2_lora_b_lst.append(loras[eid * 3 + 1].lora_b)
-            w3_lora_b_lst.append(loras[eid * 3 + 2].lora_b)
+            w1_lora_a_lst.append(w1_lora.lora_a)
+            w2_lora_a_lst.append(w2_lora.lora_a)
+            w3_lora_a_lst.append(w3_lora.lora_a)
+
+            w1_lora_b_lst.append(w1_lora.lora_b)
+            w2_lora_b_lst.append(w2_lora.lora_b)
+            w3_lora_b_lst.append(w3_lora.lora_b)
 
         w1_lora_a = torch.stack(w1_lora_a_lst, dim=0)  # (num_experts,rank,input_size)
         w2_lora_a = torch.stack(w2_lora_a_lst, dim=0)
