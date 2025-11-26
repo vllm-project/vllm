@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -18,7 +19,8 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
@@ -63,7 +65,7 @@ def mamba_gather_indices(common_attn_metadata: CommonAttentionMetadata,
                          block_size: int,
                          num_blocks: int):
     block_table_tensor = common_attn_metadata.block_table_tensor
-    start_indices = common_attn_metadata.seq_lens // block_size
+    start_indices = (common_attn_metadata.seq_lens - 1) // block_size
     offsets = torch.arange(num_blocks, device=block_table_tensor.device)
     indices_to_gather = start_indices.unsqueeze(1) + offsets
     return torch.gather(block_table_tensor, 1, indices_to_gather)
@@ -160,6 +162,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             block_table_tensor = mamba_gather_indices(common_attn_metadata,
                                                       self.kv_cache_spec.block_size,
                                                       1 + self.num_spec)
+            if is_global_first_rank():
+                logger.info(f"block_table_tensor: {block_table_tensor=}")
         else:
             block_table_tensor = m.block_table_tensor
 
