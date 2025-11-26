@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
@@ -9,6 +8,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import AttentionBackendEnum
@@ -216,7 +216,7 @@ class MultiModalConfig:
             if self.mm_encoder_attn_backend is not None
             else None
         ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
