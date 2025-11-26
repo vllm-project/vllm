@@ -4,7 +4,7 @@ import time
 def main():
     MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct"
     PROMPT_MULTIPLE = 3
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=5)
     prefix = ( # examples/offline_inference/prefix_caching.py
         "Your name is QQQQ "
         "You are an expert school principal, skilled in effectively managing "
