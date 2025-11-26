@@ -111,8 +111,8 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/
   commands:
-  - pytest -v -s entrypoints/openai/tool_parsers/test_openai_tool_parser.py
-  #- pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/openai/tool_parsers
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
