@@ -22,6 +22,7 @@ from .qwen3coder_tool_parser import Qwen3CoderToolParser
 from .seed_oss_tool_parser import SeedOssToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
+from .step_deepresearch_tool_parser import StepDeepResearchToolParser
 
 __all__ = [
     "ToolParser",
@@ -46,4 +47,5 @@ __all__ = [
     "Qwen3CoderToolParser",
     "SeedOssToolParser",
     "Step3ToolParser",
+    "StepDeepResearchToolParser",
 ]
