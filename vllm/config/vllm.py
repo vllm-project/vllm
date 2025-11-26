@@ -622,18 +622,6 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-        ):
-            logger.info(
-                "Cudagraph mode is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
@@ -645,6 +633,18 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        if (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.info(
+                "Cudagraph mode %s is not compatible with compilation mode %s."
+                "Overriding to NONE.",
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.mode,
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
