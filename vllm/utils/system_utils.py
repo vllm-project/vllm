@@ -56,6 +56,39 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
             os.environ[key] = old
 
 
+@contextlib.contextmanager
+def suppress_stdout():
+    """
+    Suppress stdout from C libraries at the file descriptor level.
+
+    Only suppresses stdout, not stderr, to preserve error messages.
+    Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
+
+    Example:
+        with suppress_stdout():
+            # C library calls that would normally print to stdout
+            torch.distributed.new_group(ranks, backend="gloo")
+    """
+    # Don't suppress if logging level is DEBUG
+    if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+        yield
+        return
+
+    stdout_fd = sys.stdout.fileno()
+    stdout_dup = os.dup(stdout_fd)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+
+    try:
+        sys.stdout.flush()
+        os.dup2(devnull_fd, stdout_fd)
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(stdout_dup, stdout_fd)
+        os.close(stdout_dup)
+        os.close(devnull_fd)
+
+
 # File path utilities
 
 
