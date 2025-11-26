@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import os
+import logging
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any, Literal
@@ -17,6 +18,8 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+logger = logging.getLogger(__name__)
 
 
 class CompilerInterface:
@@ -241,9 +244,17 @@ class InductorStandaloneAdaptor(CompilerInterface):
         path = os.path.join(self.cache_dir, key)
 
         if is_compile_cache_enabled(compiler_config):
-            compiled_graph.save(path=path, format=self.save_format)
-            compilation_counter.num_compiled_artifacts_saved += 1
-        return compiled_graph, (key, path)
+            handle_to_return = None
+            try:
+                compiled_graph.save(path=path, format=self.save_format)
+                compilation_counter.num_compiled_artifacts_saved += 1
+                handle_to_return = (key, path)
+            except AssertionError as e:
+                logger.warning("Skipping compile cache save due to AssertionError: %s", e)
+            except Exception as e:
+                logger.warning("Skipping compile cache save due to unexpected error: %s", e)
+            return compiled_graph, handle_to_return
+        return compiled_graph, None
 
     def load(
         self,
@@ -257,9 +268,14 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
         path = handle[1]
-        inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
-            path=path, format=self.save_format
-        )
+        try:
+            inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
+                path=path, format=self.save_format
+            )
+        except FileNotFoundError:
+            logger.warning("Compile cache missing at %s, will recompile", path)
+            return None
+
         from torch._inductor.compile_fx import graph_returns_tuple
 
         returns_tuple = graph_returns_tuple(graph)

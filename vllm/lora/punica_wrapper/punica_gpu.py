@@ -10,8 +10,45 @@ https://arxiv.org/abs/2310.18547
 from typing import final
 
 import torch
+import torch._dynamo as torchdynamo
 
+import os
+import contextlib
+
+# Lightweight NVTX guard to annotate LoRA regions when enabled.
+_enable_nvtx = os.getenv("VLLM_LORA_NVTX", "0") != "0"
+
+@contextlib.contextmanager
+def _nvtx(name: str):
+    # Avoid graph breaks: no-op when torch.compile/Dynamo is tracing.
+    try:
+        import torch._dynamo as _dynamo
+        if _dynamo.is_compiling():
+            yield
+            return
+    except Exception:
+        pass
+    try:
+        import torch.compiler as _tc
+        if getattr(_tc, "is_compiling", lambda: False)():
+            yield
+            return
+    except Exception:
+        pass
+
+    if _enable_nvtx:
+        import torch.cuda.nvtx as nvtx
+        nvtx.range_push(name)
+        try:
+            yield
+        finally:
+            nvtx.range_pop()
+    else:
+        yield
+
+from vllm import envs
 from vllm.lora.layers import LoRAMapping
+from vllm.utils.torch_utils import aux_stream, current_stream
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -59,6 +96,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.max_loras, max_num_batched_tokens, device=device
         )
 
+        self.lora_stream = None
+        if not envs.VLLM_DISABLE_LORA_STREAM:
+            self.lora_stream = aux_stream()
+
     def update_metadata(
         self,
         mapping: LoRAMapping,
@@ -74,6 +115,66 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+    def _run_on_lora_stream(self, fn):
+        """Run fn, optionally on the dedicated LoRA stream."""
+        is_compiling = False
+        try:
+            is_compiling = torch.compiler.is_compiling()
+        except Exception:
+            pass
+        try:
+            is_compiling = is_compiling or torch._dynamo.is_compiling()
+        except Exception:
+            pass
+        if self.lora_stream is None or is_compiling:
+            return fn()
+        ls = self.lora_stream
+        ls.wait_stream(current_stream())
+        with torch.cuda.stream(ls):
+            out = fn()
+        current_stream().wait_stream(ls)
+        return out
+
+    def _run_on_lora_stream_async(
+        self, fn, pre_event: torch.cuda.Event | None = None
+    ) -> torch.cuda.Event | None:
+        """Run fn on the LoRA stream and return a completion event.
+
+        If we don't have a dedicated stream or we're compiling / graph-capturing,
+        fall back to running fn() synchronously on the current stream and return None.
+        """
+        is_compiling = False
+        try:
+            is_compiling = torch.compiler.is_compiling()
+        except Exception:
+            pass
+        try:
+            is_compiling = is_compiling or torch._dynamo.is_compiling()
+        except Exception:
+            pass
+
+        if self.lora_stream is None or is_compiling:
+            fn()
+            return None
+
+        ls = self.lora_stream
+        curr = current_stream()
+
+        # Ensure LoRA sees inputs: either via an explicit pre_event or by
+        # waiting on the current stream's prior work.
+        if pre_event is not None:
+            ls.wait_event(pre_event)
+        else:
+            ls.wait_stream(curr)
+
+        # Enqueue fn() onto the LoRA stream.
+        with torch.cuda.stream(ls):
+            fn()
+
+        # Record completion of all work enqueued on the LoRA stream so far.
+        evt = torch.cuda.Event()
+        evt.record(ls)
+        return evt
     def add_shrink(
         self,
         y: torch.Tensor,
@@ -96,14 +197,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor for the operation
         """
 
-        x = x.view(-1, x.shape[-1])
-        lora_shrink(
-            x,
-            lora_a_stacked,
-            y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
-            scale,
-        )
+        def _b():
+            x_ = x.view(-1, x.shape[-1])
+            lora_shrink(x_, lora_a_stacked, y, *self.token_mapping_meta.meta_args(x_.size(0)), scale)
+        with _nvtx("lora_launch_sync"):
+            self._run_on_lora_stream(_b)
 
     def add_expand(
         self,
@@ -138,15 +236,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         assert x.size(0) == len(output_slices)
         num_tokens = x.size(1)  # first dimension is the num slices
 
-        lora_expand(
-            x,
-            lora_b_stacked,
-            y,
-            *self.token_mapping_meta.meta_args(num_tokens),
-            offset_start=offset_start,
-            add_inputs=True,
-        )
-
+        def _b():
+            lora_expand(x, lora_b_stacked, y, *self.token_mapping_meta.meta_args(num_tokens), offset_start=offset_start, add_inputs=True)
+        with _nvtx("lora_launch_sync"):
+            self._run_on_lora_stream(_b)
         y = y.view_as(y_org)
 
     def add_lora_embedding(
@@ -170,14 +263,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs (bool): Default to True.
         """
 
-        lora_expand(
-            x.unsqueeze(dim=0),
-            (lora_b_stacked,),
-            y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
-            offset_start=0,
-            add_inputs=add_inputs,
-        )
+        def _b():
+            lora_expand(x.unsqueeze(dim=0), (lora_b_stacked,), y, *self.token_mapping_meta.meta_args(x.size(0)), offset_start=0, add_inputs=add_inputs)
+        with _nvtx("lora_launch_sync"):
+            self._run_on_lora_stream(_b)
 
     def add_lora_linear(
         self,
@@ -187,6 +276,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: tuple[torch.Tensor, ...],
         scale: float,
         output_slices: tuple[int, ...],
+        offset_start: int = 0,
         *,
         buffer: torch.Tensor | None = None,
         **kwargs,
@@ -226,21 +316,125 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
 
-        self.add_shrink(
-            buffer,  # type: ignore
-            x,
-            lora_a_stacked,
-            scale,
-            **kwargs,
+        def _b():
+            lora_shrink(
+                x,
+                lora_a_stacked,
+                buffer,
+                *self.token_mapping_meta.meta_args(x.size(0)),
+                scale,
+            )
+            lora_expand(
+                buffer,
+                lora_b_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(buffer.size(1)),
+                offset_start=offset_start,
+                add_inputs=True,
+            )
+        with _nvtx("lora_launch_sync"):
+            self._run_on_lora_stream(_b)
+
+    def add_lora_linear_into_async(
+        self,
+        y_out: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        offset_start: int = 0,
+        *,
+        buffer: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.cuda.Event | None:
+        """Async LoRA that writes into provided output buffer (no in-place add).
+
+        Returns a CUDA event that signals completion (or None if run synchronously).
+        """
+
+        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear_into_async() instead of being passed in."
         )
-        self.add_expand(
-            y,
-            buffer,  # type: ignore
-            lora_b_stacked,
-            output_slices,
-            add_inputs=True,
-            **kwargs,
+        r = lora_b_stacked[0].size(-1)
+        buffer = torch.empty(
+            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
+
+        def _b():
+            lora_shrink(
+                x,
+                lora_a_stacked,
+                buffer,
+                *self.token_mapping_meta.meta_args(x.size(0)),
+                scale,
+            )
+            lora_expand(
+                buffer,
+                lora_b_stacked,
+                y_out,
+                *self.token_mapping_meta.meta_args(buffer.size(1)),
+                offset_start=offset_start,
+                add_inputs=True,
+            )
+
+        with _nvtx("lora_launch_async"):
+            return self._run_on_lora_stream_async(_b, pre_event=kwargs.get("pre_event"))
+
+    def add_lora_linear_async(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        offset_start: int = 0,
+        *,
+        buffer: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.cuda.Event | None:
+        """Async variant of add_lora_linear.
+
+        Launches the LoRA shrink + expand on the LoRA stream and returns a CUDA
+        event that signals completion. The output y is updated in-place.
+        """
+
+        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        r = lora_b_stacked[0].size(-1)
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty(
+            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
+        )
+
+        def _b():
+            lora_shrink(
+                x,
+                lora_a_stacked,
+                buffer,
+                *self.token_mapping_meta.meta_args(x.size(0)),
+                scale,
+            )
+            lora_expand(
+                buffer,
+                lora_b_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(buffer.size(1)),
+                offset_start=offset_start,
+                add_inputs=True,
+            )
+
+        return self._run_on_lora_stream_async(_b)
 
     def add_lora_logits(
         self,
@@ -282,21 +476,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # Note: buffer is zeroed inside the shrink op
         buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        lora_shrink(
-            x,
-            [lora_a_stacked],
-            buffer.unsqueeze(dim=0),
-            *self.prompt_mapping_meta.meta_args(x.size(0)),
-            scale,
-        )
-
-        lora_expand(
-            buffer.unsqueeze(dim=0),
-            [lora_b_stacked],
-            y,
-            *self.prompt_mapping_meta.meta_args(buffer.size(0)),
-            add_inputs=True,
-        )
+        def _b():
+            lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0), *self.prompt_mapping_meta.meta_args(x.size(0)), scale)
+            lora_expand(buffer.unsqueeze(dim=0), [lora_b_stacked], y, *self.prompt_mapping_meta.meta_args(buffer.size(0)), add_inputs=True)
+        with _nvtx("lora_launch_sync"):
+            self._run_on_lora_stream(_b)
         y = y.view_as(y_org)
 
     def moe_lora_align_block_size(
@@ -379,9 +563,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
         (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
-        fused_moe_lora(
-            y,
-            x,
+        def _b():
+            fused_moe_lora(
+                y,
+                x,
             lora_a_stacked,
             lora_b_stacked,
             topk_weights,
