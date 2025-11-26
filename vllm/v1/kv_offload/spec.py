@@ -11,7 +11,7 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionBackend
+    from vllm.attention.backends.abstract import AttentionBackend
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)

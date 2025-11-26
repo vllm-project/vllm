@@ -17,9 +17,8 @@ import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import MLAAttention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (

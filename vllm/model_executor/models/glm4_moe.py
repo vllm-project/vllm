@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
