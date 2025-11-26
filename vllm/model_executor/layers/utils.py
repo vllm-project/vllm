@@ -144,8 +144,7 @@ def rocm_unquantized_gemm_impl(
         #and False
         #and bias is None
         #and (n==32 and m == 640 and k == 2880)
-        and (n==32 and k == 2880 and (m == 640 or m == 128))
-        and (n==32 and k == 512 and m == 2880)
+        and ((n==32 and k == 2880 and (m == 640 or m == 128)) or (n==32 and k == 512 and m == 2880))
     )
     if use_skinny_race is True:
         hp_out = torch.nn.functional.linear(x, weight, bias)
