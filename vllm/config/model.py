@@ -2313,7 +2313,7 @@ class APC_REASONS:
     )
 
     attn_type_to_reason_map: dict[AttnTypeStr: BoolWithReason] = {
-        "decoder": ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+        "decoder": GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING,
         "hybrid": HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
         "attention_free": ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING,
         "encoder_decoder": ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
