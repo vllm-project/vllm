@@ -75,7 +75,10 @@ class AttentionConfig:
         from vllm import envs
 
         if envs.is_set(env_var_name):
-            setattr(self, field_name, getattr(envs, env_var_name))
+            value = getattr(envs, env_var_name)
+            if field_name == "backend":
+                value = self.validate_backend_before(value)
+            setattr(self, field_name, value)
             logger.warning_once(
                 "Using %s environment variable is deprecated and will be removed in "
                 "v0.13.0 or v1.0.0, whichever is soonest. Please use "
