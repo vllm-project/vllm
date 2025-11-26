@@ -1353,6 +1353,433 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
+
+
+
+
+#if defined(__HIP__GFX9__)  // TODO: Add NAVI support
+// This version targets big A[] cases, where it is much larger than LDS capacity
+
+__device__ inline int min__(int a, int b) {
+	  int tmp;
+	  asm("v_min_i32_e32 %0, %2, %3 "
+               : "=v"(tmp)
+               : "0"(tmp), "v"(a), "v"(b));
+          return tmp;
+}
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void __launch_bounds__(WvPrGrp*THRDS)
+    wvSplitKrc_(const int K, const int M, const int Bx, const int By,
+                     const scalar_t* B, const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ BIAS,
+		     float* glbl,
+		     int* cntr,
+                     scalar_t* C,
+                     const int CuCount) {
+  constexpr int GrpsShrB = 2;
+  constexpr int NTILE = 16;
+  constexpr int WVLDS_ = (512*4);
+  constexpr int APAD = 2;
+  constexpr int ASTRD = 64;
+  constexpr int BPAD = 2;
+  constexpr int BSTRD = 64;
+  constexpr int WVLDS = ((WVLDS_+(WVLDS_/BSTRD)*BPAD)*4);
+
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  //constexpr bool use_mfma = true;//(std::is_same_v<scalar_t, __hip_bfloat16>);
+
+  using scalar16 =
+      __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    unsigned int i[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    unsigned long l[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+  using big4 =
+      __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
+
+  __shared__ scalar_t stg[WvPrGrp*WVLDS/GrpsShrB];
+  unsigned int* myStg = (unsigned int*)(&stg[WVLDS*(threadIdx.y/GrpsShrB)]);
+  __shared__ scalar_t s[max_lds_len-WvPrGrp*WVLDS/GrpsShrB];
+
+  constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
+  // find biggest k size that fits padded into LDS
+  constexpr uint32_t kFit__ = (max_lds_len-WvPrGrp*WVLDS/GrpsShrB) / N;
+  //constexpr uint32_t kFit_ = (kFit__*ASTRD)/(APAD + ASTRD);
+  uint32_t kFit = kFit__ - (kFit__ % TUC_); // round down
+  uint32_t kfitsPerRdc = (K+kFit-1)/kFit;
+  uint32_t numCuwithFullK = ((M + (WvPrGrp*YTILE/GrpsShrB)-1)/(WvPrGrp*YTILE/GrpsShrB));
+  uint32_t Mmod = numCuwithFullK*(WvPrGrp*YTILE/GrpsShrB);
+
+  if ( ((K+kfitsPerRdc*kFit-1)/(kfitsPerRdc*kFit)) * numCuwithFullK <= CuCount )
+  while (true) {
+   while (kFit>TUC_) {
+    uint32_t kFit_ = kFit-TUC_;
+    if ( ((K+(kfitsPerRdc*kFit_-1))/(kfitsPerRdc*kFit_)) * numCuwithFullK > CuCount) break;
+    kFit = kFit_;
+   }
+   if ( ((K+((kfitsPerRdc-1)*kFit-1))/((kfitsPerRdc-1)*kFit)) * numCuwithFullK <= CuCount) kfitsPerRdc--;
+   else break;
+  }
+
+  bool doRdc = (kfitsPerRdc*kFit < K);
+
+  uint32_t kFitPdd = kFit + (kFit/ASTRD)*APAD;
+  uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
+  uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
+  uint32_t m = (m0 + m1) % Mmod;
+  uint32_t k_str = (m0 / Mmod) * kFit *kfitsPerRdc;
+  uint32_t k_end_ = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  uint32_t k_end = k_end_;//(uint32_t)min_((uint32_t)K, (uint32_t)k_end_);
+  //uint32_t k_len = kFit*kfitsPerRdc;// k_end-k_str;
+  uint32_t k_rnd = K / (kFit*kfitsPerRdc) + ((K % (kFit*kfitsPerRdc)) ? 1 : 0);// k_end-k_str;
+
+  scalar8 sum4[N/NTILE/GrpsShrB][1];
+  //----------------------------------------------------
+  bigType bigB_[YTILE/2][UNRL];
+  bool noreloada = false;
+  uint32_t rmnd = 0;//(WvPrGrp*YTILE)%((WvPrGrp*YTILE)-(M%(WvPrGrp*YTILE)));
+  const uint32_t bLoader = (threadIdx.y % GrpsShrB);
+  uint32_t kBase = 0;
+  if (k_str >= K) return;
+  while (m < Mmod + rmnd) {
+
+#if 1
+    if (m + (threadIdx.x%16) < M)
+    if (doRdc)
+    if (k_str == 0) {
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+        for (uint32_t j=0; j<4; j++) {
+          const int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
+	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
+
+          __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        }
+      }
+    }
+#endif
+
+      //if (threadIdx.y % GrpsShrB == bLoader)
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k_str + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+	//bool v1 = (k_ < K);
+
+        const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
+  #pragma unroll
+        for (uint32_t y = 0; y < YTILE/2; y++) {
+		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*2+bLoader+m, M-1) * K])));
+	}
+      }
+
+    for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
+      // Fetch the weight matrix from memory!
+      const bool reloada = (!noreloada) && ((k1 == k_str) || (k1 == k_str + kBase + kFit)) && (k1 < k_end);
+      if (reloada) {  // load next chunk of A[] to LDS
+        if (k1 != k_str) kBase += kFit;
+        __syncthreads();
+        constexpr int sprdN = 4;
+        const uint32_t thrd = ((threadIdx.y/sprdN) * THRDS + threadIdx.x);
+	//printf("[%d]", kFit);
+#pragma unroll
+        for (uint32_t k = 0; k < kFit; // min_(K, max_lds_len/N);
+                      k += THRDS * (WvPrGrp/sprdN) * A_CHUNK) {
+          const uint32_t kOff = k + (thrd * A_CHUNK);//min_(kFit-1, k + (thrd * A_CHUNK));
+
+          if (kOff < kFit) { //  && (kBase + kOff < K)) // continue;
+	    constexpr int unrl = 8;
+            bigType tmp[unrl];
+	    //for( int n=0; n<unrl; n++) tmp[n].h8 = {0};
+#pragma unroll
+            for (int nt=0; nt<N/sprdN; nt+=NTILE) {
+	      for (int n8=0; n8<NTILE/unrl; n8++) {
+               for (int n=0; n<unrl; n++) {
+                const uint32_t k_in = k_str + kBase + kOff + (n+n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*K;
+                tmp[n] =
+		  *((bigType*)(&A[k_in]));
+               }
+#pragma unroll
+               for (int n=0; n<unrl; n++) {
+		const uint32_t k_ot = kOff + (n+n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*kFitPdd;
+                *((bigType*)(&s[k_ot])) = tmp[n];
+               }
+	      }
+	    }
+	  }
+	}
+        //__syncthreads();
+      }
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        //zero out if oob
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const bool oob_k = (k_ >= K);
+        for (uint32_t d=0; d<2; d++)
+          for (uint32_t j=0; j<2; j++)
+            for (uint32_t y=0; y<YTILE/2; y++) {
+              uint32_t idx = threadIdx.x*YTILE+y*2+bLoader;
+              idx += ((uint32_t)(idx/BSTRD))*BPAD;
+              myStg[idx+(WVLDS/8)*(d*2+j)] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
+            }
+      }
+
+      if (k1 + THRDS * A_CHUNK * UNRL < K)
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
+  #pragma unroll
+        for (uint32_t y = 0; y < YTILE/2; y++) {
+		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*2+bLoader+m, M-1) * K])));
+	}
+      }
+
+      __syncthreads();
+
+      bigType bigB[YTILE][UNRL];
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        //zero out if oob
+        //uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        //uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        //const bool oob_k = (k_ >= K);
+        for (uint32_t d=0; d<2; d++)
+          for (uint32_t j=0; j<2; j++)
+            for (uint32_t y=0; y<YTILE; y++) {
+              uint32_t idx = threadIdx.x+64*y;
+              idx += ((uint32_t)(idx/BSTRD))*BPAD;
+              bigB[y][k2].i[d*2+j] = myStg[idx+(WVLDS/8)*(d*2+j)];
+            }
+      }
+
+      //if (reloada)  __syncthreads();
+
+      bigType bigA[N/GrpsShrB][UNRL];
+#pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 /*+ THRDS * A_CHUNK * UNRL*/ + k2 * THRDS * A_CHUNK;
+#pragma unroll
+        for (uint32_t nt=0; nt<N/GrpsShrB; nt+=NTILE)
+#pragma unroll
+         for (uint32_t n = 0; n < NTILE; n++) {
+	  uint32_t idxa = (nt+(threadIdx.x%NTILE) + (N/GrpsShrB)*(threadIdx.y%GrpsShrB))*kFitPdd + A_CHUNK*((threadIdx.x/NTILE)+n*4)+ ((uint32_t)(k-kBase-k_str));
+          bigA[nt+n][k2] = *((const bigType*)(&(s[idxa])));
+         }
+      }
+
+  #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+  #pragma unroll
+        for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+          if constexpr (std::is_same_v<scalar_t, half>) {
+           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+             bigA[nt*NTILE+0][k2].h4[0], bigB[0][k2].h4[0], (k1==k_str)?((scalar8){0}):sum4[nt][0], 0, 0, 0);
+           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+             bigA[nt*NTILE+0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0, 0, 0);
+	  } else { // bf16
+           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+             bigA[nt*NTILE+0][k2].h4[0], bigB[0][k2].h4[0], (k1==k_str)?((scalar8){0}):sum4[nt][0], 0, 0, 0);
+           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+             bigA[nt*NTILE+0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0, 0, 0);
+	  }
+  #pragma unroll
+         for (uint32_t j=1; j<YTILE; j++) {
+           if constexpr (std::is_same_v<scalar_t, half>) {
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+              bigA[nt*NTILE+j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0], 0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+              bigA[nt*NTILE+j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0], 0, 0, 0);
+	   } else { //bf16
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+              bigA[nt*NTILE+j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0], 0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+              bigA[nt*NTILE+j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0], 0, 0, 0);
+	   }
+         }
+        }
+      }
+    }
+
+    if (!doRdc) {
+     if (m + (threadIdx.x%16) < M)
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+       for (uint32_t j=0; j<4; j++) {
+        int mindx = m + (threadIdx.x%16);
+        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
+        int adr = mindx+M*nindx;
+
+        if (BIAS) {
+          if constexpr (std::is_same_v<scalar_t, half>) {
+              sum4[nt][0][j] += __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              sum4[nt][0][j] +=
+                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+          }
+	}
+
+        if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
+	  C[adr] = __float2bfloat16(sum4[nt][0][j]);
+	else
+	  C[adr] = __float2half(sum4[nt][0][j]);
+       }
+      }
+    } else {
+     if (m + (threadIdx.x%16) < M) {
+      int my_cntr[N/NTILE/GrpsShrB][4];
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+       for (uint32_t j=0; j<4; j++) {
+        int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
+	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
+	atomicAdd(&glbl[adr], sum4[nt][0][j]);
+        my_cntr[nt][j] = atomicAdd(&cntr[adr], 1);
+       }
+      }
+      float vals[N/NTILE/GrpsShrB][4];
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+       for (uint32_t j=0; j<4; j++) {
+        int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
+	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
+	// read-back glbl[] here, can't use return from atomic above
+	if (my_cntr[nt][j] + 1 == k_rnd) vals[nt][j] = glbl[adr];
+       }
+      }
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+       for (uint32_t j=0; j<4; j++) {
+       	int mindx = m + (threadIdx.x%16);
+        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
+        int adr = mindx+M*nindx;
+        if (my_cntr[nt][j] + 1 == k_rnd) {
+          if (BIAS) {
+            if constexpr (std::is_same_v<scalar_t, half>) {
+              vals[nt][j] += __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              vals[nt][j] +=
+                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+            }
+	  }
+          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
+            C[adr] = __float2bfloat16(vals[nt][j]);
+          else
+            C[adr] = __float2half(vals[nt][j]);
+        }
+       }
+      }
+     }
+    }
+
+    m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
+    m = (m0 + m1)%Mmod;
+    k_str = (m0/Mmod) * kFit * kfitsPerRdc;
+    k_end_ = (m0/Mmod+1) * kFit * kfitsPerRdc;
+    k_end = k_end_;
+    if (k_str >= K) break;
+
+    kBase = 0;
+  }
+}
+#else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N>
+__global__ void wvSplitKrc_(const int K, const int M, const int Bx,
+                                 const int By, const scalar_t* B,
+                                 const scalar_t* __restrict__ A,
+                                 const scalar_t* __restrict__ BIAS,
+				 float* glbl,
+				 int* cntr,
+				 scalar_t* C,
+                                 const int CuCount) {
+  UNREACHABLE_CODE
+}
+#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+
+
+torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
+                       const std::optional<at::Tensor>& in_bias,
+                       const int64_t CuCount) {
+  auto M_in = in_a.size(0);
+  auto N_in = in_b.size(0);
+  auto K_in = in_a.size(1);
+  auto Bx_in =
+      (in_bias.has_value() && in_bias->numel() > 0)
+          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
+          : 1;
+  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
+                in_bias->sizes().size() == 2)
+                   ? in_bias->size(0)
+                   : 1;
+
+  TORCH_CHECK(in_a.dtype() == in_b.dtype());
+  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
+  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
+              in_a.dtype() == torch::kBFloat16);
+
+  auto out_c = torch::empty(
+      {N_in, M_in},
+      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+
+  auto axl_glbl = torch::empty(
+      {N_in, M_in},
+      torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
+  auto axl_cntr = torch::empty(
+      {N_in, M_in},
+      torch::TensorOptions().dtype(torch::kInt).device(in_b.device()));
+
+  dim3 grid(CuCount);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  //const int max_lds_len = get_lds_size() / 2;
+
+#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N)                               \
+  {                                                                           \
+    dim3 block(64, _WvPrGrp);                                                 \
+    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N>                   \
+          <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
+                                       biasf4, glbl, cntr, c, CuCount);       \
+  }
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitKrc", [&] {
+    using fptype = typename scalar<scalar_t>::type;
+    fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
+    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    const fptype* biasf4 =
+        (in_bias.has_value() && in_bias->numel() > 0)
+            ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+            : nullptr;
+    fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
+    auto glbl = axl_glbl.data_ptr<float>();
+    auto cntr = axl_cntr.data_ptr<int>();
+    switch (N_in) {
+      case 32:
+        WVSPLITKrc(4, 16, 1, 32)
+        break;
+      case 64:
+        WVSPLITKrc(4, 16, 1, 64)
+        break;
+      default:
+        throw std::runtime_error(
+            "Unsupported N value: " + std::to_string(M_in) + "," +
+            std::to_string(K_in) + "," + std::to_string(N_in));
+    }
+  });
+  //printf("MADEIT");
+  return out_c;
+}
+
+
 #if defined(__HIP__MI3XX__)  // TODO: Add NAVI support
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>

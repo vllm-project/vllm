@@ -1823,6 +1823,10 @@ def wvSplitK(
 ) -> torch.Tensor:
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
+def wvSplitKrc(
+    a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
+) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
 
 def wvSplitKQ(
     a: torch.Tensor,

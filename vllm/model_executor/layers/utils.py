@@ -130,14 +130,44 @@ def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
+    from vllm.platforms.rocm import on_gfx950
 
     n = x.numel() / x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]
+    #print("\nENTER:n:",n,"m:",m,"k:",k)
+
+    use_skinny_race = (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_gfx950()
+        and x.dtype in [torch.float16, torch.bfloat16]
+        #and False
+        #and bias is None
+        #and (n==32 and m == 640 and k == 2880)
+        and (n==32 and k == 2880 and (m == 640 or m == 128))
+        and (n==32 and k == 512 and m == 2880)
+    )
+    if use_skinny_race is True:
+        hp_out = torch.nn.functional.linear(x, weight, bias)
+        cu_count = get_cu_count()
+        x_view = x.reshape(-1, x.size(-1))
+        #print("n:",n,"m:",m,"k:",k)
+        out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
+        """
+        my_out = out.reshape(*x.shape[:-1], weight.shape[0])
+
+        if x.dtype==torch.bfloat16:
+          atol = 1e-1; rtol = 1e-1
+        if x.dtype==torch.float16:
+          atol = 1e-3; rtol = 1e-5
+        if not torch.allclose(my_out,hp_out,atol=atol,rtol=rtol) :
+            print("MISSMATCH:",m,",",n,",",k,",my:",my_out,"\nhp:", hp_out, "\n\n\n")"""
+        return out
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
+        #print("\nTriton:n:",n,"m:",m,"k:",k)
         return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
@@ -148,6 +178,7 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny is not True:
+        #print("\nhipb:n:",n,"m:",m,"k:",k,"\n")
         return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
@@ -158,6 +189,8 @@ def rocm_unquantized_gemm_impl(
     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
         out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
+    #if n==32:
+    #  print("\nhipb:n:",n,"m:",m,"k:",k,"\n")
     return torch.nn.functional.linear(x, weight, bias)
 
 

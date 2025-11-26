@@ -43,6 +43,12 @@ NKM_FACTORS_WVSPLITK = [
     (4, 256, 8),
 ]
 
+NKM_FACTORS_WVSPLITKRC = [
+    (32, 2880, 128),
+    (32, 2880, 640),
+    (32, 512, 2880),
+]
+
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
     (1, 16, 16),
@@ -59,7 +65,25 @@ NKM_FACTORS_WVSPLITK_FP8 = [
 
 SEEDS = [0]
 
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitkrc_bias2D_kernel(n, k, m, dtype, seed):
+    torch.manual_seed(seed)
+    cu_count = get_cu_count()
 
+    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
+    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
+
+    ref_out = torch.nn.functional.linear(A, B, BIAS)
+    out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
+
+    assert torch.allclose(out, ref_out, rtol=0.01)
+
+""""
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
@@ -134,7 +158,6 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
 
     assert torch.allclose(out, ref_out, rtol=0.01)
 
-
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -198,3 +221,4 @@ def test_rocm_wvsplitk_fp8_bias1D_kernel(n, k, m, dtype, seed):
     )
 
     assert torch.allclose(out, ref_out, rtol=0.01)
+    """
