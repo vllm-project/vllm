@@ -203,9 +203,9 @@ class NgramGPUKernel(nn.Module):
 
     def forward(
         self,
-        num_tokens_no_spec: torch.Tensor,  # [batch_size] on GPU
-        token_ids_gpu: torch.Tensor,  # [batch_size, max_len] on GPU
-        combined_mask: torch.Tensor,  # [batch_size] bool on GPU
+        num_tokens_no_spec: torch.Tensor,
+        token_ids_gpu: torch.Tensor,
+        combined_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
         Forward pass for N-gram proposal using GPU tensor operations.
@@ -217,7 +217,6 @@ class NgramGPUKernel(nn.Module):
             num_tokens_no_spec: Number of tokens for each sequence [batch_size]
             token_ids_gpu: Token IDs [batch_size, max_len]
             combined_mask: Whether each sequence is valid for spec decode [batch_size]
-            batch_size: Deprecated parameter, will be inferred from tensor shape
 
         Returns:
             draft_tokens: [batch_size, k] on GPU
