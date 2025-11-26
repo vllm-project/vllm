@@ -270,19 +270,11 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
       const int sf_k_pack_idx = sf_k_idx / 4;
       const int pos = sf_k_idx % 4;
 
-      // reinterpret the UE8M0 scale y_s as IEEE bits and extract its 8-bit
-      // exponent
-      unsigned int bits = __float_as_uint(y_s);
-      unsigned int contrib = 0;
-      if (pos == 0) {
-        contrib = (bits >> 23u);
-      } else if (pos == 1) {
-        contrib = (bits >> 15u);
-      } else if (pos == 2) {
-        contrib = (bits >> 7u);
-      } else {
-        contrib = (bits << 1u);
-      }
+      // reinterpret the UE8M0 scale y_s as IEEE bits, extract the 8-bit
+      // exponent, and place it into the correct byte of the 32-bit word.
+      const unsigned int bits = __float_as_uint(y_s);
+      const unsigned int exponent = (bits >> 23u) & 0xffu;
+      const unsigned int contrib = exponent << (pos * 8u);
 
       const int out_idx = sf_k_pack_idx * tma_aligned_mn + mn_idx;
       // atomically OR 8-bit exponent into the packed scales buffer

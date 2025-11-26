@@ -671,23 +671,16 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """FP8 per-token-group quantization for DeepGEMM.
 
-    This helper:
-      - Quantizes activations to FP8 (same scheme as `per_token_group_quant_fp8`)
-      - Writes per-group scales directly into UE8M0-packed, TMA-aligned layout
-        expected by DeepGEMM kernels (see `smxx_layout.cuh` in DeepGEMM).
-
     Returns:
         (x_q, x_s_packed)
-          x_q:        FP8 activations, same shape as `x`.
-          x_s_packed: Int32 tensor with logical shape
-                      [mn, ceil(num_groups_per_row / 4)], laid out with
-                      TMA-aligned stride along the packed-K dimension:
-                        - mn  = x.numel() // x.shape[-1]
-                        - num_groups_per_row = x.shape[-1] // group_size
+            x_q: FP8 activations, same shape as `x`.
+            x_s_packed: Int32 tensor with logical shape
+                        [mn, ceil(num_groups_per_row / 4)], laid out with
+                        TMA-aligned stride along the packed-K dimension
     """
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
-    # For DeepGEMM UE8M0-packed layout we *require* UE8M0 scales.
+    # for DeepGEMM UE8M0-packed layout we *require* UE8M0 scales.
     assert use_ue8m0, (
         "per_token_group_quant_fp8_packed_for_deepgemm requires UE8M0 scales."
     )
@@ -700,22 +693,15 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    fp8_min, fp8_max = finfo.min, finfo.max
 
-    # For the experimental DeepGEMM path we always operate on
-    # contiguous inputs/outputs; allocate our own FP8 buffer.
-
-    # Compute DeepGEMM-style packed scale tensor shape.
+    # compute DeepGEMM-style packed scale tensor shape.
     hidden_dim = x.shape[-1]
     mn = x.numel() // hidden_dim
     num_groups_per_row = hidden_dim // group_size
     k_num_packed_sf_k = (num_groups_per_row + 3) // 4
     tma_aligned_mn = ((mn + 3) // 4) * 4
 
-    # Allocate with the same logical shape and stride as DeepGEMM's
-    # `get_mn_major_tma_aligned_packed_ue8m0_tensor`, i.e. shape
-    # [mn, packed_sf_k] and stride [1, tma_aligned_mn].
     x_s_packed = torch.empty_strided(
         (mn, k_num_packed_sf_k),
         (1, tma_aligned_mn),
@@ -729,13 +715,14 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         "platforms using DeepGEMM."
     )
 
-    # Ensure a contiguous view for the CUDA kernel, independent of how
-    # `x` is represented inside TorchDynamo / Inductor graphs.
-    x_contig = x.contiguous()
-    x_q_local = torch.empty_like(x_contig, device=x.device, dtype=dtype)
+    x_contiguous = x.contiguous()
+    if out_q is not None:
+        x_q_local = out_q
+    else:
+        x_q_local = torch.empty_like(x_contiguous, device=x.device, dtype=dtype)
 
     torch.ops._C.per_token_group_fp8_quant_packed(
-        x_contig,
+        x_contiguous,
         x_q_local,
         x_s_packed,
         group_size,
@@ -744,7 +731,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         fp8_max,
     )
 
-    # Return a tensor with the original logical shape.
+    # return a tensor with the original logical shape.
     x_q = x_q_local.view_as(x)
     return x_q, x_s_packed
 
