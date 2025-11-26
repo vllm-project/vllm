@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsMoEMethod,
+    get_compressed_tensors_moe_method,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS,
@@ -158,7 +158,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
+            return get_compressed_tensors_moe_method(self, layer)
         return None
 
     @classmethod
