@@ -128,6 +128,7 @@ class ParallelConfig:
             "pplx",
             "deepep_high_throughput",
             "deepep_low_latency",
+            "nixl_ep",
             "allgather_reducescatter",
             "flashinfer_all2allv",
         ]
@@ -434,6 +435,7 @@ class ParallelConfig:
                 "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "nixl_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1

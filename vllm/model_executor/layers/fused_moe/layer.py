@@ -216,10 +216,11 @@ def determine_expert_placement_strategy(
         if (
             moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.use_deepep_ll_kernels
+            and not moe_parallel_config.use_nixl_ep_kernels
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
-                "the DeepEP low-latency backend, but '%s' was configured. "
+                "the DeepEP low-latency or NIXL EP backend, but '%s' was configured. "
                 "Falling back to linear expert placement.",
                 moe_parallel_config.all2all_backend,
             )
@@ -743,6 +744,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_nixl_ep_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )
 
@@ -759,6 +761,7 @@ class FusedMoE(CustomOp):
         if (
             self.expert_placement_strategy != "round_robin"
             or not self.use_deepep_ll_kernels
+            or not self.use_nixl_ep_kernels
         ):
             return None
 

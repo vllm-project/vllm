@@ -390,6 +390,134 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
+class NixlEPAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on NIXL EP kernels.
+    This backend supports elastic EP with dynamic rank connection/disconnection.
+    """
+
+    # (nixl_ep_buffer, ep_size)
+    _buffer: tuple[Any, int] | None = None
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
+        import os
+
+        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+        assert envs.VLLM_NIXL_EP_UCX_IB_DEVICES is not None, (
+            "VLLM_NIXL_EP_UCX_IB_DEVICES is not set"
+        )
+        assert envs.VLLM_NIXL_EP_UCX_TCP_DEVICES is not None, (
+            "VLLM_NIXL_EP_UCX_TCP_DEVICES is not set"
+        )
+        if envs.VLLM_NIXL_EP_ETCD_ENDPOINTS is not None:
+            os.environ["NIXL_ETCD_ENDPOINTS"] = envs.VLLM_NIXL_EP_ETCD_ENDPOINTS
+        if envs.VLLM_NIXL_EP_PLUGIN_DIR is not None:
+            os.environ["NIXL_PLUGIN_DIR"] = envs.VLLM_NIXL_EP_PLUGIN_DIR
+
+        from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+
+        # NOTE(yongji): envs.LOCAL_RANK may not be set
+        # an ugly way to get current worker's device index under DPEngineCoreActor
+        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES.split(",")
+        assert get_pp_group().world_size == 1
+        local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
+        ucx_ib_nics = envs.VLLM_NIXL_EP_UCX_IB_DEVICES.split(",")
+        pxb_ib_nic = ucx_ib_nics[local_device_index]
+        os.environ["UCX_NET_DEVICES"] = (
+            f"cuda0-{pxb_ib_nic}:1" + "," + envs.VLLM_NIXL_EP_UCX_TCP_DEVICES
+        )
+
+    def _init_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ) -> None:
+        from nixl_ep import Buffer  # type: ignore[import-not-found]
+
+        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        num_rdma_bytes = Buffer.get_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=self.max_num_ep_ranks,
+            num_experts=max_num_global_experts,
+        )
+        assert NixlEPAll2AllManager._buffer is None, (
+            "NIXL EP buffer already initialized"
+        )
+        buffer = Buffer(
+            nvlink_backend="nixl",
+            explicitly_destroy=True,
+            rank=self.rank,
+            enable_shrink=True,
+        )
+        buffer.update_memory_buffers(
+            num_ranks=self.max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            num_rdma_bytes=num_rdma_bytes,
+        )
+        ranks_to_connect = list(range(self.cpu_group.size()))
+        buffer.connect_ranks(ranks_to_connect)
+        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+
+    def _update_buffer(self):
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer, current_ep_size = NixlEPAll2AllManager._buffer
+        current_ranks = list(range(current_ep_size))
+        new_ep_size = self.cpu_group.size()
+        if new_ep_size > len(current_ranks):
+            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
+            buffer.connect_ranks(ranks_to_connect)
+        else:
+            ranks_to_disconnect = current_ranks[new_ep_size:]
+            buffer.disconnect_ranks(ranks_to_disconnect)
+
+    def get_handle(self, kwargs):
+        if (
+            NixlEPAll2AllManager._buffer is not None
+            and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
+        ):
+            return NixlEPAll2AllManager._buffer[0]
+
+        num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+        nixl_kwargs = dict(
+            max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
+            token_hidden_size=kwargs["token_hidden_size"],
+            num_experts_per_rank=num_experts_per_rank,
+        )
+        if NixlEPAll2AllManager._buffer is None:
+            self._init_buffer(**nixl_kwargs)
+        else:
+            self._update_buffer()
+
+        assert NixlEPAll2AllManager._buffer is not None
+        handle = NixlEPAll2AllManager._buffer[0]
+        return handle
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
+        # scale-up/down, so we cannot destroy the persistent buffer here.
+        pass
+
+    # NIXL EP uses RDMA so no SMs are used for communication
+    def max_sms_used(self) -> int | None:
+        return 0
+
+
 class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.

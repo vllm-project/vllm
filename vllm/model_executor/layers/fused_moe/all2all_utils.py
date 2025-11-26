@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_nixl_ep, has_pplx
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -30,6 +30,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_nixl_ep():
+        from .nixl_ep_prepare_finalize import NixlEPPrepareAndFinalize
 
 
 def maybe_roundup_layer_hidden_size(
@@ -58,6 +60,11 @@ def maybe_roundup_layer_hidden_size(
 
     if moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size
+        )
+
+    if moe_parallel_config.use_nixl_ep_kernels:
+        hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
 
@@ -159,6 +166,41 @@ def maybe_make_prepare_finalize(
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
+            local_expert_global_ids=local_expert_global_ids,
+        )
+
+    elif moe.use_nixl_ep_kernels:
+        assert quant_config is not None
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+        )
+
+        prepare_finalize = NixlEPPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,

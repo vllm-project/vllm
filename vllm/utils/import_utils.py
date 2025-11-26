@@ -428,6 +428,11 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
+def has_nixl_ep() -> bool:
+    """Whether the optional `nixl_ep` package is available."""
+    return _has_module("nixl_ep")
+
+
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
     is_available = _has_module("triton_kernels") or _has_module(
