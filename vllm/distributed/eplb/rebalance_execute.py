@@ -528,9 +528,6 @@ def rearrange_expert_weights_inplace(
     # Max number of layers to group for communication
     max_group_layers = envs.VLLM_EPLB_SYNC_MAX_GROUPED_LAYERS
     max_group_layers = max(min(max_group_layers, num_moe_layers), 1)
-    logger.info_once(
-        f"EPLB Sync: rearrange max_group_layers: {max_group_layers}", scope="global"
-    )
 
     first_layer_weights = list(expert_weights[0])
     # Buffers to hold the expert weights during the exchange.
@@ -552,6 +549,9 @@ def rearrange_expert_weights_inplace(
                     group=ep_group,
                 )
         return
+    logger.info_once(
+        f"EPLB Sync: rearrange max_group_layers: {max_group_layers}", scope="global"
+    )
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!

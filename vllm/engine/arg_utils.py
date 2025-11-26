@@ -419,10 +419,10 @@ class EngineArgs:
     )
     _api_process_count: int = ParallelConfig._api_process_count
     _api_process_rank: int = ParallelConfig._api_process_rank
-    num_redundant_experts: int = EPLBConfig.num_redundant_experts
-    eplb_window_size: int = EPLBConfig.window_size
-    eplb_step_interval: int = EPLBConfig.step_interval
-    eplb_log_balancedness: bool = EPLBConfig.log_balancedness
+    num_redundant_experts: int | None = None
+    eplb_window_size: int | None = None
+    eplb_step_interval: int | None = None
+    eplb_log_balancedness: bool | None = None
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )

@@ -549,7 +549,12 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        if log_stats:
+        if (
+            log_stats
+            and self.expert_rearrangement_step
+            % self.parallel_config.eplb_config.log_balancedness_interval
+            == 0
+        ):
             # Sync the expert load pass for each model (main and drafter).
             # expert_load_pass: (num_moe_layers, num_physical_experts)
             expert_load_pass_list = self._sync_load_pass()
@@ -581,9 +586,10 @@ class EplbState:
 
                 if ep_group.rank() == 0:
                     logger.info(
-                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                        "EPLB step: %d/%d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f",
                         self.expert_rearrangement_step,
+                        self.expert_rearrangement_step_interval,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
