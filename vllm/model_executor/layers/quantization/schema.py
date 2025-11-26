@@ -13,8 +13,6 @@ possible on ROCm), the model can be optionally augmented with KV cache
 scaling factors.
 """
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 
 
@@ -30,7 +28,8 @@ class KVCacheQuantSchema(BaseModel):
     def check_is_fp8(self) -> "KVCacheQuantSchema":
         assert self.dtype == "float8_e4m3fn", (
             "Loaded scaling factors intended for KV cache dtype = "
-            f"{self.dtype} rather than float8_e4m3fn!")
+            f"{self.dtype} rather than float8_e4m3fn!"
+        )
         return self
 
     @model_validator(mode="after")
@@ -41,15 +40,18 @@ class KVCacheQuantSchema(BaseModel):
             num_hidden_layers = context["num_hidden_layers"]
             assert len(self.scaling_factor) == tp_size, (
                 f"Loaded dictionary has TP size {len(self.scaling_factor)} "
-                f"but LLM engine is currently running with TP size {tp_size}.")
+                f"but LLM engine is currently running with TP size {tp_size}."
+            )
             for tp_rank, layer_maps in self.scaling_factor.items():
                 assert len(layer_maps) == num_hidden_layers, (
                     f"KV cache scales map for TP rank {tp_rank} is malformed. "
                     f"Expected {num_hidden_layers} layers, got "
-                    f"{len(layer_maps)}.")
+                    f"{len(layer_maps)}."
+                )
             for i in range(tp_size):
                 assert i in self.scaling_factor, (
-                    f"KV cache scales map for TP rank {i} not found.")
+                    f"KV cache scales map for TP rank {i} not found."
+                )
         return self
 
     @model_validator(mode="after")
@@ -62,7 +64,8 @@ class KVCacheQuantSchema(BaseModel):
             for i in range(num_hidden_layers):
                 assert i in layer_scales_map, (
                     f"Could not find KV cache scales for layer {i} in "
-                    f"TP rank {tp_rank}.")
+                    f"TP rank {tp_rank}."
+                )
         return self
 
 
@@ -70,7 +73,7 @@ class QuantParamSchema(BaseModel):
     # TODO: Generalize and extend with more fields
     # (e.g. weights/activations params) once functionality is enabled
     model_config = ConfigDict(protected_namespaces=())
-    model_type: Optional[str]
+    model_type: str | None
     kv_cache: KVCacheQuantSchema
 
     @model_validator(mode="after")
@@ -82,5 +85,6 @@ class QuantParamSchema(BaseModel):
                 assert model_type == self.model_type, (
                     f"Model type is {model_type} but loaded "
                     f"scaling factors belonging to different "
-                    f"model type {self.model_type}!")
+                    f"model type {self.model_type}!"
+                )
         return self

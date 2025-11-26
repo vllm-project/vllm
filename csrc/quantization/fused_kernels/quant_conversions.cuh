@@ -6,7 +6,7 @@
 
 #include "quantization/vectorization.cuh"
 // TODO(luka/varun):refactor common.cuh to use this file instead
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 

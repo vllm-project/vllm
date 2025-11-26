@@ -2,22 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+from unittest.mock import Mock
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import openai
 import pybase64
 import pytest
 import regex as re
 import torch
 
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.config import ModelConfig
+from vllm.entrypoints.renderer import CompletionRenderer
 
 from ...utils import RemoteOpenAIServer
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch):
-    monkeypatch.setenv('VLLM_USE_V1', '1')
 
 
 @pytest.mark.asyncio
@@ -27,12 +24,17 @@ async def test_empty_prompt():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match="decoder prompt cannot be empty"):
-            await client.completions.create(model=model_name,
-                                            prompt="",
-                                            max_tokens=5,
-                                            temperature=0.0)
+        with pytest.raises(
+            openai.BadRequestError,
+            match="Either prompt or prompt_embeds must be provided and non-empty.",
+        ):
+            await client.completions.create(
+                model=model_name,
+                prompt="",
+                max_tokens=5,
+                temperature=0.0,
+                extra_body={"prompt_embeds": []},
+            )
 
 
 @pytest.mark.asyncio
@@ -42,23 +44,27 @@ async def test_out_of_vocab_token_ids():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.*out of vocabulary.*').pattern):
-            await client.completions.create(model=model_name,
-                                            prompt=[999999],
-                                            max_tokens=5,
-                                            temperature=0.0)
+        with pytest.raises(
+            openai.BadRequestError, match=re.compile(".*out of vocabulary.*").pattern
+        ):
+            await client.completions.create(
+                model=model_name, prompt=[999999], max_tokens=5, temperature=0.0
+            )
 
 
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "layout",
-    [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr])
+    "layout", [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr]
+)
 @pytest.mark.parametrize("seq_len", [2, 10])
 @pytest.mark.parametrize("hidden_size", [2, 10])
-def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
-                            seq_len: int, hidden_size: int):
+def test_load_prompt_embeds(
+    dtype: torch.dtype, layout: torch.layout, seq_len: int, hidden_size: int
+):
+    model_config = Mock(spec=ModelConfig)
+    model_config.enable_prompt_embeds = True
+    renderer = CompletionRenderer(model_config, tokenizer=None)
+
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user
     # uses sparse tensors to reduce the transmission size of prompt embeddings,
@@ -83,11 +89,30 @@ def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
     buffer.seek(0)
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
 
-    loaded_prompt_embeds = OpenAIServing._load_prompt_embeds(encoded_tensor)
+    loaded_prompt_embeds = renderer.load_prompt_embeds(encoded_tensor)
     assert len(loaded_prompt_embeds) == 1
     loaded_tensor = loaded_prompt_embeds[0]["prompt_embeds"]
     assert loaded_tensor.device.type == "cpu"
     assert loaded_tensor.layout == torch.strided
-    torch.testing.assert_close(loaded_tensor,
-                               tensor.to("cpu").to_dense(),
-                               equal_nan=True)
+    torch.testing.assert_close(
+        loaded_tensor, tensor.to("cpu").to_dense(), equal_nan=True
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("seq_len", [2])
+@pytest.mark.parametrize("hidden_size", [2])
+def test_disable_prompt_embeds(dtype: torch.dtype, seq_len: int, hidden_size: int):
+    model_config = Mock(spec=ModelConfig)
+    model_config.enable_prompt_embeds = False
+    renderer = CompletionRenderer(model_config, tokenizer=None)
+
+    tensor = torch.randn((seq_len, hidden_size), dtype=dtype)
+
+    buffer = io.BytesIO()
+    torch.save(tensor, buffer)
+    buffer.seek(0)
+    encoded_tensor = pybase64.b64encode(buffer.getvalue())
+
+    with pytest.raises(ValueError, match="--enable-prompt-embeds"):
+        renderer.load_prompt_embeds(encoded_tensor)

@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 
+pytestmark = pytest.mark.cpu_test
 
-def assert_nested_tensors_equal(expected: NestedTensors,
-                                actual: NestedTensors):
+
+def assert_nested_tensors_equal(expected: NestedTensors, actual: NestedTensors):
     assert type(expected) == type(actual)  # noqa: E721
     if isinstance(expected, torch.Tensor):
         assert torch.equal(expected, actual)
@@ -16,8 +18,9 @@ def assert_nested_tensors_equal(expected: NestedTensors,
             assert_nested_tensors_equal(expected_item, actual_item)
 
 
-def assert_multimodal_inputs_equal(expected: MultiModalKwargs,
-                                   actual: MultiModalKwargs):
+def assert_multimodal_inputs_equal(
+    expected: MultiModalKwargs, actual: MultiModalKwargs
+):
     assert set(expected.keys()) == set(actual.keys())
     for key in expected:
         assert_nested_tensors_equal(expected[key], actual[key])
@@ -49,19 +52,10 @@ def test_multimodal_input_batch_nested_tensors():
     a = torch.rand([2, 3])
     b = torch.rand([2, 3])
     c = torch.rand([2, 3])
-    result = MultiModalKwargs.batch([{
-        "image": [a]
-    }, {
-        "image": [b]
-    }, {
-        "image": [c]
-    }])
-    assert_multimodal_inputs_equal(result, {
-        "image":
-        torch.stack([a.unsqueeze(0),
-                     b.unsqueeze(0),
-                     c.unsqueeze(0)])
-    })
+    result = MultiModalKwargs.batch([{"image": [a]}, {"image": [b]}, {"image": [c]}])
+    assert_multimodal_inputs_equal(
+        result, {"image": torch.stack([a.unsqueeze(0), b.unsqueeze(0), c.unsqueeze(0)])}
+    )
 
 
 def test_multimodal_input_batch_heterogeneous_lists():
@@ -70,8 +64,8 @@ def test_multimodal_input_batch_heterogeneous_lists():
     c = torch.rand([1, 2, 3])
     result = MultiModalKwargs.batch([{"image": [a, b]}, {"image": [c]}])
     assert_multimodal_inputs_equal(
-        result,
-        {"image": [torch.stack([a, b]), c.unsqueeze(0)]})
+        result, {"image": [torch.stack([a, b]), c.unsqueeze(0)]}
+    )
 
 
 def test_multimodal_input_batch_multiple_batchable_lists():
@@ -81,9 +75,8 @@ def test_multimodal_input_batch_multiple_batchable_lists():
     d = torch.rand([1, 2, 3])
     result = MultiModalKwargs.batch([{"image": [a, b]}, {"image": [c, d]}])
     assert_multimodal_inputs_equal(
-        result,
-        {"image": torch.stack([torch.stack([a, b]),
-                               torch.stack([c, d])])})
+        result, {"image": torch.stack([torch.stack([a, b]), torch.stack([c, d])])}
+    )
 
 
 def test_multimodal_input_batch_mixed_stacking_depths():
