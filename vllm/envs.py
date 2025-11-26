@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
+    VLLM_USE_FLASHINFER: bool = False
     VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
@@ -162,6 +163,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_USE_FLASHINFER_NORM: bool = False
+    VLLM_USE_FLASHINFER_ACTIVATION: bool = False
+    VLLM_USE_FLASHINFER_ALLREDUCE: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
@@ -599,6 +603,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"
     ),
     "VLLM_NO_USAGE_STATS": lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    # Master switch to enable all FlashInfer backends/kernels.
+    # When set to 1, enables FlashInfer for: attention, sampling, MoE,
+    # RMSNorm, activations, allreduce, and all2all.
+    "VLLM_USE_FLASHINFER": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER", "0"))
+    ),
     "VLLM_DISABLE_FLASHINFER_PREFILL": lambda: os.environ.get(
         "VLLM_DISABLE_FLASHINFER_PREFILL", "0"
     )
@@ -646,21 +656,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASHINFER_MLA": use FlashInfer for MLA
     # - "CUTLASS_MLA": use CUTLASS for MLA
     # All possible options loaded dynamically from AttentionBackendEnum
+    # Falls back to FLASHINFER when VLLM_USE_FLASHINFER is set.
     "VLLM_ATTENTION_BACKEND": env_with_choices(
         "VLLM_ATTENTION_BACKEND",
-        None,
+        "FLASHINFER" if os.getenv("VLLM_USE_FLASHINFER", "0") == "1" else None,
         lambda: list(
             __import__(
                 "vllm.attention.backends.registry", fromlist=["AttentionBackendEnum"]
             ).AttentionBackendEnum.__members__.keys()
         ),
     ),
-    # If set, vllm will use flashinfer sampler
+    # If set, vllm will use flashinfer sampler.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
     )
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-    else None,
+    else (True if os.getenv("VLLM_USE_FLASHINFER", "0") == "1" else None),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
@@ -1178,33 +1190,64 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # Allow use of FlashInfer MoE kernels for fused moe ops.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_FP8": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
+    ),
+    # Allow use of FlashInfer RMSNorm/LayerNorm kernels.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
+    "VLLM_USE_FLASHINFER_NORM": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_NORM",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
+    ),
+    # Allow use of FlashInfer activation kernels (silu_and_mul, gelu_and_mul).
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
+    "VLLM_USE_FLASHINFER_ACTIVATION": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_ACTIVATION",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
+    ),
+    # If set to 1, enable FlashInfer fused allreduce + RMSNorm for tensor
+    # parallel inference. Requires SM >= 90 (Hopper) and TP > 1.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
+    "VLLM_USE_FLASHINFER_ALLREDUCE": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_ALLREDUCE",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # If set to 1, use the FlashInfer CUTLASS backend for
     # MXFP8 (activation) x MXFP4 (weight) MoE.
     # This is separate from the TRTLLMGEN path controlled by
     # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.
+    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+                      os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -1243,9 +1286,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
+    # Falls back to flashinfer_all2allv when VLLM_USE_FLASHINFER is set.
     "VLLM_ALL2ALL_BACKEND": env_with_choices(
         "VLLM_ALL2ALL_BACKEND",
-        "allgather_reducescatter",
+        "flashinfer_all2allv"
+        if os.getenv("VLLM_USE_FLASHINFER", "0") == "1"
+        else "allgather_reducescatter",
         [
             "naive",
             "pplx",

@@ -6,22 +6,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+logger = init_logger(__name__)
+
+
+def _use_flashinfer_norm() -> bool:
+    """Check if FlashInfer normalization should be used."""
+    return (
+        envs.VLLM_USE_FLASHINFER_NORM
+        and has_flashinfer()
+        and current_platform.is_cuda()
+    )
 
 
 def rms_norm(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
-    from vllm import _custom_ops as ops
-
     if vllm_is_batch_invariant():
         return rms_norm_batch_invariant(x, weight, variance_epsilon)
+
+    if _use_flashinfer_norm():
+        from flashinfer.norm import rmsnorm
+
+        logger.info_once("Using FlashInfer rmsnorm.")
+        return rmsnorm(x, weight, variance_epsilon)
+
+    from vllm import _custom_ops as ops
+
     out = torch.empty_like(x)
     ops.rms_norm(
         out,
@@ -38,12 +59,19 @@ def fused_add_rms_norm(
     weight: torch.Tensor,
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm import _custom_ops as ops
-
     if vllm_is_batch_invariant():
         return rms_norm_batch_invariant(
             x + residual, weight, variance_epsilon
         ), x + residual
+
+    if _use_flashinfer_norm():
+        from flashinfer.norm import fused_add_rmsnorm
+
+        logger.info_once("Using FlashInfer fused_add_rmsnorm.")
+        return fused_add_rmsnorm(x, residual, weight, variance_epsilon)
+
+    from vllm import _custom_ops as ops
+
     ops.fused_add_rms_norm(
         x,
         residual,
