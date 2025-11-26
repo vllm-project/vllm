@@ -522,6 +522,7 @@ class WhisperEncoder(nn.Module):
 
     def forward(self, input_features: torch.Tensor | list[torch.Tensor]):
         hidden_states = []
+        input_is_batched = False
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
@@ -530,8 +531,13 @@ class WhisperEncoder(nn.Module):
                 embeds.dtype
             )
             hidden_states.append(embeds)
+            input_is_batched = embeds.ndim > 2
         # Input to MHA must be B x T x D
-        hidden_states = torch.stack(hidden_states, dim=0)
+        if input_is_batched:
+            # Models using WhisperEncoder may handle batching internally.
+            hidden_states = torch.cat(hidden_states)
+        else:
+            hidden_states = torch.stack(hidden_states, dim=0)
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
