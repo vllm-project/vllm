@@ -2437,13 +2437,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
 
 class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
-    """
-    MoE method using 4-bit weights and FP8 activations
-    - Weights: int4 (stored as int8 values in [-8,7], packed to uint8 nibbles)
-    - Scales: Fp32 for Channelwise , bf16 for groupwise quantization
-    - Bias: Same data type as original weights
-    - Activations: FP8 (E4M3/F4M4)
-    """
     def __init__(
         self,
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
