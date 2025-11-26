@@ -178,8 +178,6 @@ class AttentionBackend(ABC):
         By default, only supports decoder attention.
         Backends should override this to support other attention types.
         """
-        from vllm.attention.backends.abstract import AttentionType
-
         return attn_type == AttentionType.DECODER
 
     @classmethod

@@ -4,13 +4,11 @@
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -98,7 +96,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
             path = path.rsplit(".", 1)[0]
         return path
 
-    def get_class(self) -> "type[AttentionBackend]":
+    def get_class(self) -> type[AttentionBackend]:
         """Get the backend class (respects overrides).
 
         Returns:
@@ -160,7 +158,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
             path = path.rsplit(".", 1)[0]
         return path
 
-    def get_class(self) -> "type[AttentionBackend]":
+    def get_class(self) -> type[AttentionBackend]:
         """Get the backend class (respects overrides).
 
         Returns:

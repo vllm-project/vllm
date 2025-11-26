@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -27,7 +28,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -216,7 +216,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         for c in self._connectors:
