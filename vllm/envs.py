@@ -460,8 +460,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     in ("1", "true")
     or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
     # If set, skip adding +precompiled suffix to version string
-    "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: os.environ.get(
-        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX", "0") == "1",
+    "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: bool(
+        int(os.environ.get("VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX", "0"))
+    ),
     # Used to mark that setup.py is running in a Docker build context,
     # in order to force the use of precompiled binaries.
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "")
