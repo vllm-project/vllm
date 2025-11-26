@@ -130,6 +130,7 @@ class PostGradPassManager(CustomGraphPass):
         state = {"pass_config": self.pass_config.compile_factors(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
+        state["passes"].append(self.post_cleanup.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
 
         return InductorPass.hash_dict(state)

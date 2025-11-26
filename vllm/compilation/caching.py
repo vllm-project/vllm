@@ -4,6 +4,7 @@
 import inspect
 import os
 import pickle
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -23,6 +24,28 @@ except ImportError:
 assert isinstance(SerializableCallable, type)
 
 logger = init_logger(__name__)
+
+
+def get_code_factors(forward_code_files: list[Path]) -> list[dict[str, str]]:
+    """Return per-file factors for compile cache hashing."""
+    code_factors: list[dict[str, str]] = []
+    for filepath in forward_code_files:
+        path_str = str(filepath)
+        entry: dict[str, str] = {"path": path_str}
+        if path_str == "<string>":
+            # Dynamically generated code (e.g., exec); nothing to hash.
+            code_factors.append(entry)
+            continue
+        try:
+            with filepath.open() as f:
+                content = f.read()
+        except Exception:
+            logger.warning("Failed to read file %s", path_str)
+            code_factors.append(entry)
+            continue
+        entry["hash"] = hash_factors({"content": content})
+        code_factors.append(entry)
+    return code_factors
 
 
 class VllmSerializableFunction(SerializableCallable):

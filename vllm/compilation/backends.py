@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -35,6 +36,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 from .caching import (
     VllmSerializableFunction,
     compute_env_and_config_hashes,
+    get_code_factors,
 )
 from .compiler_interface import (
     CompilerInterface,
@@ -607,29 +609,15 @@ class VllmBackend:
         compiler_factors = self.compiler_manager.compile_factors(vllm_config)
         compiler_hash = hash_factors(compiler_factors)
         traced_files = set(self.compilation_config.traced_files)
-        forward_code_files = list(sorted(traced_files))
+        forward_code_files = sorted(
+            (Path(filepath) for filepath in traced_files), key=str
+        )
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
+            lazy(lambda: "\n".join(map(str, forward_code_files))),
         )
-        code_factors: list[dict[str, str]] = []
-        for filepath in forward_code_files:
-            entry: dict[str, str] = {"path": filepath}
-            if filepath == "<string>":
-                # This means the function was dynamically generated, with
-                # e.g. exec(). We can't actually check these.
-                code_factors.append(entry)
-                continue
-            try:
-                with open(filepath) as f:
-                    content = f.read()
-            except Exception:
-                logger.warning("Failed to read file %s", filepath)
-                code_factors.append(entry)
-                continue
-            entry["content"] = content
-            code_factors.append(entry)
+        code_factors = get_code_factors(forward_code_files)
         code_hash = hash_factors({"files": code_factors})
         # Clear after consumption
         self.compilation_config.traced_files.clear()

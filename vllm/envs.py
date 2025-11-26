@@ -1575,7 +1575,7 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def collect_compile_factors() -> dict[str, object]:
+def compile_factors() -> dict[str, object]:
     """Collect env vars used for torch.compile cache keys."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
@@ -1680,8 +1680,3 @@ def collect_compile_factors() -> dict[str, object]:
         factors[var] = normalize_value(os.getenv(var))
 
     return factors
-
-
-def compile_factors() -> dict[str, object]:
-    """Return env compile factors."""
-    return collect_compile_factors()

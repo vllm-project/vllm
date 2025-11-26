@@ -482,18 +482,36 @@ class EplbState:
             )
             self.expert_rearrangement_step = 0
 
+        expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
+
+        model_state = EplbModelState(
+            physical_to_logical_map=physical_to_logical_map,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            expert_load_pass=expert_load_pass,
+            expert_load_window=expert_load_window,
+            model_name=model_config.model,
+            model=model,
+            expert_buffer=expert_buffer,
+            buffer_lock=threading.Lock(),
+            buffer_ready_event=None,
+            ep_buffer_ready=0,
+            layer_to_transfer=0,
+            rebalanced=False,
+            pending_global_ready_check=False,
+            is_unchanged=[],
+            is_received_locally=[],
+            experts_recv_loc={},
+            is_async_enabled=self.is_async,
+            cuda_device_index=self.cuda_device_index,
+            new_physical_to_logical_map=new_physical_to_logical_map,
+            new_logical_to_physical_map=new_logical_to_physical_map,
+            new_logical_replica_count=new_logical_replica_count,
+        )
+
         model_factors = model_config.compile_factors() or {}
         model_hash = hash_factors(model_factors)
-        self.model_states[model_hash] = EplbModelState(
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count,
-            expert_load_pass,
-            expert_load_window,
-            model_config.model,
-            model,
-        )
-        self.model_states[model_config.compute_hash()] = model_state
+        self.model_states[model_hash] = model_state
 
     def step(
         self,

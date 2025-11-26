@@ -26,7 +26,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
-HashResult = dict[str, object] | None
+CompileFactors = dict[str, object] | None
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -157,7 +157,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 @runtime_checkable
 class SupportsCompileFactors(Protocol):
-    def compile_factors(self) -> HashResult: ...
+    def compile_factors(self) -> CompileFactors: ...
 
 
 class SupportsMetricsInfo(Protocol):
@@ -275,6 +275,7 @@ def get_compile_factors(
 ) -> dict[str, object]:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
+    - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
     factors: dict[str, object] = {}

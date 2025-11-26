@@ -39,7 +39,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import HashResult, SupportsCompileFactors, config
+from .utils import CompileFactors, SupportsCompileFactors, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -116,7 +116,7 @@ class VllmConfig:
     instance_id: str = ""
     """The ID of the vLLM instance."""
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -165,6 +165,7 @@ class VllmConfig:
         if self.additional_config:
             additional_config = self.additional_config
             if isinstance(additional_config, dict):
+                assert isinstance(additional_config, SupportsCompileFactors)
                 vllm_factors.append(additional_config)
             else:
                 vllm_factors.append(additional_config.compile_factors())
