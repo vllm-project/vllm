@@ -2250,7 +2250,7 @@ class CP_REASONS:
         reason="Prefill context parallel does not compatible with chunked prefill.",
     )
     ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
-        value=False, reason="Encoder_decoder models does not support chunked prefill."
+        value=False, reason="Encoder decoder models does not support chunked prefill."
     )
     POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL = BoolWithReason(
         value=True, reason="Pooling models with causal attn support chunked prefill."
@@ -2283,14 +2283,14 @@ class APC_REASONS:
     )
     ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
-        reason="Attention free does not support prefix caching since the feature is still experimental.",  # noqa: E501
+        reason="Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
     )
     PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
         reason="Prefill context parallel does not compatible with prefix caching.",
     )
     ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
-        value=False, reason="Encoder_decoder models does not support prefix caching."
+        value=False, reason="Encoder decoder models does not support prefix caching."
     )
     POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=True, reason="Pooling models with causal attn support prefix caching."
