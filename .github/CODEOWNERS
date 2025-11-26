@@ -54,17 +54,24 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 mkdocs.yaml @hmellor
 
 # TT-Fork Specific
+
+# Generic
 /examples/offline_inference_tt.py @skhorasganiTT
 /examples/server_example_tt.py @skhorasganiTT
+/requirements/tt* @skhorasganiTT
 /tt_metal @skhorasganiTT
-/vllm/platforms/tt.py @skhorasganiTT
+/vllm/platforms/tt.py @skhorasganiTT @tchedaTT
 /vllm/model_executor/model_loader/tt_loader.py @skhorasganiTT
-/vllm/worker/tt_worker.py @skhorasganiTT
+
+# V0
+/vllm/worker/tt_worker.py @skhorasganiTT @sraizada-tt
 /vllm/worker/tt_model_runner.py @skhorasganiTT @sraizada-tt @tchedaTT
-/vllm/v1/worker/tt_worker.py @skhorasganiTT
-/vllm/v1/worker/tt_model_runner.py @skhorasganiTT
-/vllm/v1/worker/tt_input_batch.py @skhorasganiTT
-/vllm/v1/core/sched/ascend_scheduler.py @skhorasganiTT
-/vllm/v1/engine/core.py @skhorasganiTT
+
+# V1
+/vllm/v1/worker/tt_worker.py @skhorasganiTT @tchedaTT
+/vllm/v1/worker/tt_model_runner.py @skhorasganiTT @tchedaTT
+/vllm/v1/worker/tt_input_batch.py @skhorasganiTT @tchedaTT
+/vllm/v1/core/sched/ascend_scheduler.py @skhorasganiTT @tchedaTT
+/vllm/v1/engine/core.py @skhorasganiTT @tchedaTT
 /vllm/v1/engine/utils.py @skhorasganiTT
 /vllm/v1/engine/tt_core_launcher.py @skhorasganiTT
