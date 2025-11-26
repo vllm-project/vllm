@@ -147,21 +147,20 @@ def rocm_unquantized_gemm_impl(
         and ((n==32 and k == 2880 and (m == 640 or m == 128)) or (n==32 and k == 512 and m == 2880))
     )
     if use_skinny_race is True:
-        hp_out = torch.nn.functional.linear(x, weight, bias)
+        #hp_out = torch.nn.functional.linear(x, weight, bias)
         cu_count = get_cu_count()
         x_view = x.reshape(-1, x.size(-1))
         #print("n:",n,"m:",m,"k:",k)
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
         """
-        my_out = out.reshape(*x.shape[:-1], weight.shape[0])
-
         if x.dtype==torch.bfloat16:
           atol = 1e-1; rtol = 1e-1
         if x.dtype==torch.float16:
           atol = 1e-3; rtol = 1e-5
         if not torch.allclose(my_out,hp_out,atol=atol,rtol=rtol) :
             print("MISSMATCH:",m,",",n,",",k,",my:",my_out,"\nhp:", hp_out, "\n\n\n")"""
-        return out
+        #return out
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
