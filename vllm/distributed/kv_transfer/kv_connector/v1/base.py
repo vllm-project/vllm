@@ -49,7 +49,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent, KVEventBatch
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -379,7 +379,7 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_kv_connector_kv_cache_events(self) -> Optional["KVEventBatch"]:
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
         """
         Get the KV connector kv cache events collected during the last interval.
         This function should be called by the model runner every time after the

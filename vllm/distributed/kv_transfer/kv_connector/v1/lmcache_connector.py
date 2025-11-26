@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -9,6 +10,12 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import (
+    BlockStored,
+    KVCacheEvent,
+    KVConnectorKVEvents,
+    KVEventAggregator,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -16,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -24,6 +32,37 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class LMCacheKVEvents(KVConnectorKVEvents):
+    """
+    Concrete implementation of KVConnectorKVEvents using KVEventAggregator.
+    """
+
+    def __init__(self, num_workers: int) -> None:
+        self._aggregator = KVEventAggregator(num_workers)
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        self._aggregator.add_events(events)
+
+    def aggregate(self) -> "LMCacheKVEvents":
+        """
+        Aggregate KV events and retain only common events.
+        """
+        common_events = self._aggregator.get_common_events()
+        self._aggregator.clear_events()
+        self._aggregator.add_events(common_events)
+        self._aggregator.reset_workers()
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        self._aggregator.increment_workers(count)
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return self._aggregator.get_all_events()
+
+    def __repr__(self) -> str:
+        return f"<LMCacheKVEvents events={self.get_all_events()}>"
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
@@ -53,6 +92,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             cls = LMCacheConnectorLatestImpl
 
         self._lmcache_engine = cls(vllm_config, role, self)
+
+        self._kv_cache_events: list[KVCacheEvent] = []
 
     # ==============================
     # Worker-side methods
@@ -151,6 +192,31 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         # Fallback for older versions that don't support this method
         return set()
 
+    def get_kv_connector_kv_cache_events(self) -> LMCacheKVEvents | None:
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        """
+
+        events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
+        if not events:
+            return None
+
+        blocks: list[BlockStored] = [
+            BlockStored(
+                block_hashes=e.block_hashes,
+                parent_block_hash=e.parent_block_hash,
+                token_ids=e.token_ids,
+                lora_id=e.lora_id,
+                block_size=e.block_size,
+                medium=e.medium,
+            )
+            for e in events
+        ]
+
+        lmcache_kv_events = LMCacheKVEvents(num_workers=1)
+        lmcache_kv_events.add_events(blocks)
+        return lmcache_kv_events
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -198,6 +264,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        Update KVConnector state from worker-side connectors output.
+
+        Args:
+            connector_output (KVConnectorOutput): the worker-side
+                connectors output.
+        """
+        # Get the KV events
+        kv_cache_events = connector_output.kv_cache_events
+        if not kv_cache_events or not isinstance(kv_cache_events, LMCacheKVEvents):
+            return
+        self._kv_cache_events.extend(kv_cache_events.get_all_events())
+        return
+
     def request_finished(
         self,
         request: "Request",
@@ -214,3 +295,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._lmcache_engine.request_finished(request, block_ids)
+
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        """
+        Take the KV cache events from the connector.
+
+        Yields:
+            New KV cache events since the last call.
+        """
+        if self._kv_cache_events is not None:
+            yield from self._kv_cache_events
+            self._kv_cache_events.clear()
