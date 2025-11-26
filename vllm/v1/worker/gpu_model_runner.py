@@ -1562,7 +1562,6 @@ class GPUModelRunner(
             self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
-
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
@@ -1628,6 +1627,9 @@ class GPUModelRunner(
                 logits_indices
             )
 
+        # Cache attention metadata builds across hybrid KV-cache groups
+        cached_attn_metadata: dict[tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata] = {}
+
         def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
@@ -1635,6 +1637,8 @@ class GPUModelRunner(
             ubid: int | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
+            cache_key = (kv_cache_groups[kv_cache_gid].kv_cache_spec, type(builder))
+            
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
                 if cascade_attn_prefix_lens
@@ -1655,6 +1659,12 @@ class GPUModelRunner(
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(
                     common_attn_metadata
+                )
+            elif cache_key in cached_attn_metadata and builder.supports_update_block_table:
+                attn_metadata_i = builder.update_block_table(
+                    cached_attn_metadata[cache_key],
+                    common_attn_metadata.block_table_tensor,
+                    common_attn_metadata.slot_mapping,
                 )
             else:
                 attn_metadata_i = builder.build(
