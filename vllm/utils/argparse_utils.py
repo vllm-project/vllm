@@ -10,35 +10,19 @@ from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
+    Namespace,
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import regex as re
 import yaml
 
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
-    from argparse import Namespace
-else:
-    Namespace = object
-
 logger = init_logger(__name__)
-
-
-class StoreBoolean(Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(
-                f"Invalid boolean value: {values}. Expected 'true' or 'false'."
-            )
 
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
@@ -89,14 +73,6 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
-            if args is not None and "--disable-log-requests" in args:
-                # Special case warning because the warning below won't trigger
-                # if –-disable-log-requests because its value is default.
-                logger.warning_once(
-                    "argument '--disable-log-requests' is deprecated and "
-                    "replaced with '--enable-log-requests'. This will be "
-                    "removed in v0.12.0."
-                )
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (
@@ -487,12 +463,8 @@ class FlexibleArgumentParser(ArgumentParser):
             )
             raise ex
 
-        store_boolean_arguments = [
-            action.dest for action in self._actions if isinstance(action, StoreBoolean)
-        ]
-
         for key, value in config.items():
-            if isinstance(value, bool) and key not in store_boolean_arguments:
+            if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
             elif isinstance(value, list):

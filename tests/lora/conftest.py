@@ -237,7 +237,7 @@ def deepseekv2_lora_files():
 
 @pytest.fixture(scope="session")
 def gptoss20b_lora_files():
-    return snapshot_download(repo_id="LevinZheng/gpt-oss-20b-lora-adapter")
+    return snapshot_download(repo_id="jeeejeee/gpt-oss-20b-lora-adapter-text2sql")
 
 
 @pytest.fixture(scope="session")
@@ -248,6 +248,16 @@ def qwen3moe_lora_files():
 @pytest.fixture(scope="session")
 def olmoe_lora_files():
     return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def qwen3_lora_files():
+    return snapshot_download(repo_id="charent/self_cognition_Alice")
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files():
+    return snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")
 
 
 @pytest.fixture

@@ -6,6 +6,9 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
+# Import fixture
+from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
+
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -149,26 +152,6 @@ VIDEO_ASSETS = VideoTestAssets()
 """Singleton instance of {class}`VideoTestAssets`."""
 AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
-
-
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
 
 
 @pytest.fixture(autouse=True)
@@ -765,6 +748,14 @@ class VllmRunner:
             # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
+            # Make sure we have atleast one cudagraph large enough for a single decode.
+            if (speculative_config := kwargs.get("speculative_config")) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
+            ):
+                kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
+                    num_speculative_tokens + 1
+                )
+
         with init_ctx:
             self.llm = LLM(
                 model=model_name,
@@ -831,8 +822,9 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        return_logprobs: bool = False,
         **kwargs: Any,
-    ) -> list[tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]] | tuple[list, list]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
         req_outputs = self.llm.generate(
@@ -840,22 +832,28 @@ class VllmRunner:
         )
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
+        logprobs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
+            req_logprobs = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append((prompt_str or "") + output_str)
+                if sample.logprobs:
+                    req_logprobs.extend(sample.logprobs)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
-        return outputs
+            logprobs.append(req_logprobs)
+        return outputs if not return_logprobs else (outputs, logprobs)
 
     @staticmethod
     def _final_steps_generate_w_logprobs(
         req_outputs: list[RequestOutput],
+        include_prompt_token_ids: bool = False,
     ) -> list[TokensTextLogprobsPromptLogprobs]:
         outputs: list[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
@@ -864,9 +862,26 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append(
-                (output_ids, output_str, output_logprobs, req_output.prompt_logprobs)
-            )
+            if include_prompt_token_ids:
+                outputs.append(
+                    (  # type: ignore[arg-type]
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_token_ids,
+                        req_output.prompt_logprobs,
+                    )
+                )
+            else:
+                outputs.append(
+                    (
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_logprobs,
+                    )
+                )
+
         return outputs
 
     def generate_w_logprobs(
@@ -876,6 +891,7 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        include_prompt_token_ids: bool = False,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs] | list[TokensTextLogprobsPromptLogprobs]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
@@ -885,7 +901,7 @@ class VllmRunner:
         )
 
         toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(
-            req_outputs
+            req_outputs, include_prompt_token_ids
         )
         # Omit prompt logprobs if not required by sampling params
         return (
@@ -1395,3 +1411,16 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def disable_deepgemm_ue8m0(monkeypatch):
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    with monkeypatch.context() as monkeypatch_ctx:
+        monkeypatch_ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+        is_deep_gemm_e8m0_used.cache_clear()
+        yield
+        # Clear cache so the next time it is used it is processed with the
+        # default VLLM_USE_DEEP_GEMM_E8M0  setting.
+        is_deep_gemm_e8m0_used.cache_clear()

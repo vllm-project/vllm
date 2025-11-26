@@ -38,7 +38,7 @@ def tpu_platform_plugin() -> str | None:
     # Check for Pathways TPU proxy
     if envs.VLLM_TPU_USING_PATHWAYS:
         logger.debug("Confirmed TPU platform is available via Pathways proxy.")
-        return "tpu_inference.platforms.tpu_jax.TpuPlatform"
+        return "tpu_inference.platforms.tpu_platform.TpuPlatform"
 
     # Check for libtpu installation
     try:
@@ -60,7 +60,7 @@ def cuda_platform_plugin() -> str | None:
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:
-        from vllm.utils import import_pynvml
+        from vllm.utils.import_utils import import_pynvml
 
         pynvml = import_pynvml()
         pynvml.nvmlInit()

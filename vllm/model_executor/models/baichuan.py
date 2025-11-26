@@ -98,13 +98,22 @@ class BaiChuanMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size, hidden_size, bias=False, quant_config=quant_config
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -127,7 +136,7 @@ class BaiChuanAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         position_embedding: str,
-        rope_theta: float = 10000,
+        rope_parameters: dict,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -141,7 +150,6 @@ class BaiChuanAttention(nn.Module):
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = hidden_size // self.total_num_heads
         self.position_embedding = position_embedding
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         # pylint: disable=invalid-name
@@ -152,12 +160,14 @@ class BaiChuanAttention(nn.Module):
             self.total_num_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.W_pack",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         # Create the alibi slopes and slice them.
         if self.position_embedding == "ALIBI":
@@ -181,7 +191,7 @@ class BaiChuanAttention(nn.Module):
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=self.max_position_embeddings,
-                base=self.rope_theta,
+                rope_parameters=rope_parameters,
             )
             self.scaling = self.head_dim**-0.5
             self.attn = Attention(
@@ -218,13 +228,12 @@ class BaiChuanDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = BaiChuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
-            rope_theta=rope_theta,
+            rope_parameters=getattr(config, "rope_parameters", None),
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -235,6 +244,7 @@ class BaiChuanDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -297,7 +307,7 @@ class BaiChuanModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -311,7 +321,7 @@ class BaiChuanModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -390,9 +400,9 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
-        self.lora_config = lora_config
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.quant_config = quant_config
         self.model = BaiChuanModel(
@@ -414,8 +424,8 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

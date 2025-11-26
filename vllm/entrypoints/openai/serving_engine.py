@@ -10,9 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
+import numpy as np
 import torch
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
@@ -20,6 +21,10 @@ if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
     from typing_extensions import TypedDict
+
+from openai.types.responses import (
+    ToolChoiceFunction,
+)
 
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
@@ -36,8 +41,11 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationRequest,
     ClassificationResponse,
     CompletionRequest,
@@ -49,6 +57,10 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    FunctionCall,
+    FunctionDefinition,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorRequest,
     PoolingResponse,
     RerankRequest,
@@ -107,13 +119,16 @@ CompletionLikeRequest: TypeAlias = (
     | DetokenizeRequest
     | EmbeddingCompletionRequest
     | RerankRequest
-    | ClassificationRequest
+    | ClassificationCompletionRequest
     | ScoreRequest
     | TokenizeCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -122,6 +137,7 @@ AnyRequest: TypeAlias = (
     | SpeechToTextRequest
     | ResponsesRequest
     | IOProcessorRequest
+    | GenerateRequest
 )
 
 AnyResponse: TypeAlias = (
@@ -133,6 +149,7 @@ AnyResponse: TypeAlias = (
     | PoolingResponse
     | ClassificationResponse
     | ScoreResponse
+    | GenerateResponse
 )
 
 
@@ -279,11 +296,7 @@ class OpenAIServing:
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
-        logger.info(
-            '"auto" tool choice has been enabled please note that while'
-            " the parallel_tool_calls client option is preset for "
-            "compatibility reasons, it will be ignored."
-        )
+        logger.info('"auto" tool choice has been enabled.')
 
         try:
             if tool_parser_name == "pythonic" and self.model_config.model.startswith(
@@ -326,6 +339,7 @@ class OpenAIServing:
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -345,22 +359,7 @@ class OpenAIServing:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
-        else:
-            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
-                prompt
-            )
 
-        if processed_inputs["type"] == "embeds":
-            raise NotImplementedError
-
-        # This is a workaround to fix multimodal beam search; this is a
-        # bandaid fix for 2 small problems:
-        # 1. Multi_modal_data on the processed_inputs currently resolves to
-        #    `None`.
-        # 2. preprocessing above expands the multimodal placeholders. However,
-        #    this happens again in generation, so the double expansion causes
-        #    a mismatch.
-        # TODO - would be ideal to handle this more gracefully.
         prompt_text: str | None
         prompt_token_ids: list[int]
         multi_modal_data: MultiModalDataDict | None
@@ -373,16 +372,24 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs: dict[str, Any] | None = processed_inputs.get(
-            "mm_processor_kwargs"
-        )  # type: ignore
+        mm_processor_kwargs: dict[str, Any] | None = None
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
 
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
+        logprobs_num = 2 * beam_width
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width,
+            logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
         )
@@ -427,6 +434,7 @@ class OpenAIServing:
                             beam_search_params,
                             request_id_item,
                             lora_request=lora_req,
+                            trace_headers=trace_headers,
                         )
                     )
                 )
@@ -435,40 +443,75 @@ class OpenAIServing:
             output = [x[0] for x in await asyncio.gather(*tasks)]
 
             new_beams = []
-            for i, current_beam in enumerate(all_beams):
-                result = output[i]
-
+            # Store all new tokens generated by beam
+            all_beams_token_id = []
+            # Store the cumulative probability of all tokens
+            # generated by beam search
+            all_beams_logprob = []
+            # Iterate through all beam inference results
+            for i, result in enumerate(output):
+                current_beam = all_beams[i]
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    for token_id, logprob_obj in logprobs.items():
-                        if token_id == eos_token_id and not ignore_eos:
-                            completed.append(
-                                BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id]
-                                    if include_stop_str_in_output
-                                    else current_beam.tokens,
-                                    logprobs=current_beam.logprobs + [logprobs],
-                                    cum_logprob=current_beam.cum_logprob
-                                    + logprob_obj.logprob,
-                                    finish_reason="stop",
-                                    stop_reason=eos_token_id,
-                                )
-                            )
-                        else:
-                            new_beams.append(
-                                BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id],
-                                    logprobs=current_beam.logprobs + [logprobs],
-                                    lora_request=current_beam.lora_request,
-                                    cum_logprob=current_beam.cum_logprob
-                                    + logprob_obj.logprob,
-                                    multi_modal_data=current_beam.multi_modal_data,
-                                    mm_processor_kwargs=current_beam.mm_processor_kwargs,
-                                )
-                            )
+                    all_beams_token_id.extend(list(logprobs.keys()))
+                    all_beams_logprob.extend(
+                        [
+                            current_beam.cum_logprob + obj.logprob
+                            for obj in logprobs.values()
+                        ]
+                    )
 
-            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
-            all_beams = sorted_beams[:beam_width]
+            # Handle the token for the end of sentence (EOS)
+            all_beams_token_id = np.array(all_beams_token_id)
+            all_beams_logprob = np.array(all_beams_logprob)
+
+            if not ignore_eos:
+                # Get the index position of eos token in all generated results
+                eos_idx = np.where(all_beams_token_id == eos_token_id)[0]
+                for idx in eos_idx:
+                    current_beam = all_beams[idx // logprobs_num]
+                    result = output[idx // logprobs_num]
+                    assert result.outputs[0].logprobs is not None
+                    logprobs_entry = result.outputs[0].logprobs[0]
+                    completed.append(
+                        BeamSearchSequence(
+                            tokens=current_beam.tokens + [eos_token_id]
+                            if include_stop_str_in_output
+                            else current_beam.tokens,
+                            logprobs=current_beam.logprobs + [logprobs_entry],
+                            cum_logprob=float(all_beams_logprob[idx]),
+                            finish_reason="stop",
+                            stop_reason=eos_token_id,
+                        )
+                    )
+                # After processing, set the log probability of the eos condition
+                # to negative infinity.
+                all_beams_logprob[eos_idx] = -np.inf
+
+            # Processing non-EOS tokens
+            # Get indices of the top beam_width probabilities
+            topn_idx = np.argpartition(np.negative(all_beams_logprob), beam_width)[
+                :beam_width
+            ]
+
+            for idx in topn_idx:
+                current_beam = all_beams[idx // logprobs_num]
+                result = output[idx // logprobs_num]
+                token_id = int(all_beams_token_id[idx])
+                assert result.outputs[0].logprobs is not None
+                logprobs_entry = result.outputs[0].logprobs[0]
+                new_beams.append(
+                    BeamSearchSequence(
+                        tokens=current_beam.tokens + [token_id],
+                        logprobs=current_beam.logprobs + [logprobs_entry],
+                        lora_request=current_beam.lora_request,
+                        cum_logprob=float(all_beams_logprob[idx]),
+                        multi_modal_data=current_beam.multi_modal_data,
+                        mm_processor_kwargs=current_beam.mm_processor_kwargs,
+                    )
+                )
+
+            all_beams = new_beams
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
@@ -815,7 +858,11 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and "content" in message
@@ -908,7 +955,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -916,7 +964,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
@@ -1099,13 +1148,13 @@ class OpenAIServing:
         )
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                msg = (
+                    "Tool usage is only supported for Chat Completions API "
+                    "or Responses API requests."
+                )
                 raise NotImplementedError(msg)
-
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request
-            )
+            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (
@@ -1189,16 +1238,19 @@ class OpenAIServing:
     ):
         prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
+        sub_request = 0
         while True:
+            # Ensure that each sub-request has a unique request id.
+            sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
-                request_id,
+                sub_request_id,
                 request_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
             engine_request, tokenization_kwargs = await self._process_inputs(
-                request_id,
+                sub_request_id,
                 engine_prompt,
                 sampling_params,
                 lora_request=lora_request,
@@ -1209,7 +1261,7 @@ class OpenAIServing:
             generator = self.engine_client.generate(
                 engine_request,
                 sampling_params,
-                request_id,
+                sub_request_id,
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
@@ -1228,7 +1280,7 @@ class OpenAIServing:
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
-            context.append_output(tool_output)
+            context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
             # yield context
@@ -1242,6 +1294,7 @@ class OpenAIServing:
             sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
             # OPTIMIZATION
             priority = orig_priority - 1
+            sub_request += 1
 
     def _get_prompt_components(
         self,
@@ -1292,11 +1345,98 @@ class OpenAIServing:
         raw_request: Request | None, default: str | None = None
     ) -> str | None:
         """Pulls the request id to use from a header, if provided"""
-        default = default or random_uuid()
-        if raw_request is None:
-            return default
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            return req_id
 
-        return raw_request.headers.get("X-Request-Id", default)
+        return random_uuid() if default is None else default
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_tool_calls_from_content(
+        request: ResponsesRequest | ChatCompletionRequest,
+        tokenizer: AnyTokenizer,
+        enable_auto_tools: bool,
+        tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
+        content: str | None = None,
+    ) -> tuple[list[FunctionCall] | None, str | None]:
+        function_calls = list[FunctionCall]()
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                [
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls
+                ]
+            )
+            content = None  # Clear content since tool is called.
+        elif (
+            tool_parser_cls
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
+            # Automatic Tool Call Parsing
+            try:
+                tool_parser = tool_parser_cls(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
+            else:
+                # No tool calls.
+                return None, content
+
+        return function_calls, content
 
     @staticmethod
     def _get_decoded_token(

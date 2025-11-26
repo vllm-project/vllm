@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
@@ -15,11 +16,15 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
+
+
+class Device(enum.Enum):
+    GPU = enum.auto()
+    CPU = enum.auto()
 
 
 class EngineClient(ABC):
@@ -72,6 +77,7 @@ class EngineClient(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
@@ -119,7 +125,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
+    async def reset_prefix_cache(self) -> None:
         """Reset the prefix cache"""
         ...
 
@@ -141,6 +147,33 @@ class EngineClient(ABC):
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        ...
+
+    @abstractmethod
+    async def pause_generation(
+        self,
+        *,
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """Pause new generation/encoding requests.
+
+        Args:
+            wait_for_inflight_requests: When ``True`` waits for in-flight requests
+                to finish before pausing. When ``False`` (default), aborts in-flight
+                requests immediately.
+            clear_cache: Whether to clear KV and prefix caches after draining.
+        """
+        ...
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume accepting generation/encoding requests."""
+        ...
+
+    @abstractmethod
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
         ...
 
     async def scale_elastic_ep(

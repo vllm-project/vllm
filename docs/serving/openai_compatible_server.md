@@ -49,7 +49,8 @@ We currently support the following OpenAI APIs:
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
-    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+    - *Note: `user` parameter is ignored.*
+    - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -77,11 +78,11 @@ In addition, we have the following custom APIs:
 
 In order for the language model to support chat protocol, vLLM requires the model to include
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
-specifies how are roles, messages, and other chat-specific tokens are encoded in the input.
+specifies how roles, messages, and other chat-specific tokens are encoded in the input.
 
 An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
 
-Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those model,
+Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those models,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
 template, or the template in string form. Without a chat template, the server will not be able to process chat
 and all chat requests will error.
@@ -293,7 +294,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
             base_url="http://localhost:8000/v1",
             api_key="EMPTY",
         )
-        image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
         response = create_chat_embeddings(
             client,
@@ -638,7 +639,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-Code example: [examples/online_serving/openai_cross_encoder_score.py](../../examples/online_serving/openai_cross_encoder_score.py)
+Code example: [examples/online_serving/pooling/openai_cross_encoder_score.py](../../examples/online_serving/pooling/openai_cross_encoder_score.py)
 
 #### Single inference
 
@@ -819,7 +820,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
         print("Scoring output:", response_json["data"][0]["score"])
         print("Scoring output:", response_json["data"][1]["score"])
         ```
-Full example: [examples/online_serving/openai_cross_encoder_score_for_multimodal.py](../../examples/online_serving/openai_cross_encoder_score_for_multimodal.py)
+Full example: [examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py](../../examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py)
 
 #### Extra parameters
 
