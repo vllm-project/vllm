@@ -107,6 +107,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         # -1 in case it's non-computed and causes later issues with indexing
         block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
+        # -1 in the case we have a padded request (0 seq-len)
+        block_idx_last_scheduled_token = block_idx_last_scheduled_token.clamp(min=0)
 
         return (
             block_idx_last_computed_token,
