@@ -17,6 +17,14 @@ from vllm.entrypoints.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.openai.parser.responses_parser import (
+    get_responses_parser_for_simple_context,
+)
+from vllm.entrypoints.openai.protocol import (
+    ResponseInputOutputItem,
+    ResponseRawMessageAndToken,
+    ResponsesRequest,
+)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -147,6 +155,10 @@ class SimpleContext(ConversationContext):
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
+        self.input_messages = ResponseRawMessageAndToken(message=[], tokens=[])
+        self.output_messages = ResponseRawMessageAndToken(message=[], tokens=[])
+
+
     def append_output(self, output) -> None:
         self.last_output = output
         if not isinstance(output, RequestOutput):
@@ -154,6 +166,12 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+
+        if len(self.input_messages.tokens) == 0:
+            self.input_messages.message.append(output.prompt)
+            self.input_messages.tokens.extend(output.prompt_token_ids)
+        self.output_messages.tokens.extend(output.outputs[0].token_ids)
+        self.output_messages.message.append(output.outputs[0].text)
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")

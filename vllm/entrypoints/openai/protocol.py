@@ -2229,6 +2229,19 @@ def serialize_messages(msgs):
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
+class ResponseRawMessageAndToken(OpenAIBaseModel):
+    """Class to show the raw message.
+    If message / tokens diverge, tokens is the source of truth"""
+
+    message: list[str]
+    tokens: list[int]
+
+
+ResponseInputOutputMessage: TypeAlias = (
+    list[ChatCompletionMessageParam] | ResponseRawMessageAndToken
+)
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -2262,8 +2275,8 @@ class ResponsesResponse(OpenAIBaseModel):
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
     # see serialize_input_messages and serialize_output_messages
-    input_messages: list[ChatCompletionMessageParam] | None = None
-    output_messages: list[ChatCompletionMessageParam] | None = None
+    input_messages: ResponseInputOutputMessage | None = None
+    output_messages: ResponseInputOutputMessage | None = None
     # --8<-- [end:responses-extra-params]
 
     # NOTE: openAI harmony doesn't serialize TextContent properly,
@@ -2289,8 +2302,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
-        input_messages: list[ChatCompletionMessageParam] | None = None,
-        output_messages: list[ChatCompletionMessageParam] | None = None,
+        input_messages: ResponseInputOutputMessage | None = None,
+        output_messages: ResponseInputOutputMessage | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
