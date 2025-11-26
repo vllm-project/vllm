@@ -1782,9 +1782,7 @@ class ModelConfig:
             # for pooling models
             if attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
-                return (
-                    CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
-                )
+                return CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL # noqa: E501
             else:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
@@ -1806,9 +1804,7 @@ class ModelConfig:
             # for pooling models
             if attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
-                return (
-                    APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
-                )
+                return APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING # noqa: E501
             else:
                 # for decoder models (causal attn)
                 pooling_type = self.pooler_config.pooling_type.lower()
@@ -1819,13 +1815,7 @@ class ModelConfig:
                 else:  # pooling_type == "last"
                     return APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING  # noqa: E501
         else:
-            if attn_type == "encoder_decoder":
-                return APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
-            elif attn_type == "hybrid":
-                return APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
-            elif attn_type == "attention_free":
-                return APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING
-            return APC_REASONS.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
+            return APC_REASONS.attn_type_to_reason_map[attn_type]
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
@@ -2321,3 +2311,10 @@ class APC_REASONS:
         value=False,
         reason="ARM and POWER, S390X and RISC-V CPUs does not support prefix caching.",
     )
+
+    attn_type_to_reason_map: dict[AttnTypeStr: BoolWithReason] = {
+        "decoder": ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+        "hybrid": HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+        "attention_free": ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+        "encoder_decoder": ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+    }
