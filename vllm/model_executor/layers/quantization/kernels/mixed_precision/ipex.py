@@ -79,7 +79,7 @@ class IPEXwNa16LinearKernel(MPLinearKernel):
                 qweight,
                 scales,
                 qzeros,
-                in_features=ipex_in_size,
+                in_features=self.config.partition_weight_shape[0],
                 out_features=ipex_output_size,
                 qconfig=qconfig,
                 g_idx=g_idx,
