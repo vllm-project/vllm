@@ -61,7 +61,7 @@ def maybe_get_vit_flash_attn_backend(
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = AttentionBackendEnum.ROCM_AITER_FA
-        elif attn_backend_override is None \
+        elif attn_backend_override is None and on_gfx9() \
                 and attn_backend == AttentionBackendEnum.FLASH_ATTN:
             return AttentionBackendEnum.FLASH_ATTN, None
         else:
