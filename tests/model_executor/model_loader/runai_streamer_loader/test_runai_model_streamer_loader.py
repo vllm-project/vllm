@@ -86,6 +86,14 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     monkeypatch.setattr(
         "runai_model_streamer.SafetensorsStreamer", GLOBAL_PATCHER.create_mock_streamer
     )
+    monkeypatch.setattr(
+        "runai_model_streamer.safetensors_streamer.safetensors_streamer.pull_files",
+        GLOBAL_PATCHER.shim_pull_files,
+    )
+    monkeypatch.setattr(
+        "runai_model_streamer.safetensors_streamer.safetensors_streamer.list_safetensors",
+        GLOBAL_PATCHER.shim_list_safetensors,
+    )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
