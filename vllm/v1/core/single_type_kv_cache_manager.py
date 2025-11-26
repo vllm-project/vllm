@@ -21,6 +21,27 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 
+def format_blocks(blocks: list[KVCacheBlock]):
+    if not blocks:
+        return "[]"
+    
+    result = []
+    i = 0
+    
+    while i < len(blocks):
+        if blocks[i].block_id == 0:
+            count = 0
+            start = i
+            while i < len(blocks) and blocks[i].block_id == 0:
+                count += 1
+                i += 1
+            result.append(f"Null-block*{count}")
+        else:
+            result.append(f'KVBlock(block_id={blocks[i].block_id})')
+            i += 1
+    
+    return f"[{', '.join(result)}]"
+
 class SingleTypeKVCacheManager(ABC):
     """
     An abstract base class for a manager that handle the kv cache management
@@ -658,6 +679,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     computed.append(cached)
                 break  # we just need the last match - early stopping
 
+        print(f'Mamba.FindLongest: computed_blocks={[format_blocks(computed_block) for computed_block in computed_blocks]}', flush=True)
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -676,8 +698,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 # NOTE: pre block should not be freed becasue it may be used to copy
                 last_computed_tokens = self._req_to_last_computed[request_id]
                 target_idx = last_computed_tokens // self.block_size - 1
+                self.print(f'Mamba.remove_skipped: {last_computed_tokens=}, {target_idx=}, {len(blocks)=}')
                 if target_idx >= 0 and blocks[target_idx] != self._null_block:
-                    self.print(f'Mamba.remove_skipped: Freeing block {target_idx=}, {blocks[target_idx]=}')
+                    self.print(f'Mamba.remove_skipped: Freeing block {last_computed_tokens=}, {target_idx=}, {blocks[target_idx]=}')
                     self.block_pool.free_blocks([blocks[target_idx]])
                     blocks[target_idx] = self._null_block
 
@@ -742,7 +765,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        self.print(f'Mamba.save_computed: {request_id=}, {new_computed_blocks=}')
+        self.print(f'Mamba.save_computed: {request_id=}, new_computed_blocks={format_blocks(new_computed_blocks)}')
         super().save_new_computed_blocks(request_id, new_computed_blocks)
 
     def allocate_new_blocks(
@@ -764,8 +787,9 @@ class MambaManager(SingleTypeKVCacheManager):
                            if request_id in self._allocated_reqs else 0)
             num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(self.req_to_blocks[request_id]))
+            self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, {num_required_blocks=}, {num_new_blocks=}')
             if num_new_blocks <= 0:
-                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks=[], {req_blocks=}')
+                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks=[], req_blocks={format_blocks(req_blocks)}')
                 return []
             else: 
                 # first prefill chunk
@@ -793,7 +817,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
                 new_blocks.extend(new_alloc_blocks)
                 req_blocks.extend(new_blocks)
-                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, {new_blocks=}, {req_blocks=}')
+                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks={format_blocks(new_blocks)}')
+                # self.print(f'Mamba.alloc_blks: {request_id=}, {len(req_blocks)=}, {len(self.req_to_blocks[request_id])=}, req_blocks={format_blocks(req_blocks)}')
                 return new_blocks
 
     def free(self, request_id: str) -> None:
