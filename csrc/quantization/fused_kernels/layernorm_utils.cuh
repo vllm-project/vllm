@@ -174,7 +174,7 @@ __device__ void compute_dynamic_per_token_scales(
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false>
+          bool has_residual = false, bool is_scale_transposed = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -199,7 +199,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       if constexpr (is_scale_transposed) {
         scale_idx = (i / group_size) * gridDim.x + blockIdx.x;
       } else {
-        scale_idx = blockIdx.x * num_groups + i / group_size;
+        scale_idx = blockIdx.x * (hidden_size / group_size) + i / group_size;
       }
     }
     auto scale_val =
