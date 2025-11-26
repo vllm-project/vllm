@@ -92,6 +92,11 @@ class ZeroExpertFusedMoE(FusedMoE):
         Temporarily set attributes using object.__setattr__ and restore them.
 
         This bypasses nn.Module.__setattr__ to avoid Dynamo tracing issues.
+        When PyTorch Dynamo traces the forward pass, it cannot handle
+        nn.Module.__setattr__ calls (which include parameter registration logic),
+        resulting in "Unsupported" errors. Using object.__setattr__ directly
+        sets the attribute without triggering nn.Module's custom __setattr__,
+        allowing Dynamo to trace the code successfully.
         """
         originals = {key: getattr(self, key) for key in attrs}
         try:
