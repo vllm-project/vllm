@@ -1146,6 +1146,15 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
+For Pareto visualization (tokens/s/user on x-axis and tokens/s/GPU on y-axis), use [`vllm/benchmarks/sweep/plot_pareto.py`](../../vllm/benchmarks/sweep/plot_pareto.py):
+
+```bash
+vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
+    --user-count-var max_concurrency \
+    --gpu-count-var tp \
+    --dry-run
+```
+
 ## Performance Benchmarks
 
 The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the `perf-benchmarks` and `ready` labels, and when a PR is merged into vLLM.
