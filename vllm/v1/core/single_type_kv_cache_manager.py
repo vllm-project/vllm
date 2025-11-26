@@ -64,6 +64,10 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
 
+    def print(self, *args, **kwargs):
+        new_args = (f">>> [KvGrp {self.kv_cache_group_id}] ", ) + args
+        print(*new_args, **kwargs)
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -673,6 +677,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 last_computed_tokens = self._req_to_last_computed[request_id]
                 target_idx = last_computed_tokens // self.block_size - 1
                 if target_idx >= 0 and blocks[target_idx] != self._null_block:
+                    self.print(f'Mamba.remove_skipped: Freeing block {target_idx=}, {blocks[target_idx]=}')
                     self.block_pool.free_blocks([blocks[target_idx]])
                     blocks[target_idx] = self._null_block
 
@@ -722,8 +727,18 @@ class MambaManager(SingleTypeKVCacheManager):
             num_evictable_computed_blocks = sum(
                 blk.ref_cnt == 0 and not blk.is_null
                 for blk in new_computed_blocks)
-            
+                    
+            self.print(f'Mamba.get_nblks: {request_id=}, {num_tokens=}, {num_new_blocks=}, '
+                    f'{num_new_alloc_blocks=}, {num_evictable_computed_blocks=}')
+
             return num_new_alloc_blocks + num_evictable_computed_blocks
+
+    def save_new_computed_blocks(
+            self, request_id: str,
+            new_computed_blocks: list[KVCacheBlock]) -> None:
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        self.print(f'Mamba.save_computed: {request_id=}, {new_computed_blocks=}')
+        super().save_new_computed_blocks(request_id, new_computed_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int
@@ -743,6 +758,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(self.req_to_blocks[request_id]))
             if num_new_blocks <= 0:
+                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks=[], {req_blocks=}')
                 return []
             else: 
                 # first prefill chunk
@@ -770,6 +786,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
                 new_blocks.extend(new_alloc_blocks)
                 req_blocks.extend(new_blocks)
+                self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, {new_blocks=}, {req_blocks=}')
                 return new_blocks
 
     def free(self, request_id: str) -> None:

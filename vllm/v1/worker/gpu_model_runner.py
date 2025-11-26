@@ -2661,7 +2661,9 @@ class GPUModelRunner(
             block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
             prefix_block_idx = cdiv(new_req.num_computed_tokens, block_size) - 1
             dest_block_idx = len(block_ids) - 1 - num_speculative_blocks
+            logger.info(f'>>> [DEBUG] Worker: preprocess mamba for NEW: {new_req.req_id=}, {kv_cache_group_id=}, {prefix_block_idx=}, {dest_block_idx=}')
             prefix_block_id, dest_block_id = block_ids[prefix_block_idx], block_ids[dest_block_idx]
+            logger.info(f'>>> [DEBUG] Worker: preprocess mamba for NEW: {new_req.req_id=}, {kv_cache_group_id=}, copy {prefix_block_id=} -> {dest_block_id=}')
             self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)
         
         cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
@@ -2680,7 +2682,10 @@ class GPUModelRunner(
                 # TODO: for sps, need to handle sps blocks
                 src_block_idx = cdiv(num_compute_tokens, block_size) - 1
                 dest_block_idx = len(new_block_ids) - 1 - num_speculative_blocks
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {cached_reqs.req_ids[i]=}, {kv_cache_group_id=}, {src_block_idx=}, {dest_block_idx=}')
                 src_block_id, dest_block_id = block_ids[src_block_idx], new_block_ids[dest_block_idx]
+                logger.info(f'>>> [DEBUG] Worker: req_id={cached_reqs.req_ids[i]}, {block_ids=}')
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {cached_reqs.req_ids[i]=}, {kv_cache_group_id=}, copy {src_block_id=} -> {dest_block_id=}')
                 self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
             else:
                 assert group_block_ids is not None
@@ -2689,7 +2694,9 @@ class GPUModelRunner(
                     continue
                 prefix_block_idx = cdiv(num_compute_tokens, block_size) - 1
                 dest_block_idx = len(new_block_ids) - 1 - num_speculative_blocks
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {cached_reqs.req_ids[i]=}, {kv_cache_group_id=}, {prefix_block_id=}, {dest_block_idx=}')
                 prefix_block_id, dest_block_id = new_block_ids[prefix_block_idx], new_block_ids[dest_block_idx]
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {cached_reqs.req_ids[i]=}, {kv_cache_group_id=}, copy {prefix_block_id=} -> {dest_block_id=}')
                 self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)  
 
     # def _preprocess_mamba_prefix(self, scheduler_output: "SchedulerOutput", 
@@ -2856,6 +2863,7 @@ class GPUModelRunner(
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
+                        scheduler_output=scheduler_output,
                         total_num_scheduled_tokens=total_num_scheduled_tokens,
                         max_num_scheduled_tokens=max_num_scheduled_tokens,
                         num_reqs=num_reqs,

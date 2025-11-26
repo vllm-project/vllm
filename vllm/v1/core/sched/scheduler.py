@@ -258,6 +258,8 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            logger.info(f'>>> [DEBUG] Scheduler: schedule RUNING: req_id={request.request_id}, '
+                        f'num_prompt_tokens={request.num_prompt_tokens=}')
             # Ensure new tokens for a request in the prefill phase do not contain 
             # sps tokens, especially in the last prefill chunk. For a hybrid-model, 
             # extra sps tokens would corrupt the generated Mamba state.
@@ -454,6 +456,8 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting.peek_request()
+                logger.info(f'>>> [DEBUG] Scheduler: schedule WAITING: req_id={request.request_id}, '
+                            f'num_prompt_tokens={request.num_prompt_tokens=}')
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -504,6 +508,8 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    logger.info(f'>>> [DEBUG] Scheduler: get_computed_blk: req_id={request.request_id},'
+                               f'{num_new_local_computed_tokens=}, {new_computed_blocks.blocks=}')
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -749,6 +755,10 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        logger.info('>>> [DEBUG] Scheduler: new_reqs:'
+                    f'{[(reqdata.req_id, reqdata.block_ids) for reqdata in new_reqs_data]}')
+        logger.info('>>> [DEBUG] Scheduler: cached_reqs:'
+                    f'{[(req_id, cached_reqs_data.new_block_ids[i]) for i, req_id in enumerate(cached_reqs_data.req_ids)]}')
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
