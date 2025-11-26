@@ -133,7 +133,7 @@ def _prepare_records(
                 "tokens_per_user": tokens_per_user,
                 "tokens_per_gpu": tokens_per_gpu,
                 "user_count_estimate": user_count,
-                "gpu_count_estimate": gpu_count,
+                "gpu_count": gpu_count,
             }
         )
 
@@ -174,6 +174,7 @@ def _get_fig_path(
 def _plot_fig(
     fig_dir: Path,
     fig_group_data: tuple[tuple[tuple[str, str], ...], list[dict[str, object]]],
+    label_by: list[str],
     *,
     dry_run: bool,
 ):
@@ -218,6 +219,20 @@ def _plot_fig(
         label="Pareto frontier",
     )
 
+    if label_by:
+        for _, row in frontier.iterrows():
+            label_parts = []
+            for key in label_by:
+                if key in row:
+                    label_parts.append(f"{key}={row[key]}")
+            if label_parts:
+                ax.text(
+                    row["tokens_per_user"],
+                    row["tokens_per_gpu"],
+                    "\n".join(label_parts),
+                    fontsize=8,
+                )
+
     ax.set_xlabel("Tokens/s/user")
     ax.set_ylabel("Tokens/s/GPU")
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
@@ -235,6 +250,7 @@ def plot_pareto(
     output_dir: Path,
     user_count_var: str | None,
     gpu_count_var: str | None,
+    label_by: list[str],
     *,
     dry_run: bool,
 ):
@@ -279,6 +295,7 @@ def plot_pareto(
                 partial(
                     _plot_fig,
                     fig_dir,
+                    label_by=label_by,
                     dry_run=dry_run,
                 ),
                 fig_groups,
@@ -291,6 +308,7 @@ class SweepPlotParetoArgs:
     output_dir: Path
     user_count_var: str | None
     gpu_count_var: str | None
+    label_by: list[str]
     dry_run: bool
 
     parser_name: ClassVar[str] = "plot_pareto"
@@ -305,10 +323,13 @@ class SweepPlotParetoArgs:
         if not output_dir.exists():
             raise ValueError(f"No parameter sweep results under {output_dir}")
 
+        label_by = [] if not args.label_by else args.label_by.split(",")
+
         return cls(
             output_dir=output_dir,
             user_count_var=args.user_count_var,
             gpu_count_var=args.gpu_count_var,
+            label_by=label_by,
             dry_run=args.dry_run,
         )
 
@@ -336,6 +357,13 @@ class SweepPlotParetoArgs:
             "or tensor_parallel_size * pipeline_parallel_size.",
         )
         parser.add_argument(
+            "--label-by",
+            type=str,
+            default="max_concurrency,gpu_count",
+            help="Comma-separated list of fields to annotate on Pareto frontier "
+            "points.",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the figures to plot without drawing them.",
@@ -349,6 +377,7 @@ def run_main(args: SweepPlotParetoArgs):
         output_dir=args.output_dir,
         user_count_var=args.user_count_var,
         gpu_count_var=args.gpu_count_var,
+        label_by=args.label_by,
         dry_run=args.dry_run,
     )
 

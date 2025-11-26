@@ -1146,13 +1146,20 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
-For Pareto visualization (tokens/s/user on x-axis and tokens/s/GPU on y-axis), use [`vllm/benchmarks/sweep/plot_pareto.py`](../../vllm/benchmarks/sweep/plot_pareto.py):
+### Pareto visualization (tokens/s/user vs tokens/s/GPU)
+
+`vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
+
+- x-axis: tokens/s/user = `output_throughput` ÷ concurrency (`--user-count-var`, default `max_concurrency`, fallback `max_concurrent_requests`).
+- y-axis: tokens/s/GPU = `output_throughput` ÷ GPU count (`--gpu-count-var` if set; else gpu_count is TP×PP*DP).
+- Output: a single figure at `OUTPUT_DIR/pareto/PARETO.png`; 
+- Show the configuration used in each data point `--label-by` (default: `max_concurrency,gpu_count`).
+
+Example:
 
 ```bash
 vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
-    --user-count-var max_concurrency \
-    --gpu-count-var tp \
-    --dry-run
+  --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
 ```
 
 ## Performance Benchmarks
