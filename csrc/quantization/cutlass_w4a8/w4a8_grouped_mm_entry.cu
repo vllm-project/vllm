@@ -23,6 +23,7 @@
 #include "core/registration.h"
 #include "get_group_starts.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "w4a8_utils.cuh"
 
 
 namespace vllm::cutlass_w4a8_moe {
@@ -271,7 +272,7 @@ void mm(
 
 std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(torch::Tensor const& b_tensors){
   TORCH_CHECK(b_tensors.dtype() == torch::kInt32);
-  TORCH_CHECK(b_tensors.dim() == 3); // (experts, n, k) TODO: this shape is unclear how it should be passed in but seems correct so far
+  TORCH_CHECK(b_tensors.dim() == 3);  // (experts, n, k)
   TORCH_CHECK(b_tensors.is_contiguous());
   TORCH_CHECK(b_tensors.is_cuda());
   // we will store it in int32 tensor; this is the number of elements we need
@@ -286,8 +287,8 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(torch::Tensor 
   auto b_packed_ptr = static_cast<QuantType*>(b_tensors_packed.data_ptr());
   
   // encode first
-  // TODO: replace with the faster cuda version
-  cutlass::unified_encode_int4b(b_ptr, b_packed_ptr, num_experts * n * k);
+  bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(b_ptr, b_packed_ptr, num_experts * n * k);
+  TORCH_CHECK(ok, "unified_encode_int4b failed");
 
   // offsets and loop through experts; this assumes each expert has same shape/layout
   // TODO construct the packed layout tensor
