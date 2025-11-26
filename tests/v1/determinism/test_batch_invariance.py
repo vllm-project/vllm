@@ -159,7 +159,6 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -428,7 +427,6 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_without_batch_invariance_should_fail(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -644,7 +642,6 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 @skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-@pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
