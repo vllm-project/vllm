@@ -9,18 +9,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
 )
-from openai.types.responses.response import ToolChoiceFunction
-
-from vllm.entrypoints.context import SimpleContext
-from vllm.entrypoints.openai.protocol import ResponsesRequest
-from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-)
-from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import SamplingParams
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -76,9 +65,7 @@ async def responses_client(responses_server):
         "auto",
     ],
 )
-async def test_responses_streaming_tool_calls_e2e(
-    responses_client, tool_choice
-):
+async def test_responses_streaming_tool_calls_e2e(responses_client, tool_choice):
     stream = await responses_client.responses.create(
         model=MODEL_NAME,
         input=(

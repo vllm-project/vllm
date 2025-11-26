@@ -50,7 +50,6 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from openai.types.responses.tool_param import ToolParam
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -80,7 +79,6 @@ from vllm.entrypoints.harmony_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -97,7 +95,6 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
-    Tool
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -1200,13 +1197,15 @@ class OpenAIServingResponses(OpenAIServing):
             param_pos = current_text.rfind('"parameters":')
             if param_pos != -1:
                 param_section = current_text[param_pos:]
-                param_match = re.search(r'"parameters"\s*:\s*(.*)', param_section, re.DOTALL)
+                param_match = re.search(
+                    r'"parameters"\s*:\s*(.*)', param_section, re.DOTALL
+                )
                 if param_match:
                     arguments = param_match.group(1)
                     arguments, _ = self._filter_delta_text(arguments, previous_text)
             if (
-                finishes_previous_tool 
-                and "parameters" not in current_tool_call 
+                finishes_previous_tool
+                and "parameters" not in current_tool_call
                 and len(obj) > 1
             ):
                 current_tool_call = obj[-2]
