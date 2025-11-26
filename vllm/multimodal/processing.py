@@ -1678,8 +1678,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
     ) -> tuple[OptionalPreCachedMediaItems, MultiModalDataItems]:
         mm_cached_items = {
-            modality: cache.peek(mm_data_items[modality], hashes)
-            for modality, hashes in mm_hashes.items()
+            modality: cache.peek(hashes) for modality, hashes in mm_hashes.items()
         }
 
         mm_missing_idxs = {
