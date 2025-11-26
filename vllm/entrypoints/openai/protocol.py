@@ -2233,7 +2233,7 @@ class ResponseRawMessageAndToken(OpenAIBaseModel):
     """Class to show the raw message.
     If message / tokens diverge, tokens is the source of truth"""
 
-    message: list[str]
+    message: str
     tokens: list[int]
 
 
