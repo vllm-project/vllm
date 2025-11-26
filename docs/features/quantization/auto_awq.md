@@ -1,7 +1,8 @@
----
-title: AutoAWQ
----
-[](){ #auto-awq }
+# AutoAWQ
+
+> ⚠️ **Warning:**
+    The `AutoAWQ` library is deprecated. This functionality has been adopted by the vLLM project in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq).
+    For the recommended quantization workflow, please see the AWQ examples in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq). For more details on the deprecation, refer to the original [AutoAWQ repository](https://github.com/casper-hansen/AutoAWQ).
 
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
@@ -15,19 +16,21 @@ pip install autoawq
 
 After installing AutoAWQ, you are ready to quantize a model. Please refer to the [AutoAWQ documentation](https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization) for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
-??? Code
+??? code
 
     ```python
     from awq import AutoAWQForCausalLM
     from transformers import AutoTokenizer
 
-    model_path = 'mistralai/Mistral-7B-Instruct-v0.2'
-    quant_path = 'mistral-instruct-v0.2-awq'
-    quant_config = { "zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM" }
+    model_path = "mistralai/Mistral-7B-Instruct-v0.2"
+    quant_path = "mistral-instruct-v0.2-awq"
+    quant_config = {"zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM"}
 
     # Load model
     model = AutoAWQForCausalLM.from_pretrained(
-        model_path, **{"low_cpu_mem_usage": True, "use_cache": False}
+        model_path,
+        low_cpu_mem_usage=True,
+        use_cache=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -51,7 +54,7 @@ python examples/offline_inference/llm_engine_example.py \
 
 AWQ models are also supported directly through the LLM entrypoint:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams

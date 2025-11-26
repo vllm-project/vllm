@@ -1,7 +1,4 @@
----
-title: BitsAndBytes
----
-[](){ #bits-and-bytes }
+# BitsAndBytes
 
 vLLM now supports [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) for more efficient model inference.
 BitsAndBytes quantizes models to reduce memory usage and enhance performance without significantly sacrificing accuracy.
@@ -30,7 +27,7 @@ model_id = "unsloth/tinyllama-bnb-4bit"
 llm = LLM(
     model=model_id,
     dtype=torch.bfloat16,
-    trust_remote_code=True
+    trust_remote_code=True,
 )
 ```
 
@@ -46,7 +43,7 @@ llm = LLM(
     model=model_id,
     dtype=torch.bfloat16,
     trust_remote_code=True,
-    quantization="bitsandbytes"
+    quantization="bitsandbytes",
 )
 ```
 

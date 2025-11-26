@@ -17,27 +17,32 @@ FILE_HEAD = """
 namespace MARLIN_NAMESPACE_NAME {
 """.strip()
 
-TEMPLATE = ("template __global__ void Marlin<"
-            "{{scalar_t}}, "
-            "{{w_type_id}}, "
-            "{{threads}}, "
-            "{{thread_m_blocks}}, "
-            "{{thread_n_blocks}}, "
-            "{{thread_k_blocks}}, "
-            "{{'true' if m_block_size_8 else 'false'}}, "
-            "{{stages}}, "
-            "{{group_blocks}}, "
-            "{{'true' if is_zp_float else 'false'}}>"
-            "( MARLIN_KERNEL_PARAMS );")
+TEMPLATE = (
+    "template __global__ void Marlin<"
+    "{{scalar_t}}, "
+    "{{w_type_id}}, "
+    "{{s_type_id}}, "
+    "{{threads}}, "
+    "{{thread_m_blocks}}, "
+    "{{thread_n_blocks}}, "
+    "{{thread_k_blocks}}, "
+    "{{'true' if m_block_size_8 else 'false'}}, "
+    "{{stages}}, "
+    "{{group_blocks}}, "
+    "{{'true' if is_zp_float else 'false'}}>"
+    "( MARLIN_KERNEL_PARAMS );"
+)
 
 # int8 with zero point case (vllm::kU8) is also supported,
 # we don't add it to reduce wheel size.
 SCALAR_TYPES = [
-    "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
-    "vllm::kFE2M1f"
+    "vllm::kU4",
+    "vllm::kU4B8",
+    "vllm::kU8B128",
+    "vllm::kFE4M3fn",
+    "vllm::kFE2M1f",
 ]
-THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
-                  (128, 64, 128)]
+THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128), (128, 64, 128)]
 
 THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 # group_blocks:
@@ -58,11 +63,12 @@ def generate_new_kernels():
         all_template_str_list = []
 
         for group_blocks, m_blocks, thread_configs in itertools.product(
-                GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
-
+            GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS
+        ):
             # act order case only support gptq-int4 and gptq-int8
             if group_blocks == 0 and scalar_type not in [
-                    "vllm::kU4B8", "vllm::kU8B128"
+                "vllm::kU4B8",
+                "vllm::kU8B128",
             ]:
                 continue
             if thread_configs[2] == 256:
@@ -78,7 +84,8 @@ def generate_new_kernels():
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
                 continue
             # nvfp4 only supports group_size == 16
-            if scalar_type == "vllm::kFE2M1f" and group_blocks != 1:
+            # mxfp4 only supports group_size == 32
+            if scalar_type == "vllm::kFE2M1f" and group_blocks not in [1, 2]:
                 continue
             # other quantization methods don't support group_size = 16
             if scalar_type != "vllm::kFE2M1f" and group_blocks == 1:
@@ -91,16 +98,28 @@ def generate_new_kernels():
             c_dtype = "half" if dtype == "fp16" else "nv_bfloat16"
 
             is_zp_float_list = [False]
-            if dtype == "fp16" and scalar_type == "vllm::kU4" and \
-                    group_blocks == 4:
+            if dtype == "fp16" and scalar_type == "vllm::kU4" and group_blocks == 4:
                 # HQQ (is_zp_float = true) only supports
                 # 4bit quantization and fp16
                 is_zp_float_list.append(True)
+
+            if scalar_type == "vllm::kFE2M1f" and group_blocks == 1:
+                s_type = "vllm::kFE4M3fn"
+            elif scalar_type == "vllm::kFE2M1f" and group_blocks == 2:
+                s_type = "vllm::kFE8M0fnu"
+                if dtype == "fp16":
+                    # we cannot safely dequantize e8m0 to fp16, so skip this
+                    continue
+            elif dtype == "fp16":
+                s_type = "vllm::kFloat16"
+            elif dtype == "bf16":
+                s_type = "vllm::kBFloat16"
 
             for is_zp_float in is_zp_float_list:
                 template_str = jinja2.Template(TEMPLATE).render(
                     scalar_t=c_dtype,
                     w_type_id=scalar_type + ".id()",
+                    s_type_id=s_type + ".id()",
                     threads=threads,
                     thread_m_blocks=max(m_blocks, 1),
                     thread_n_blocks=n_blocks,

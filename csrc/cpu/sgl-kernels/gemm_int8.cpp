@@ -41,7 +41,7 @@ struct tinygemm_kernel_nn<at::BFloat16, has_bias, BLOCK_M, BLOCK_N> {
     __m512  vd0;
     __m512  vd1[COLS];
 
-    // oops! 4x4 spills but luckly we use 4x2
+    // oops! 4x4 spills but luckily we use 4x2
     __m512 vbias[COLS];
 
     // [NOTE]: s8s8 igemm compensation in avx512-vnni

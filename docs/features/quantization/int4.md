@@ -1,7 +1,4 @@
----
-title: INT4 W4A16
----
-[](){ #int4 }
+# INT4 W4A16
 
 vLLM supports quantizing weights to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
 
@@ -21,7 +18,7 @@ pip install llmcompressor
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm lm-eval==0.4.4
+pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 ```
 
 ## Quantization Process
@@ -42,7 +39,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
+    MODEL_ID,
+    device_map="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
@@ -53,7 +52,7 @@ When quantizing weights to INT4, you need sample data to estimate the weight upd
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -78,10 +77,10 @@ For a general-purpose instruction-tuned model, you can use a dataset like `ultra
 
 Now, apply the quantization algorithms:
 
-??? Code
+??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import GPTQModifier
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
@@ -111,7 +110,8 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
@@ -136,12 +136,12 @@ lm_eval --model vllm \
 - Employ the chat template or instruction template that the model was trained with
 - If you've fine-tuned a model, consider using a sample of your training data for calibration
 - Tune key hyperparameters to the quantization algorithm:
-  - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
-  - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
+    - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
+    - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
 
 The following is an example of an expanded quantization recipe you can tune to your own use case:
 
-??? Code
+??? code
 
     ```python
     from compressed_tensors.quantization import (
@@ -168,7 +168,7 @@ The following is an example of an expanded quantization recipe you can tune to y
         },
         ignore=["lm_head"],
         update_size=NUM_CALIBRATION_SAMPLES,
-        dampening_frac=0.01
+        dampening_frac=0.01,
     )
     ```
 

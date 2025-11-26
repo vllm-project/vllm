@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,8 @@ import torch
 from PIL import Image, ImageDraw
 
 from vllm.multimodal.hasher import MultiModalHasher
+
+pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
@@ -44,10 +47,11 @@ def test_hash_collision_image_transpose():
     assert hasher.hash_kwargs(image=image1) != hasher.hash_kwargs(image=image2)
 
 
-def test_hash_collision_tensor_shape():
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_hash_collision_tensor_shape(dtype):
     # The hash should be different though the data is the same when flattened
-    arr1 = torch.zeros((5, 10, 20, 3))
-    arr2 = torch.zeros((10, 20, 5, 3))
+    arr1 = torch.zeros((5, 10, 20, 3), dtype=dtype)
+    arr2 = torch.zeros((10, 20, 5, 3), dtype=dtype)
 
     hasher = MultiModalHasher
     assert hasher.hash_kwargs(data=arr1) != hasher.hash_kwargs(data=arr2)
@@ -72,3 +76,20 @@ def test_hash_non_contiguous_array():
     hasher = MultiModalHasher
     # Both should be hashable and produce the same hashes
     assert hasher.hash_kwargs(data=arr) == hasher.hash_kwargs(data=arr_c)
+
+
+def test_hash_image_exif_id():
+    # Test that EXIF ImageId tag can be used to store UUID
+    # and the hasher will use that instead of the image data.
+    image1 = image2 = Image.new("1", size=(10, 20))
+    id = uuid.uuid4()
+    image1.getexif()[Image.ExifTags.Base.ImageID] = id
+    image2 = Image.open(ASSETS_DIR / "image1.png")
+    image2.getexif()[Image.ExifTags.Base.ImageID] = "Not a UUID"
+    image2a = Image.open(ASSETS_DIR / "image1.png")
+
+    hasher = MultiModalHasher
+    # first image has UUID in ImageID, so it should hash to that UUID
+    assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
+    # second image has non-UUID in ImageID, so it should hash to the image data
+    assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)

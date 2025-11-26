@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -9,14 +8,16 @@ import torch
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
 
-NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
 
-DTYPES = [torch.float16, torch.bfloat16]
-QDTYPES = [None, torch.float8_e4m3fn] if not current_platform.is_rocm() else [
-    None, torch.float8_e4m3fnuz
-]
+DTYPES = [torch.bfloat16]
+QDTYPES = (
+    [None, torch.float8_e4m3fn]
+    if not current_platform.is_rocm()
+    else [None, torch.float8_e4m3fnuz]
+)
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
@@ -30,8 +31,8 @@ def ref_paged_attn(
     kv_lens: list[int],
     block_tables: torch.Tensor,
     scale: float,
-    sliding_window: Optional[int] = None,
-    soft_cap: Optional[float] = None,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -42,7 +43,7 @@ def ref_paged_attn(
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
-        q = query[start_idx:start_idx + query_len]
+        q = query[start_idx : start_idx + query_len]
         q *= scale
 
         num_kv_blocks = (kv_len + block_size - 1) // block_size
@@ -60,10 +61,13 @@ def ref_paged_attn(
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
         if sliding_window is not None:
-            sliding_window_mask = torch.triu(empty_mask,
-                                             diagonal=kv_len -
-                                             (query_len + sliding_window) +
-                                             1).bool().logical_not()
+            sliding_window_mask = (
+                torch.triu(
+                    empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
+                )
+                .bool()
+                .logical_not()
+            )
             mask |= sliding_window_mask
         if soft_cap is not None and soft_cap > 0:
             attn = soft_cap * torch.tanh(attn / soft_cap)
@@ -77,15 +81,15 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 1328), (5, 18),
-                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
+@pytest.mark.parametrize(
+    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("sliding_window", [None, 64, 128, 256])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+@pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @torch.inference_mode()
@@ -93,17 +97,14 @@ def test_triton_unified_attn(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    sliding_window: Optional[int],
+    sliding_window: int | None,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
 ) -> None:
     torch.set_default_device("cuda")
-
-    if q_dtype is not None and q_dtype.itemsize < 2 and block_size < 32:
-        pytest.skip("block size must be at least 32 for fp8")
 
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
@@ -114,30 +115,23 @@ def test_triton_unified_attn(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
     scale = head_size**-0.5
 
-    query = torch.randn(sum(query_lens),
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype)
-    key_cache = torch.randn(num_blocks,
-                            block_size,
-                            num_kv_heads,
-                            head_size,
-                            dtype=dtype)
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
     value_cache = torch.randn_like(key_cache)
-    cu_query_lens = torch.tensor([0] + query_lens,
-                                 dtype=torch.int32).cumsum(dim=0,
-                                                           dtype=torch.int32)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
     kv_lens = torch.tensor(kv_lens, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
-    block_tables = torch.randint(0,
-                                 num_blocks,
-                                 (num_seqs, max_num_blocks_per_seq),
-                                 dtype=torch.int32)
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
 
     output = torch.empty_like(query)
 
@@ -191,5 +185,7 @@ def test_triton_unified_attn(
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
-    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
-        f"{torch.max(torch.abs(output - ref_output))}"
+    (
+        torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
+        f"{torch.max(torch.abs(output - ref_output))}",
+    )

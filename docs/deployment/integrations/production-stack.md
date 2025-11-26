@@ -1,7 +1,4 @@
----
-title: Production stack
----
-[](){ #deployment-production-stack }
+# Production stack
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack). Born out of a Berkeley-UChicago collaboration, [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
 
@@ -44,7 +41,8 @@ vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
 ```
 
-**NOTE**: It may take some time for the containers to download the Docker images and LLM weights.
+!!! note
+    It may take some time for the containers to download the Docker images and LLM weights.
 
 ### Send a Query to the Stack
 
@@ -57,10 +55,10 @@ sudo kubectl port-forward svc/vllm-router-service 30080:80
 And then you can send out a query to the OpenAI-compatible API to check the available models:
 
 ```bash
-curl -o- http://localhost:30080/models
+curl -o- http://localhost:30080/v1/models
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -80,7 +78,7 @@ curl -o- http://localhost:30080/models
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
 ```bash
-curl -X POST http://localhost:30080/completions \
+curl -X POST http://localhost:30080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "facebook/opt-125m",
@@ -89,7 +87,7 @@ curl -X POST http://localhost:30080/completions \
   }'
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -121,7 +119,7 @@ sudo helm uninstall vllm
 
 The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
 
-??? Yaml
+??? code "Yaml"
 
     ```yaml
     servingEngineSpec:
@@ -142,16 +140,19 @@ The core vLLM production stack configuration is managed with YAML. Here is the e
     ```
 
 In this YAML configuration:
+
 * **`modelSpec`** includes:
-  * `name`: A nickname that you prefer to call the model.
-  * `repository`: Docker repository of vLLM.
-  * `tag`: Docker image tag.
-  * `modelURL`: The LLM model that you want to use.
+    * `name`: A nickname that you prefer to call the model.
+    * `repository`: Docker repository of vLLM.
+    * `tag`: Docker image tag.
+    * `modelURL`: The LLM model that you want to use.
 * **`replicaCount`**: Number of replicas.
 * **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
 * **`requestGPU`**: Specifies the number of GPUs required.
 * **`pvcStorage`**: Allocates persistent storage for the model.
 
-**NOTE:** If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
+!!! note
+    If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
 
-**NOTE:** vLLM production stack offers many more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
+!!! tip
+    vLLM production stack offers many more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
