@@ -266,11 +266,38 @@ class ParsableContext(ConversationContext):
         self.chat_template = chat_template
         self.chat_template_content_format = chat_template_content_format
 
+        self.input_messages: list[ResponseRawMessageAndToken] = []
+        self.output_messages: list[ResponseRawMessageAndToken] = []
+
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         self.parser.process(output.outputs[0])
+        output_prompt = output.prompt or ""
+        output_prompt_token_ids = output.prompt_token_ids or []
+        if len(self.input_messages) == 0:
+            self.input_messages.append(
+                ResponseRawMessageAndToken(
+                    message=output_prompt,
+                    tokens=output_prompt_token_ids,
+                )
+            )
+        else:
+            # TODO: merge them in properly together
+            # TODO: responsesParser doesn't parse kimi k2 sentences correctly
+            self.output_messages.append(
+                ResponseRawMessageAndToken(
+                    message=output_prompt,
+                    tokens=output_prompt_token_ids,
+                )
+            )
+        self.output_messages.append(
+            ResponseRawMessageAndToken(
+                message=output.outputs[0].text,
+                tokens=output.outputs[0].token_ids,
+            )
+        )
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
         self.parser.response_messages.extend(output)
