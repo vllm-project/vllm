@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
@@ -970,6 +971,10 @@ class FusedMoEParallelConfig:
     def use_mori_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "mori"
 
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -1236,3 +1241,18 @@ class FusedMoEConfig:
     @property
     def use_naive_all2all_kernels(self):
         return self.moe_parallel_config.use_naive_all2all_kernels
+
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.moe_parallel_config.use_nixl_ep_kernels
+
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        """
+        Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
+        """
+        return (
+            envs.VLLM_USE_FLASHINFER_MOE_FP4
+            and has_flashinfer_cutlass_fused_moe()
+            and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput"
+        )
