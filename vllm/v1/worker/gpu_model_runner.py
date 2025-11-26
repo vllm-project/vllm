@@ -1051,25 +1051,43 @@ class GPUModelRunner(
         num_decode_reqs: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        If prefill context parallelism is enabled, we will update
-        the number of `tokens` after sequence splitting.
-        Meanwhile, we will compute:
-        `positions` the new token positions,
-        `self.num_pcp_pads_cpu` the number of padding tokens
-            per request for alignment,
-        `self.pcp_unpad_mask_cpu` the mask for non-padded tokens,
-        `self.pcp_allgather_restore_idx` indices to restore the
-            original vector order after PCP allgather.
+        Update token counts and positions for Prefill Context Parallelism (PCP).
+
+        When using Prefill Context Parallelism, each request's prefill sequence is
+        split across multiple PCP ranks. The splitting strategy used here is the
+        "DualChunkSwap" style: each request's (padded) sequence is split into
+        2 * pcp_world_size chunks and ranks are assigned chunks in an interleaved
+        head/tail pattern to balance load.
+
+        This function:
+        - Computes how many tokens each request should be processed by the current
+          PCP rank (pcp_tokens).
+        - Computes the flattened positions of those tokens within the local
+          padded buffer (pcp_positions).
+        - Updates runner state arrays used to restore original order and mask out
+          padded tokens after allgather:
+            - self.num_pcp_pads_cpu: number of pads added per request
+            - self.pcp_unpad_mask_cpu: boolean mask marking real tokens in the
+              padded allgather buffer
+            - self.pcp_allgather_restore_idx: index array used to restore original
+              ordering after per-rank allgather and interleaving.
+
+        Args:
+            tokens: 1D numpy array of length num_reqs containing the number of new
+                    tokens scheduled for each request (before PCP splitting).
+        Returns:
+            Tuple (pcp_tokens, pcp_positions):
+            - pcp_tokens: number of tokens per request that this PCP rank will
+                          actually process (after splitting / replication).
+            - pcp_positions: flattened positions for those tokens on this rank,
+                             used to build the positions buffer for the model.
+
+
         Example:
-        >>> tokens = [1, 5, 8]
-        >>> pcp_world_size = 2
-        >>> pcp_rank = 0
-        >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
-        >>> pcp_rank = 1
-        >>> _update_tokens_for_pcp(tokens)
-        ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
-        >>> # the following results are same for each pcp rank
+        >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
+        >>> pcp_rank = 0 get ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
+        >>> pcp_rank = 1 get ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5])
+        >>> Meanwhile, the following results are same for each pcp rank
         >>> self.num_pcp_pads_cpu
         [1, 3, 0]
         >>> self.pcp_unpad_mask_cpu
@@ -1094,42 +1112,74 @@ class GPUModelRunner(
         self.num_pcp_pads_cpu[:num_reqs] = 0
 
         num_decode_tokens = sum(tokens[:num_decode_reqs])
-
+        # DualChunkSwap requires alignment to a multiple of (2 * pcp_world_size).
+        # We first pad each request's token count up to that multiple.
         num_padded_scheduled_tokens = np.ceil(
             tokens / (2 * self.pcp_world_size)
         ).astype(np.int32) * (2 * self.pcp_world_size)
-        # we duplicate scheduled tokens of decode reqs to pcp_world_size
+
+        # PCP does not split decode requests. For decode requests, we instead
+        # duplicate the scheduled tokens across the pcp_world_size ranks.
         num_padded_scheduled_tokens[:num_decode_reqs] = (
             tokens[:num_decode_reqs] * self.pcp_world_size
         )
+
+        # Record how many pads were added per request (padded - original).
         self.num_pcp_pads_cpu[:num_reqs] = num_padded_scheduled_tokens - tokens
+        # cu_padded_tokens: cumulative sum of padded token counts,
+        # pcp_padded_arange: per-request arange flattened for padded tokens.
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
             num_padded_scheduled_tokens
         )
+        # Build the mask that marks which positions in the padded allgather buffer
+        # correspond to real (unpadded) tokens.
         self.pcp_unpad_mask_cpu[: pcp_padded_arange.shape[0]] = (
             pcp_padded_arange < np.repeat(tokens, num_padded_scheduled_tokens)
         )
 
         pcp_tokens = num_padded_scheduled_tokens // self.pcp_world_size
+
+        # Compute per-request "chunk sizes" for the head/tail splitting.
+        # For prefill requests, we further split the pcp_tokens into two chunks
+        # (head and tail). For decode requests, the chunk equals pcp_tokens.
         pcp_chunk_sizes = (pcp_tokens // 2).clip(min=1)
         pcp_chunk_sizes[:num_decode_reqs] = pcp_tokens[:num_decode_reqs]
+
+        # Build arange-style helpers for pcp tokens and chunk sizes:
+        # - pcp_arange gives indices repeated for each token in pcp_tokens
+        # - pcp_chunk_arange gives indices repeated for each position inside chunks
         _, pcp_arange = self._get_cumsum_and_arange(pcp_tokens)
         _, pcp_chunk_arange = self._get_cumsum_and_arange(pcp_chunk_sizes)
+
+        # Mask that marks whether a position belongs to the head chunk (True)
+        # or the tail chunk (False). For decode requests, tail chunk won't exist
+        # and is handled specially below.
         pcp_head_chunk_mask = pcp_arange < np.repeat(pcp_chunk_sizes, pcp_tokens)
 
         def get_current_rank_positions(
             positions_start_loc: int | np.ndarray, rank: int
         ):
+            """
+            Compute flattened positions for the given rank with a given start
+            offset for each request (positions_start_loc).
+            - For head chunks: start at positions_start_loc + rank * chunk_size.
+            - For tail chunks: start at positions_start_loc + (2*pcp_world_size- rank -
+            1) * chunk_size.
+            - For decode requests: no tail chunks; their positions are filled from the
+              contiguous (unpadded) `tokens` arange instead (handled after).
+            """
             positions = np.zeros(len(pcp_head_chunk_mask), dtype=np.int32)
             head_start_loc = positions_start_loc + rank * pcp_chunk_sizes
             tail_start_loc = (
                 positions_start_loc
                 + (2 * self.pcp_world_size - rank - 1) * pcp_chunk_sizes
             )
+            # Fill head positions using chunk arange offset by head_start_loc.
             positions[pcp_head_chunk_mask] = pcp_chunk_arange + np.repeat(
                 head_start_loc, pcp_chunk_sizes
             )
-            # Decode reqs do not have tail chunks.
+            # Fill tail positions. Note decode requests do not have tail chunks,
+            # so the tail filling is only for prefill positions.
             positions[~pcp_head_chunk_mask] = (
                 pcp_chunk_arange[num_decode_tokens:]
                 + np.repeat(tail_start_loc, pcp_chunk_sizes)[num_decode_tokens:]
@@ -1144,6 +1194,7 @@ class GPUModelRunner(
                 tokens[:num_decode_reqs]
             )[1]
 
+        # Build the restore index used after allgather.
         padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
         padded_pos_start_loc[0] = 0
         all_positions_lst = [
@@ -1155,6 +1206,7 @@ class GPUModelRunner(
             all_positions.argsort()
         )
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+
         return (
             pcp_tokens[:num_reqs],
             positions,
@@ -3977,7 +4029,7 @@ class GPUModelRunner(
         pcp_metadata = None
         if self.pcp_world_size > 1 and force_attention:
             num_decode_reqs = sum(num_scheduled_tokens == 1)
-            num_scheduled_tokens[:num_reqs], _, pcp_metadata = (
+            num_scheduled_tokens[:num_reqs], _ = (
                 self._update_tokens_for_pcp(
                     num_scheduled_tokens[:num_reqs],
                     dummy_input=True,
@@ -4033,7 +4085,6 @@ class GPUModelRunner(
                 num_reqs=num_reqs,
                 ubatch_slices=ubatch_slices,
                 for_cudagraph_capture=True,
-                pcp_metadata=pcp_metadata if self.pcp_world_size > 1 else None,
             )
 
         with self.maybe_dummy_run_with_lora(

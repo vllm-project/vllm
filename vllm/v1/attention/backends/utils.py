@@ -33,6 +33,7 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -53,10 +54,7 @@ def is_valid_kv_cache_layout(value: str) -> bool:
 class PrefillContextParallelMetadata:
     """
     Attention metadata for prefill context parallel
-    """
 
-    allgather_restore_idx: torch.Tensor
-    """
     We split and concatenate the sequence in a head-tail style,
     and use this variable to restore the original order.
     """
@@ -113,7 +111,7 @@ class CommonAttentionMetadata:
     cp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in prefill/decode context parallelism world"""
 
-    pcp_metadata: PrefillContextParallelMetadata | None = None
+    pcp_allgather_restore_idx: torch.Tensor | None = None
 
 
 def slice_query_start_locs(
@@ -1135,64 +1133,56 @@ def get_cp_local_seq_lens(
     cp_local_seq_lens = base + remainder
     return cp_local_seq_lens.squeeze(1)
 
-def get_pcp_metadata(
-    q_start_loc_cpu: torch.Tensor,
-    q_indptr_np: np.ndarray,
-    allgather_restore_idx: torch.Tensor,
-    kv_start_loc_cpu: torch.Tensor,
-    kv_for_head_indptr_np: np.ndarray,
-    kv_for_tail_indptr_np: np.ndarray,
-) -> PrefillContextParallelMetadata:
+def pcp_kv_allgather_and_restore(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_actual_tokens: int,
+    pcp_allgather_restore_idx: torch.Tensor,
+    pcp_group: GroupCoordinator,
+):
     """
-    During the prefill phrase, the attention computation is divided into
-    two parts: q_head and q_tail. Here, we calculate the kv indices
-    corresponding to q_head or q_tail. Meawhile, the q and kv indptr are
-    also computed to build the attention wrapper.
-    If the pcp_size is 2, the variables are following:
-    >>> q_lens [4, 8]  kv_lens [8, 16]
-    >>> pcp_chunk_sizes[2, 4]
-    >>> q_indptr[0, 2, 4]
-    >>> q_head_indices [0, 1, 4, 5, 6, 7] q_tail_indices [2, 3, 8, 9, 10, 11]
-    >>> kv_head_len r0 [2, 4] / r1 [4, 8]
-    >>> kv_for_head_indptr r0 [0, 2, 6] / r1 [0, 4, 12]
-    >>> kv_for_head_indices r0 [0, 1, 8, 9, 10, 11]
-    >>> r1[0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15]
-    >>> kv_tail_len r0 [8, 16] / r1 [6, 12]
-    >>> kv_for_tail_indptr r0 [0, 8, 24] / r1 [0, 6, 18]
-    >>> kv_for_tail_indices r0 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ..., 23]
-    >>> r1[0, 1, 2, 3, 4, 5, 8, 9, ..., 19]
+    All-gather key and value tensors across PCP ranks and restore the original order.
+    Args:
+        key: key tensor for the current pcp rank.
+        value: value tensor for the current pcp rank.
+        num_actual_tokens: number of actual tokens (Exclude graph padding tokens).
+        pcp_allgather_restore_idx: indices to restore the original order.
+        pcp_group: PCP group coordinator.
+    Returns:
+        key: all-gathered and restored key tensor.
+        value: all-gathered and restored value tensor.
     """
-
-
-def get_q_indices(
-    q_start_loc_cpu: torch.Tensor,
-    q_indptr_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    q_head_indices, q_selected_num_tokens = get_pcp_selected_indices(q_start_loc_cpu, q_indptr_np)
-    q_tail_indices = q_head_indices + np.repeat(q_selected_num_tokens, q_selected_num_tokens)
-
-    return q_head_indices, q_tail_indices
-
-
-def get_kv_indices(
-    kv_start_loc_cpu: torch.Tensor,
-    kv_for_head_indptr_np: np.ndarray,
-    kv_for_tail_indptr_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    kv_for_head_indices = get_pcp_selected_indices(kv_start_loc_cpu, kv_for_head_indptr_np)
-    kv_for_tail_indices = get_pcp_selected_indices(kv_start_loc_cpu, kv_for_tail_indptr_np)
-    return kv_for_head_indices, kv_for_tail_indices
-
+    # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+    # ignores the padding from CUDA Graph.
+    # TODO(yyj) Batch all-gather operations to reduce launch overhead.
+    # Be careful about the dimensions of key and value.
+    key_across_cp = pcp_group.all_gather(key[:num_actual_tokens].contiguous(), dim=0)
+    value_across_cp = pcp_group.all_gather(
+        value[:num_actual_tokens].contiguous(), dim=0
+    )
+    # Reorder kv after pcp allgather.
+    # Note that there are duplicate decoding tokens after allgather.
+    key = torch.index_select(key_across_cp, 0, pcp_allgather_restore_idx)
+    value = torch.index_select(value_across_cp, 0, pcp_allgather_restore_idx)
+    return key, value
 
 def get_pcp_selected_indices(
     start_loc_cpu: torch.Tensor,
     selected_cu_num_tokens: np.ndarray,
     need_num_tokens: bool = False,
 ) -> torch.Tensor:
+    """Get the selected indices when using "DualChunkSwap" style for load balancing.
+    e.g: [0, 4], [0, 2, 6] -> [0, 1, 4, 5, 6, 7], optional([2, 4])
+    """
     start_loc_np = start_loc_cpu.numpy()
+    # Step1. Get batched selected_num_tokens array: [0, 2, 6] -> [2, 4]
     selected_num_tokens = selected_cu_num_tokens[1:] - selected_cu_num_tokens[:-1]
+    # Step2: Get batched arrange of given selected_num_tokens
+    # [0, 2, 6], [2, 4] -> [0, 1, 0, 1, 2, 3]
     cumsums_offsets = np.repeat(selected_cu_num_tokens[:-1], selected_num_tokens)
     arange = np.arange(selected_cu_num_tokens[-1], dtype=np.int32) - cumsums_offsets
+    # Step3: Add complete req offsets
+    # [0, 1, 0, 1, 2, 3] + [0, 0, 4, 4, 4, 4] = [0, 1, 4, 5, 6, 7]
     selected_indices = arange + np.repeat(start_loc_np, selected_num_tokens)
     selected_indices_cpu = torch.from_numpy(selected_indices)
 
@@ -1200,3 +1190,27 @@ def get_pcp_selected_indices(
         return selected_indices_cpu, selected_num_tokens
     else:
         return selected_indices_cpu
+
+def get_q_indices(
+    q_start_loc_cpu: torch.Tensor,
+    q_indptr_np: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Get selected q_indices of both head and tail parts"""
+    q_head_indices, q_selected_num_tokens = (
+        get_pcp_selected_indices(q_start_loc_cpu, q_indptr_np, need_num_tokens=True)
+    )
+    # Get q_tail_indices by add q_selected_num_tokens offset
+    q_tail_indices = q_head_indices + np.repeat(q_selected_num_tokens, q_selected_num_tokens)
+
+    return q_head_indices, q_tail_indices
+
+def get_kv_indices(
+    kv_start_loc_cpu: torch.Tensor,
+    kv_for_head_indptr_np: np.ndarray,
+    kv_for_tail_indptr_np: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Get selected kv_indices of both head and tail parts"""
+    kv_for_head_indices = get_pcp_selected_indices(kv_start_loc_cpu, kv_for_head_indptr_np)
+    kv_for_tail_indices = get_pcp_selected_indices(kv_start_loc_cpu, kv_for_tail_indptr_np)
+
+    return kv_for_head_indices, kv_for_tail_indices
