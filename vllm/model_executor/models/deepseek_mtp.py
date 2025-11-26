@@ -350,6 +350,10 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                         # Instead, create a new variable
                         name_mapped = chunk_name.replace(weight_name, param_name)
 
+                        # Skip if this expert is not on this rank (EP)
+                        if name_mapped not in params_dict:
+                            continue
+
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
