@@ -45,7 +45,7 @@ class CompilerInterface:
         """
         pass
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
         """
         Gather compiler-specific factors that influence the generated code.
 
@@ -54,7 +54,7 @@ class CompilerInterface:
         additional data that uniquely identifies the compiler's contribution to
         the cache key.
         """
-        return None
+        return {}
 
     def compile(
         self,
@@ -193,7 +193,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]):
         self.save_format = save_format
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
         return {"inductor_standalone": get_inductor_factors()}
 
     def initialize_cache(
@@ -278,7 +278,7 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object] | None:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
         return {"inductor": get_inductor_factors()}
 
     def initialize_cache(

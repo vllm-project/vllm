@@ -17,7 +17,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import HashResult, config, get_compile_factors, getattr_iter
+from vllm.config.utils import CompileFactors, config, get_compile_factors, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -317,7 +317,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config, review
         `ignored_factors` to decide whether that field must be excluded.

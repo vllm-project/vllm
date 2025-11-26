@@ -7,7 +7,7 @@ from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import HashResult, config
+from vllm.config.utils import CompileFactors, config
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -42,7 +42,7 @@ class StructuredOutputsConfig:
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

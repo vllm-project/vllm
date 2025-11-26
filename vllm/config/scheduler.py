@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self, deprecated
 
-from vllm.config.utils import HashResult, config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -162,7 +162,7 @@ class SchedulerConfig:
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

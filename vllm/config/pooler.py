@@ -3,7 +3,7 @@
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -84,7 +84,7 @@ class PoolerConfig:
         # raise deprecated warning for softmax and activation
         self.use_activation = get_use_activation(self)
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

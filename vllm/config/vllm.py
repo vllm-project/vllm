@@ -136,7 +136,10 @@ class VllmConfig:
         vllm_factors.append(__version__)
 
         def _append_config(config_obj: SupportsCompileFactors | None) -> None:
-            vllm_factors.append(config_obj.compile_factors() if config_obj else None)
+            if config_obj is None:
+                vllm_factors.append({})
+            else:
+                vllm_factors.append(config_obj.compile_factors())
 
         _append_config(self.model_config)
         _append_config(self.cache_config)
@@ -151,14 +154,14 @@ class VllmConfig:
             # graph explicitly.
             vllm_factors.append(self.scheduler_config.max_num_batched_tokens)
         else:
-            vllm_factors.append(None)
+            vllm_factors.append({})
         _append_config(self.speculative_config)
         _append_config(self.structured_outputs_config)
         vllm_factors.append(self.observability_config.compile_factors())
         if self.compilation_config:
             vllm_factors.append(self.compilation_config.compile_factors())
         else:
-            vllm_factors.append(None)
+            vllm_factors.append({})
         _append_config(self.kv_transfer_config)
         _append_config(self.ec_transfer_config)
         if self.additional_config:
@@ -169,7 +172,7 @@ class VllmConfig:
             else:
                 vllm_factors.append(additional_config.compile_factors())
         else:
-            vllm_factors.append(None)
+            vllm_factors.append({})
 
         factors.append(vllm_factors)
         return {"vllm": factors}

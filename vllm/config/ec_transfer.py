@@ -6,7 +6,7 @@ from typing import Any, Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import HashResult, config
+from vllm.config.utils import CompileFactors, config
 
 ECProducer = Literal["ec_producer"]
 ECConsumer = Literal["ec_consumer"]
@@ -59,7 +59,7 @@ class ECTransferConfig:
     """The Python module path to dynamically load the EC connector from.
     Only supported in V1."""
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

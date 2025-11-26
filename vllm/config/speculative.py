@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import HashResult, config, normalize_value
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
@@ -145,7 +145,7 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if

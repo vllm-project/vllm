@@ -8,7 +8,7 @@ from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import HashResult, config, normalize_value
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
 
-    def compile_factors(self) -> HashResult:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
