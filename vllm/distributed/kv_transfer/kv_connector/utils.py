@@ -129,16 +129,20 @@ class KVOutputAggregator:
                     combined_kv_cache_events,
                     type(kv_cache_events),
                 )
-                combined_kv_cache_events = (
-                    combined_kv_cache_events.combine_unique_ordered_events(
-                        kv_cache_events
-                    )
-                )
+                worker_kv_cache_events = kv_cache_events.get_all_events()
+                combined_kv_cache_events.add_events(worker_kv_cache_events)
+                combined_kv_cache_events.increment_workers()
 
             invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
+
+        # Aggregate the events across workers.
+        # This operation needs to be done post worker processing so that we have all
+        # events for all workers.
+        if combined_kv_cache_events is not None:
+            combined_kv_cache_events = combined_kv_cache_events.aggregate()
 
         assert output is not None
         output.kv_connector_output = KVConnectorOutput(
