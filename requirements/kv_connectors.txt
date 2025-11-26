@@ -1,2 +1,2 @@
 lmcache
-nixl >= 0.6.0 # Required for disaggregated prefill
+nixl >= 0.7.1 # Required for disaggregated prefill

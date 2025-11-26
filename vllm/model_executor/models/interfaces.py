@@ -94,7 +94,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
@@ -104,7 +104,13 @@ class SupportsMultiModal(Protocol):
             the appearances of their corresponding multimodal data item in the
             input prompt.
         """
-        ...
+        if hasattr(self, "get_multimodal_embeddings"):
+            logger.warning_once(
+                "`get_multimodal_embeddings` for vLLM models is deprecated and will be "
+                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
+                "this method to `embed_multimodal`."
+            )
+            return self.get_multimodal_embeddings(**kwargs)
 
     def get_language_model(self) -> VllmModel:
         """
@@ -119,10 +125,10 @@ class SupportsMultiModal(Protocol):
         ...
 
     @overload
-    def get_input_embeddings(self, input_ids: Tensor) -> Tensor: ...
+    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
 
     @overload
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
         multimodal_embeddings: MultiModalEmbeddings,
@@ -131,17 +137,17 @@ class SupportsMultiModal(Protocol):
         handle_oov_mm_token: bool = False,
     ) -> Tensor: ...
 
-    def _get_text_embeddings(
+    def _embed_text_input_ids(
         self,
         input_ids: Tensor,
-        get_input_embeddings: Callable[[Tensor], Tensor],
+        embed_input_ids: Callable[[Tensor], Tensor],
         *,
         is_multimodal: Tensor | None,
         handle_oov_mm_token: bool,
     ) -> Tensor:
         if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
-            text_embeds = get_input_embeddings(input_ids[is_text])
+            text_embeds = embed_input_ids(input_ids[is_text])
 
             return torch.empty(
                 (input_ids.shape[0], text_embeds.shape[1]),
@@ -149,9 +155,9 @@ class SupportsMultiModal(Protocol):
                 device=text_embeds.device,
             ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
 
-        return get_input_embeddings(input_ids)
+        return embed_input_ids(input_ids)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -167,15 +173,15 @@ class SupportsMultiModal(Protocol):
 
         In case the multi-modal token IDs exceed the vocabulary size of
         the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `get_input_embeddings` method
+        to avoid calling the language model's `embed_input_ids` method
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.get_language_model().get_input_embeddings,
+            self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
@@ -185,7 +191,7 @@ class SupportsMultiModal(Protocol):
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )
@@ -580,13 +586,11 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -926,13 +930,73 @@ def supports_transcription(
 
 
 @runtime_checkable
-class SupportsEagle3(Protocol):
+class SupportsEagleBase(Protocol):
+    """Base interface for models that support EAGLE-based speculative decoding."""
+
+    has_own_lm_head: bool = False
+    """
+    A flag that indicates this model has trained its own lm_head.
+    """
+
+    has_own_embed_tokens: bool = False
+    """
+    A flag that indicates this model has trained its own input embeddings.
+    """
+
+
+@overload
+def supports_any_eagle(model: type[object]) -> TypeIs[type[SupportsEagleBase]]: ...
+
+
+@overload
+def supports_any_eagle(model: object) -> TypeIs[SupportsEagleBase]: ...
+
+
+def supports_any_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
+    """Check if model supports any EAGLE variant (1, 2, or 3)."""
+    return supports_eagle(model) or supports_eagle3(model)
+
+
+@runtime_checkable
+class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE3 speculative decoding."""
+    EAGLE-1 and EAGLE-2 speculative decoding."""
+
+    supports_eagle: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_eagle(model: type[object]) -> TypeIs[type[SupportsEagle]]: ...
+
+
+@overload
+def supports_eagle(model: object) -> TypeIs[SupportsEagle]: ...
+
+
+def supports_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagle]] | TypeIs[SupportsEagle]:
+    return isinstance(model, SupportsEagle)
+
+
+@runtime_checkable
+class SupportsEagle3(SupportsEagleBase, Protocol):
+    """The interface required for models that support
+    EAGLE-3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE3 
+    A flag that indicates this model supports EAGLE-3 
     speculative decoding.
 
     Note:
@@ -943,7 +1007,7 @@ class SupportsEagle3(Protocol):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
         Set which layers should output auxiliary
-        hidden states for EAGLE3.
+        hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
@@ -954,7 +1018,7 @@ class SupportsEagle3(Protocol):
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
         Get the layer indices that should output auxiliary hidden states
-        for EAGLE3.
+        for EAGLE-3.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
@@ -983,7 +1047,7 @@ class SupportsMRoPE(Protocol):
     supports_mrope: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports M-RoPE.
-    
+
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
@@ -1024,3 +1088,52 @@ def supports_mrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMRoPE]] | TypeIs[SupportsMRoPE]:
     return isinstance(model, SupportsMRoPE)
+
+
+@runtime_checkable
+class SupportsXDRoPE(Protocol):
+    """The interface required for all models that support XD-RoPE."""
+
+    supports_xdrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports XD-RoPE.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        XDRope of your model class.
+    """
+
+    def get_xdrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> torch.Tensor:
+        """
+        Get XD-RoPE input positions and delta value for this specific model.
+
+        This method should be implemented by each model that supports XD-RoPE
+        to provide model-specific logic for computing input positions.
+
+        Args:
+            input_tokens: List of input token IDs
+            mm_features: Information about each multi-modal data item
+
+        Returns:
+            llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
+            4D(P/W/H/T) or 3D(W/H/T) positions.
+        """
+        ...
+
+
+@overload
+def supports_xdrope(model: type[object]) -> TypeIs[type[SupportsXDRoPE]]: ...
+
+
+@overload
+def supports_xdrope(model: object) -> TypeIs[SupportsXDRoPE]: ...
+
+
+def supports_xdrope(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
+    return isinstance(model, SupportsXDRoPE)
