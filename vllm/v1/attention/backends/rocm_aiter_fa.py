@@ -464,6 +464,14 @@ class AiterFlashAttentionMetadataBuilder(
             seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
 
+            if self.dcp_world_size > 1:
+                computed_kv_lens = get_dcp_local_seq_lens(
+                    computed_kv_lens,
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    self.dcp_kv_cache_interleave_size,
+                )
+
             # allocate the equal amount of workspace for
             # each chunk prefill request
             max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends
@@ -496,71 +504,17 @@ class AiterFlashAttentionMetadataBuilder(
             )  # [num_chunks, max_cum_tokens]
             token_to_batch_tensor = torch.cumsum(idx_to_batch_tensor, dim=1)
 
-            if self.dcp_world_size > 1:
-                # Calculate local sequence lengths for this rank
-                local_context_lens = get_dcp_local_seq_lens(
-                    computed_kv_lens,
-                    self.dcp_world_size,
-                    self.dcp_rank,
-                    self.dcp_kv_cache_interleave_size,
-                )
-
-                # Compute local chunk boundaries for DCP
-                local_chunk_ends = torch.min(
-                    local_context_lens.unsqueeze(0), chunk_starts + max_context_chunk
-                )
-                local_chunk_seq_lens = (local_chunk_ends - chunk_starts).clamp(min=0)
-
-                # Build cumulative lengths for cp_gather_cache
-                dcp_cu_seq_lens_cpu = torch.zeros(
-                    num_chunks, num_extends + 1, dtype=torch.int32, pin_memory=True
-                )
-                torch.cumsum(
-                    local_chunk_seq_lens,
-                    dim=1,
-                    out=dcp_cu_seq_lens_cpu[:, 1:],
-                    dtype=torch.int32,
-                )
-
-            if self.dcp_world_size > 1:
-                chunk_context_metadata = AiterChunkContextMetadata(
-                    workspace=self.extend_workspace,
-                    cu_seq_lens_chunk=cu_seq_lens_cpu.to(
-                        self.device, non_blocking=True
-                    ),
-                    chunk_starts=chunk_starts.to(self.device, non_blocking=True),
-                    seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                    max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-                    seq_lens=chunk_seq_lens,
-                    token_to_batch=token_to_batch_tensor.to(
-                        self.device, non_blocking=True
-                    ),
-                    num_chunks=num_chunks,
-                    total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
-                    # DCP-specific: local cumulative lengths for cp_gather_cache
-                    dcp_cu_seq_lens_chunk=dcp_cu_seq_lens_cpu.to(
-                        self.device, non_blocking=True
-                    ),
-                    dcp_seq_tot=local_chunk_seq_lens.sum(
-                        dim=1
-                    ).tolist(),  # Local total for cp_gather
-                )
-            else:
-                chunk_context_metadata = AiterChunkContextMetadata(
-                    workspace=self.extend_workspace,
-                    cu_seq_lens_chunk=cu_seq_lens_cpu.to(
-                        self.device, non_blocking=True
-                    ),
-                    chunk_starts=chunk_starts.to(self.device, non_blocking=True),
-                    seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                    max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-                    seq_lens=chunk_seq_lens,
-                    token_to_batch=token_to_batch_tensor.to(
-                        self.device, non_blocking=True
-                    ),
-                    num_chunks=num_chunks,
-                    total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
-                )
+            chunk_context_metadata = AiterChunkContextMetadata(
+                workspace=self.extend_workspace,
+                cu_seq_lens_chunk=cu_seq_lens_cpu.to(self.device, non_blocking=True),
+                chunk_starts=chunk_starts.to(self.device, non_blocking=True),
+                seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
+                max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+                seq_lens=chunk_seq_lens,
+                token_to_batch=token_to_batch_tensor.to(self.device, non_blocking=True),
+                num_chunks=num_chunks,
+                total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
+            )
 
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes : num_decodes + num_extends + 1
@@ -738,22 +692,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
         num_chunks = chunk_context_metadata.num_chunks
         workspace = chunk_context_metadata.workspace
 
-        # Determine if DCP is enabled and select appropriate metadata
-        use_dcp = (
-            self.dcp_world_size > 1
-            and chunk_context_metadata.dcp_cu_seq_lens_chunk is not None
-        )
+        use_dcp = self.dcp_world_size > 1
 
-        # No DCP: use query as-is and same metadata for both
         query_for_context = query
         cu_seqlens_kv = chunk_context_metadata.cu_seq_lens_chunk
-        cu_seqlens_kv_attn = chunk_context_metadata.cu_seq_lens_chunk
 
         if use_dcp:
-            # AllGather queries across DCP ranks
             query = query.contiguous()
             query_for_context = get_dcp_group().all_gather(query, dim=1)
-            cu_seqlens_kv = chunk_context_metadata.dcp_cu_seq_lens_chunk
 
         max_seqlens = chunk_context_metadata.max_seq_lens
         chunk_starts = chunk_context_metadata.chunk_starts
@@ -784,7 +730,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 k=key_fetched,
                 v=value_fetched,
                 cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_kv_attn[chunk_idx],
+                cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlens[chunk_idx],
                 min_seqlen_q=min_seqlen_q,
