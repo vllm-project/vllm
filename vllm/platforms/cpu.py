@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import psutil
 import regex as re
 import torch
 
@@ -151,10 +152,12 @@ class CpuPlatform(Platform):
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
         if kv_cache_space is None:
-            kv_cache_space = 4 * GiB_bytes  # type: ignore
+            free_cpu_memory = psutil.virtual_memory().available
+            DEFAULT_CPU_MEM_UTILIZATION = 0.5
+            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
             logger.warning_once(
-                "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                "for CPU backend is not set, using 4 by default."
+                "VLLM_CPU_KVCACHE_SPACE not set. "
+                "Using automatic CPU memory for KV cache."
             )
         else:
             kv_cache_space *= GiB_bytes
