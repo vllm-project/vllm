@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import threading
 import time
 import uuid
@@ -12,6 +13,7 @@ import msgspec
 import numpy as np
 import torch
 import zmq
+import zmq.asyncio
 
 from vllm import envs
 from vllm.attention.selector import get_attn_backend
@@ -92,9 +94,15 @@ class SendReqMeta:
 
 
 @dataclass
-class FinishedReqSet:
+class FinishedSendReqSet:
     set: set[ReqId]
     lock: threading.Lock
+
+
+@dataclass
+class FinishedReceiveReqSet:
+    set: set[ReqId]
+    lock: asyncio.Lock
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -439,17 +447,22 @@ class MooncakeConnectorWorker:
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=self.num_workers, thread_name_prefix="vllm-mooncake-sender"
             )
-        if self.kv_role != "kv_producer":
-            self._receiver_executor = ThreadPoolExecutor(
-                max_workers=self.num_workers,
-                thread_name_prefix="vllm-mooncake-receiver",
+            logger.debug(
+                "Mooncake Prefiller: use %d workers to send kvcaches", self.num_workers
             )
+        if self.kv_role != "kv_producer":
+            self.receiver_loop = asyncio.new_event_loop()
+            self._mooncake_receiver_t = threading.Thread(
+                target=self._receiver_loop, args=(self.receiver_loop,), daemon=True
+            )
+            self._mooncake_receiver_t.start()
+            logger.debug("Mooncake Decoder: start receiver thread")
 
-        self.finished_sending_reqs: FinishedReqSet = FinishedReqSet(
+        self.finished_sending_reqs: FinishedSendReqSet = FinishedSendReqSet(
             set(), threading.Lock()
         )
-        self.finished_recving_reqs: FinishedReqSet = FinishedReqSet(
-            set(), threading.Lock()
+        self.finished_recving_reqs: FinishedReceiveReqSet = FinishedReceiveReqSet(
+            set(), asyncio.Lock()
         )
 
         self.block_size = vllm_config.cache_config.block_size
@@ -483,6 +496,7 @@ class MooncakeConnectorWorker:
         self._use_pallas = self.kv_topo._use_pallas
 
         self.zmq_ctx = zmq.Context()
+        self.async_zmq_ctx = zmq.asyncio.Context()
         self._encoder = msgspec.msgpack.Encoder()
         self._decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
 
@@ -492,12 +506,18 @@ class MooncakeConnectorWorker:
     def shutdown(self):
         """Cleanup background threads on destruction."""
         self.zmq_ctx.term()
+        self.async_zmq_ctx.term()
         if self.kv_role != "kv_consumer":
             self._sender_executor.shutdown(wait=False)
             if self._mooncake_sender_t:
                 self._mooncake_sender_t.join(timeout=0)
-        if self.kv_role != "kv_producer":
-            self._receiver_executor.shutdown(wait=False)
+        if self.kv_role != "kv_producer" and self.receiver_loop.is_running():
+            self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
+            self._mooncake_receiver_t.join(timeout=0)
+
+    def _receiver_loop(self, loop: asyncio.AbstractEventLoop):
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
 
     def _mooncake_sender(
         self, ready_event: threading.Event, base_port: int, tp_rank: int
@@ -724,19 +744,32 @@ class MooncakeConnectorWorker:
         self._mooncake_sender_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
+    async def fetch_finished_recving_reqs(self) -> set[ReqId]:
+        async with self.finished_recving_reqs.lock:
+            finished_recving_reqs = self.finished_recving_reqs.set
+            self.finished_recving_reqs.set = set()
+        return finished_recving_reqs
+
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
-        with self.finished_recving_reqs.lock:
-            finished_recving_reqs = self.finished_recving_reqs.set
-            self.finished_recving_reqs.set = set()
+        fut = None
+        if self.kv_role != "kv_producer":
+            fut = asyncio.run_coroutine_threadsafe(
+                self.fetch_finished_recving_reqs(), self.receiver_loop
+            )
 
-        with self.finished_sending_reqs.lock:
-            finished_sending_reqs = self.finished_sending_reqs.set
-            self.finished_sending_reqs.set = set()
+        if self.kv_role != "kv_consumer":
+            with self.finished_sending_reqs.lock:
+                finished_sending_reqs = self.finished_sending_reqs.set
+                self.finished_sending_reqs.set = set()
+        else:
+            finished_sending_reqs = set()
+
+        finished_recving_reqs = fut.result() if fut else set()
 
         if finished_sending_reqs or finished_recving_reqs:
             logger.debug(
@@ -768,7 +801,7 @@ class MooncakeConnectorWorker:
 
         return finished_sending_reqs or None, finished_recving_reqs or None
 
-    def receive_kv(self, path: str, req_blocks: list[tuple[str, list[int]]]):
+    async def receive_kv(self, path: str, req_blocks: list[tuple[str, list[int]]]):
         req_ids, block_ids = map(list, zip(*req_blocks))
         metadata = MooncakeAgentMetadata(
             remote_hostname=self.hostname,
@@ -779,30 +812,34 @@ class MooncakeConnectorWorker:
         )
 
         encoded_data = self._encoder.encode(metadata)
-        size_in_bytes = len(encoded_data)
         logger.debug(
-            "Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes)
+            "Size of encoded MooncakeAgentMetadata: %d bytes", len(encoded_data)
         )
-
         logger.debug("Sending kv transfer request for %s on path: %s", req_ids, path)
 
         # Send query for the request.
+        sock: zmq.asyncio.Socket = make_zmq_socket(
+            self.async_zmq_ctx, path, zmq.REQ, bind=False, linger=0
+        )
+        sock.setsockopt(zmq.RCVTIMEO, 60000)
         try:
-            sock = make_zmq_socket(self.zmq_ctx, path, zmq.REQ, bind=False, linger=0)
-            sock.setsockopt(zmq.RCVTIMEO, 60000)
-            sock.send(encoded_data)
-            ret_msg = sock.recv()
+            await sock.send(encoded_data)
+            ret_msg = await sock.recv()
             if ret_msg != TRANS_DONE:
                 logger.error(
                     "Error happens during tranfering kvcache for %s, see logs in prefiller.",  # noqa: E501
                     req_ids,
                 )
                 return
+        except zmq.ContextTerminated:
+            logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             logger.error("MooncakeAgentMetadata transfer failed for %s: %s", req_ids, e)
             return
+        finally:
+            sock.close()
 
-        with self.finished_recving_reqs.lock:
+        async with self.finished_recving_reqs.lock:
             self.finished_recving_reqs.set.update(req_ids)
 
         logger.debug("pulling kv_caches for %s finished", req_ids)
@@ -827,7 +864,9 @@ class MooncakeConnectorWorker:
         if self.kv_role != "kv_producer":
             kv_pulls = self.group_kv_pull(metadata)
             for path, req_blocks in kv_pulls.items():
-                self._receiver_executor.submit(self.receive_kv, path, req_blocks)
+                asyncio.run_coroutine_threadsafe(
+                    self.receive_kv(path, req_blocks), self.receiver_loop
+                )
 
         if self.kv_role != "kv_consumer":
             with self.reqs_need_send.lock:
