@@ -68,7 +68,15 @@ def cutlass_preprocess(
     return the packed layout/strides to pass to grouped gemm
     """
     # i dont think the shape matters as long as contiguous and one after the other
-    w_s_packed = ops.cutlass_pack_scale_fp8(torch.cat(w_s_experts))
+    E, (K1, N) = len(w_s_experts), w_s_experts[0].shape
+    w_s_experts = torch.stack(w_s_experts)
+    w_s_experts_perm = torch.as_strided(
+        w_s_experts,
+        size=(E, N, K1),
+        stride=(K1 * N, 1, N)
+    )
+    # import ipdb;ipdb.set_trace()
+    w_s_packed = ops.cutlass_pack_scale_fp8(w_s_experts_perm)
     w_q_packed, packed_layout = ops.cutlass_encode_and_reorder_int4b_grouped(torch.stack(w_q_experts)) # expects dim 3
     return w_q_packed, w_s_packed, packed_layout
 

@@ -1719,6 +1719,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_packed", marlin_w2_qweight)
 
         # Repack scales
+        # TODO(czhu): naive cast to fp8 to test the quality
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_weight_scale,
             size_k=layer.w13_weight_packed.shape[2],
@@ -2481,7 +2482,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # storage type
+        # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
         # WEIGHTS
@@ -2510,11 +2511,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_packed, extra_weight_attrs)
 
         # TODO(czhu): for both types of scales (and weights) assume TP1 for now
-        # GROUP_SCALES
-        # stored as (n, k // group_size)
-        # at runtime it's all packed
-        # logically before packed it would be (num_experts, n, )
-        # the name needs to be *weight_scale otherwise may be skipped
+        # weight_scale refers to the group-wise scales
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
@@ -2567,7 +2564,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_chan_scale, extra_weight_attrs)
 
         # weight shapes
-        # TODO(czhu): dont believe it matters the quant method here
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
         )
@@ -2585,10 +2581,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
-        # encode and reorder weights
-        # pack scales
-        # define the a/b/c/s strides
-        # do i have to rename weight_packed -> weight? dont think so
         device = layer.w13_weight_packed.device
 
         # STRIDES
@@ -2613,6 +2605,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
 
         # S (group-wise scales)
+        # sizeof(StrideS) = 16 bytes, so we need to use 2xint64 to encode it
         self.s_strides1 = torch.zeros(
             (layer.local_num_experts, 2),
             device=device,
@@ -2628,17 +2621,21 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.s_strides2[:, 0] = layer.hidden_size
 
         # pack group-wise scales
+        # The weights are stored as (E, N, K // 128) but the kernel expects
+        # (E, K // 128, N) in row-major, so we need to permute the last 2 dims
+        # and make it contiguous
         w13_weight_scale_packed = ops.cutlass_pack_scale_fp8(
-            layer.w13_weight_scale
+            layer.w13_weight_scale.permute(0, 2, 1).contiguous()
         )
         replace_parameter(layer, "w13_weight_scale", w13_weight_scale_packed)
         w2_weight_scale_packed = ops.cutlass_pack_scale_fp8(
-            layer.w2_weight_scale
+            layer.w2_weight_scale.permute(0, 2, 1).contiguous()
         )
+
         replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
 
-        # packed int4 weights B
-        # we get the layout/strides from the packing function
+        # encode and reorder weight tensors, and get the layout to pass to
+        # the grouped gemm kernel. `b_strides1/2` specifies the entire layout
         w13_weight_shuffled, self.b_strides1 = ops.cutlass_encode_and_reorder_int4b_grouped(
             layer.w13_weight_packed
         )
@@ -2649,7 +2646,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
-        # double check this pass needed for cutlass moe kernels?
         return super().maybe_make_prepare_finalize()
     
     def get_fused_moe_quant_config(
@@ -2668,16 +2664,14 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_out_ch_quant=True, # always use per-chan
             block_shape=layer.weight_block_size, # should it be [0, group_size] ? 
         )
-        # i guess this means we need to pass strides through the cutlass moe fn
 
+    # TODO(czhu): is this needed?
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        __import__('fpdb').ForkedPdb().set_trace()
         assert self.moe_quant_config is not None
-        pass
 
     def apply(
         self,
@@ -2731,7 +2725,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_w4a8_fp8,
         )
-        # args needs some change i think
+
         return cutlass_moe_w4a8_fp8(
             x,
             layer.w13_weight_packed,
