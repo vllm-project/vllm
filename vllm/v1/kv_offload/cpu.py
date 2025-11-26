@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import torch
 
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager

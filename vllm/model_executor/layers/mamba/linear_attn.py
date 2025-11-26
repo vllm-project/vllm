@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (

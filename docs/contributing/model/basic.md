@@ -29,7 +29,7 @@ The initialization code should look like this:
     ```python
     from torch import nn
     from vllm.config import VllmConfig
-    from vllm.attention import Attention
+    from vllm.attention.layer import Attention
 
     class MyAttention(nn.Module):
         def __init__(self, vllm_config: VllmConfig, prefix: str):

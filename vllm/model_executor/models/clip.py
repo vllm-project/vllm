@@ -14,8 +14,7 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention import Attention
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size

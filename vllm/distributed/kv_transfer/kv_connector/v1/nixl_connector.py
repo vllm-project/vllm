@@ -20,7 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig

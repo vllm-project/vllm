@@ -16,8 +16,8 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention import Attention, AttentionType
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions

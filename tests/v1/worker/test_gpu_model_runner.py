@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import MultipleOf
+from vllm.attention.layer import Attention
 from vllm.config import (
     CacheConfig,
     ModelConfig,
