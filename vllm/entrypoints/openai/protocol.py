@@ -29,7 +29,6 @@ from openai.types.responses import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponsePrompt,
-    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -304,9 +303,7 @@ def get_logits_processors(
     return None
 
 
-ResponseInputOutputItem: TypeAlias = (
-    ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
-)
+ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -559,9 +556,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ) = "none"
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     include_reasoning: bool = True
+    parallel_tool_calls: bool | None = True
 
-    # NOTE this will be ignored by vLLM -- the model determines the behavior
-    parallel_tool_calls: bool | None = False
+    # NOTE this will be ignored by vLLM
     user: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
@@ -661,7 +658,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1078,7 +1075,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1375,7 +1372,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1470,7 +1467,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1892,7 +1889,7 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1983,7 +1980,7 @@ class ClassificationChatRequest(OpenAIBaseModel):
     )
 
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3094,7 +3091,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 ####### Tokens IN <> Tokens OUT #######
 class GenerateRequest(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3151,7 +3148,7 @@ class GenerateResponseChoice(BaseModel):
 
 class GenerateResponse(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
