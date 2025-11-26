@@ -257,7 +257,48 @@ class OpenAIServingResponses(OpenAIServing):
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
+        if self.use_harmony:
+            tool_error = self._validate_requested_tools_available(request)
+            if tool_error is not None:
+                return tool_error
         return None
+
+    def _validate_requested_tools_available(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        """Validate that all requested built-in tools are available."""
+        if not request.tools:
+            return None
+
+        tool_types = extract_tool_types(request.tools)
+
+        # Map Harmony tool types to the corresponding ToolServer names.
+        required_tools = {
+            "web_search_preview": "browser",
+            "code_interpreter": "python",
+            "container": "container",
+        }
+
+        missing_tools: list[str] = []
+        for tool_type, tool_name in required_tools.items():
+            if tool_type not in tool_types:
+                continue
+            if self.tool_server is None or not self.tool_server.has_tool(tool_name):
+                missing_tools.append(tool_type)
+
+        if not missing_tools:
+            return None
+
+        missing_str = ", ".join(sorted(missing_tools))
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(
+                f"Requested tool(s) {missing_str} are not available on this "
+                "server. Ensure the tool server provides them or remove them "
+                "from the request."
+            ),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
 
     async def create_responses(
         self,

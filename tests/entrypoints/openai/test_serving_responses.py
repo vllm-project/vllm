@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -254,3 +255,79 @@ class TestValidateGeneratorInput:
         # Should return an ErrorResponse
         assert result is not None
         assert isinstance(result, ErrorResponse)
+
+
+class TestToolAvailabilityValidation:
+    def _make_serving_responses(self, model_type: str, tool_server: ToolServer):
+        # Minimal concrete model config
+        class DummyModelConfig:
+            def __init__(self):
+                self.hf_config = SimpleNamespace(model_type=model_type)
+                self.generation_config = "auto"
+                self.max_model_len = 2048
+                self.model = "openai/gpt-oss-20b"
+
+            def get_diff_sampling_param(self):
+                return {}
+
+        engine_client = MagicMock()
+        engine_client.processor = MagicMock()
+        engine_client.io_processor = MagicMock()
+
+        models = MagicMock()
+        models.processor = MagicMock()
+        models.io_processor = MagicMock()
+        models.model_config = DummyModelConfig()
+
+        return OpenAIServingResponses(
+            engine_client=engine_client,
+            models=models,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            tool_server=tool_server,
+        )
+
+    def test_error_when_requested_tool_missing(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter")
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.has_tool.return_value = False
+
+        serving = self._make_serving_responses("gpt_oss", tool_server)
+
+        request = ResponsesRequest(
+            input="hello",
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "code_interpreter",
+                    "server_url": "http://localhost:8888",
+                }
+            ],
+        )
+
+        error = serving._validate_create_responses_input(request)
+        assert error is not None
+        assert error.error.type == "invalid_request_error"
+        assert "code_interpreter" in error.error.message
+
+    def test_no_error_when_tool_available(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "code_interpreter")
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.has_tool.return_value = True
+
+        serving = self._make_serving_responses("gpt_oss", tool_server)
+
+        request = ResponsesRequest(
+            input="hello",
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "code_interpreter",
+                    "server_url": "http://localhost:8888",
+                }
+            ],
+        )
+
+        error = serving._validate_create_responses_input(request)
+        assert error is None
