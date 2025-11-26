@@ -10,14 +10,14 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
-class IPEXwNa16LinearKernel(MPLinearKernel):
+class XPUwNa16LinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
         return 0
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not (current_platform.is_xpu() or current_platform.is_cpu()):
+        if not current_platform.is_xpu():
             return False, "IPEX wNa16 only supported on XPU/CPU devices"
 
         # TODO: (yiliu30) relax these restrictions in later PRs
