@@ -598,7 +598,6 @@ class VllmConfig:
                 "Optimizations settings that are only active during"
                 "Inductor compilation will be ignored."
             )
-            self.optimization_level = OptimizationLevel.O0
 
         def has_blocked_weights():
             if self.quant_config is not None:
@@ -628,7 +627,7 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(
-                "Cudagraph mode %s is not compatible with compilation mode %s. "
+                "Cudagraph mode is not compatible with compilation mode %s."
                 "Overriding to NONE.",
                 self.compilation_config.cudagraph_mode,
                 self.compilation_config.mode,
