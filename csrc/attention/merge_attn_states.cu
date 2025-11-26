@@ -16,7 +16,8 @@ __global__ void merge_attn_states_kernel(
     scalar_t* output, float* output_lse, const scalar_t* prefix_output,
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const uint num_tokens, const uint num_heads,
-    const uint head_size) {
+    const uint head_size, const uint prefix_head_stride,
+    const uint output_head_stride) {
   using pack_128b_t = uint4;
   const uint pack_size = 16 / sizeof(scalar_t);
   const uint threads_per_head = head_size / pack_size;
@@ -34,11 +35,13 @@ __global__ void merge_attn_states_kernel(
   const uint head_idx = token_head_idx % num_heads;
 
   const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
-  const uint head_offset =
-      token_idx * num_heads * head_size + head_idx * head_size;
-  const scalar_t* prefix_head_ptr = prefix_output + head_offset;
-  const scalar_t* suffix_head_ptr = suffix_output + head_offset;
-  scalar_t* output_head_ptr = output + head_offset;
+  const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
+                               head_idx * prefix_head_stride;
+  const uint dst_head_offset = token_idx * num_heads * output_head_stride +
+                               head_idx * output_head_stride;
+  const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
+  const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
+  scalar_t* output_head_ptr = output + dst_head_offset;
 
   float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
   float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
@@ -140,7 +143,7 @@ __global__ void merge_attn_states_kernel(
             reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
             reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
             reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
-            num_heads, head_size);                                          \
+            num_heads, head_size, prefix_head_stride, output_head_stride);  \
   }
 
 /*@brief Merges the attention states from prefix and suffix
@@ -166,17 +169,11 @@ void merge_attn_states_launcher(torch::Tensor& output,
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
   const uint head_size = output.size(2);
+  const uint prefix_head_stride = prefix_output.stride(1);
+  const uint output_head_stride = output.stride(1);
   const uint pack_size = 16 / sizeof(scalar_t);
   TORCH_CHECK(head_size % pack_size == 0,
               "headsize must be multiple of pack_size:", pack_size);
-  TORCH_CHECK(output.stride(-2) == head_size && output.stride(-1) == 1,
-              "output heads must be contiguous in memory");
-  TORCH_CHECK(
-      prefix_output.stride(-2) == head_size && prefix_output.stride(-1) == 1,
-      "prefix_output heads must be contiguous in memory");
-  TORCH_CHECK(
-      suffix_output.stride(-2) == head_size && suffix_output.stride(-1) == 1,
-      "suffix_output heads must be contiguous in memory");
   float* output_lse_ptr = nullptr;
   if (output_lse.has_value()) {
     output_lse_ptr = output_lse.value().data_ptr<float>();
