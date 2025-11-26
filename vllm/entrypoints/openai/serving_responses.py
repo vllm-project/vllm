@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from collections import deque
@@ -13,6 +14,7 @@ from http import HTTPStatus
 from typing import Final
 
 import jinja2
+import partial_json_parser
 from fastapi import Request
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -48,6 +50,7 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool_param import ToolParam
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -55,6 +58,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    make_tool_call_id,
 )
 from vllm.entrypoints.context import (
     ConversationContext,
@@ -76,7 +80,10 @@ from vllm.entrypoints.harmony_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     InputTokensDetails,
     OutputTokensDetails,
@@ -90,6 +97,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    Tool
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -1128,6 +1136,116 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
+    @staticmethod
+    def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
+        """Calculate the current level of nested brackets in a given string."""
+        level = 0
+        for char in s:
+            if char == opening:
+                level += 1
+            elif char == closing:
+                level -= 1
+        return level
+
+    @staticmethod
+    def _filter_delta_text(delta_text: str, previous_text: str) -> tuple[str, bool]:
+        """Trim tool call JSON to only emit the current in-progress block."""
+        bracket_level = OpenAIServingResponses._bracket_level(previous_text)
+        updated_delta, passed_zero = "", False
+        for c in delta_text:
+            if c == "{":
+                bracket_level += 1
+                passed_zero = bracket_level == 0
+            elif c == "}":
+                bracket_level -= 1
+                passed_zero = bracket_level == 0
+
+            if bracket_level != 0:
+                updated_delta += c
+            else:
+                if c == ",":
+                    break
+        return updated_delta, passed_zero
+
+    def _extract_tool_call_required_streaming(
+        self,
+        previous_text: str,
+        current_text: str | None,
+        delta_text: str,
+        function_name_returned: bool,
+    ) -> tuple[DeltaMessage | None, bool]:
+        """Parse streaming tool calls when tool_choice is forced/required."""
+        if current_text is None or current_text == "":
+            return None, function_name_returned
+        try:
+            obj = partial_json_parser.loads(current_text)
+        except partial_json_parser.core.exceptions.MalformedJSON:
+            logger.debug("not enough tokens to parse into JSON yet")
+            obj = None
+
+        if obj is None or not isinstance(obj, list) or not len(obj) > 0:
+            return None, False
+
+        _, finishes_previous_tool = self._filter_delta_text(delta_text, previous_text)
+        current_tool_call = obj[-1]
+        if not finishes_previous_tool and (
+            "name" not in current_tool_call or "parameters" not in current_tool_call
+        ):
+            return None, False
+
+        if not function_name_returned:
+            param_match = re.search(r'.*"parameters":\s*(.*)', current_text, re.DOTALL)
+            arguments = param_match.group(1) if param_match else ""
+            arguments, _ = self._filter_delta_text(arguments, previous_text)
+            if finishes_previous_tool and "parameters" not in current_tool_call:
+                current_tool_call = obj[-2]
+
+            function_name_returned = True
+            delta_message = DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id=make_tool_call_id(func_name=current_tool_call["name"]),
+                        function=DeltaFunctionCall(
+                            name=current_tool_call["name"], arguments=arguments
+                        ),
+                        index=len(obj) - 1,
+                        type="function",
+                    )
+                ]
+            )
+            return delta_message, function_name_returned
+
+        delta_text, _ = self._filter_delta_text(delta_text, previous_text)
+        if delta_text != "":
+            delta_message = DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        function=DeltaFunctionCall(
+                            name=None,
+                            arguments=delta_text,
+                        ),
+                        index=len(obj) - 1,
+                    )
+                ]
+            )
+            return delta_message, function_name_returned
+
+        return None, function_name_returned
+
+    def _should_stream_with_auto_tool_parsing(self, request: ResponsesRequest) -> bool:
+        """
+        Check if streamed tokens should go through the auto tool parser.
+
+        We only do this when tools are provided, auto tool choice is enabled,
+        and a tool parser is configured.
+        """
+        return bool(
+            request.tools
+            and self.tool_parser
+            and self.enable_auto_tools
+            and request.tool_choice in ["auto", None]
+        )
+
     async def _process_simple_streaming_events(
         self,
         request: ResponsesRequest,
@@ -1152,29 +1270,140 @@ class OpenAIServingResponses(OpenAIServing):
         previous_token_ids: list[int] = []
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
+        function_name_returned = False
+        tool_choice_required = request.tool_choice == "required"
+        tool_choice_auto = self._should_stream_with_auto_tool_parsing(request)
+        if tool_choice_auto and self.tool_parser:
+            try:
+                tool_parser = self.tool_parser(tokenizer)
+            except Exception:
+                logger.exception("Error in tool parser creation.")
+                tool_choice_auto = False
+                tool_parser = None
+        else:
+            tool_parser = None
+
+        tool_call_states: dict[int, dict[str, str | int]] = {}
+        tool_output_start_index: int | None = None
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
+                delta_text = output.text
+                delta_token_ids = output.token_ids or []
+                prev_text = previous_text
+                prev_token_ids = previous_token_ids
+                current_text = prev_text + delta_text
+                current_token_ids = prev_token_ids + list(delta_token_ids)
+
+                delta_message: DeltaMessage | None = None
+                reasoning_delta: DeltaMessage | None = None
                 if reasoning_parser:
-                    delta_message = reasoning_parser.extract_reasoning_streaming(
-                        previous_text=previous_text,
-                        current_text=previous_text + output.text,
-                        delta_text=output.text,
-                        previous_token_ids=previous_token_ids,
-                        current_token_ids=previous_token_ids + output.token_ids,
-                        delta_token_ids=output.token_ids,
+                    reasoning_delta = reasoning_parser.extract_reasoning_streaming(
+                        previous_text=prev_text,
+                        current_text=current_text,
+                        delta_text=delta_text,
+                        previous_token_ids=prev_token_ids,
+                        current_token_ids=current_token_ids,
+                        delta_token_ids=delta_token_ids,
                     )
-                else:
-                    delta_message = DeltaMessage(
-                        content=output.text,
-                    )
-                previous_text += output.text
-                previous_token_ids += output.token_ids
+                    if reasoning_delta and reasoning_delta.reasoning is not None:
+                        delta_message = reasoning_delta
+
+                if delta_message is None:
+                    if tool_choice_required:
+                        delta_message, function_name_returned = (
+                            self._extract_tool_call_required_streaming(
+                                prev_text,
+                                current_text,
+                                delta_text,
+                                function_name_returned,
+                            )
+                        )
+                    elif tool_choice_auto and tool_parser:
+                        parsed_tool_delta = tool_parser.extract_tool_calls_streaming(
+                            previous_text=prev_text,
+                            current_text=current_text,
+                            delta_text=delta_text,
+                            previous_token_ids=prev_token_ids,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=delta_token_ids,
+                            request=request,
+                        )
+                        if parsed_tool_delta:
+                            delta_message = parsed_tool_delta
+                        elif reasoning_delta:
+                            delta_message = reasoning_delta
+                    elif reasoning_delta:
+                        delta_message = reasoning_delta
+                    else:
+                        delta_message = DeltaMessage(
+                            content=delta_text,
+                        )
+
+                previous_text = current_text
+                previous_token_ids = current_token_ids
                 if not delta_message:
                     continue
+
+                if delta_message.tool_calls:
+                    if tool_output_start_index is None:
+                        tool_output_start_index = current_output_index + (
+                            1 if first_delta_sent else 0
+                        )
+                    for tc in delta_message.tool_calls:
+                        output_index = (
+                            tool_output_start_index + tc.index
+                            if tool_output_start_index is not None
+                            else current_output_index
+                        )
+                        tool_state = tool_call_states.get(tc.index)
+                        if tool_state is None:
+                            item_id = tc.id or f"fc_{random_uuid()}"
+                            tool_state = {
+                                "item_id": item_id,
+                                "call_id": f"call_{random_uuid()}",
+                                "name": (tc.function.name or "") if tc.function else "",
+                                "arguments": "",
+                                "output_index": output_index,
+                            }
+                            tool_call_states[tc.index] = tool_state
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemAddedEvent(
+                                    type="response.output_item.added",
+                                    sequence_number=-1,
+                                    output_index=output_index,
+                                    item=ResponseFunctionToolCall(
+                                        name=tool_state["name"],
+                                        type="function_call",
+                                        id=tool_state["item_id"],
+                                        call_id=tool_state["call_id"],
+                                        arguments="",
+                                        status="in_progress",
+                                    ),
+                                )
+                            )
+                        if tc.function and tc.function.name and not tool_state["name"]:
+                            tool_state["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            tool_state["arguments"] += tc.function.arguments
+                            yield _increment_sequence_number_and_return(
+                                ResponseFunctionCallArgumentsDeltaEvent(
+                                    item_id=tool_state["item_id"],
+                                    delta=tc.function.arguments,
+                                    output_index=tool_state["output_index"],
+                                    sequence_number=-1,
+                                    type="response.function_call_arguments.delta",
+                                )
+                            )
+                    if (
+                        delta_message.reasoning is None
+                        and delta_message.content is None
+                    ):
+                        continue
+
                 if not first_delta_sent:
                     current_item_id = str(uuid.uuid4())
                     if delta_message.reasoning:
@@ -1223,7 +1452,6 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     current_content_index += 1
                     first_delta_sent = True
-                # todo(kebe7jun) tool call support
 
                 # check delta message and previous delta message are
                 # same as content or reasoning content
@@ -1339,7 +1567,11 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 current_content_index += 1
 
-                previous_delta_messages.append(delta_message)
+                if (
+                    delta_message.reasoning is not None
+                    or delta_message.content is not None
+                ):
+                    previous_delta_messages.append(delta_message)
         if previous_delta_messages:
             if previous_delta_messages[-1].reasoning is not None:
                 reason_content = "".join(
@@ -1428,6 +1660,33 @@ class OpenAIServingResponses(OpenAIServing):
                         sequence_number=-1,
                         output_index=current_output_index,
                         item=item,
+                    )
+                )
+        if tool_call_states:
+            for _, tool_state in sorted(tool_call_states.items()):
+                yield _increment_sequence_number_and_return(
+                    ResponseFunctionCallArgumentsDoneEvent(
+                        type="response.function_call_arguments.done",
+                        arguments=str(tool_state.get("arguments", "")),
+                        name=str(tool_state.get("name", "")),
+                        item_id=str(tool_state.get("item_id", "")),
+                        output_index=int(tool_state.get("output_index", 0)),
+                        sequence_number=-1,
+                    )
+                )
+                yield _increment_sequence_number_and_return(
+                    ResponseOutputItemDoneEvent(
+                        type="response.output_item.done",
+                        sequence_number=-1,
+                        output_index=int(tool_state.get("output_index", 0)),
+                        item=ResponseFunctionToolCall(
+                            type="function_call",
+                            id=str(tool_state.get("item_id", "")),
+                            call_id=str(tool_state.get("call_id", "")),
+                            name=str(tool_state.get("name", "")),
+                            arguments=str(tool_state.get("arguments", "")),
+                            status="completed",
+                        ),
                     )
                 )
 
