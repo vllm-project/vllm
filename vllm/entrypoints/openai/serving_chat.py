@@ -55,6 +55,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_l
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -1206,6 +1207,7 @@ class OpenAIServingChat(OpenAIServing):
 
                         finish_reason_sent[i] = True
 
+                    choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1531,6 +1533,7 @@ class OpenAIServingChat(OpenAIServing):
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
             )
+            choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
 

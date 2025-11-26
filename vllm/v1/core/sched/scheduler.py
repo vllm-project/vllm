@@ -189,6 +189,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            hash_block_size=self.block_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
@@ -1232,8 +1233,6 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.logprobs is not None
                 and logprobs
             ):
-                # NOTE: once we support N tokens per step (spec decode),
-                # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
