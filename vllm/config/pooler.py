@@ -5,6 +5,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import HashResult, config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 

@@ -10,6 +10,7 @@ from typing_extensions import Self
 
 from vllm.config.utils import HashResult, config, normalize_value
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

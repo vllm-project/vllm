@@ -8,6 +8,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import HashResult, config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
