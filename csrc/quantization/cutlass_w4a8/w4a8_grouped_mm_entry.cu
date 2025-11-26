@@ -25,18 +25,20 @@
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "w4a8_utils.cuh"
 
-
 namespace vllm::cutlass_w4a8_moe {
+
 using namespace cute;
 
+// -------------------------------------------------------------------------------------
+// Static configuration shared across all instantiations
+// -------------------------------------------------------------------------------------
 using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int,int,int>>; // <M,N,K> per group
 using MmaType = cutlass::float_e4m3_t;
 using QuantType = cutlass::int4b_t;
-constexpr int TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-/// GEMM kernel configurations
-/////////////////////////////////////////////////////////////////////////////////////////////////
+constexpr int TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
+static int constexpr ScalePackSize = 8;  // pack 8 scale elements together
+static int constexpr PackFactor = 8;     // 8 4-bit packed into int32
 
 // A matrix configuration
 using         ElementA    = MmaType;
@@ -79,20 +81,23 @@ constexpr int AlignmentD  = 128 / cutlass::sizeof_bits<ElementD>::value;
 using ElementAccumulator  = float;                                          // Element type for internal accumulation
 using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
 using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
-using TileShape           = Shape<_128,_16,cute::Int<TileShapeK>>;                           // Threadblock-level tile size
-using ClusterShape        = Shape<_1,_1,_1>;                                // Shape of the threadblocks in a cluster
 using StageCountType = cutlass::gemm::collective::StageCountAuto;           // Stage count maximized based on the tile size
-using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
-using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative; // Epilogue to launch
 
-// per-chan per-tok epilogue
+// per-channel and per-token scales for epilogue
 using ElementSChannel = float;
-using ChTokScalesEpilogue =
+
+template<class TileShape_MN, class ClusterShape_MNK, class KernelSchedule, class EpilogueSchedule>
+struct W4A8GroupedGemmKernel {
+  using TileShape =
+      decltype(cute::append(TileShape_MN{}, cute::Int<TileShapeK>{}));
+  using ClusterShape = ClusterShape_MNK;
+
+  // per-channel, per-token scales epilogue
+  using ChTokScalesEpilogue =
     typename vllm::c3x::ScaledEpilogueArray<ElementAccumulator, ElementD,
                                         TileShape>;
-using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
-
-using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+  using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, OperatorClass, TileShape, ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
     ElementAccumulator, ElementSChannel,
@@ -101,49 +106,42 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     EpilogueSchedule, EVTCompute
   >::CollectiveOp;
 
-// =========================================================== MIXED INPUT WITH SCALES ===========================================================================
-// The Scale information must get paired with the operand that will be scaled. In this example, B is scaled so we make a tuple of B's information and the scale information.
-using CollectiveMainloopShuffled = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag, OperatorClass,
-    cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>, LayoutB_Reordered *, AlignmentB,
-    ElementA, LayoutA_Transpose *, AlignmentA,
-    ElementAccumulator,
-    TileShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    KernelSchedule
-  >::CollectiveOp;
+  // =========================================================== MIXED INPUT WITH SCALES ===========================================================================
+  // The Scale information must get paired with the operand that will be scaled. In this example, B is scaled so we make a tuple of B's information and the scale information.
+  using CollectiveMainloopShuffled = typename cutlass::gemm::collective::CollectiveBuilder<
+      ArchTag, OperatorClass,
+      cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>, LayoutB_Reordered *, AlignmentB,
+      ElementA, LayoutA_Transpose *, AlignmentA,
+      ElementAccumulator,
+      TileShape, ClusterShape,
+      cutlass::gemm::collective::StageCountAutoCarveout<
+        static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      KernelSchedule
+    >::CollectiveOp;
 
-using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
-    ProblemShape, 
-    CollectiveMainloopShuffled,
-    CollectiveEpilogue
->;
+  using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
+      ProblemShape, 
+      CollectiveMainloopShuffled,
+      CollectiveEpilogue
+  >;
 
-using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
+  using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
 
-using StrideC = typename GemmKernelShuffled::InternalStrideC;
-using StrideD = typename GemmKernelShuffled::InternalStrideD;
+  using StrideC = typename GemmKernelShuffled::InternalStrideC;
+  using StrideD = typename GemmKernelShuffled::InternalStrideD;
 
-using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
-using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
-using StrideS = typename CollectiveMainloopShuffled::StrideScale;
-using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
+  using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
+  using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
+  using StrideS = typename CollectiveMainloopShuffled::StrideScale;
+  using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
 
-// static asserts for passing in strides/layouts
-// pack to 2x int64
-static_assert(sizeof(StrideS) == 2 * sizeof(int64_t));
-// pack to 3xint32,
-static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
-            "LayoutB_Reordered size must be divisible by 4 bytes");
+  // static asserts for passing in strides/layouts
+  // pack to 2x int64
+  static_assert(sizeof(StrideS) == 2 * sizeof(int64_t));
+  // pack to 3xint32,
+  static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
+              "LayoutB_Reordered size must be divisible by 4 bytes");
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-/// GEMM setup and evaluation
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-// In the mainloop, PRMT selects 1 byte from only 8 bytes so the sign bit is handled in an extra PRMT.
-// Here the encodings of positive values and negative values are unified (except for the sign bit). 
-// For instance, 1 becomes 0b0111, which is the same encoding as -1 (0b1111).
   static void grouped_mm(
     torch::Tensor& out_tensors,
     const torch::Tensor& a_tensors,
@@ -244,6 +242,8 @@ static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
     CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
     CUTLASS_CHECK(gemm.run(stream));
   }
+};
+
 
 void mm(
     torch::Tensor& out_tensors,
@@ -263,7 +263,12 @@ void mm(
 ) {
     // no dispatch logic for now, just call one kernel
     // TODO: inputs validation
-    return grouped_mm(
+    using TileShape           = Shape<_128,_16>;                           // Threadblock-level tile size
+    using ClusterShape        = Shape<_1,_1,_1>;                                // Shape of the threadblocks in a cluster
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative; // Epilogue to launch
+
+    return W4A8GroupedGemmKernel<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>::grouped_mm(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales,
         b_group_scales, b_group_size, expert_offsets, problem_sizes,
         a_strides, b_strides, c_strides, group_scale_strides
@@ -275,23 +280,24 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(torch::Tensor 
   TORCH_CHECK(b_tensors.dim() == 3);  // (experts, n, k)
   TORCH_CHECK(b_tensors.is_contiguous());
   TORCH_CHECK(b_tensors.is_cuda());
-  // we will store it in int32 tensor; this is the number of elements we need
+
+  // we will store the layout to an int32 tensor;
+  // this is the number of elements we need per layout
   constexpr size_t layout_width = sizeof(LayoutB_Reordered) / sizeof(int32_t);
 
   torch::Tensor b_tensors_packed = torch::empty_like(b_tensors);
   int num_experts = static_cast<int>(b_tensors.size(0));
   int n = static_cast<int>(b_tensors.size(1));
-  int k = static_cast<int>(b_tensors.size(2)) * 8; // packed factor to get logical shapes
+  // logical k
+  int k = static_cast<int>(b_tensors.size(2)) * PackFactor;
 
   auto b_ptr = static_cast<QuantType const*>(b_tensors.const_data_ptr());
   auto b_packed_ptr = static_cast<QuantType*>(b_tensors_packed.data_ptr());
   
-  // encode first
   bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(b_ptr, b_packed_ptr, num_experts * n * k);
   TORCH_CHECK(ok, "unified_encode_int4b failed");
 
-  // offsets and loop through experts; this assumes each expert has same shape/layout
-  // TODO construct the packed layout tensor
+  // construct the layout once; assumes each expert has the same layout
   using LayoutType = LayoutB_Reordered;
   std::vector<LayoutType> layout_B_reordered_host(num_experts);
   auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {n, k, Int<1>{}});
@@ -299,34 +305,33 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(torch::Tensor 
   auto layout_B = make_layout(shape_B, stride_B);
   LayoutType layout_B_reordered = tile_to_shape(LayoutAtomQuant{}, shape_B);
   
-  // reorder each expert weights
+  // reorder weights for each expert
   for (int i = 0; i < num_experts; i++){
-    auto offset = i * n * k * cutlass::sizeof_bits<QuantType>::value / 8; // bytes/storage type
+    // since the storage type of int4b is 1 byte but one element is 4 bits
+    // we need to adjust the offset
+    auto offset = i * n * k * cutlass::sizeof_bits<QuantType>::value / 8;
     cutlass::reorder_tensor(b_packed_ptr + offset, layout_B, layout_B_reordered);
   }
 
-  // create cpu tensor
+  // save the packed layout to torch tensor so we can re-use it
   auto cpu_opts = torch::TensorOptions()
                     .dtype(torch::kInt32)
                     .device(torch::kCPU);
   torch::Tensor layout_cpu =
     torch::empty({num_experts, layout_width}, cpu_opts);
 
-  // copy to layout
   int32_t* layout_data = layout_cpu.data_ptr<int32_t>();
   for (int i = 0; i < num_experts; ++i) {
     std::memcpy(
-        layout_data + static_cast<std::size_t>(i) * layout_width,  // dst (int32*)
-        &layout_B_reordered,                 // src (LayoutType*)
-        sizeof(LayoutType));                         // number of bytes
+        layout_data + i * layout_width,  // dst (int32*)
+        &layout_B_reordered,             // src (LayoutType*)
+        sizeof(LayoutType));             // number of bytes
   }
 
-  // move to gpu
   torch::Tensor packed_layout =
     layout_cpu.to(b_tensors.device(), /*non_blocking=*/false);
 
   return {b_tensors_packed, packed_layout};
-
 }
 
 
