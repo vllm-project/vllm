@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.utils.deep_gemm import (
@@ -152,6 +153,27 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = (M_sum, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output)
+
+    def _act_mul_quant(
+        self, input: torch.Tensor, output: torch.Tensor, activation: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if activation == "silu":
+            return silu_mul_per_token_group_quant_fp8_colmajor(
+                input=input, output=output
+            )
+        else:
+            # This is a fallback path. If we find ourselves using any activation other
+            # than silu, we should add that activation to
+            # silu_mul_per_token_group_quant_fp8_colmajor kernel as it is much faster.
+            M_sum, N = input.size()
+            act_out = torch.empty(
+                (M_sum, N // 2), dtype=input.dtype, device=input.device
+            )
+            self.activation(activation, act_out, input)
+            assert self.block_shape is not None
+            return per_token_group_quant_fp8(
+                act_out, self.block_shape[1], column_major_scales=True, out_q=output
+            )
 
     def apply(
         self,
