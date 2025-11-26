@@ -60,11 +60,19 @@ class EagleSpeculator:
         aux_hidden_states: list[torch.Tensor] | None,
         # [num_reqs]
         num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
         # [max_num_reqs, 1]
         last_sampled: torch.Tensor,
         # [num_reqs]
         next_prefill_tokens: torch.Tensor,
     ) -> torch.Tensor:
+        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
+        # number of rejected tokens, we maintain the size of eagle's input_ids and
+        # hidden_states the same as the target model's. This means, we pad each
+        # request's query length to include any rejected positions. By doing so,
+        # we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model.
         if aux_hidden_states:
             assert self.method == "eagle3"
             hidden_states = self.model.combine_hidden_states(
@@ -78,6 +86,7 @@ class EagleSpeculator:
             self.input_ids,
             input_batch,
             num_sampled,
+            num_rejected,
             last_sampled,
             next_prefill_tokens,
         )
@@ -110,6 +119,11 @@ class EagleSpeculator:
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
         pos = input_batch.positions[last_token_indices] + 1
+        # NOTE(woosuk): For draft sampling, we only consider the temperature
+        # and ignore the other sampling parameters such as top_k and top_p,
+        # for simplicity and performance.
+        # While this may slightly degrade the acceptance rate, it does not
+        # affect the output distribution after rejection sampling.
         draft_tokens = gumbel_sample(
             logits, temperature, seed, pos, apply_temperature=True
         )
@@ -128,8 +142,8 @@ def _prepare_eagle_inputs_kernel(
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     num_sampled_ptr,
+    num_rejected_ptr,
     query_start_loc_ptr,
-    cu_num_logits_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
@@ -138,17 +152,13 @@ def _prepare_eagle_inputs_kernel(
     query_len = query_end - query_start
 
     # Get the true query length and next token after accounting for rejected tokens.
+    num_rejected = tl.load(num_rejected_ptr + batch_idx)
+    query_len -= num_rejected
+
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     if num_sampled > 0:
         req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
         next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-
-        logits_start = tl.load(cu_num_logits_ptr + batch_idx)
-        logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
-        num_logits = logits_end - logits_start
-
-        num_rejected = num_logits - num_sampled
-        query_len -= num_rejected
     else:
         # Chunked prefilling.
         # Get the next prefill token.
@@ -171,6 +181,8 @@ def prepare_eagle_inputs(
     input_batch: InputBatch,
     # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
+    num_rejected: torch.Tensor,
     # [max_num_reqs, 1]
     last_sampled: torch.Tensor,
     # [max_num_reqs]
@@ -190,8 +202,8 @@ def prepare_eagle_inputs(
         last_sampled,
         next_prefill_tokens,
         num_sampled,
+        num_rejected,
         input_batch.query_start_loc,
-        input_batch.cu_num_logits,
         BLOCK_SIZE=1024,
     )
     return last_token_indices
