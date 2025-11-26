@@ -234,11 +234,15 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
-            # Make sure the input position does not exceed the max model len or
-            # request's max_tokens.
-            # This is necessary when using spec decoding and/or async scheduling.
+            num_spec_placeholders = max(0, request.num_output_placeholders - 1)
             max_total_tokens = min(
-                request.num_prompt_tokens + request.max_tokens, self.max_model_len
+                # Avoid scheduling tokens that we're sure won't will be needed based on
+                # request.max_tokens. For this calculation we assume placeholder
+                # speculated output tokens are rejected.
+                request.num_prompt_tokens + request.max_tokens + num_spec_placeholders,
+                # Make sure the input position does not exceed the max model len.
+                # This is necessary when using spec decoding.
+                self.max_model_len,
             )
             num_new_tokens = min(
                 num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
