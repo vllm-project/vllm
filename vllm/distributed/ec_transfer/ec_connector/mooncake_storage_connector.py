@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase, ECConnectorMetadata, ECConnectorRole)
-from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import (
-    ECMooncakeStore)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+
+_EC_STORE_MODULES = {
+    "datasystem":
+    "vllm.distributed.ec_transfer.ec_lookup_buffer.datasystem_store",
+    "mooncake": "vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store"
+}
+
+ec_store_type = os.getenv("EC_STORE_TYPE", "mooncake")
+module_name = _EC_STORE_MODULES.get(ec_store_type,
+                                    _EC_STORE_MODULES["mooncake"])
+ECMooncakeStore = import_module(module_name).ECMooncakeStore
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
