@@ -64,7 +64,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     monkeypatch,
 ):
     GLOBAL_PATCHER.local_path = str(tmp_path)
-    
+
     test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
 
     # Download model from HF
