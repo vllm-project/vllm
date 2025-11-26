@@ -1821,7 +1821,7 @@ class ModelConfig:
         else:
             if attn_type == "encoder_decoder":
                 return APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
-            elif self.is_hybrid:
+            elif attn_type == "hybrid":
                 return APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
             elif attn_type == "attention_free":
                 return APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING
