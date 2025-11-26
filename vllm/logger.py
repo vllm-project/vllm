@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Hashable
+from collections.abc import Generator, Hashable
+from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
@@ -210,6 +211,14 @@ def init_logger(name: str) -> _VllmLogger:
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)
+
+
+@contextmanager
+def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
+    current_level = logging.root.manager.disable
+    logging.disable(level)
+    yield
+    logging.disable(current_level)
 
 
 # The root logger is initialized when the module is imported.

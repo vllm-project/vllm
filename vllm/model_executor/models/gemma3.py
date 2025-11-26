@@ -23,7 +23,8 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -166,10 +167,12 @@ class Gemma3Attention(nn.Module):
         else:
             # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            rope_parameters = config.rope_parameters.copy()
+            rope_parameters = config.rope_parameters
             # Local attention. Override the values in config.json.
             if self.is_sliding:
-                rope_parameters["rope_theta"] = config.rope_local_base_freq
+                rope_parameters = dict(
+                    rope_type="default", rope_theta=config.rope_local_base_freq
+                )
 
         self.rotary_emb = get_rope(
             self.head_dim,

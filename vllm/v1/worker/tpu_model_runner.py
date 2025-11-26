@@ -17,9 +17,8 @@ import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import MLAAttention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
@@ -247,6 +246,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: dict[str, int] = {}
 
         # Initialize input batch early to avoid AttributeError in _update_states
         self.input_batch = InputBatch(
@@ -420,6 +422,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.num_prompt_logprobs.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -476,6 +479,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
+
+            if sampling_params and sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[req_id] = (
+                    self.input_batch.vocab_size
+                    if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs
+                )
 
             req_ids_to_add.append(req_id)
 
@@ -1262,15 +1272,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids: list[np.ndarray] = [
-                row for row in selected_token_ids.numpy()
-            ]
+            valid_sampled_token_ids = selected_token_ids.tolist()
 
             # Mask out the sampled tokens that should not be sampled.
             # TODO: Keep in sync with gpu_model_runner.py, in particular
             #       the "else" case here
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i] = np.array([])
+                valid_sampled_token_ids[i].clear()
 
             # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
@@ -1283,7 +1291,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
-                seq.numpy() for seq in selected_token_ids[valid_mask].split(gen_lens)
+                seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
             self.input_batch.num_tokens[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
