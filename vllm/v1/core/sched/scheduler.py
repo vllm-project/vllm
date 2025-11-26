@@ -74,12 +74,11 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
-        metrics_cfg = vllm_config.observability_config
-        self._kv_metrics_enabled = bool(metrics_cfg.kv_cache_metrics)
+        self.observability_config = vllm_config.observability_config
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
-        if self._kv_metrics_enabled:
+        if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
-                sample_rate=metrics_cfg.kv_cache_metrics_sample,
+                self.observability_config.kv_cache_metrics_sample,
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
@@ -1361,20 +1360,20 @@ class Scheduler(SchedulerInterface):
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
         connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
-        block_events: list[KVCacheEvictionEvent] = []
-        if self._kv_metrics_enabled:
-            block_events = self.kv_cache_manager.collect_kv_cache_eviction_events()
-        spec_stats = spec_decoding_stats if self.log_stats else None
-        connector_stats_payload = None
-        if self.log_stats and kv_connector_stats is not None:
-            connector_stats_payload = kv_connector_stats.data
+        eviction_events: list[KVCacheEvictionEvent] = []
+        if self.kv_metrics_collector is not None:
+            eviction_events = self.kv_metrics_collector.drain_events()
+        spec_stats = spec_decoding_stats
+        connector_stats_payload = (
+            kv_connector_stats.data if kv_connector_stats else None
+        )
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
-            kv_cache_eviction_events=block_events,
+            kv_cache_eviction_events=eviction_events,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
         )

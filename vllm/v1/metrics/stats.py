@@ -157,7 +157,6 @@ class KVCacheEvictionEvent:
     lifetime_seconds: float
     idle_seconds: float
     reuse_gaps_seconds: tuple[float, ...]
-    prefix_residency_seconds: float | None = None
 
 
 @dataclass

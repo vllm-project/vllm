@@ -245,7 +245,6 @@ def test_kv_cache_metrics_surface_in_llm_get_metrics(vllm_runner):
         assert idle_hist.count > 0
 
         assert "vllm_kv_block_reuse_gap_seconds" in histograms
-        assert "vllm_request_prefix_residency_seconds" in histograms
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])

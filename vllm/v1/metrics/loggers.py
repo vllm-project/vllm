@@ -924,25 +924,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_kv_block_reuse_gap = make_per_engine(
                 histogram_kv_block_reuse_gap, engine_indexes, model_name
             )
-
-            histogram_request_prefix_residency = self._histogram_cls(
-                name="vllm_request_prefix_residency_seconds",
-                documentation=(
-                    "Histogram of request prefix block residency time "
-                    "after prefill completion. "
-                    "Sampled metrics (controlled by --kv-cache-metrics-sample)."
-                ),
-                buckets=kv_cache_residency_buckets,
-                labelnames=labelnames,
-            )
-            self.histogram_request_prefix_residency = make_per_engine(
-                histogram_request_prefix_residency, engine_indexes, model_name
-            )
         else:
             self.histogram_kv_block_lifetime = {}
             self.histogram_kv_block_idle_before_evict = {}
             self.histogram_kv_block_reuse_gap = {}
-            self.histogram_request_prefix_residency = {}
 
         #
         # LoRA metrics
@@ -1042,15 +1027,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
                 idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
                 reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
-                prefix_hist = self.histogram_request_prefix_residency[engine_idx]
 
                 for event in scheduler_stats.kv_cache_eviction_events:
                     lifetime_hist.observe(event.lifetime_seconds)
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:
                         reuse_hist.observe(gap)
-                    if event.prefix_residency_seconds is not None:
-                        prefix_hist.observe(event.prefix_residency_seconds)
 
             if self.gauge_lora_info is not None:
                 running_lora_adapters = ",".join(

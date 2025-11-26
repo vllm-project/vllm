@@ -82,7 +82,6 @@ class KVCacheMetricsCollector:
                 lifetime_seconds=lifetime,
                 idle_seconds=idle_time,
                 reuse_gaps_seconds=reuse_gaps,
-                prefix_residency_seconds=None,
             )
         )
 
