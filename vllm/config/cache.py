@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -74,8 +73,8 @@ class CacheConfig:
     sliding_window: int | None = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: bool | None = None
-    """Whether to enable prefix caching. Enabled by default for V1."""
+    enable_prefix_caching: bool = True
+    """Whether to enable prefix caching."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing.\n
@@ -145,7 +144,7 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend | None = None
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
     together with kv_offloading_size."""
 
     def compute_hash(self) -> str:
@@ -160,13 +159,27 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        factors.append(self.mamba_cache_dtype)
-        factors.append(self.mamba_ssm_cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/derived knobs that don't affect compiled graph shape
+            "gpu_memory_utilization",
+            "swap_space",
+            "is_attention_free",
+            "num_gpu_blocks_override",
+            "enable_prefix_caching",
+            "prefix_caching_hash_algo",
+            "cpu_kvcache_space_bytes",
+            "mamba_page_size_padded",
+            # Post-init/derived counters
+            "num_gpu_blocks",
+            "num_cpu_blocks",
+            # WIP feature toggle not impacting compiled graph shape
+            "kv_sharing_fast_prefill",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
