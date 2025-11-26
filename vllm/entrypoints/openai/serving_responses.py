@@ -94,7 +94,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
-    construct_chat_message_with_tool_call,
+    construct_input_messages,
     convert_tool_responses_to_completions_format,
     extract_tool_types,
 )
@@ -504,7 +504,12 @@ class OpenAIServingResponses(OpenAIServing):
                 for tool in request.tools
             ]
         # Construct the input messages.
-        messages = self._construct_input_messages(request, prev_response)
+        messages = construct_input_messages(
+            request_instructions=request.instructions,
+            request_input=request.input,
+            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
+            prev_response_output=prev_response.output if prev_response else None,
+        )
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
@@ -868,47 +873,6 @@ class OpenAIServingResponses(OpenAIServing):
         if last_items:
             output_items.extend(last_items)
         return output_items
-
-    def _construct_input_messages(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None = None,
-    ) -> list[ChatCompletionMessageParam]:
-        messages: list[ChatCompletionMessageParam] = []
-        if request.instructions:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": request.instructions,
-                }
-            )
-
-        # Prepend the conversation history.
-        if prev_response is not None:
-            # Add the previous messages.
-            prev_msg = self.msg_store[prev_response.id]
-            messages.extend(prev_msg)
-
-            # Add the previous output.
-            for output_item in prev_response.output:
-                # NOTE: We skip the reasoning output.
-                if isinstance(output_item, ResponseOutputMessage):
-                    for content in output_item.content:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": content.text,
-                            }
-                        )
-
-        # Append the new input.
-        # Responses API supports simple text inputs without chat format.
-        if isinstance(request.input, str):
-            messages.append({"role": "user", "content": request.input})
-        else:
-            for item in request.input:
-                messages.append(construct_chat_message_with_tool_call(item))
-        return messages
 
     def _construct_harmony_system_input_message(
         self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
