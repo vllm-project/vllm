@@ -672,7 +672,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_config is not None
             and cache_config.enable_prefix_caching
             and vllm_is_batch_invariant()
-            and self.attn_backend.get_name() == "TRITON_MLA"
+            and (
+                self.attn_backend.get_name() == "TRITON_MLA"
+                or self.attn_backend.get_name() == "FLASHINFER"
+            )
         ):
             logger.warning_once(
                 "Disabling prefix caching for TRITON_MLA with batch invariance, "
