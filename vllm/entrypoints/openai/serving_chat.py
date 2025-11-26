@@ -179,6 +179,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        logger.info(f'>>> [DEBUG] create_chat: req_id={request.request_id} msg={request.messages}')
         try:
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True
