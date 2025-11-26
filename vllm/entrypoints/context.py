@@ -164,8 +164,10 @@ class SimpleContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
         if len(self.input_messages.tokens) == 0:
-            self.input_messages.message += output.prompt
-            self.input_messages.tokens.extend(output.prompt_token_ids)
+            if output.prompt:
+                self.input_messages.message += output.prompt
+            if output.prompt_token_ids:
+                self.input_messages.tokens.extend(output.prompt_token_ids)
         self.output_messages.tokens.extend(output.outputs[0].token_ids)
         self.output_messages.message += output.outputs[0].text
 
