@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
-
 else:
     PretrainedConfig = Any
 
