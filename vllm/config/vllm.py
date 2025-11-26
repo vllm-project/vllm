@@ -653,7 +653,7 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             if "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
-                    "RMS norm force enabled, sequence parallelism might break"
+                    "RMS norm force disabled, sequence parallelism might break"
                 )
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
