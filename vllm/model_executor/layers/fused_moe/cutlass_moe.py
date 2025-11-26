@@ -207,7 +207,7 @@ def run_cutlass_moe_fp8(
         # this rank handles only partial tokens, or when it is batched .
         mm1_out.fill_(0)
 
-    print(f'Printing information for first moe call')
+    # print(f'Printing information for first moe call')
     # print_args_info(
     #     mm1_out,
     #     a1q,
@@ -223,8 +223,8 @@ def run_cutlass_moe_fp8(
     #     per_out_ch,
     # )
     # print problem shapes and stuff
-    print(f'{problem_sizes1=}')
-    print(f'{expert_offsets=}')
+    # print(f'{problem_sizes1=}')
+    # print(f'{expert_offsets=}')
     ops.cutlass_moe_mm(
         mm1_out,
         a1q,
@@ -1099,6 +1099,10 @@ def run_cutlass_block_scaled_fused_experts(
 
 
 # W4A8
+# TODO(czhu) just test the quant op
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+QUANT_FP8_OP = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -1133,7 +1137,7 @@ def run_cutlass_moe_w4a8_fp8(
 ):
     a1q = hidden_states
 
-    # TODO(czhu): more validation on the weight/scale/channel scale shapes etc
+    # TODO(czhu): more validation
     assert per_act_token, "W4A8 must use per-token scales"
     assert per_out_ch, "W4A8 must use per-channel scales"
     assert w1_scale is not None
@@ -1176,6 +1180,7 @@ def run_cutlass_moe_w4a8_fp8(
         workspace13.view(dtype=torch.float8_e4m3fn), (M * topk, N)
     )
     mm2_out = _resize_cache(workspace2, (M * topk, K))
+
     problem_sizes1 = torch.empty(
         (global_num_experts, 3), dtype=torch.int32, device=device
     )
@@ -1206,9 +1211,7 @@ def run_cutlass_moe_w4a8_fp8(
     # we can get around this for now (just test correctness) with a hack
     # if SwapAB is not enabled then manually swap it ourselves
     if local_topk_ids.numel() > 64:
-        # then they did not swap it so let's swap it
         def swap_columns_contiguous(X, i, j):
-            X = X.clone()            # contiguous copy
             X[:, [i, j]] = X[:, [j, i]]
             return X     
         problem_sizes1 = swap_columns_contiguous(problem_sizes1, 0, 1)
@@ -1221,15 +1224,15 @@ def run_cutlass_moe_w4a8_fp8(
         a1q_scale,
         w1_chan_scale,
         w1_scale,
-        128,  # TODO(czhu) store this somewhere, don't hardcode?
+        128,  # TODO(czhu): part of quant_config/dont hardcode?
         expert_offsets,
         problem_sizes1,
         a_strides1,
         b_strides1,
         c_strides1,
-        s_strides1
+        s_strides1 
     )
-    __import__('fpdb').ForkedPdb().set_trace()
+
     activation_callable(act_out, mm1_out)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
@@ -1246,7 +1249,7 @@ def run_cutlass_moe_w4a8_fp8(
         a2q_scale,
         w2_chan_scale,
         w2_scale,
-        128,  # TODO(czhu) store this somewhere, don't hardcode?
+        128,
         expert_offsets,
         problem_sizes2,
         a_strides2,
@@ -1302,11 +1305,11 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.Standard,
         )
 
-    # TODO(czhu): check these actually supported.
+    # TODO(czhu): check this works
     def supports_chunking(self) -> bool:
         return True
 
-    # TODO(czhu): check these actually supported.
+    # TODO(czhu): check this works
     def supports_expert_map(self) -> bool:
         return True
     
@@ -1472,7 +1475,7 @@ def cutlass_moe_w4a8_fp8(
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),  # standard activation format?
+        MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsW4A8Fp8(
             out_dtype=a.dtype,
             a_strides1=a_strides1,
