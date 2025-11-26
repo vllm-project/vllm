@@ -265,17 +265,16 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 
 COPY . .
+
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-ARG nvcc_threads=8
-ENV NVCC_THREADS=$nvcc_threads
-
 ARG vllm_target_device="cuda"
 ENV VLLM_TARGET_DEVICE=${vllm_target_device}
+
+# Skip adding +precompiled suffix to version (preserves git-derived version)
+ENV VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX=1
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \

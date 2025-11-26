@@ -544,7 +544,7 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED:
+        if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
             version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
