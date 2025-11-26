@@ -133,21 +133,23 @@ class Mamba2AttentionMetadata:
     # Speculative decoding support
     num_spec_decodes: int = 0
     num_spec_decode_tokens: int = 0
-    
+
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
-    
+
     # Token-level state indices for speculative decode
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec+1]
     non_spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch]
-    
+
     # Which sequences are doing speculative decode
     spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
-    
+
     # Query locations split by spec vs non-spec
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
-    non_spec_query_start_loc: torch.Tensor | None = None  # shape: [batch - num_spec_decodes + 1,]
-    
+    non_spec_query_start_loc: torch.Tensor | None = (
+        None  # shape: [batch - num_spec_decodes + 1,]
+    )
+
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
@@ -167,7 +169,7 @@ class Mamba2AttentionMetadataBuilder(
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
-        
+
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
         self.compilation_config = vllm_config.compilation_config
@@ -180,16 +182,20 @@ class Mamba2AttentionMetadataBuilder(
             self.num_spec = self.speculative_config.num_speculative_tokens
         else:
             self.use_spec_decode = False
-        
-        
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_spec_decode:
-            raise ValueError("Full CUDA graph is not supported for Mamba2AttentionBackend and specdec. Remove this once for-loop on ssm kernel update is removed")
+
+        if (
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and self.use_spec_decode
+        ):
+            raise ValueError(
+                "Full CUDA graph is not supported for Mamba2AttentionBackend and specdec. Remove this once for-loop on ssm kernel update is removed"
+            )
         # Pre-allocate tensors for CUDA graph support (similar to GDN)
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
             self.compilation_config.max_cudagraph_capture_size,
         )
-        
+
         if self.use_spec_decode:
             # Spec decode state indices: [batch, num_spec+1]
             self.spec_state_indices_tensor_buffer = torch.empty(
@@ -242,7 +248,7 @@ class Mamba2AttentionMetadataBuilder(
         idx = torch.arange(mask.numel(), device=mask.device)
         key = mask.to(torch.int32) * (mask.numel() + 1) + idx
         return torch.argsort(key, stable=True)
-    
+
     def build(
         self,
         common_prefix_len: int,
@@ -298,7 +304,7 @@ class Mamba2AttentionMetadataBuilder(
         num_spec_decodes = 0
         num_spec_decode_tokens = 0
         num_accepted_tokens_filtered = None
-        
+
         # Check if we have spec decode sequences
         if (
             not self.use_spec_decode
@@ -321,7 +327,7 @@ class Mamba2AttentionMetadataBuilder(
                 spec_sequence_masks = spec_sequence_masks.to(
                     common_attn_metadata.query_start_loc.device, non_blocking=True
                 )
-        
+
         # Compute decode/prefill split
         if spec_sequence_masks is None:
             # No spec decode - use standard split
@@ -331,17 +337,22 @@ class Mamba2AttentionMetadataBuilder(
                 )
             )
             num_spec_decode_tokens = 0
-            non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor
+            else:
+                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                    :, 0
+                ]
             non_spec_query_start_loc = common_attn_metadata.query_start_loc
             spec_token_indx = None
             non_spec_token_indx = None
         else:
             # Have spec decode - compute counts EXCLUDING spec sequences
             query_lens = (
-                common_attn_metadata.query_start_loc[1:] 
+                common_attn_metadata.query_start_loc[1:]
                 - common_attn_metadata.query_start_loc[:-1]
             )
-            
+
             non_spec_query_lens = query_lens[~spec_sequence_masks]
             num_decodes = (non_spec_query_lens == 1).sum().item()
             num_prefills = non_spec_query_lens.size(0) - num_decodes
@@ -350,7 +361,7 @@ class Mamba2AttentionMetadataBuilder(
             num_spec_decode_tokens = (
                 query_lens.sum().item() - num_prefill_tokens - num_decode_tokens
             )
-            
+
             if num_prefills == 0 and num_decodes == 0:
                 spec_token_size = min(
                     num_spec_decodes * (self.num_spec + 1),
@@ -362,10 +373,14 @@ class Mamba2AttentionMetadataBuilder(
                     device=common_attn_metadata.query_start_loc.device,
                 )
                 non_spec_token_indx = torch.empty(
-                    0, dtype=torch.int32, device=common_attn_metadata.query_start_loc.device
+                    0,
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
                 )
-                
-                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[:, : self.num_spec + 1]
+
+                spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+                    :, : self.num_spec + 1
+                ]
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
@@ -382,10 +397,15 @@ class Mamba2AttentionMetadataBuilder(
                 spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
                     spec_sequence_masks, : self.num_spec + 1
                 ]
-                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                    ~spec_sequence_masks, 0
-                ]
-                
+                if self.vllm_config.cache_config.enable_prefix_caching:
+                    non_spec_state_indices_tensor = (
+                        common_attn_metadata.block_table_tensor[~spec_sequence_masks]
+                    )
+                else:
+                    non_spec_state_indices_tensor = (
+                        common_attn_metadata.block_table_tensor[~spec_sequence_masks, 0]
+                    )
+
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
                     dtype=torch.int32,
@@ -404,7 +424,7 @@ class Mamba2AttentionMetadataBuilder(
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
-            
+
             # Filter num_accepted_tokens to only spec sequences
             if num_accepted_tokens is not None:
                 num_accepted_tokens_filtered = num_accepted_tokens[spec_sequence_masks]
@@ -422,13 +442,12 @@ class Mamba2AttentionMetadataBuilder(
             has_initial_states_p = has_initial_states_cpu.to(
                 common_attn_metadata.query_start_loc.device
             )
-            
+
             # Subtract ALL decode tokens (spec + non-spec) to get prefill-only coordinates
             total_decode_tokens = num_decode_tokens + num_spec_decode_tokens
             query_start_loc_p = (
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - total_decode_tokens
-                # - num_decode_tokens
             )
 
             if self.vllm_config.cache_config.enable_prefix_caching:
@@ -446,7 +465,6 @@ class Mamba2AttentionMetadataBuilder(
             query_start_loc_p_cpu = (
                 common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
                 - total_decode_tokens
-                # - num_decode_tokens
             )
 
             # The code below carefully constructs the chunks such that:
@@ -513,7 +531,7 @@ class Mamba2AttentionMetadataBuilder(
             )
 
         # CUDA graph padding for spec decode
-        if (
+        elif (
             self.use_spec_decode
             and spec_sequence_masks is not None
             and num_prefills == 0
@@ -523,39 +541,45 @@ class Mamba2AttentionMetadataBuilder(
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad for CUDA graph (pure spec decode batch)
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_spec_decode_tokens)
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_spec_decode_tokens
+            )
             batch_size = min(self.decode_cudagraph_max_bs, num_input_tokens)
-            
+
             # Copy and pad spec_state_indices_tensor
             self.spec_state_indices_tensor_buffer[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
             )
-            spec_state_indices_tensor = self.spec_state_indices_tensor_buffer[:batch_size]
+            spec_state_indices_tensor = self.spec_state_indices_tensor_buffer[
+                :batch_size
+            ]
             spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
-            
+
             # Copy and pad spec_sequence_masks
             self.spec_sequence_masks_buffer[:num_spec_decodes].copy_(
                 spec_sequence_masks, non_blocking=True
             )
             spec_sequence_masks = self.spec_sequence_masks_buffer[:batch_size]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
-            
+
             # Copy and pad spec_query_start_loc
-            self.spec_query_start_loc_buffer[:num_spec_decodes + 1].copy_(
+            self.spec_query_start_loc_buffer[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
             )
             spec_num_query_tokens = spec_query_start_loc[-1]
-            spec_query_start_loc = self.spec_query_start_loc_buffer[:batch_size + 1]
-            spec_query_start_loc[num_spec_decodes + 1:].fill_(spec_num_query_tokens)
-            
+            spec_query_start_loc = self.spec_query_start_loc_buffer[: batch_size + 1]
+            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
+
             # Copy and pad num_accepted_tokens
             if num_accepted_tokens_filtered is not None:
                 self.num_accepted_tokens_buffer[:num_spec_decodes].copy_(
                     num_accepted_tokens_filtered, non_blocking=True
                 )
-                num_accepted_tokens_filtered = self.num_accepted_tokens_buffer[:batch_size]
+                num_accepted_tokens_filtered = self.num_accepted_tokens_buffer[
+                    :batch_size
+                ]
                 num_accepted_tokens_filtered[num_spec_decodes:].fill_(1)
-        
+
         # CUDA graph padding for non-spec decode
         elif (
             num_decodes <= self.decode_cudagraph_max_bs
@@ -563,12 +587,12 @@ class Mamba2AttentionMetadataBuilder(
         ):
             # Pad state tensor for CUDA graph (regular decode only)
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
-            # self.state_indices_tensor[:num_decodes].copy_(
-            #     non_spec_state_indices_tensor, non_blocking=True
-            # )
+            self.state_indices_tensor[:num_decodes].copy_(
+                non_spec_state_indices_tensor, non_blocking=True
+            )
             non_spec_state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             non_spec_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
-            
+
             if self.vllm_config.cache_config.enable_prefix_caching:
                 assert block_idx_last_scheduled_token is not None
                 assert block_idx_last_computed_token is not None
@@ -579,7 +603,7 @@ class Mamba2AttentionMetadataBuilder(
                     :num_input_tokens
                 ]
                 block_idx_last_scheduled_token[num_decodes:] = 0
-                
+
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
                 )
@@ -620,5 +644,5 @@ class Mamba2AttentionMetadataBuilder(
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens_filtered,
         )
-        
+
         return attn_metadata
