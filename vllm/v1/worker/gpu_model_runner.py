@@ -2462,23 +2462,33 @@ class GPUModelRunner(
 
             # Generate custom attention masks for models that require them.
             # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
-            # Check mm_features (mm_embeds is empty during decode).
-            has_mm_features = any(
-                req_state.mm_features for req_state in self.requests.values()
+            # Only generate masks when ALL requests in the batch are prefilling
+            # with images. Mixed decode+prefill batches should use standard
+            # attention to avoid incorrect mask application to decode tokens.
+            scheduled_mm_req_ids = set(scheduler_output.scheduled_encoder_inputs.keys())
+            batch_req_ids = set(self.input_batch.req_ids[: self.input_batch.num_reqs])
+            all_reqs_have_scheduled_mm = (
+                scheduled_mm_req_ids
+                and batch_req_ids
+                and batch_req_ids <= scheduled_mm_req_ids
             )
             # Defense-in-depth: Check flag (GGUF-only), multimodal presence,
             # and method existence before generating custom attention masks.
             if (
                 self.uses_custom_attention_masks
-                and has_mm_features
+                and all_reqs_have_scheduled_mm
                 and hasattr(self.model, "generate_attention_masks")
             ):
+                num_reqs = self.input_batch.num_reqs
                 mask_kwargs = self.model.generate_attention_masks(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     self.positions.gpu[:num_scheduled_tokens],
                     mask_dtype=self.model.dtype,
+                    query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 )
                 model_kwargs.update(mask_kwargs)
+                # Store for _dummy_run to prevent loss during re-initialization.
+                self.custom_model_kwargs = mask_kwargs
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -4096,6 +4106,7 @@ class GPUModelRunner(
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
+                    **getattr(self, "custom_model_kwargs", {}),
                 }
             elif self.enable_prompt_embeds:
                 input_ids = None

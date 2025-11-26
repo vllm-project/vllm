@@ -456,7 +456,7 @@ def uses_custom_attention_masks(config: PretrainedConfig, model_path: str) -> bo
     Returns:
         True if the model is a GGUF Gemma3 multimodal model
     """
-    from vllm.transformers_utils.utils import check_gguf_file
+    from vllm.transformers_utils.gguf_utils import check_gguf_file
 
     # Check architecture
     architectures = getattr(config, "architectures", [])
