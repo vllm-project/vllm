@@ -238,9 +238,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_out = _resize_cache(
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, N // 2)
         )
-        assert activation == "silu"
-        a2q, a2q_scale = silu_mul_per_token_group_quant_fp8_colmajor(
-            input=mm1_out.view(-1, N), output=quant_out
+        a2q, a2q_scale = self._act_mul_quant(
+            input=mm1_out.view(-1, N), output=quant_out, activation=activation
         )
 
         mm2_out = _resize_cache(workspace2, (M_sum, K))
