@@ -614,10 +614,15 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
-            "decoder",
+            "hybrid",
         ),
         (
             "ibm-granite/granite-4.0-h-small",
+            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
+            "hybrid",
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
             CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "attention_free",
         ),
@@ -696,10 +701,15 @@ def test_is_chunked_prefill_supported(
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
-            "decoder",
+            "hybrid",
         ),
         (
             "ibm-granite/granite-4.0-h-small",
+            APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+            "hybrid",
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
             APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "attention_free",
         ),

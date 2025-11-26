@@ -6,7 +6,6 @@ from typing import (
     TYPE_CHECKING,
     ClassVar,
     Generic,
-    Literal,
     Protocol,
     TypeVar,
     get_args,

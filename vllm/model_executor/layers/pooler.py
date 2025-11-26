@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Literal, TypeVar
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
