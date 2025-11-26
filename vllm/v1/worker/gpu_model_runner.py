@@ -5062,6 +5062,9 @@ class GPUModelRunner(
             layer_type = cast(type[Any], AttentionLayerBase)
             layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
             for layer in layers.values():
+                layer_impl = getattr(layer, "impl", None)
+                if layer_impl is None:
+                    continue
                 assert layer.impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode. "
