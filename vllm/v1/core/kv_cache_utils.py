@@ -1302,8 +1302,6 @@ def _auto_fit_max_model_len(
     available_memory: list[int],
 ) -> None:
     """
-    Automatically determines the maximum model length that fits in GPU memory.
-
     When max_model_len is set to -1, this function estimates the largest
     context length that can be supported with the available GPU memory.
     It uses binary search to find the maximum length that fits across all
@@ -1312,6 +1310,8 @@ def _auto_fit_max_model_len(
     Args:
         vllm_config: The global VllmConfig (will be modified in-place)
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
+            These should already be unified (via get_kv_cache_groups) to match
+            the actual allocation strategy.
         available_memory: Memory available for KV cache in bytes for each
             worker.
     """
@@ -1326,56 +1326,49 @@ def _auto_fit_max_model_len(
             # Skip empty specs (attention-free models)
             continue
 
-        # Make a copy and unify specs to match what get_kv_cache_groups will do.
-        # This ensures the estimate matches the actual allocation strategy.
-        # When hybrid KV cache manager is disabled, all layers are converted
-        # to full attention, so we must estimate based on that.
-        kv_cache_spec_for_estimate = dict(kv_cache_spec_one_worker)
-        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-            unify_hybrid_kv_cache_specs(kv_cache_spec_for_estimate)
-
         estimated = estimate_max_model_len(
-            vllm_config, kv_cache_spec_for_estimate, available_memory_one_worker
+            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
         )
         estimated_max_lens.append(estimated)
 
+    # Restore the original max_model_len in case estimate_max_model_len modified it
+    vllm_config.model_config.max_model_len = original_max
+
     if not estimated_max_lens:
         # All workers have empty specs (attention-free model)
-        logger.info(
+        logger.info_once(
             "Auto-fit max_model_len: attention-free model, "
             "using derived max_model_len=%d",
             original_max,
+            scope="local",
         )
         return
 
-    # Use the minimum across all workers to ensure all can handle it
     auto_fit_max = min(estimated_max_lens)
-
     if auto_fit_max <= 0:
         raise ValueError(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
             "to serve even a single token. Try increasing `gpu_memory_utilization`."
         )
 
-    # Restore the original max_model_len in case estimate_max_model_len modified it
-    vllm_config.model_config.max_model_len = original_max
-
     if auto_fit_max >= original_max:
         # The model's full context length fits in memory
-        logger.info(
+        logger.info_once(
             "Auto-fit max_model_len: full model context length %d fits in "
             "available GPU memory",
             original_max,
+            scope="local",
         )
     else:
         # Need to reduce max_model_len to fit in memory
         vllm_config.model_config.max_model_len = auto_fit_max
-        logger.info(
+        logger.info_once(
             "Auto-fit max_model_len: reduced from %d to %d to fit in "
             "available GPU memory (%.2f GiB available for KV cache)",
             original_max,
             auto_fit_max,
             min(available_memory) / GiB_bytes,
+            scope="local",
         )
 
 
@@ -1395,10 +1388,12 @@ def get_kv_cache_configs(
     1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
        the whole model.
     2. Generate the KV cache groups based on the layer ratio of the whole model.
-    3. Generate the KV cache configs for each worker based on the KV cache
+       This also handles spec unification for hybrid models.
+    3. Handle auto-fit max_model_len and memory checks using the unified specs.
+    4. Generate the KV cache configs for each worker based on the KV cache
        grouping strategy. (This is reasonable because the layer ratio of
        different PP stages are similar.)
-    4. Change the num_blocks of each worker to the smallest among all workers
+    5. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
 
     Args:
@@ -1410,19 +1405,6 @@ def get_kv_cache_configs(
     Returns:
         The generated KVCacheConfigs for each worker.
     """
-
-    # Handle auto-fit mode: if original_max_model_len was -1, automatically
-    # determine the maximum model length that fits in available GPU memory.
-    if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(vllm_config, kv_cache_specs, available_memory)
-
-    # Check if the available memory is enough for each worker.
-    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        kv_cache_specs, available_memory
-    ):
-        check_enough_kv_cache_memory(
-            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
-        )
 
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
@@ -1437,7 +1419,32 @@ def get_kv_cache_configs(
                     "The KV cache specs for the same layer are different "
                     "across workers. This is not supported yet."
                 )
+
+    # Get global KV cache groups. This also handles spec unification for
+    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
+    # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
+
+    # Get unified per-worker specs by projecting from the merged specs.
+    # This ensures auto-fit and memory checks use the same unified specs
+    # that will be used for actual allocation.
+    unified_kv_cache_specs = [
+        {layer: merged_kv_cache_specs[layer] for layer in spec_one_worker}
+        for spec_one_worker in kv_cache_specs
+    ]
+
+    # If original_max_model_len was -1, automatically
+    # determine the maximum model length that fits in available GPU memory.
+    if vllm_config.model_config.original_max_model_len == -1:
+        _auto_fit_max_model_len(vllm_config, unified_kv_cache_specs, available_memory)
+
+    # Check if the available memory is enough for each worker.
+    for unified_spec_one_worker, available_memory_one_worker in zip(
+        unified_kv_cache_specs, available_memory
+    ):
+        check_enough_kv_cache_memory(
+            vllm_config, unified_spec_one_worker, available_memory_one_worker
+        )
 
     kv_cache_configs: list[KVCacheConfig] = []
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
