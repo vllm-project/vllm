@@ -76,11 +76,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         if self.base_layer.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
-            output_ = output_parallel
-
-        # Bias was already added by rank 0 in apply(), no need to add again
-        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
-        output = output_
+            output = output_parallel
 
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         if not self.base_layer.return_bias:
