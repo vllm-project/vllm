@@ -685,8 +685,8 @@ def check_enough_kv_cache_memory(
     if available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
-            "when initializing the engine. "
+            "Try increasing `gpu_memory_utilization` when "
+            "initializing the engine. "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
