@@ -75,24 +75,24 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     local_bucket_root = str(tmp_path)
     GLOBAL_PATCHER.local_path = local_bucket_root
 
+    class MockFilesModule:
+        def glob(self, path: str, allow_pattern=None, credentials=None):
+            return GLOBAL_PATCHER.shim_list_safetensors(path, s3_credentials=credentials)
+
+        def pull_files(self, model_path, dst, allow_pattern=None, ignore_pattern=None, credentials=None):
+            return GLOBAL_PATCHER.shim_pull_files(
+                model_path, dst, allow_pattern, ignore_pattern, s3_credentials=credentials
+            )
+
+    def mock_get_s3_files_module():
+        return MockFilesModule()
+
     monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_pull_files",
-        GLOBAL_PATCHER.shim_pull_files,
-    )
-    monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_list_safetensors",
-        GLOBAL_PATCHER.shim_list_safetensors,
+        "runai_model_streamer.s3_utils.s3_utils.get_s3_files_module",
+        mock_get_s3_files_module,
     )
     monkeypatch.setattr(
         "runai_model_streamer.SafetensorsStreamer", GLOBAL_PATCHER.create_mock_streamer
-    )
-    monkeypatch.setattr(
-        "runai_model_streamer.safetensors_streamer.safetensors_streamer.pull_files",
-        GLOBAL_PATCHER.shim_pull_files,
-    )
-    monkeypatch.setattr(
-        "runai_model_streamer.safetensors_streamer.safetensors_streamer.list_safetensors",
-        GLOBAL_PATCHER.shim_list_safetensors,
     )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
