@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
 from vllm.v1.core.sched.output import NewRequestData
@@ -10,7 +12,7 @@ def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestD
         mm_features=[],
         sampling_params=None,
         pooling_params=None,
-        block_ids=([], ),
+        block_ids=([],),
         num_computed_tokens=0,
         lora_request=None,
         prompt_embeds=prompt_embeds,
