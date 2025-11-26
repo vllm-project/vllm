@@ -1194,10 +1194,21 @@ class OpenAIServingResponses(OpenAIServing):
             return None, False
 
         if not function_name_returned:
-            param_match = re.search(r'.*"parameters":\s*(.*)', current_text, re.DOTALL)
-            arguments = param_match.group(1) if param_match else ""
-            arguments, _ = self._filter_delta_text(arguments, previous_text)
-            if finishes_previous_tool and "parameters" not in current_tool_call:
+            arguments = ""
+            # Extract the parameters field closest to the end of the string to
+            # avoid grabbing earlier tool calls when multiple are present.
+            param_pos = current_text.rfind('"parameters":')
+            if param_pos != -1:
+                param_section = current_text[param_pos:]
+                param_match = re.search(r'"parameters"\s*:\s*(.*)', param_section, re.DOTALL)
+                if param_match:
+                    arguments = param_match.group(1)
+                    arguments, _ = self._filter_delta_text(arguments, previous_text)
+            if (
+                finishes_previous_tool 
+                and "parameters" not in current_tool_call 
+                and len(obj) > 1
+            ):
                 current_tool_call = obj[-2]
 
             function_name_returned = True

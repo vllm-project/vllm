@@ -93,6 +93,7 @@ async def test_responses_streaming_tool_calls_e2e(
 
     added_event = None
     arg_chunks: list[str] = []
+    final_arguments: str | None = None
     async for event in stream:
         if (
             isinstance(event, ResponseOutputItemAddedEvent)
@@ -102,10 +103,12 @@ async def test_responses_streaming_tool_calls_e2e(
         if isinstance(event, ResponseFunctionCallArgumentsDeltaEvent):
             arg_chunks.append(event.delta)
         if isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
-            arg_chunks.append(event.arguments)
+            final_arguments = event.arguments
 
     assert added_event is not None
-    args_text = "".join(arg_chunks).lower()
+    assert final_arguments is not None
+    assert final_arguments == "".join(arg_chunks)
+    args_text = final_arguments.lower()
     assert "berlin" in args_text
     assert "germany" in args_text
     assert "fahrenheit" in args_text
