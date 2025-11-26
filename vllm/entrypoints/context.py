@@ -13,6 +13,7 @@ from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
 from vllm.entrypoints.harmony_utils import (
+    TOOL_NAME_TO_TYPE_MAP,
     get_encoding,
     get_streamable_parser_for_assistant,
     render_for_completion,
@@ -26,24 +27,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# This is currently needed as the tool type doesn't 1:1 match the
-# tool namespace, which is what is used to look up the
-# connection to the tool server
-_TOOL_NAME_TO_TYPE_MAP = {
-    "browser": "web_search_preview",
-    "python": "code_interpreter",
-    "container": "container",
-}
-
-
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
-    if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
-        available_tools = ", ".join(_TOOL_NAME_TO_TYPE_MAP.keys())
+    if tool_name not in TOOL_NAME_TO_TYPE_MAP:
+        available_tools = ", ".join(TOOL_NAME_TO_TYPE_MAP.keys())
         raise ValueError(
             f"Built-in tool name '{tool_name}' not defined in mapping. "
             f"Available tools: {available_tools}"
         )
-    return _TOOL_NAME_TO_TYPE_MAP[tool_name]
+    return TOOL_NAME_TO_TYPE_MAP[tool_name]
 
 
 class TurnMetrics:

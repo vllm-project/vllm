@@ -63,6 +63,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    TYPE_TO_TOOL_NAME_MAP,
     construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -272,15 +273,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         tool_types = extract_tool_types(request.tools)
 
-        # Map Harmony tool types to the corresponding ToolServer names.
-        required_tools = {
-            "web_search_preview": "browser",
-            "code_interpreter": "python",
-            "container": "container",
-        }
-
         missing_tools: list[str] = []
-        for tool_type, tool_name in required_tools.items():
+        for tool_type, tool_name in TYPE_TO_TOOL_NAME_MAP.items():
             if tool_type not in tool_types:
                 continue
             if self.tool_server is None or not self.tool_server.has_tool(tool_name):
