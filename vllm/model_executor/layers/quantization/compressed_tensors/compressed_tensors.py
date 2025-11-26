@@ -266,8 +266,9 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return []
 
+    @staticmethod
     def _check_scheme_supported(
-        self, min_capability: int, error: bool = True, match_exact: bool = False
+        min_capability: int, error: bool = True, match_exact: bool = False
     ) -> bool:
         capability_tuple = current_platform.get_device_capability()
 
@@ -293,9 +294,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             return False
 
-    def _is_fp4a4_nvfp4(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
-    ):
+    @staticmethod
+    def _is_fp4a4_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
         if weight_quant is None or input_quant is None:
             return False
 
@@ -322,9 +322,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
-    def _is_fp4a16_nvfp4(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
-    ):
+    @staticmethod
+    def _is_fp4a16_nvfp4(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
         is_weight_only = weight_quant is not None and input_quant is None
         is_tensor_group_quant = (
             weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
@@ -344,8 +343,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
+    @staticmethod
     def _is_static_tensor_w8a8(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         weight_strategy = (
@@ -362,8 +362,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_8_bits and is_tensor and weight_quant.symmetric and is_static
 
+    @staticmethod
     def _is_dynamic_token_w8a8(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         weight_strategy = (
@@ -379,8 +380,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
 
+    @staticmethod
     def _is_dynamic_token_w4a8_int(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
@@ -403,8 +405,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_dynamic
         )
 
+    @staticmethod
     def _is_fp8_w8a8(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         # Confirm weights and activations quantized.
         if weight_quant is None or input_quant is None:
@@ -439,8 +442,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_per_tensor_activation = input_quant.strategy == QuantizationStrategy.TENSOR
         return is_symmetric_activation and is_per_tensor_activation
 
+    @staticmethod
     def _is_fp8_w4a8(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         if not weight_quant or not input_quant:
             return False
@@ -462,29 +466,33 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_dynamic
         )
 
+    @classmethod
     def _is_fp8_w4a8_sm90(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
-        return self._check_scheme_supported(
+        return cls._check_scheme_supported(
             90, error=False, match_exact=True
-        ) and self._is_fp8_w4a8(weight_quant, input_quant)
+        ) and cls._is_fp8_w4a8(weight_quant, input_quant)
 
+    @classmethod
     def _is_fp8_w8a8_sm90(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
-        return self._check_scheme_supported(
+        return cls._check_scheme_supported(
             90, error=False, match_exact=True
-        ) and self._is_fp8_w8a8(weight_quant, input_quant)
+        ) and cls._is_fp8_w8a8(weight_quant, input_quant)
 
+    @classmethod
     def _is_fp8_w8a8_sm100(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
-        return self._check_scheme_supported(
+        return cls._check_scheme_supported(
             100, error=False, match_exact=True
-        ) and self._is_fp8_w8a8(weight_quant, input_quant)
+        ) and cls._is_fp8_w8a8(weight_quant, input_quant)
 
+    @staticmethod
     def _is_fp8_w8a16(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         # Confirm weights quantized.
         if weight_quant is None:
@@ -508,8 +516,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_tensor_or_channel_or_block_weight
         )
 
+    @staticmethod
     def _is_wNa16_group_channel(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         input_quant_none = input_quant is None
         is_channel_group = (
