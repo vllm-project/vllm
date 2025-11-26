@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
@@ -15,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -423,7 +423,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         if mm_hashes:
             mm_str = "-".join(mm_hashes)
             token_bytes += mm_str.encode("utf-8")
-        input_ids_hash = hashlib.md5(token_bytes, usedforsecurity=False).hexdigest()
+        input_ids_hash = safe_hash(token_bytes, usedforsecurity=False).hexdigest()
 
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:

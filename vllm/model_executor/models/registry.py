@@ -5,7 +5,6 @@ Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
-import hashlib
 import importlib
 import json
 import os
@@ -32,6 +31,7 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttnTypeStr
@@ -296,6 +296,10 @@ _MULTIMODAL_MODELS = {
         "GraniteSpeechForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
+    "HunYuanVLForConditionalGeneration": (
+        "hunyuan_vision",
+        "HunYuanVLForConditionalGeneration",
+    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "OpenCUAForConditionalGeneration": (
@@ -661,7 +665,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
         if model_path.exists():
             with open(model_path, "rb") as f:
-                module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
+                module_hash = safe_hash(f.read(), usedforsecurity=False).hexdigest()
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
