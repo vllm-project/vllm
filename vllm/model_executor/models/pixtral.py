@@ -392,7 +392,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         }
 
         self.vision_args = VisionEncoderArgs(**vision_args)
-        is_vision_encoder_loaded = bool(multimodal_config.get_limit_per_prompt("image"))
 
         # init MistralForCausalLM
         self.language_model = init_vllm_registered_model(
@@ -401,7 +400,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
-        if is_vision_encoder_loaded:
+        if multimodal_config.get_limit_per_prompt("image"):
             self.vision_encoder = VisionTransformer(self.vision_args)
             self.pre_mm_projector_norm = (
                 RMSNorm(self.vision_args.hidden_size, eps=1e-5)
