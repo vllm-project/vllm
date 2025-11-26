@@ -277,10 +277,6 @@ class OpenAIServingResponses(OpenAIServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
-        import fbvscode
-
-        fbvscode.set_trace()
-
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).

@@ -153,7 +153,7 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages = ResponseRawMessageAndToken(message="", tokens=[])
-        self.output_messages = ResponseRawMessageAndToken(message=[], tokens=[])
+        self.output_messages = ResponseRawMessageAndToken(message="", tokens=[])
 
     def append_output(self, output) -> None:
         self.last_output = output
