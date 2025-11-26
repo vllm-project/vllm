@@ -5,9 +5,9 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
@@ -32,6 +32,7 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -42,8 +43,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
-        if self.dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.pcp_world_size = pcp_world_size
+        if dcp_world_size * pcp_world_size > 1:
+            self.block_size *= dcp_world_size * pcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
 
@@ -151,7 +153,7 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
@@ -205,13 +207,15 @@ class SingleTypeKVCacheManager(ABC):
     @abstractmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
@@ -229,6 +233,11 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
+            alignment_tokens: The returned cache hit length (in tokens) should
+                be a multiple of this value (in tokens). By default, it should
+                be set to the block_size.
+            dcp_world_size: The world size of decode context parallelism.
+            pcp_world_size: The world size of prefill context parallelism.
 
         Returns:
             A list of cached blocks with skipped blocks replaced by null block
@@ -243,34 +252,71 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    @abstractmethod
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         """
-        Remove the blocks that are no longer needed from `blocks` and free the
-        blocks. The removed blocks should be replaced by null_block.
-        Need to be customized for each attention type.
+        Remove and free the blocks that are no longer needed for attention computation.
+        The removed blocks should be replaced by null_block.
+
+        This function depends on `get_num_skipped_tokens`, which need to be implemented
+        differently for each attention type.
 
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
         """
-        raise NotImplementedError
+        # Remove the blocks that will be skipped during attention computation.
+        num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
+        if num_skipped_tokens <= 0:
+            # This indicates that ALL tokens are inside attention window.
+            # Thus we do not need to free any blocks outside attention window.
+            # A typical case is full attention that we never free any token
+            # before the request is finished.
+            return
+        num_skipped_blocks = num_skipped_tokens // self.block_size
+        blocks = self.req_to_blocks[request_id]
+        removed_blocks: list[KVCacheBlock] = []
+        # Because the block starts from index 0, the num_skipped_block-th block
+        # corresponds to index num_skipped_blocks - 1.
+        for i in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                # If the block is already a null block, the blocks before it
+                # should also have been set to null blocks by the previous calls
+                # to this function.
+                break
+            removed_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        self.block_pool.free_blocks(removed_blocks)
+
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """
+        Get the number of tokens that will be skipped for attention computation.
+
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The number of tokens that will be skipped for attention computation.
+        """
+        # The default behavior is to not skip any tokens.
+        return 0
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
@@ -279,8 +325,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size > 1:
-            block_size *= dcp_world_size
+        if dcp_world_size * pcp_world_size > 1:
+            block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -294,13 +340,16 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if use_eagle and computed_blocks[0]:
+            # Need to drop the last matched block if eagle is enabled.
+            for computed in computed_blocks:
+                computed.pop()
+        while (
+            block_size != alignment_tokens  # Faster for common case.
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
-
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # No need to remove blocks for full attention.
-        pass
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -324,18 +373,21 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -359,6 +411,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
+        block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
@@ -366,6 +419,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
+                # Skip prefix matching check if the block is not aligned with
+                # `alignment_tokens`.
+                if (
+                    num_contiguous_blocks == 0
+                    and block_size != alignment_tokens  # Faster for common case.
+                    and (i + 1) * block_size % alignment_tokens != 0
+                ):
+                    continue
+                # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
@@ -384,27 +446,47 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
+            while (
+                block_size != alignment_tokens  # Faster for common case.
+                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            ):
+                for computed in computed_blocks:
+                    computed.pop()
         if use_eagle and computed_blocks[0]:
+            assert kv_cache_spec.block_size == alignment_tokens, (
+                "aligned_length is not compatible with eagle now"
+            )
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # Remove the blocks that are no longer be in the sliding window and
-        # skipped during the attention computation.
-        last_useful_token = num_computed_tokens - self.sliding_window + 1
-        last_useful_block = last_useful_token // self.block_size
-        blocks = self.req_to_blocks[request_id]
-        removed_blocks: list[KVCacheBlock] = []
-        for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
-                break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """
+        Get the number of tokens that will be skipped for attention computation.
+
+        For sliding window, this corresponds to the tokens that are prior to
+        the current sliding window.
+
+        Example:
+        sliding_window=4, num_computed_tokens=7
+
+        Tokens:   [ 0  1  2  3  4  5  6  7 ]
+                  | ---- computed -----|
+                                         ^ next token to be computed
+                               |-----------| sliding window for next token
+                  |--skipped---|
+
+        The current window contains tokens 4~7. Tokens 0~3 will be skipped for
+        attention computation since they are outside the sliding window.
+        Thus, get_num_skipped_tokens(7) == 4.
+
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The number of tokens that will be skipped for attention computation.
+        """
+        return num_computed_tokens - self.sliding_window + 1
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -427,13 +509,15 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -462,6 +546,10 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
+            dcp_world_size: The world size of decode context parallelism.
+            pcp_world_size: The world size of prefill context parallelism.
+            alignment_tokens: The returned cache hit length (in tokens) should
+                be a multiple of this value (in tokens).
 
         Returns:
             A list of cached blocks
@@ -474,6 +562,11 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
+        assert pcp_world_size == 1, "PCP not support chunked local attn now."
+        assert kv_cache_spec.block_size == alignment_tokens, (
+            "KV cache groups with different block sizes are not compatible with "
+            "chunked local attention now"
+        )
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (
@@ -505,40 +598,51 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # Remove the blocks that are no longer be in the chunked attention
-        # window and skipped during the attention computation.
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """
+        Get the number of tokens that will be skipped for attention computation.
 
-        # [chunk 0][chunk 1]local_attention_start_idx ... current
-        # we computed previous number of chunks to get the idx of
-        # current chunk window starting offset,
-        # e.g. for computed 1024 tokens, the 1024th token (0 indexed)
-        # is in the second chunk, there are 1 prev chunk, the start idx
-        # is 1024. for 1023, it will be 0.
-        num_cached_block = self.num_cached_block.get(request_id, 0)
-        local_attention_start_idx = (
-            (num_computed_tokens)
-            // self.attention_chunk_size
-            * self.attention_chunk_size
-        )
-        first_useful_block_idx = local_attention_start_idx // self.block_size
-        if num_cached_block > 0:
-            # Make sure we don't delete the last cached block
-            first_useful_block_idx = min(first_useful_block_idx, num_cached_block - 1)
-        # if block size = 128, 0 -> block 0, 1024 (= 128 * 8) ->
-        # block 8, 372 (= 128 * 2 + 116) -> block 2
-        blocks = self.req_to_blocks[request_id]
-        removed_blocks: list[KVCacheBlock] = []
-        # we need to keep the last block to get the previous hash key
-        for i in range(first_useful_block_idx - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
-                break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        For chunked local attention, this corresponds to the tokens that are on
+        the left side of the current chunk.
+
+        Example 1:
+        chunk size = 8, num_computed_tokens = 13
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | ----- computed ---------------|
+                                                  ^^ next token to be computed
+                                   |----------------| <-- attention window for
+                                                          next token
+                 |--- skipped -----|
+        Output: get_num_skipped_tokens(13) == 8
+
+        Example 2:
+        chunk size = 8, num_computed_tokens = 8
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | --- computed ---|
+                                     ^ next token to be computed
+                                   |--| <-- attention window for next token
+                 | --- skipped ----|
+        Output: get_num_skipped_tokens(8) == 8
+
+        Example 3:
+        chunk size = 8, num_computed_tokens = 7
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 |---computed---|
+                                 ^ next token to be computed
+                 |-----------------| <-- attention window for next token
+                 no token should be skipped.
+        Output: get_num_skipped_tokens(7) == 0
+
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The number of tokens that will be skipped for attention computation.
+        """
+        num_skipped_tokens = (
+            num_computed_tokens // self.attention_chunk_size
+        ) * self.attention_chunk_size
+        return num_skipped_tokens
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -551,28 +655,40 @@ class MambaManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
         assert dcp_world_size == 1, "DCP not support mamba now."
+        assert pcp_world_size == 1, "PCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
 
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
+                # When enable Mamba prefix caching, `block_size` will be aligned
+                # across full attention layers and Mamba layers to ensure the
+                # prefix hit length aligned at block
+                if (
+                    block_size != alignment_tokens  # Faster for common case.
+                    and (i + 1) * block_size % alignment_tokens != 0
+                ):
+                    continue
                 for computed, cached in zip(computed_blocks, cached_block):
                     # the hit length logic later assumes:
                     #  hit_length = len(hit_blocks_other_attn[0])
@@ -583,12 +699,6 @@ class MambaManager(SingleTypeKVCacheManager):
                 break  # we just need the last match - early stopping
 
         return computed_blocks
-
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # Here unused blocks may be freed up for running requests.
-        # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
-        #  (for which find_longest_cache_hit returns block_pool.null_block)
-        pass
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -651,13 +761,15 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        alignment_tokens: int,
         dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
@@ -669,11 +781,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # 3. No reusable prefix exists between different multimodal inputs
         # Return empty blocks to indicate no cache hits
         raise NotImplementedError("CrossAttentionManager does not support caching")
-
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # Cross-attention blocks represent encoder states which are needed
-        # for the entire decoding process, so no blocks should be skipped
-        pass
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {

@@ -142,7 +142,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
-* Additional mistral function-calling models are compatible as well.
+* Additional Mistral function-calling models are compatible as well.
 
 Known issues:
 
@@ -158,12 +158,25 @@ Known issues:
 
 Recommended flags:
 
-1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+1. To use the official Mistral AI's format:
 
-    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+    `--tool-call-parser mistral`
 
-2. To use the default Transformers tokenization backend:
-    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+2. To use the Transformers format when available:
+
+    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+!!! note
+    Models officially released by Mistral AI have two possible formats:
+
+    1. The official format that is used by default with `auto` or `mistral` arguments:
+
+        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
+
+    2. The Transformers format, when available, that is used with `hf` arguments:
+
+        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -321,7 +334,7 @@ Supported models:
 Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
-* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
 ### LongCat-Flash-Chat Models (`longcat`)
 
@@ -407,7 +420,6 @@ Here is a summary of a plugin file:
     # the name list in register_module can be used
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
-    @ToolParserManager.register_module(["example"])
     class ExampleToolParser(ToolParser):
         def __init__(self, tokenizer: AnyTokenizer):
             super().__init__(tokenizer)
@@ -439,6 +451,12 @@ Here is a summary of a plugin file:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=text)
+    # register the tool parser to ToolParserManager
+    ToolParserManager.register_lazy_module(
+        name="example",
+        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        class_name="ExampleToolParser",
+    )
 
     ```
 

@@ -17,7 +17,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
-    has_kv_transfer_group,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -25,9 +24,9 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -89,7 +88,7 @@ class TPUWorker:
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 
@@ -106,9 +105,6 @@ class TPUWorker:
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s", self.profile_dir
             )
-
-        if self.model_config.seed is None:
-            self.model_config.seed = 0
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -142,8 +138,7 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        if self.model_config.seed is not None:
-            xm.set_rng_state(self.model_config.seed, self.device)
+        xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -255,13 +250,13 @@ class TPUWorker:
             tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
+        self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
-        output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is set up
-        return output if self.is_driver_worker or has_kv_transfer_group() else None
+        return self.model_runner.execute_model(scheduler_output)
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
@@ -333,7 +328,7 @@ class TPUWorker:
             world_size=parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
-            distributed_init_method=distributed_init_method,
+            distributed_init_method=distributed_init_method or "env://",
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(

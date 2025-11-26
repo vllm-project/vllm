@@ -21,7 +21,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionImpl
@@ -89,9 +89,11 @@ class CommonAttentionMetadata:
     num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: np.ndarray | None = None
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
 
@@ -244,7 +246,8 @@ class AttentionCGSupport(enum.Enum):
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # Do not access directly. Call get_cudagraph_support() instead.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
@@ -263,8 +266,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        """Get the cudagraph support level of this builder class."""
+        return cls._cudagraph_support
+
     def _init_reorder_batch_threshold(
-        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
     ) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
         if self.reorder_batch_threshold is not None and supports_spec_as_decode:
@@ -280,6 +295,12 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                     self.reorder_batch_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
+
+        if (
+            self.vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not supports_dcp_with_varlen
+        ):
+            self.reorder_batch_threshold = 1
 
     @abstractmethod
     def build(
@@ -728,6 +749,73 @@ def subclass_attention_backend(
     )
 
 
+def split_decodes_prefills_and_extends(
+    common_attn_metadata: CommonAttentionMetadata,
+    decode_threshold: int = 1,
+) -> tuple[int, int, int, int, int, int]:
+    """
+    Assuming a reordered batch, finds the boundary between prefill and decode
+    requests.
+
+    Args:
+        common_attn_metadata: CommonAttentionMetadata object containing the
+            batch metadata.
+        decode_threshold: The maximum query length to be considered a decode.
+
+    Returns:
+        num_decodes: The number of decode requests.
+        num_extends: The number of extend requests.
+        num_prefills: The number of prefill requests.
+        num_decode_tokens: The number of tokens in the decode requests.
+        num_extend_tokens: The number of tokens in the extend requests.
+        num_prefill_tokens: The number of tokens in the prefill requests.
+    """
+    max_query_len = common_attn_metadata.max_query_len
+    num_reqs = common_attn_metadata.num_reqs
+    num_tokens = common_attn_metadata.num_actual_tokens
+    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    seq_lens = common_attn_metadata.seq_lens_cpu
+
+    if max_query_len <= decode_threshold:
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    is_prefill_or_extend = query_lens > decode_threshold
+    is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
+    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
+    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    num_decodes = first_extend
+    num_decode_tokens = query_start_loc[first_extend].item()
+    if not torch.any(is_prefill_or_extend):
+        return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
+
+    num_prefills_or_extends = num_reqs - num_decodes
+    num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
+    if not torch.any(is_prefill):
+        return (
+            num_decodes,
+            num_prefills_or_extends,
+            0,
+            num_decode_tokens,
+            num_prefill_or_extend_tokens,
+            0,
+        )
+
+    num_extends = first_prefill - num_decodes
+    num_prefills = num_reqs - first_prefill
+
+    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
+    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    return (
+        num_decodes,
+        num_extends,
+        num_prefills,
+        num_decode_tokens,
+        num_extend_tokens,
+        num_prefill_tokens,
+    )
+
+
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
@@ -795,51 +883,59 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are at
-    # the front and the "prefill" requests are at the back using the least
-    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
-    # requests where attention is likely memory-bound and "prefill" to mean
-    # requests where attention is likely compute-bound, TODO(lucas): figure out
-    # a better naming here)
-    decodes = []
-    prefills = []
-    num_decode_tokens = 0
-    num_prefill_tokens = 0
+    # We now want to reorder the batch into decode → extend → prefill order
+    # where:
+    #   decode: request with num_scheduled_tokens <= decode_threshold
+    #   extend: non-decode request with existing context
+    #   prefill: non-decode request with no existing context
+    # NOTE for now we loosely use "decode" to mean requests where attention is
+    #  likely memory-bound and "prefill" to mean requests where attention is
+    #  likely compute-bound,
+    num_reqs = len(input_batch.req_ids)
+    num_scheduled_tokens = [
+        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
+    ]
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
+    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-            num_decode_tokens += num_tokens
-        else:
-            prefills.append(i)
-            num_prefill_tokens += num_tokens
+    is_decode = num_scheduled_tokens_np <= decode_threshold
+    is_extend = (~is_decode) & (num_computed_tokens_np > 0)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == 0)
 
-    # We hope that this is fairly minimal since decodes
-    # should be around for a number of iterations so hopefully they are
-    # relatively stationary (and new request are generally appended to the
-    # persistent batch so already should be at the back)
-    # To achieve this we loop over the decodes in descending order and
-    # the prefills in ascending order. We swap decodes from the  "back"
-    # i.e. past where the last decode should be in the reodorered with
-    # prefills from the front of the batch.
-    # `decodes` and `prefills` are already in ascending order just based on
-    # the above loop
-    num_decodes = len(decodes)
-    num_prefills = len(prefills)
-    modified_batch = False
+    # Desired order: decode → extend → prefill
+    req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions[is_extend] = 1
+    req_regions[is_prefill] = 2
 
-    for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
+    num_decodes = int(is_decode.sum())
+    num_extends = int(is_extend.sum())
 
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
+    target_regions = np.zeros(num_reqs, dtype=np.int32)
+    target_regions[num_decodes : num_decodes + num_extends] = 1
+    target_regions[num_decodes + num_extends :] = 2
 
-    return modified_batch
+    needs_swap = req_regions != target_regions
+
+    if not needs_swap.any():
+        return False
+
+    # Extract indices that need swapping and sort by target region
+    orig_indices = np.where(needs_swap)[0]
+    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+    src_indices = orig_indices[sorted_order]
+
+    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
+
+    for src in src_dest_map:
+        dst = src_dest_map[src]
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            # Mark dst as done by updating its destination to itself
+            next_dst = src_dest_map.get(dst, dst)
+            src_dest_map[dst] = dst
+            dst = next_dst
+
+    return True
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -871,12 +967,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
 
 
-KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", torch.Tensor | None, None),
-    ("num_logits_indices", int, 0),
-]
-
-
 def subclass_attention_metadata(
     name_prefix: str,
     metadata_cls: Any,
@@ -892,8 +982,8 @@ def subclass_attention_metadata(
 
 @runtime_checkable
 class KVSharingFastPrefillMetadata(Protocol):
-    logits_indices_padded: torch.Tensor
-    num_logits_indices: int
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
 
 def create_fast_prefill_custom_backend(
@@ -925,11 +1015,6 @@ def create_fast_prefill_custom_backend(
                     for _field in fields(metadata.__class__):
                         setattr(self, _field.name, getattr(metadata, _field.name))
 
-                    # Set additional fields that will be used in model code
-                    assert (
-                        common_attn_metadata.logits_indices_padded is not None
-                        and common_attn_metadata.num_logits_indices is not None
-                    )
                     self.logits_indices_padded = (
                         common_attn_metadata.logits_indices_padded
                     )
@@ -992,3 +1077,41 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
 
     return nums_dict, batch_ptr, token_chunk_offset_ptr
+
+
+def get_dcp_local_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_size: int = 1,
+    dcp_rank: int | None = None,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    """While using dcp, kv_cache size stored on each rank may be different,
+    use this function to calculate split decode seq_lens of each dcp rank.
+    Only consider dcp now, we can extend the case of cp based on this.
+    """
+    num_requests = seq_lens.size(0)
+    if dcp_rank is None:
+        rank_offsets = (
+            torch.arange(dcp_size, dtype=torch.int32)
+            .unsqueeze(0)
+            .repeat(num_requests, 1)
+        )
+    else:
+        rank_offsets = torch.Tensor([[dcp_rank]]).to(dtype=torch.int32)
+    seq_lens_tiled = (
+        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
+    )
+    base = (
+        seq_lens_tiled
+        // cp_kv_cache_interleave_size
+        // dcp_size
+        * cp_kv_cache_interleave_size
+    )
+    remainder = seq_lens_tiled - base * dcp_size
+    remainder = torch.clip(
+        remainder - rank_offsets * cp_kv_cache_interleave_size,
+        0,
+        cp_kv_cache_interleave_size,
+    )
+    dcp_local_seq_lens = base + remainder
+    return dcp_local_seq_lens.squeeze(1)

@@ -1,30 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import glob
 import json
 import os
 import platform
 import subprocess
 import sys
 from dataclasses import dataclass
-from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    _Backend = None
+    AttentionBackendEnum = None
     VllmConfig = None
 
 
@@ -125,32 +125,28 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
+        if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
-        logger.info("Using Torch SDPA backend.")
-        if not use_v1:
-            raise ValueError("CPU backend only supports V1.")
-        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import vllm.envs as envs
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
@@ -185,20 +181,18 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        ipex_available = find_spec("intel_extension_for_pytorch") is not None
+        if cache_config.block_size is None:
+            cache_config.block_size = 128
 
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 128 if ipex_available else 16
-
-        if not ipex_available and cache_config.block_size != 16:
-            raise RuntimeError(
-                f"--block-size={cache_config.block_size} requires"
-                " intel_extension_for_pytorch"
+        if cache_config.block_size % 32 != 0:
+            logger.warning(
+                "CPU backend prefers block_size is multiples of 32, "
+                "otherwise the performance is not optimized."
             )
 
         scheduler_config = vllm_config.scheduler_config
         if (
-            scheduler_config.chunked_prefill_enabled
+            scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
         ) and cache_config.cache_dtype != "auto":
             raise RuntimeError(
@@ -206,22 +200,11 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype == "fp8_e4m3":
-            cache_config.cache_dtype = "fp8_e5m2"
+        if cache_config.cache_dtype != "auto":
             logger.warning(
-                "CPU backend doesn't support fp8_e4m3 KV cache type, cast to fp8_e5m2."
+                "CPU backend doesn't support KV cache quantization fallback to auto."
             )
-
-        if (
-            cache_config.cache_dtype != "auto"
-            and model_config is not None
-            and model_config.dtype == torch.half
-        ):
-            logger.warning(
-                "FP8 KV cache on the CPU backend only does not"
-                " support fp16 for now, cast to bf16."
-            )
-            model_config.dtype = torch.bfloat16
+            cache_config.cache_dtype = "auto"
 
         cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
@@ -288,21 +271,26 @@ class CpuPlatform(Platform):
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
-        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
+            # Set default threads num for OpenMP parallel
+            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        else:
+            # In this case, setting the OpenMP configuration via
+            # OMP_NUM_THREADS is up to the user.
+            logger.info("Disabling binding processes to CPU cores...")
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # Disable multi-stream for shared experts as no Stream on CPU
-        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
         # Intel OpenMP setting
-        ld_prealod_str = os.getenv("LD_PRELOAD", "")
-        if "libiomp5.so" in ld_prealod_str:
+        ld_preload_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             os.environ["KMP_BLOCKTIME"] = "1"
@@ -312,6 +300,32 @@ class CpuPlatform(Platform):
             os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
+
+        if (
+            platform.system() == "Linux"
+            and Platform.get_cpu_architecture()
+            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
+            and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
+        ):
+            # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
+            # one core will be properly utilized when we thread-bind
+            # See: https://github.com/vllm-project/vllm/issues/27369
+            # TODO: Remove once:
+            # https://github.com/pytorch/pytorch/issues/166087 is fixed
+
+            # We need to find the location of PyTorch's libgomp
+            torch_pkg = os.path.dirname(torch.__file__)
+            site_root = os.path.dirname(torch_pkg)
+            torch_libs = os.path.join(site_root, "torch.libs")
+            pytorch_libgomp_so_candidates = glob.glob(
+                os.path.join(torch_libs, "libgomp-*.so*")
+            )
+            if pytorch_libgomp_so_candidates:
+                pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
+                if ld_preload_str:
+                    ld_preload_str += ":"
+                ld_preload_str += pytorch_libgomp_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
 
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
@@ -324,10 +338,9 @@ class CpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod

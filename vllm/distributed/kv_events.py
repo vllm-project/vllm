@@ -353,7 +353,11 @@ class EventPublisherFactory:
         cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
     ) -> EventPublisher:
         """Create publisher from a config mapping."""
-        if config is None or config.publisher == "null":
+        if (
+            config is None
+            or not config.enable_kv_cache_events
+            or config.publisher == "null"
+        ):
             return NullEventPublisher()
 
         config_dict = asdict(config)
