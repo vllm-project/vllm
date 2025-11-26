@@ -45,16 +45,6 @@ COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
 COMPLETED_NONE_FUTURE.set_result(None)
 
 
-class RayRemoteWrapper:
-    """A simple wrapper around Ray object reference."""
-
-    def __init__(self, ref):
-        self.ref = ref
-
-    def get(self):
-        return ray.get(self.ref)
-
-
 @dataclass
 class RayWorkerMetaData:
     """
@@ -458,13 +448,10 @@ class RayDistributedExecutor(Executor):
 
         if self.scheduler_config.async_scheduling:
             assert non_block
-            for ref in refs:
-                ref.get()
+            ray.get(refs)
 
             refs = [
-                RayRemoteWrapper(
-                    worker.execute_method.remote("get_execute_model_output")
-                )
+                worker.execute_method.remote("get_execute_model_output")
                 for worker in self.workers
             ]
 
@@ -472,7 +459,7 @@ class RayDistributedExecutor(Executor):
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                return ray.get(refs[0])
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
