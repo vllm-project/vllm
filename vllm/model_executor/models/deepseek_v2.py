@@ -1583,10 +1583,6 @@ class DeepseekV2ForCausalLM(
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
 
-                        # Skip if this expert is not on this rank (EP)
-                        if name_mapped not in params_dict:
-                            continue
-
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
