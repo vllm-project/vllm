@@ -1238,15 +1238,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
         if self.is_aiter_triton_fp8_bmm_enabled:
+            out = out.view(-1, self.num_heads, self.v_head_dim)
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
-            # Convert from (B, N, V) to (B, N * V)
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
-            # Copy result
-            out.copy_(x)
         else:
             # Convert from (B, N * V) to (N, B, V)
             out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
@@ -1824,7 +1822,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
@@ -1837,7 +1836,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        output = self._run_prefill_new_tokens(
+        output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
@@ -1846,7 +1845,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         if has_context:
-            suffix_output, suffix_lse = output
+            suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
@@ -1862,7 +1861,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
-            output = torch.empty_like(suffix_output)
+            # unpad if necessary
+            if self._pad_v:
+                context_output = context_output[..., : v.shape[-1]]
+                suffix_output = suffix_output[..., : v.shape[-1]]
+
+            output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
                 prefix_output=context_output,
@@ -1870,12 +1874,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
-
-        # unpad if necessary
-        if self._pad_v:
-            output = output[..., : v.shape[-1]]
-
-        return output.flatten(start_dim=-2)
+        else:
+            output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
+            output.copy_(output_prefill)
 
     @abstractmethod
     def _forward_decode(
@@ -1970,13 +1971,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
+            self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
                 prefill_k_pe,
                 kv_cache,
                 attn_metadata,
                 layer._k_scale,
+                output=output[num_decode_tokens:],
             )
 
         if has_decode:
