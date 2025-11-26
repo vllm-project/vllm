@@ -40,9 +40,6 @@ class PoolingType(IntEnum):
     MEAN = 4
 
 
-PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
-
-
 @dataclass(frozen=True)
 class ResolvedPoolingConfig:
     pooling_type: PoolingType

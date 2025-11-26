@@ -34,8 +34,8 @@ from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_mo
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttnTypeStr
-    from vllm.model_executor.layers.pooler import PoolingTypeStr
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import PoolingTypeStr
 else:
     AttnTypeStr = Any
     PoolingTypeStr = Any

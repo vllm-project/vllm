@@ -53,7 +53,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
@@ -110,6 +109,10 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "pooling": ["embed", "classify", "reward"],
     "draft": [],
 }
+
+AttnTypeStr = Literal[
+    "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
+]
 
 
 @config
@@ -1764,10 +1767,12 @@ class ModelConfig:
             else:
                 is_causal = getattr(self.hf_config, "is_causal", True)
                 return "encoder_only" if not is_causal else self._model_info.attn_type
-        elif self.is_encoder_decoder:
-            return "encoder_decoder"
+        elif self.is_hybrid:
+            return "hybrid"
         elif self.is_attention_free:
             return "attention_free"
+        elif self.is_encoder_decoder:
+            return "encoder_decoder"
         else:
             return "decoder"
 
@@ -1817,10 +1822,10 @@ class ModelConfig:
         else:
             if attn_type == "encoder_decoder":
                 return APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
-            elif attn_type == "attention_free":
-                return APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING
             elif self.is_hybrid:
                 return APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
+            elif attn_type == "attention_free":
+                return APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING
             return APC_REASONS.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
 
 

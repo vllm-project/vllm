@@ -18,9 +18,10 @@ from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttnTypeStr
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.pooler import Pooler, PoolingTypeStr
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import PoolingTypeStr
+    from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any
