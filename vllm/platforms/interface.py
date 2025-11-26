@@ -6,6 +6,7 @@ import os
 import platform
 import random
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -654,7 +655,7 @@ class Platform:
         return max_model_len
 
     @classmethod
-    def get_forward_context_manager(cls):
+    def get_forward_context_manager(cls) -> Callable:
         """
         Returns forward context manager for the current platform.
         """

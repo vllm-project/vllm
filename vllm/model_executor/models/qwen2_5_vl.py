@@ -80,6 +80,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -352,8 +353,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             )
         )
         # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
-        from vllm.platforms import current_platform
-
         if (
             current_platform.is_rocm()
             and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
@@ -418,8 +417,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
-            from vllm.platforms import current_platform
-
             # Never remove the next contiguous logic
             # Without it, hallucinations occur with the backend
             if current_platform.is_rocm():
@@ -1245,8 +1242,6 @@ class Qwen2_5_VLForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        from vllm.platforms import current_platform
 
         self.set_forward_context = current_platform.get_forward_context_manager()
 
