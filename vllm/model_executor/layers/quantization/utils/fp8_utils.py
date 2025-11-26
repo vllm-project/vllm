@@ -586,10 +586,10 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     N_2 = N // 2
 
     if output is None:
-        output = torch.empty((M, N_2), dtype=torch.float8_e4m3fn, device="cuda")
+        output = torch.empty((M, N_2), dtype=torch.float8_e4m3fn, device=input.device)
 
     output_scales = torch.empty(
-        ((N_2 // GROUP_SIZE), M), dtype=torch.float32, device="cuda"
+        ((N_2 // GROUP_SIZE), M), dtype=torch.float32, device=input.device
     ).transpose(0, 1)
 
     BLOCK_M = 8
