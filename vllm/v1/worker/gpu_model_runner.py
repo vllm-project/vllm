@@ -1538,9 +1538,12 @@ class GPUModelRunner(
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
+        attn_metadata_cache: dict[tuple[KVCacheSpec, type], Any] = {}
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+
             encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
@@ -1644,11 +1647,24 @@ class GPUModelRunner(
                             common_attn_metadata
                         )
                     else:
-                        attn_metadata_i = builder.build(
-                            common_prefix_len=cascade_attn_prefix_len,
-                            common_attn_metadata=common_attn_metadata,
-                            **extra_attn_metadata_args,
-                        )
+                        cache_key = (kv_cache_spec, type(builder))
+                        if (
+                            cache_key in attn_metadata_cache
+                            and builder.supports_update_block_table
+                        ):
+                            cached_attn_metadata = attn_metadata_cache[cache_key]
+                            attn_metadata_i = builder.update_block_table(
+                                cached_attn_metadata,
+                                blk_table_tensor,
+                                slot_mapping,
+                            )
+                        else:
+                            attn_metadata_i = builder.build(
+                                common_prefix_len=cascade_attn_prefix_len,
+                                common_attn_metadata=common_attn_metadata,
+                                **extra_attn_metadata_args,
+                            )
+                            attn_metadata_cache[cache_key] = attn_metadata_i
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
