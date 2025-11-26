@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPrometheus,
 )
 from vllm.logger import init_logger
-from vllm.plugins import load_plugins_by_group
+from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -67,7 +67,7 @@ class StatLoggerBase(ABC):
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
 
-    for name, plugin_class in load_plugins_by_group("vllm.stat_logger_plugins").items():
+    for name, plugin_class in load_plugins_by_group(STAT_LOGGER_PLUGINS_GROUP).items():
         if not isinstance(plugin_class, type) or not issubclass(
             plugin_class, StatLoggerBase
         ):
@@ -440,60 +440,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # Setting default values
         self.record_sleep_state()
 
-        # GPU cache
-        #
-        # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            gauge_gpu_cache_usage = self._gauge_cls(
-                name="vllm:gpu_cache_usage_perc",
-                documentation=(
-                    "GPU KV-cache usage. 1 means 100 percent usage."
-                    "DEPRECATED: Use vllm:kv_cache_usage_perc instead."
-                ),
-                multiprocess_mode="mostrecent",
-                labelnames=labelnames,
-            )
-            self.gauge_gpu_cache_usage = make_per_engine(
-                gauge_gpu_cache_usage, engine_indexes, model_name
-            )
-
-        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_queries
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            counter_gpu_prefix_cache_queries = self._counter_cls(
-                name="vllm:gpu_prefix_cache_queries",
-                documentation=(
-                    "GPU prefix cache queries, in terms of number of queried"
-                    "tokens. DEPRECATED: Use vllm:prefix_cache_queries instead."
-                ),
-                labelnames=labelnames,
-            )
-            self.counter_gpu_prefix_cache_queries = make_per_engine(
-                counter_gpu_prefix_cache_queries, engine_indexes, model_name
-            )
-
-        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_hits
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            counter_gpu_prefix_cache_hits = self._counter_cls(
-                name="vllm:gpu_prefix_cache_hits",
-                documentation=(
-                    "GPU prefix cache hits, in terms of number of cached "
-                    "tokens. DEPRECATED: Use vllm:prefix_cache_hits instead."
-                ),
-                labelnames=labelnames,
-            )
-            self.counter_gpu_prefix_cache_hits = make_per_engine(
-                counter_gpu_prefix_cache_hits, engine_indexes, model_name
-            )
-
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
             documentation="KV-cache usage. 1 means 100 percent usage.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
         self.gauge_kv_cache_usage = make_per_engine(
@@ -734,39 +684,41 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # TODO: in 0.12, only enable if show_hidden_metrics=True
-        histogram_time_per_output_token = self._histogram_cls(
-            name="vllm:time_per_output_token_seconds",
-            documentation=(
-                "Histogram of time per output token in seconds."
-                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-            ),
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
-            labelnames=labelnames,
-        )
-        self.histogram_time_per_output_token = make_per_engine(
-            histogram_time_per_output_token, engine_indexes, model_name
-        )
+        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
+        # TODO: remove in 0.13.0
+        if self.show_hidden_metrics:
+            histogram_time_per_output_token = self._histogram_cls(
+                name="vllm:time_per_output_token_seconds",
+                documentation=(
+                    "Histogram of time per output token in seconds."
+                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
+                ),
+                buckets=[
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.075,
+                    0.1,
+                    0.15,
+                    0.2,
+                    0.3,
+                    0.4,
+                    0.5,
+                    0.75,
+                    1.0,
+                    2.5,
+                    5.0,
+                    7.5,
+                    10.0,
+                    20.0,
+                    40.0,
+                    80.0,
+                ],
+                labelnames=labelnames,
+            )
+            self.histogram_time_per_output_token = make_per_engine(
+                histogram_time_per_output_token, engine_indexes, model_name
+            )
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
@@ -965,19 +917,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )
-            if self.show_hidden_metrics:
-                self.gauge_gpu_cache_usage[engine_idx].set(
-                    scheduler_stats.kv_cache_usage
-                )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
-
-            if self.show_hidden_metrics:
-                self.counter_gpu_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.queries
-                )
-                self.counter_gpu_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.hits
-                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
@@ -1049,7 +989,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            self.histogram_time_per_output_token[engine_idx].observe(itl)
+            if self.show_hidden_metrics:
+                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][

@@ -38,13 +38,13 @@ from vllm.attention.layer import (
 )
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
-    vit_xformers_attn_wrapper,
 )
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -419,7 +419,7 @@ class SiglipVisionEmbeddings(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -656,7 +656,6 @@ class SiglipAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         batch_size, _, _ = hidden_states.shape
 
@@ -702,10 +701,6 @@ class SiglipAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            if seqlens is None:
-                raise ValueError("xFormers attention backend requires seqlens tensor.")
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
         else:
             raise RuntimeError(
                 f"PaddleOCR-VL does not support {self.attn_backend} backend now."
@@ -817,7 +812,6 @@ class SiglipEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -827,7 +821,6 @@ class SiglipEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
 
         hidden_states = residual + hidden_states
@@ -869,7 +862,6 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -942,14 +934,11 @@ class SiglipEncoder(nn.Module):
             cu_seqlens = cu_seqlens.to(device=device)
 
         max_seqlen = None
-        seqlens = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -958,7 +947,6 @@ class SiglipEncoder(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
         return hidden_states
 

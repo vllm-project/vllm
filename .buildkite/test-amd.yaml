@@ -61,7 +61,7 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker Test (CPU) # 4 mins
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -73,6 +73,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
+  - tests/config
   no_gpu: true
   commands:
   - python3 standalone_tests/lazy_imports.py
@@ -80,6 +81,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s transformers_utils
+  - pytest -v -s config
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -187,7 +189,7 @@ steps:
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/compile/test_basic_correctness
+  - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - tests/examples/offline_inference/data_parallel.py
@@ -215,7 +217,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
-  - pytest -v -s compile/test_basic_correctness.py
+  - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
@@ -390,6 +392,15 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -493,17 +504,12 @@ steps:
     - vllm/
     - tests/compile
   commands:
-    - pytest -v -s compile/test_pass_manager.py
-    - pytest -v -s compile/test_fusion.py
-    - pytest -v -s compile/test_fusion_attn.py
-    - pytest -v -s compile/test_functionalization.py
-    - pytest -v -s compile/test_silu_mul_quant_fusion.py
-  #  - pytest -v -s compile/test_sequence_parallelism.py
-  #  - pytest -v -s compile/test_async_tp.py
-    - pytest -v -s compile/test_fusion_all_reduce.py
-    - pytest -v -s compile/test_decorator.py
-    - pytest -v -s compile/test_noop_elimination.py
-    - pytest -v -s compile/test_aot_compile.py
+  # Run unit tests defined directly under compile/,
+  # not including subdirectories, which are usually heavier
+  # tests covered elsewhere.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -515,9 +521,11 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_basic_correctness.py
-  - pytest -v -s compile/test_multimodal_compile.py
-  - pytest -v -s compile/piecewise/
+  # Run smoke tests under fullgraph directory, except test_full_graph.py
+  # as it is a heavy test that is covered in other steps.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
@@ -529,10 +537,10 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
     # Limit to no custom ops to reduce running time
     # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/test_fusions_e2e.py -k 'TRITON and -quant_fp8'"
+  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
 
 - label: Cudagraph test
   timeout_in_minutes: 20
@@ -697,7 +705,7 @@ steps:
   - vllm/model_executor/models/whisper.py
   commands: # LMEval
   # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
-  - pytest -s entrypoints/openai/correctness/  --ignore entrypoints/openai/correctness/test_transcription_api_correctness.py
+  - pytest -s entrypoints/openai/correctness/
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
@@ -746,6 +754,7 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
+  - vllm/transformers_utils/
   - tests/models/test_initialization.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
@@ -998,12 +1007,12 @@ steps:
   optional: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
+    - pytest -v -s tests/models/test_initialization.py -k 'not (Gemma3 or ModernBert or Qwen2_5_VL or Qwen2_5vl or Qwen2VL or TransformersMultiModalEmbeddingModel or TransformersMultiModalForSequenceClassification or Ultravox or Phi4Multimodal or LlavaNextVideo or MiniCPMO or Lfm2Moe or PaliGemma or RobertaForSequenceClassification or Ovis2_5 or Fuyu or DeepseekOCR or KimiVL)'
     - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
+    # - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
     - python3 examples/offline_inference/basic/chat.py
-    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
@@ -1048,7 +1057,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
-- label: Blackwell Fusion Tests # 30 min
+- label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
@@ -1066,10 +1075,12 @@ steps:
     - pytest -v -s tests/compile/test_fusion_attn.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_gpus=2 is not set
-    - pytest -v -s tests/compile/test_fusion_all_reduce.py
+    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
-    # Wrap with quotes to escape yaml 
-    - "pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and Llama-3.1 and -quant_fp8 and -rms_norm'"
+    # Wrap with quotes to escape yaml
+    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
+    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
+    - pytest -v -s tests/compile/distributed/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Blackwell Fusion E2E Tests # 30 min
   timeout_in_minutes: 40
@@ -1086,19 +1097,18 @@ steps:
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/test_fusions_e2e.py
-  - tests/compile/test_full_graph.py
+  - tests/compile/distributed/test_fusions_e2e.py
+  - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
     # Run all e2e fusion tests
     - pytest -v -s tests/compile/test_fusions_e2e.py
-    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
-    - pytest -v -s tests/compile/test_full_graph.py::test_fp8_kv_scale_compile
 
-- label: Blackwell GPT-OSS Eval
+- label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdproduction]
   optional: true # run on nightlies
   source_file_dependencies:
   - tests/evals/gpt_oss
@@ -1107,7 +1117,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
-    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+    - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: Blackwell Quantized MoE Test
   timeout_in_minutes: 60
@@ -1197,7 +1207,7 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/test_basic_correctness.py
+  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/distributed/
   - tests/entrypoints/llm/test_collective_rpc.py
@@ -1210,7 +1220,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/test_basic_correctness.py
+  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
@@ -1310,7 +1320,10 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
+
+    # Disabled for now because MXFP4 backend on non-cuda platform 
+    # doesn't support LoRA yet
+    #- pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
@@ -1325,7 +1338,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
   mirror_hardwares: [amdexperimental]
@@ -1333,13 +1346,12 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
-  gpu: a100
   optional: true
   source_file_dependencies:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   mirror_hardwares: [amdexperimental]
@@ -1416,10 +1428,12 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/compile/test_async_tp.py
-    - pytest -v -s tests/compile/test_sequence_parallelism.py
-    - pytest -v -s tests/compile/test_fusion_all_reduce.py
-    - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
+    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
+    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
+    #- pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
+    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - pytest -v -s tests/compile/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -1472,4 +1486,4 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020

@@ -46,8 +46,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -76,7 +79,34 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        """
+        Get the physical (memory layout) ordering of the kv cache dimensions.
+        e.g. if the KV cache shape is
+        [2, num_blocks, block_size, num_heads, head_size],
+        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
+        ordering of dimensions is
+        [num_blocks, num_heads, 2, block_size, head_size].
+
+        If this function is unimplemented / raises NotImplementedError,
+        the physical layout of the KV cache will match the logical shape.
+
+        Args:
+            include_num_layers_dimension: if True, includes an additional
+                num_layers dimension, which is assumed to be prepended
+                to the logical KV cache shape.
+                With the above example, a return value (2, 4, 0, 1, 3, 5)
+                corresponds to
+                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
+
+                If an additional dimension is NOT included in the returned
+                tuple, the physical layout will not include a layers dimension.
+
+        Returns:
+            A tuple of ints which is a permutation of range(len(shape)).
+        """
         raise NotImplementedError
 
     @classmethod
@@ -115,18 +145,17 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        if not cls.supported_kernel_block_sizes:
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
             return True
 
-        for supported_size in cls.supported_kernel_block_sizes:
-            is_multiple_of = (
-                isinstance(supported_size, MultipleOf)
-                and block_size % supported_size.base == 0
-            )
-            is_int_equal = (
-                isinstance(supported_size, int) and block_size == supported_size
-            )
-            if is_multiple_of or is_int_equal:
+        for supported_size in supported_kernel_block_sizes:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
                 return True
         return False
 
@@ -149,7 +178,7 @@ class AttentionBackend(ABC):
         By default, only supports decoder attention.
         Backends should override this to support other attention types.
         """
-        from vllm.attention import AttentionType
+        from vllm.attention.backends.abstract import AttentionType
 
         return attn_type == AttentionType.DECODER
 
@@ -266,6 +295,12 @@ class AttentionImpl(ABC, Generic[T]):
     dcp_world_size: int
     dcp_rank: int
 
+    pcp_world_size: int
+    pcp_rank: int
+
+    total_cp_world_size: int
+    total_cp_rank: int
+
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
@@ -278,6 +313,17 @@ class AttentionImpl(ABC, Generic[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )

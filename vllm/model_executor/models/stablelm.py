@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import StableLmConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -153,7 +153,7 @@ class StablelmAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.config.max_position_embeddings,
-            base=self.config.rope_theta,
+            rope_parameters=self.config.rope_parameters,
             partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(

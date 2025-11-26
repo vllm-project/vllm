@@ -3,7 +3,6 @@
 """Sampling parameters for text generation."""
 
 import copy
-import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -100,19 +99,6 @@ class StructuredOutputsParams:
         )
 
 
-@dataclass
-class GuidedDecodingParams(StructuredOutputsParams):
-    def __post_init__(self):
-        warnings.warn(
-            "GuidedDecodingParams is deprecated. This will be removed in "
-            "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-            "StructuredOutputsParams instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return super().__post_init__()
-
-
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
     CUMULATIVE = 0
@@ -144,12 +130,6 @@ class SamplingParams(
         are generated and streamed cumulatively per request. To see all `n`
         outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
         in `SamplingParams`."""
-    best_of: int | None = None
-    """Number of output sequences that are generated from the prompt. From
-    these `best_of` sequences, the top `n` sequences are returned. `best_of`
-    must be greater than or equal to `n`. By default, `best_of` is set to `n`.
-    Warning, this is only supported in V0."""
-    _real_n: int | None = None
     presence_penalty: float = 0.0
     """Penalizes new tokens based on whether they appear in the generated text
     so far. Values > 0 encourage the model to use new tokens, while values < 0
@@ -204,6 +184,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    flat_logprobs: bool = False
+    """Whether to return logprobs in flatten format (i.e. FlatLogprob)
+    for better performance.
+    NOTE: GC costs of FlatLogprobs is significantly smaller than
+    list[dict[int, Logprob]]. After enabled, PromptLogprobs and
+    SampleLogprobs would populated as FlatLogprobs."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -234,8 +220,6 @@ class SamplingParams(
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
     """Parameters for configuring structured outputs."""
-    guided_decoding: GuidedDecodingParams | None = None
-    """Deprecated alias for structured_outputs."""
     logit_bias: dict[int, float] | None = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -254,12 +238,11 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    skip_reading_prefix_cache: bool = None
+    skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
     def from_optional(
         n: int | None = 1,
-        best_of: int | None = None,
         presence_penalty: float | None = 0.0,
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
@@ -284,7 +267,6 @@ class SamplingParams(
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
-        guided_decoding: GuidedDecodingParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
@@ -296,20 +278,9 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
-        if guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            structured_outputs = guided_decoding
-            guided_decoding = None
 
         return SamplingParams(
             n=1 if n is None else n,
-            best_of=best_of,
             presence_penalty=0.0 if presence_penalty is None else presence_penalty,
             frequency_penalty=0.0 if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
@@ -342,22 +313,6 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of`:
-        # if `best_of` is not set, we default to `n`;
-        # if `best_of` is set, we set `n` to `best_of`,
-        # and set `_real_n` to the original `n`.
-        # when we return the result, we will check
-        # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}."
-                )
-            if not self._real_n:
-                self._real_n = self.n
-                self.n = self.best_of
-
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
@@ -405,17 +360,6 @@ class SamplingParams(
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
 
-        if self.guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self.structured_outputs = self.guided_decoding
-            self.guided_decoding = None
-
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
@@ -427,18 +371,6 @@ class SamplingParams(
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if self.best_of is not None:
-            if not isinstance(self.best_of, int):
-                raise ValueError(
-                    f"best_of must be an integer, got {type(self.best_of)}"
-                )
-            if self.best_of < 1:
-                raise ValueError(f"best_of must be at least 1, got {self.best_of}")
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}."
-                )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -513,10 +445,6 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
-        if self.best_of != self._real_n and self.output_kind == (
-            RequestOutputKind.DELTA
-        ):
-            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

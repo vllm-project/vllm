@@ -40,6 +40,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -65,6 +66,7 @@ class EagleProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
@@ -83,12 +85,15 @@ class EagleProposer:
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config()
+        )
 
         self.use_cuda_graph = False
 
-        compilation_config = self.vllm_config.compilation_config
-        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = compilation_config.cudagraph_mode
+        self.compilation_config = self.vllm_config.compilation_config
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
             ):
@@ -103,22 +108,24 @@ class EagleProposer:
                 and not self.speculative_config.enforce_eager
             )
 
-        self.cudagraph_batch_sizes = (
-            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
-            if self.use_cuda_graph
-            else []
-        )
-
-        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
-            # M-RoPE need (3, max_num_tokens)
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
+                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -266,12 +273,24 @@ class EagleProposer:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
+        )
+
         cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+        if (
+            self.use_cuda_graph
+            and num_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
+        ):
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            num_input_tokens = num_tokens
+            num_input_tokens = num_tokens_dp_padded
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -295,6 +314,7 @@ class EagleProposer:
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
@@ -357,12 +377,23 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+        batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=batch_size,
+            num_tokens_padded=batch_size,
+        )
+
+        if (
+            self.use_cuda_graph
+            and batch_size_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
+        ):
+            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            input_batch_size = batch_size
+            input_batch_size = batch_size_dp_padded
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        if batch_size_across_dp is not None:
+            batch_size_across_dp[self.dp_rank] = input_batch_size
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -397,10 +428,13 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-
+            # For data integrity when async scheduling, we shouldn't use in place
+            # operations in case they are modified in next step's `prepare_input`
+            # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            # This is an out-of-place operation to avoid modifying the original tensor.
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 
@@ -460,6 +494,7 @@ class EagleProposer:
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
+                num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
@@ -484,7 +519,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -499,7 +534,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids.shape[0] > 0:
+            if token_ids:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -510,9 +545,10 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        return torch.tensor(
+        next_token_ids = torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
+        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -764,7 +800,10 @@ class EagleProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            if (
+                self.use_cuda_graph
+                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            ):
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
                 cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
@@ -1016,8 +1055,11 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                    # usage in CI testing environments with limited GPU memory
                     and torch.equal(
-                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                        target_embed_tokens.weight.cpu(),
+                        self.model.model.embed_tokens.weight.cpu(),
                     )
                 ):
                     share_embeddings = True
@@ -1063,8 +1105,11 @@ class EagleProposer:
                 hasattr(target_language_model, "lm_head")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
+                # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                # usage in CI testing environments with limited GPU memory
                 and torch.equal(
-                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                    target_language_model.lm_head.weight.cpu(),
+                    self.model.lm_head.weight.cpu(),
                 )
             ):
                 share_lm_head = True
@@ -1095,33 +1140,56 @@ class EagleProposer:
         self,
         num_tokens: int,
         use_cudagraphs=True,
+        is_graph_capturing=False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
-            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=(
-                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
-            ),
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
+        for fwd_idx in range(
+            self.num_speculative_tokens if not is_graph_capturing else 1
         ):
-            if self.supports_mm_inputs:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
+            if fwd_idx <= 1:
+                num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    num_tokens_padded=num_tokens,
+                )
+                if (
+                    cudagraphs_enabled
+                    and num_tokens_dp_padded
+                    <= self.compilation_config.max_cudagraph_capture_size
+                ):
+                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                        num_tokens_dp_padded
+                    )
+                else:
+                    num_input_tokens = num_tokens_dp_padded
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-            self.model(
-                input_ids=input_ids,
-                positions=self._get_positions(num_tokens),
-                hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=inputs_embeds,
-            )
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+                if cudagraphs_enabled
+                else CUDAGraphMode.NONE,
+            ):
+                if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                else:
+                    input_ids = self.input_ids[:num_input_tokens]
+                    inputs_embeds = None
+
+                self.model(
+                    input_ids=input_ids,
+                    positions=self._get_positions(num_input_tokens),
+                    hidden_states=self.hidden_states[:num_input_tokens],
+                    inputs_embeds=inputs_embeds,
+                )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
@@ -1148,6 +1216,22 @@ class EagleProposer:
         )
         return builder
 
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        return use_aux_hidden_state
+
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all eagle layers belong to the same KVCacheGroup.
@@ -1170,6 +1254,28 @@ class EagleProposer:
             )
             == 1
         ), "All eagle layers should belong to the same kv cache group"
+
+    def _pad_batch_across_dp(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+    ) -> tuple[int, torch.Tensor]:
+        # TODO(Flechman): support DBO ubatching
+        ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=False,
+            allow_dp_padding=self.use_cuda_graph,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=None,
+            num_scheduled_tokens_per_request=None,
+        )
+        assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
+
+        num_tokens_dp_padded = num_tokens_padded
+        if num_toks_across_dp is not None:
+            num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
+        return num_tokens_dp_padded, num_toks_across_dp
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
