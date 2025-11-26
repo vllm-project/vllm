@@ -455,11 +455,6 @@ def should_use_atomic_add_reduce(
 _quant_fp8_method: QuantFP8 | None = None
 
 
-def _init_quant_fp8_method():
-    global _quant_fp8_method
-    _quant_fp8_method = QuantFP8(False, GroupShape.PER_TOKEN)
-
-
 def get_marlin_input_dtype(prefix):
     if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
@@ -476,7 +471,8 @@ def get_marlin_input_dtype(prefix):
                 "(set VLLM_MARLIN_INPUT_DTYPE=int8)."
             )
 
-        _init_quant_fp8_method()
+        global _quant_fp8_method
+        _quant_fp8_method = QuantFP8(False, GroupShape.PER_TOKEN)
         return torch.float8_e4m3fn
     else:
         return
@@ -488,7 +484,8 @@ def marlin_quant_input(x: torch.Tensor, quant_dtype: torch.dtype):
         return per_token_quant_int8(x)
     elif quant_dtype == torch.float8_e4m3fn:
         if _quant_fp8_method is None:
-            _init_quant_fp8_method()
+            global _quant_fp8_method
+            _quant_fp8_method = QuantFP8(False, GroupShape.PER_TOKEN)
         return _quant_fp8_method(x)
     else:
         raise ValueError(f"unsupported quant_dtype {quant_dtype}")
