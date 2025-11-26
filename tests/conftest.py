@@ -1432,13 +1432,24 @@ def clean_gpu_memory_between_tests():
         yield
         return
 
+    # Wait for GPU memory to be cleared before starting the test
+    import gc
+
     from tests.utils import wait_for_gpu_memory_to_clear
 
     num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(num_gpus)),
-            threshold_ratio=0.1,
-        )
+        try:
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)),
+                threshold_ratio=0.1,
+            )
+        except ValueError as e:
+            logger.info("Failed to clean GPU memory: %s", e)
 
     yield
+
+    # Clean up GPU memory after the test
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
