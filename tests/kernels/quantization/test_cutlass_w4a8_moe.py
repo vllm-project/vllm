@@ -67,16 +67,7 @@ def cutlass_preprocess(
     pack the scale weights
     return the packed layout/strides to pass to grouped gemm
     """
-    # i dont think the shape matters as long as contiguous and one after the other
-    E, (K1, N) = len(w_s_experts), w_s_experts[0].shape
-    w_s_experts = torch.stack(w_s_experts)
-    w_s_experts_perm = torch.as_strided(
-        w_s_experts,
-        size=(E, N, K1),
-        stride=(K1 * N, 1, N)
-    )
-    # import ipdb;ipdb.set_trace()
-    w_s_packed = ops.cutlass_pack_scale_fp8(w_s_experts_perm)
+    w_s_packed = ops.cutlass_pack_scale_fp8(torch.stack(w_s_experts))
     w_q_packed, packed_layout = ops.cutlass_encode_and_reorder_int4b_grouped(torch.stack(w_q_experts)) # expects dim 3
     return w_q_packed, w_s_packed, packed_layout
 
@@ -88,9 +79,9 @@ Ns = [2048, 1024]
 ALIGNMENT = 16 # torch scaled mm alignment for M, needed for reference check
 
 # faster test, qwen config
-Ks = [2048]
-Ns = [768]
-NUM_EXPERTS = [128]
+# Ks = [2048]
+# Ns = [768]
+# NUM_EXPERTS = [128]
 
 if __name__ == '__main__':
     current_platform.seed_everything(42)
@@ -100,8 +91,8 @@ if __name__ == '__main__':
                 # generate random number of tokens per expert
                 Ms = [ALIGNMENT * random.randint(1, 64) for _ in range(num_experts)]
                 # set some random indices to 0
-                for zindex in [6, 7, 8, 17, 83, 94, 114]:
-                    Ms[zindex] = 0
+                # for zindex in [6, 7, 8, 17, 83, 94, 114]:
+                #     Ms[zindex] = 0
                 M_full = sum(Ms)
                 scale_k = K // GROUP_SIZE
 

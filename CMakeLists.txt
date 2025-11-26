@@ -876,6 +876,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(SRCS
        "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
        "csrc/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
+       "csrc/quantization/cutlass_w4a8/w4a8_utils.cu"
        )
 
     set_gencode_flags_for_srcs(

@@ -48,7 +48,6 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
                 "CUTLASS W4A8, only supported int4",
             )
 
-        # TODO(czhu): support -1 (column-wise)
         if c.group_size != 128:
             return False, "Only group_size 128 is supported"
 
@@ -71,7 +70,6 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
     #  `weight_scale`  is: {input_dim = 0, output_dim = 1}
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        # TODO(czhu): optimize speed/mem usage
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)

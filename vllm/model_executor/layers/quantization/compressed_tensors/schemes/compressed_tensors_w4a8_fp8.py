@@ -128,8 +128,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             ),
         )
 
-        # TODO(czhu): allocate the packed fp8 scales memory here?
-        # the scales will be expanded by 8x via `cutlass_pack_scale_fp8`
+        # The scales will be expanded by 8x via `cutlass_pack_scale_fp8`
         weight_scale_args = {
             "weight_loader": weight_loader,
             "data": torch.empty(
