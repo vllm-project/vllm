@@ -63,15 +63,16 @@ def maybe_get_vit_flash_attn_backend(
             attn_backend = AttentionBackendEnum.ROCM_AITER_FA
         elif attn_backend_override is None and on_gfx9() \
                 and attn_backend == AttentionBackendEnum.FLASH_ATTN:
-            return AttentionBackendEnum.FLASH_ATTN, None
+            pass
         else:
             return AttentionBackendEnum.TORCH_SDPA, None
     elif current_platform.is_cuda():
-        return attn_backend, None # keep the original selection
+        pass
     elif current_platform.is_xpu():
         assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
+        pass
     else:
         return AttentionBackendEnum.TORCH_SDPA, None
 
