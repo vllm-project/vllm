@@ -13,7 +13,8 @@ from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -1160,6 +1161,44 @@ def get_current_vllm_config() -> VllmConfig:
 T = TypeVar("T")
 
 
+def _collect_layers_from_context(
+    forward_context: Mapping[str, Any],
+    layer_type: type[T],
+    layer_names: Iterable[str] | None,
+) -> tuple[dict[str, T], list[str]]:
+    collected: dict[str, T] = {}
+    missing: list[str] = []
+
+    if layer_names is None:
+        for name, layer in forward_context.items():
+            if isinstance(layer, layer_type):
+                collected[name] = cast(T, layer)
+        return collected, missing
+
+    for name in layer_names:
+        layer = forward_context.get(name)
+        if layer is None:
+            missing.append(name)
+            continue
+        if isinstance(layer, layer_type):
+            collected[name] = cast(T, layer)
+
+    return collected, missing
+
+
+def resolve_layers_from_vllm_config(
+    vllm_config: VllmConfig,
+    layer_type: type[T],
+    layer_names: list[str] | None = None,
+) -> tuple[dict[str, T], list[str]]:
+    """
+    Return matching layers and names that were missing from the forward context.
+    """
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+    return _collect_layers_from_context(forward_context, layer_type, layer_names)
+
+
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
@@ -1174,13 +1213,15 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
-    forward_context = vllm_config.compilation_config.static_forward_context
-
-    return {
-        layer_name: forward_context[layer_name]
-        for layer_name in layer_names
-        if isinstance(forward_context[layer_name], layer_type)
-    }
+    layers, missing = resolve_layers_from_vllm_config(
+        vllm_config, layer_type, layer_names
+    )
+    if missing:
+        type_name = getattr(layer_type, "__name__", repr(layer_type))
+        logger.debug(
+            "Skipping %d missing layer(s) when collecting %s: %s",
+            len(missing),
+            type_name,
+            ", ".join(missing[:3]) + ("..." if len(missing) > 3 else ""),
+        )
+    return layers
