@@ -165,10 +165,10 @@ def kernel_helion_v2_attention(
             # (tile_m, HEAD_SIZE)
             q = q.view([block_m_size, head_size])
 
-            m = hl.full(
+            M = hl.full(
                 [block_m_size], float("-inf"), dtype=torch.float32
             )  # device=q.device)
-            l = hl.full([block_m_size], 1.0, dtype=torch.float32)
+            L = hl.full([block_m_size], 1.0, dtype=torch.float32)
             acc = hl.zeros(
                 [block_m_size, head_size], dtype=torch.float32
             )  # , device=q.device)
@@ -197,25 +197,25 @@ def kernel_helion_v2_attention(
                 # DEBUG: to check the shape...
                 # qk = qk.view([block_m_size, block_n_size])
                 # (tile_m)
-                m_j = torch.maximum(m, torch.amax(qk, 1))
+                M_j = torch.maximum(M, torch.amax(qk, 1))
                 # (tile_m, tile_n)
-                p = torch.exp(qk - m_j[:, None])
+                P = torch.exp(qk - M_j[:, None])
                 # (tile_m, )
-                l_j = torch.sum(p, 1)
+                L_j = torch.sum(P, 1)
                 # (tile_m, )
-                alpha = torch.exp(m - m_j)
+                alpha = torch.exp(M - M_j)
                 # (tile_m, HEAD_SIZE)
                 acc *= alpha[:, None]
-                l *= alpha + l_j
-                m = m_j
+                L *= alpha + L_j
+                M = M_j
 
                 # (tile_n, HEAD_SIZE)
                 v_view = v.view([block_n_size, head_size])
                 # (tile_m, HEAD_SIZE)
-                acc += torch.mm(p.to(v.dtype), v_view)
+                acc += torch.mm(P.to(v.dtype), v_view)
 
             # epilogue
-            acc = acc / l[:, None]
+            acc = acc / L[:, None]
             t_output[tile_q, tile_m, :] = acc.view(
                 [tile_q.block_size, tile_m.block_size, head_size]
             )
@@ -256,7 +256,9 @@ def helion_unified_attention(
         "Block size must be at least 32 for fp8"
     )
 
-    # max_used_querylen_padded = max_query_len_int if max_query_len_int == 1 else torch._inductor.runtime.runtime_utils.next_power_of_2(max(16, max_query_len_int))
+    # max_used_querylen_padded = max_query_len_int if max_query_len_int == 1
+    #   else torch._inductor.runtime.runtime_utils.next_power_of_2(
+    #     max(16, max_query_len_int))
 
     kernel_helion_v2_attention(
         t_output=out,

@@ -350,11 +350,13 @@ class HelionAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+        # descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
         if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4:
             print(
-                f"DEBUG: calling triton attention for seq lens {attn_metadata.max_query_len} and batch size {len(seqused_k)}."
+                f"DEBUG: calling triton attention for seq lens"
+                f"{attn_metadata.max_query_len} and batch size "
+                f"{len(seqused_k)}."
             )
             from vllm.attention.ops.triton_unified_attention import (
                 unified_attention as triton_unified_attention,
