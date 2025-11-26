@@ -1031,6 +1031,10 @@ def wait_for_engine_startup(
             num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
 
+            num_cpu_blocks = cache_config.num_cpu_blocks or 0
+            num_cpu_blocks += msg["num_cpu_blocks"]
+            cache_config.num_cpu_blocks = num_cpu_blocks
+
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via
             # one of the engine handshakes, and passed to the local
