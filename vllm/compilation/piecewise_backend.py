@@ -119,7 +119,9 @@ class PiecewiseBackend:
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
 
             # args are real arguments
-            # fakify for range, real args for concrete size
+            # fakify for range, real args for concrete size.
+            # For concrete size, we clear the shape env in
+            # compiler_manager.compile() so no need to fakify.
             args = (
                 self._fakify_args(args)
                 if not range_entry.compile_range.is_single_size()
