@@ -33,7 +33,7 @@ class LoRAModelRunnerMixin:
         model: nn.Module,
         vllm_config: VllmConfig,
         device: torch.device,
-        model_config: ModelConfig = None,
+        model_config: ModelConfig | None = None,
     ) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")

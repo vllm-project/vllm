@@ -241,6 +241,16 @@ def qwen2vl_vision_tower_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2.5-3b-vl-flickr-lora-vision")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
