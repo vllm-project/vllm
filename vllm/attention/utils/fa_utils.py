@@ -24,7 +24,7 @@ elif current_platform.is_rocm():
     except ImportError as e:
         raise ImportError(
             "Rocm platform requires upstream flash-attn"
-            "to be installed. Please install flash_attn first."
+            "to be installed. Please install flash-attn first."
         ) from e
 
 
