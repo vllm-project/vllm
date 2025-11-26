@@ -6,11 +6,6 @@ from pathlib import Path
 import pytest
 from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
-from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
-    list_safetensors as original_list_safetensors, # Import originals to ensure binding
-    pull_files as original_pull_files,
-    SafetensorsStreamer as original_SafetensorsStreamer
-)
 
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
@@ -60,7 +55,7 @@ def test_runai_model_loader_download_files_gcs(
         assert deserialized_outputs
 
 
-GLOBAL_PATCHER = StreamerPatcher("/dev/null_placeholder") 
+GLOBAL_PATCHER = StreamerPatcher("/dev/null_placeholder")
 
 
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
@@ -82,15 +77,14 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
 
     monkeypatch.setattr(
         "vllm.transformers_utils.runai_utils.runai_pull_files",
-        GLOBAL_PATCHER.shim_pull_files
+        GLOBAL_PATCHER.shim_pull_files,
     )
     monkeypatch.setattr(
         "vllm.transformers_utils.runai_utils.runai_list_safetensors",
-        GLOBAL_PATCHER.shim_list_safetensors
+        GLOBAL_PATCHER.shim_list_safetensors,
     )
     monkeypatch.setattr(
-        "runai_model_streamer.SafetensorsStreamer",
-        GLOBAL_PATCHER.create_mock_streamer
+        "runai_model_streamer.SafetensorsStreamer", GLOBAL_PATCHER.create_mock_streamer
     )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
