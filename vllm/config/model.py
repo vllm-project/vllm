@@ -1766,16 +1766,17 @@ class ModelConfig:
                 return "encoder_only" if not is_causal else self._model_info.attn_type
         elif self.is_encoder_decoder:
             return "encoder_decoder"
+        elif self.is_attention_free:
+            return "attention_free"
         else:
             return "decoder"
 
     @property
     def is_chunked_prefill_supported(self) -> BoolWithReason:
-        if self.is_encoder_decoder:
-            return CP_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL
-        elif self.pooler_config is not None:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
             # for pooling models
-            if self.attn_type == "encoder_only":
+            if attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
                 return (
                     CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL
@@ -1790,17 +1791,16 @@ class ModelConfig:
                 else:  # pooling_type == "last"
                     return CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL  # noqa: E501
         else:
+            if attn_type == "encoder_decoder":
+                return CP_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL
             return CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL
 
     @property
     def is_prefix_caching_supported(self) -> BoolWithReason:
-        if self.is_encoder_decoder:
-            return APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
-        elif self.is_hybrid:
-            return APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
-        elif self.pooler_config is not None:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
             # for pooling models
-            if self.attn_type == "encoder_only":
+            if attn_type == "encoder_only":
                 # for encoder_only models (bidirectional attn)
                 return (
                     APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING
@@ -1815,6 +1815,12 @@ class ModelConfig:
                 else:  # pooling_type == "last"
                     return APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING  # noqa: E501
         else:
+            if attn_type == "encoder_decoder":
+                return APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING
+            elif attn_type == "attention_free":
+                return APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING
+            elif self.is_hybrid:
+                return APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING
             return APC_REASONS.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING
 
 
@@ -2280,6 +2286,10 @@ class APC_REASONS:
     HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,
         reason="Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+    )
+    ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
+        value=False,
+        reason="Attention free does not support prefix caching since the feature is still experimental.",  # noqa: E501
     )
     PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING = BoolWithReason(
         value=False,

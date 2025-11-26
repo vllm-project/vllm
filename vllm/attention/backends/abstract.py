@@ -39,7 +39,7 @@ class AttentionType:
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
-AttnTypeStr = Literal["decoder", "encoder", "encoder_only", "encoder_decoder", "none"]
+AttnTypeStr = Literal["decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free"]
 
 
 class MultipleOf:

@@ -616,6 +616,11 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "decoder",
         ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
+            "attention_free",
+        ),
         # encoder_decoder models
         (
             "openai/whisper-small",
@@ -692,6 +697,11 @@ def test_is_chunked_prefill_supported(
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "decoder",
+        ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING,
+            "attention_free",
         ),
         # encoder_decoder models
         (
