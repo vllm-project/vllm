@@ -1,21 +1,67 @@
 #!/usr/bin/env bash
 set -ex
 
-# usage: ./build.sh [workspace_dir] [mode]
-#   mode: "install" (default) → install directly into current Python env
-#         "wheel"              → build wheels into WORKSPACE/dist
+# usage: ./install_python_libraries.sh [options]
+#   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace)
+#   --mode <mode>        "install" (default) or "wheel"
+#   --pplx-ref <commit>  pplx-kernels commit hash
+#   --deepep-ref <commit> DeepEP commit hash
 
-WORKSPACE=${1:-$(pwd)/ep_kernels_workspace}
-MODE=${2:-install}
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"12cecfd"}
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
+NVSHMEM_VER=3.3.9
+WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
+MODE=${MODE:-install}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --workspace)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --workspace requires an argument." >&2
+                exit 1
+            fi
+            WORKSPACE="$2"
+            shift 2
+            ;;
+        --mode)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --mode requires an argument." >&2
+                exit 1
+            fi
+            MODE="$2"
+            shift 2
+            ;;
+        --pplx-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --pplx-ref requires an argument." >&2
+                exit 1
+            fi
+            PPLX_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        --deepep-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --deepep-ref requires an argument." >&2
+                exit 1
+            fi
+            DEEPEP_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        *)
+            echo "Error: Unknown argument '$1'" >&2
+            exit 1
+            ;;
+    esac
+done
+
 mkdir -p "$WORKSPACE"
 
 WHEEL_DIR="$WORKSPACE/dist"
 mkdir -p "$WHEEL_DIR"
-NVSHMEM_VER=3.3.9
 
 pushd "$WORKSPACE"
-
-CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 
 # install dependencies if not installed
 if [ -z "$VIRTUAL_ENV" ]; then
@@ -133,7 +179,7 @@ do_build \
     "https://github.com/ppl-ai/pplx-kernels" \
     "pplx-kernels" \
     "setup.py" \
-    "12cecfd" \
+    "$PPLX_COMMIT_HASH" \
     ""
 
 # build DeepEP
@@ -141,7 +187,7 @@ do_build \
     "https://github.com/deepseek-ai/DeepEP" \
     "DeepEP" \
     "setup.py" \
-    "73b6ea4" \
+    "$DEEPEP_COMMIT_HASH" \
     "export NVSHMEM_DIR=$WORKSPACE/nvshmem; "
 
 if [ "$MODE" = "wheel" ]; then
