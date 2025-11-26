@@ -456,8 +456,8 @@ _quant_fp8_method: QuantFP8 | None = None
 
 
 def get__quant_fp8_method() -> QuantFP8:
+    global _quant_fp8_method
     if _quant_fp8_method is None:
-        global _quant_fp8_method
         _quant_fp8_method = QuantFP8(False, GroupShape.PER_TOKEN)
     return _quant_fp8_method
 
