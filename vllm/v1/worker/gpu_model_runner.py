@@ -846,6 +846,19 @@ class GPUModelRunner(
             # Update the block IDs.
             if not resumed_from_preemption:
                 if new_block_ids is not None:
+                    if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                        for kv_cache_gid, kv_cache_group in enumerate(
+                            self.kv_cache_config.kv_cache_groups
+                        ):
+                            kv_cache_spec = kv_cache_group.kv_cache_spec
+                            # NOTE(hhy): pop the last num_speculative_blocks (reuse blocks).
+                            #            maybe have better way to help copy blocks?
+                            if isinstance(kv_cache_spec, MambaSpec):
+                                block_ids = req_state.block_ids[kv_cache_gid]
+                                del block_ids[-kv_cache_spec.num_speculative_blocks:]
+                                if is_global_first_rank():
+                                    logger.info(f'>>> [DEBUG] Worker: poping reuse blocks: {kv_cache_gid=}, {req_state.block_ids[kv_cache_gid]=}')
+
                     # Append the new blocks to the existing block IDs.
                     for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
                         block_ids.extend(new_ids)
@@ -2672,6 +2685,8 @@ class GPUModelRunner(
                 continue
             prev_block_id = req_state.block_ids[kv_cache_group_id][prev_block_idx]
             curr_block_id = req_state.block_ids[kv_cache_group_id][curr_block_idx]
+            assert prev_block_id != 0
+            assert curr_block_id != 0
             block_copy_requests.append((prev_block_id, curr_block_id))
             if is_global_first_rank():
                 logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {req_id=}, prev_block_id {prev_block_id} curr_block_id {curr_block_id}')

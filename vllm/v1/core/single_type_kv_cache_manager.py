@@ -708,6 +708,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 request_id, num_tokens, new_computed_blocks
             )
         else:
+            # TODO(hhy): when sps is enabled, num_tokens incudes SPS lookahead tokens when 
+            # num_computed_tokens > 0, we should minus SPS tokens in prefill phase, 
+            # how about in decode?
+            num_tokens -= (self.num_speculative_blocks 
+                           if request_id in self._allocated_reqs else 0)
             num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
                               len(self.req_to_blocks[request_id]))
@@ -755,6 +760,8 @@ class MambaManager(SingleTypeKVCacheManager):
             return super().allocate_new_blocks(request_id, num_tokens)
         else:
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            num_tokens -= (self.num_speculative_blocks 
+                           if request_id in self._allocated_reqs else 0)
             num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(self.req_to_blocks[request_id]))
             if num_new_blocks <= 0:
@@ -779,9 +786,9 @@ class MambaManager(SingleTypeKVCacheManager):
                         # reuse blocks sps_i_0 and sps_i_1 as b and sps_j_0
                         # new_alloc_blocks: [sps_j_1]
                         # new_blocks: [0, 0, 0, b, sps_j_0, sps_j_1]
-                        req_blocks = req_blocks[:-self.num_speculative_blocks]
                         # TODO: reuse blocks. if we need clean? especially in decode
                         reuse_blocks = req_blocks[-self.num_speculative_blocks:]
+                        del req_blocks[-self.num_speculative_blocks:]
                         new_blocks.extend(reuse_blocks)
                 new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
                 new_blocks.extend(new_alloc_blocks)
