@@ -189,6 +189,7 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        print(f">>> [DEBUG] Scheduler: init enable_prefix_caching={self.cache_config.enable_prefix_caching} block_size={self.block_size} kv_cache_config={self.kv_cache_config}")
 
     def _has_mamba_spec(self) -> bool:
         has_mamba: bool = any(isinstance(spec.kv_cache_spec, MambaSpec) 
@@ -196,7 +197,8 @@ class Scheduler(SchedulerInterface):
         assert not has_mamba or self.vllm_config.model_config.is_hybrid
         return has_mamba
     
-    def _mamba_block_aligned_split(self, request: Request, num_new_tokens: int) -> int:
+    def _mamba_block_aligned_split(self, request: Request, num_new_tokens: int, num_new_local_computed_tokens: int=0, num_external_computed_tokens: int=0) -> int:
+        assert num_external_computed_tokens == 0, "External KV connector is not verified yet"
         if (self.cache_config.enable_prefix_caching 
             and self._has_mamba_spec()):
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
@@ -212,19 +214,21 @@ class Scheduler(SchedulerInterface):
                 # eagle prune
                 if self.use_eagle:
                     last_cache_position = max(last_cache_position - block_size, 0)
-                num_computed_tokens_after_prefill = request.num_computed_tokens + num_new_tokens 
+                num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+                num_computed_tokens_after_prefill = num_computed_tokens + num_new_tokens
                 if num_computed_tokens_after_prefill < last_cache_position:
                     # align to block_size
                     num_new_tokens = num_new_tokens // block_size * block_size
-                elif request.num_computed_tokens < last_cache_position < num_computed_tokens_after_prefill:
+                elif num_computed_tokens < last_cache_position < num_computed_tokens_after_prefill:
                     # force to cache the last chunk
-                    num_new_tokens = last_cache_position - request.num_computed_tokens
+                    num_new_tokens = last_cache_position - num_computed_tokens
                 else:
                     # prefill the last few tokens
                     pass
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
+        print(f">>> [DEBUG] Scheduler: schedule new step")
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -374,6 +378,7 @@ class Scheduler(SchedulerInterface):
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
+                    print(f">>> [DEBUG] Scheduler: preempted request {preempted_req.request_id}")
 
                     self.kv_cache_manager.free(preempted_req)
                     self.encoder_cache_manager.free(preempted_req)
@@ -591,7 +596,7 @@ class Scheduler(SchedulerInterface):
 
                 if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
                     num_new_tokens = self._mamba_block_aligned_split(
-                        request, num_new_tokens)
+                        request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens)
                     if num_new_tokens == 0:
                         break
 
