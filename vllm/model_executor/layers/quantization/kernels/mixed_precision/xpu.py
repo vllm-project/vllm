@@ -5,7 +5,6 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -69,18 +68,16 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         qzeros = None
         if self.config.zero_points:
             qzeros = layer.weight_zero_point.contiguous()
-        ipex_output_size = qweight.shape[0]
         qweight = qweight.t().contiguous()
         scales = scales.t().contiguous()
-        ipex_in_size = qweight.size(0)
-        layer.ipex_output_size = ipex_output_size
+        layer.ipex_output_size = self.config.partition_weight_shape[1]
         layer.ipex_qlinear = (
             ipex.llm.quantization.woq_linear.IPEXWeightOnlyQuantizedLinear.from_weight(
                 qweight,
                 scales,
                 qzeros,
                 in_features=self.config.partition_weight_shape[0],
-                out_features=ipex_output_size,
+                out_features=self.config.partition_weight_shape[1],
                 qconfig=qconfig,
                 g_idx=g_idx,
                 bias=bias,
