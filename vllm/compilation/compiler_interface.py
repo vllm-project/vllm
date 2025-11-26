@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
-import hashlib
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -16,6 +15,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -197,9 +197,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def initialize_cache(
@@ -286,9 +286,9 @@ class InductorAdaptor(CompilerInterface):
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def initialize_cache(
