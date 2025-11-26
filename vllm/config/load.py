@@ -101,7 +101,7 @@ class LoadConfig:
         the final hidden states.
         """
         # This config does not affect the compiled graph.
-        return None
+        return {}
 
     @field_validator("load_format", mode="after")
     def _lowercase_load_format(cls, load_format: str) -> str:

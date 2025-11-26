@@ -163,9 +163,7 @@ class SpeculativeConfig:
             self.method == "eagle3"
         ]
         normalized = normalize_value(factors)
-        if not normalized:
-            return None
-        return {"factors": normalized}
+        return {"factors": normalized} if normalized else {}
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

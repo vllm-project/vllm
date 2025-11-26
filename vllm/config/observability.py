@@ -76,7 +76,7 @@ class ObservabilityConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        return None
+        return {}
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod

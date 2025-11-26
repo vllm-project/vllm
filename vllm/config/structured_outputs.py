@@ -54,7 +54,7 @@ class StructuredOutputsConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        return None
+        return {}
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:

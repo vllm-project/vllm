@@ -371,7 +371,7 @@ class ModelConfig:
         }
 
         factors = get_compile_factors(self, ignored_factors)
-        return factors or None
+        return factors or {}
 
     def _update_nested(
         self,

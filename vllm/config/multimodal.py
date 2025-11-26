@@ -216,9 +216,7 @@ class MultiModalConfig:
             else None
         ]
         normalized = normalize_value(factors)
-        if not normalized:
-            return None
-        return {"factors": normalized}
+        return {"factors": normalized} if normalized else {}
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """

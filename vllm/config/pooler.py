@@ -99,7 +99,7 @@ class PoolerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         # No compile-time factors.
-        return None
+        return {}
 
 
 def get_use_activation(o: object):

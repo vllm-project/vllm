@@ -166,7 +166,7 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         factors = asdict(self)
-        return factors or None
+        return factors or {}
 
     def __post_init__(self) -> None:
         if not self.enable_noop:
@@ -565,7 +565,7 @@ class CompilationConfig:
         }
 
         factors = get_compile_factors(self, ignored_factors)
-        return factors or None
+        return factors or {}
 
     def __repr__(self) -> str:
         exclude = {

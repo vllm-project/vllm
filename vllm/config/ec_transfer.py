@@ -72,7 +72,7 @@ class ECTransferConfig:
         the final hidden states.
         """
         # This config does not affect the compiled graph.
-        return None
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

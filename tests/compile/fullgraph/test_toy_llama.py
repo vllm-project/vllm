@@ -26,6 +26,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import get_compile_factors
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -45,14 +46,9 @@ class LlamaConfig:
     tractable_init: bool = False
     random_seed: int = 0
 
-    def compile_factors(self) -> list[tuple[str, Any]]:
-        factors: list[tuple[str, Any]] = []
-        for key, value in self.__dict__.items():
-            if key == "random_seed":
-                continue
-            factors.append((key, value))
-        factors.sort()
-        return factors
+    def compile_factors(self) -> dict[str, Any]:
+        ignored = {"random_seed"}
+        return get_compile_factors(self, ignored)
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size

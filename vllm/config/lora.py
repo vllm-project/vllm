@@ -76,9 +76,7 @@ class LoRAConfig:
             self.lora_vocab_padding_size,
         ]
         normalized = normalize_value(factors)
-        if not normalized:
-            return None
-        return {"factors": normalized}
+        return {"factors": normalized} if normalized else {}
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:

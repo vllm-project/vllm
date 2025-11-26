@@ -175,7 +175,7 @@ class SchedulerConfig:
         the final hidden states.
         """
         # This config does not affect the compiled graph.
-        return None
+        return {}
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

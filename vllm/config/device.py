@@ -43,7 +43,7 @@ class DeviceConfig:
         # no factors to consider.
         # the device/platform information will be summarized
         # by torch/vllm automatically.
-        return None
+        return {}
 
     def __post_init__(self):
         if self.device == "auto":
