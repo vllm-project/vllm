@@ -370,7 +370,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
-    "Olmo3ForCausalLM": _HfExamplesInfo("shanearora/2025-sep-a-base-model"),
+    "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
@@ -400,6 +400,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
+        trust_remote_code=True,
+    ),
+    "Plamo3ForCausalLM": _HfExamplesInfo(
+        "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
     ),
     "QWenLMHeadModel": _HfExamplesInfo(
@@ -622,6 +626,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
     ),
+    "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
+        "tencent/HunyuanOCR",
+        is_available_online=False,
+    ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
@@ -720,6 +728,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
         "nano_vl_dummy", is_available_online=False, trust_remote_code=True
+    ),
+    "OpenCUAForConditionalGeneration": _HfExamplesInfo(
+        "xlangai/OpenCUA-7B", trust_remote_code=True
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",

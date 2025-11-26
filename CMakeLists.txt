@@ -136,7 +136,7 @@ elseif(HIP_FOUND)
 
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
+      Torch_VERSION VERSION_LESS ${TORCH_SUPPORTED_VERSION_ROCM})
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
@@ -307,7 +307,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v4.2.1" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v4.2.1")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -604,12 +604,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu")
+      "csrc/quantization/fp4/nvfp4_experts_quant.cu"
+      "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
+      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
