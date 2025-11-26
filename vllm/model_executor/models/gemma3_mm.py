@@ -136,11 +136,6 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if not do_pan_and_scan:
             return 0
 
-        logger.warning_once(
-            "`do_pan_and_scan=True` has suboptimal results on V1 "
-            "because of the simplified attention pattern being used."
-        )
-
         # Based on Gemma3ImageProcessor.pan_and_scan
         if image_width >= image_height:
             if image_width / image_height < pan_and_scan_min_ratio_to_activate:
@@ -708,10 +703,23 @@ class Gemma3ForConditionalGeneration(
             # Fill the lower triangle with 0 (causal attention)
             global_attn_mask = global_attn_mask.triu(diagonal=1)
 
-            # Enable bidirectional attention between image tokens
-            # Use advanced indexing for better performance
+            # Enable bidirectional attention for ALL image tokens.
+            # This allows tokens within each image (and across crops for
+            # pan-and-scan) to attend to each other bidirectionally, ensuring
+            # all visual information is integrated regardless of token position.
+            #
+            # For pan-and-scan: All crop tokens can see each other, so the
+            # model integrates information across the original image and all
+            # generated crops (e.g., stop sign in one crop, SUV in another).
+            #
+            # For single images: Same behavior - all 256 image tokens attend
+            # to each other bidirectionally.
+            #
+            # Text tokens remain causal (can only attend to previous tokens).
             img_indices = torch.where(img_pos)[0]
-            global_attn_mask[:, :, img_indices[:, None], img_indices] = 0
+            if len(img_indices) > 0:
+                global_attn_mask[:, :, img_indices[:, None], img_indices] = 0
+
             global_attn_masks.append(global_attn_mask)
 
             # GGUF compatibility: config might be Gemma3TextConfig directly

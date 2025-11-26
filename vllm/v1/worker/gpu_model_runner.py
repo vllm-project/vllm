@@ -2451,6 +2451,8 @@ class GPUModelRunner(
                     mask_dtype=self.model.dtype,
                 )
                 model_kwargs.update(mask_kwargs)
+                # Store for _dummy_run to prevent loss during re-initialization.
+                self.custom_model_kwargs = mask_kwargs
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -3992,6 +3994,7 @@ class GPUModelRunner(
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
+                    **getattr(self, "custom_model_kwargs", {}),
                 }
             elif self.enable_prompt_embeds:
                 input_ids = None
