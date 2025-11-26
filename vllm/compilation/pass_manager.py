@@ -19,6 +19,7 @@ if current_platform.is_cuda_alike():
     from .fusion_attn import AttnFusionPass
     from .qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .sequence_parallelism import SequenceParallelismPass
+    from .sequence_parallelism_moe import SequenceParallelismMoEPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
@@ -99,6 +100,9 @@ class PostGradPassManager(CustomGraphPass):
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.enable_async_tp:
                     self.passes += [AsyncTPPass(config)]
+
+            if self.pass_config.enable_sp_moe:
+                self.passes += [SequenceParallelismMoEPass(config)]
 
             if self.pass_config.enable_fi_allreduce_fusion:
                 self.passes += [AllReduceFusionPass(config)]
