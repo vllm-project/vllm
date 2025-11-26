@@ -134,8 +134,6 @@ __device__ void compute_dynamic_per_token_scales(
         all_token_scales[blockIdx.x * num_groups +
                          threadIdx.x / threads_per_group] = scale;
       }
-      token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] =
-          scale;
     }
     __syncthreads();
   } else {
@@ -196,10 +194,18 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
     // If groupwise is_scale_inverted is true, so we invert the scale here.
+    int64_t scale_idx = 0;
+    if (group_size > 0) {
+      if constexpr (is_scale_transposed) {
+        scale_idx = (i / group_size) * gridDim.x + blockIdx.x;
+      } else {
+        scale_idx = blockIdx.x * num_groups + i / group_size;
+      }
+    }
     auto scale_val =
-        (group_size > 0 ? (is_scale_inverted ? 1.0f / scale[i / group_size]
-                                             : scale[i / group_size])
-                        : *scale);
+        (group_size > 0
+             ? (is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx])
+             : *scale);
     output[token_offset + i] =
         ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale_val);
   }
@@ -377,8 +383,6 @@ __device__ void compute_dynamic_per_token_scales(
         all_token_scales[blockIdx.x * num_groups +
                          threadIdx.x / threads_per_group] = scale;
       }
-      token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] =
-          scale;
     }
     __syncthreads();
 
@@ -447,7 +451,7 @@ __device__ void compute_dynamic_per_token_scales(
 
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false>
+          bool has_residual = false, bool is_scale_transposed = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -501,10 +505,19 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 
     q8x4_t<scalar_out_t> out;
 
+    int64_t num_groups = hidden_size / group_size;
+    int64_t scale_idx = 0;
+    if (group_size > 0) {
+      if constexpr (is_scale_transposed) {
+        scale_idx = (i * VEC_SIZE / group_size) * gridDim.x + blockIdx.x;
+      } else {
+        scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;
+      }
+    }
+
     auto scale_val =
         (group_size > 0
-             ? (is_scale_inverted ? 1.0f / scale[i * VEC_SIZE / group_size]
-                                  : scale[i * VEC_SIZE / group_size])
+             ? (is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx])
              : *scale);
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {

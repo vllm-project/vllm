@@ -93,10 +93,12 @@ __global__ void rms_norm_per_block_quant_kernel(
     float* __restrict__ rms,
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
     float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
+                                     // or
+                                     // [hidden_size / group_size, num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
-    float* __restrict__ token_scale, float const* scale_ub,
-    float const var_epsilon, int32_t const hidden_size,
+    float* __restrict__ token_scale,      // unused
+    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
@@ -107,21 +109,20 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
       scalar_t, scalar_out_t, has_residual, is_scale_transposed>(
-      token_scale, scales, input, weight, rms[blockIdx.x], scale_ub,
-      hidden_size, residual, group_size);
+      nullptr, scales, input, weight, rms[blockIdx.x], scale_ub, hidden_size,
+      residual, group_size);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
-  int token_idx = blockIdx.x * hidden_size / group_size;
   // For int8, don't invert token_scale here: do it inside the norm_and_quant
   // kernel. We do it because particular elements of token_scale can be shared
   // between multiple threads, so this way, we avoid extra synchronization
   // overhead.
   vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t,
                                    std::is_same_v<scalar_out_t, int8_t>,
-                                   has_residual>(
-      out, input, weight, rms[blockIdx.x], token_scale + token_idx, hidden_size,
-      residual, group_size);
+                                   has_residual, is_scale_transposed>(
+      out, input, weight, rms[blockIdx.x], scales, hidden_size, residual,
+      group_size);
 }
 
 }  // namespace vllm
@@ -224,8 +225,6 @@ void rms_norm_per_block_quant_dispatch(
   auto const fp_options =
       torch::TensorOptions().dtype(torch::kFloat32).device(input.device());
   torch::Tensor rms = torch::empty({num_tokens}, fp_options);
-  torch::Tensor token_scale =
-      torch::empty({num_tokens * hidden_size / group_size}, fp_options);
 
   if (residual.has_value()) {
     if (is_scale_transposed) {
@@ -235,7 +234,7 @@ void rms_norm_per_block_quant_dispatch(
                 scalar_in_t, scalar_t, true, true><<<grid, block, 0, stream>>>(
                 rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                 scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
+                weight.data_ptr<scalar_in_t>(), nullptr,
                 scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                 var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>(),
                 group_size);
@@ -247,7 +246,7 @@ void rms_norm_per_block_quant_dispatch(
                 scalar_in_t, scalar_t, true, false><<<grid, block, 0, stream>>>(
                 rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                 scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
+                weight.data_ptr<scalar_in_t>(), nullptr,
                 scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                 var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>(),
                 group_size);
@@ -261,7 +260,7 @@ void rms_norm_per_block_quant_dispatch(
                 scalar_in_t, scalar_t, false, true><<<grid, block, 0, stream>>>(
                 rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                 scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
+                weight.data_ptr<scalar_in_t>(), nullptr,
                 scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                 var_epsilon, hidden_size, nullptr, group_size);
           });
@@ -273,8 +272,7 @@ void rms_norm_per_block_quant_dispatch(
                 <<<grid, block, 0, stream>>>(
                     rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                     scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                    weight.data_ptr<scalar_in_t>(),
-                    token_scale.data_ptr<float>(),
+                    weight.data_ptr<scalar_in_t>(), nullptr,
                     scale_ub.has_value() ? scale_ub->data_ptr<float>()
                                          : nullptr,
                     var_epsilon, hidden_size, nullptr, group_size);
