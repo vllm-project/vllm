@@ -1101,10 +1101,6 @@ def run_cutlass_block_scaled_fused_experts(
 
 
 # W4A8
-# TODO(czhu) just test the quant op
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-QUANT_FP8_OP = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -1203,21 +1199,11 @@ def run_cutlass_moe_w4a8_fp8(
     )
     expert_offsets = expert_offsets[:-1]
 
-    # TODO(czhu) I think we can re-use the code here but we need to find way
-    # to bypass the SwapAB heuristic (for w4a8 it's always swapped)
-    # e.g. for problem1 it should be [2*N, M, K], problem 2 [K, M, N]
+    # For RS gemm SwapAB is always enabled (swap logical M, N in the problem shape)
     ops.get_cutlass_moe_mm_problem_sizes(
-        local_topk_ids, problem_sizes1, problem_sizes2, global_num_experts, N, K
+        local_topk_ids, problem_sizes1, problem_sizes2, global_num_experts, N, K,
+        force_swap_ab=True
     )
-
-    # we can get around this for now (just test correctness) with a hack
-    # if SwapAB is not enabled then manually swap it ourselves
-    if local_topk_ids.numel() > 64:
-        def swap_columns_contiguous(X, i, j):
-            X[:, [i, j]] = X[:, [j, i]]
-            return X     
-        problem_sizes1 = swap_columns_contiguous(problem_sizes1, 0, 1)
-        problem_sizes2 = swap_columns_contiguous(problem_sizes2, 0, 1)
 
     ops.cutlass_w4a8_moe_mm(
         mm1_out,

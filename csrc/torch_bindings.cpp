@@ -480,7 +480,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                                 Tensor! problem_sizes1, "
       "                                 Tensor! problem_sizes2, "
       "                                 int num_experts, int n, int k, "
-      "                                 Tensor? blockscale_offsets) -> ()");
+      "                                 Tensor? blockscale_offsets, "
+      "                                 bool? force_swap_ab) -> ()");
   ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
            &get_cutlass_moe_mm_problem_sizes);
 

@@ -1719,7 +1719,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_packed", marlin_w2_qweight)
 
         # Repack scales
-        # TODO(czhu): naive cast to fp8 to test the quality
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_weight_scale,
             size_k=layer.w13_weight_packed.shape[2],
