@@ -601,6 +601,13 @@ class LoRAModelManager:
 
             if not self._match_target_modules(module_name):
                 continue
+
+            if (
+                self.supports_mm_lora
+                and self._get_mm_punica_wrapper(module_name) is None
+            ):
+                continue
+
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if isinstance(module, FusedMoE):
