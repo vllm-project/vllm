@@ -210,6 +210,14 @@ class OpenAIServingCompletion(OpenAIServing):
                 # environments. It shouldn't be necessary (redundant from above)
                 # but pre-commit in CI fails without it.
                 engine_prompt = cast(EmbedsPrompt | TokensPrompt, engine_prompt)
+
+                # Process cartridges if present
+                if request.cartridges and "prompt_token_ids" in engine_prompt:
+                    cartridge_dicts = [c.model_dump() for c in request.cartridges]
+                    engine_prompt["prompt_token_ids"] = self._process_cartridges(
+                        cartridge_dicts, engine_prompt["prompt_token_ids"]
+                    )
+
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
                         prompt=engine_prompt,

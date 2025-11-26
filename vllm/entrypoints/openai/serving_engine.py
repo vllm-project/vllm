@@ -289,6 +289,49 @@ class OpenAIServing:
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
+    def _process_cartridges(
+        self, cartridges: list[dict[str, Any]] | None, prompt_token_ids: list[int]
+    ) -> list[int]:
+        """
+        Load cartridges and prepend their token IDs to the prompt.
+
+        Args:
+            cartridges: List of cartridge specifications from the request
+            prompt_token_ids: Original prompt token IDs
+
+        Returns:
+            Combined token IDs with cartridge tokens prepended
+        """
+        if not cartridges:
+            return prompt_token_ids
+
+        from vllm.logger import init_logger
+        from vllm.v1.cartridge_loader import load_cartridges_from_request
+
+        logger = init_logger(__name__)
+
+        try:
+            # Load all cartridges
+            loaded_cartridges = load_cartridges_from_request(cartridges)
+
+            # Prepend cartridge token IDs to the prompt
+            cartridge_token_ids = []
+            for cartridge_data in loaded_cartridges:
+                cartridge_token_ids.extend(cartridge_data.token_ids.tolist())
+
+            if cartridge_token_ids:
+                logger.info(
+                    f"Prepending {len(cartridge_token_ids)} tokens from "
+                    f"{len(loaded_cartridges)} cartridge(s) to prompt"
+                )
+                return cartridge_token_ids + prompt_token_ids
+            else:
+                return prompt_token_ids
+
+        except Exception as e:
+            logger.error(f"Failed to process cartridges: {e}")
+            raise RuntimeError(f"Failed to process cartridges: {e}") from e
+
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
     ) -> Callable[[AnyTokenizer], ToolParser] | None:

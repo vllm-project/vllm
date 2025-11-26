@@ -522,6 +522,29 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
 
+class KVCacheCartridge(OpenAIBaseModel):
+    """KV cache cartridge specification for loading pre-computed KV caches."""
+
+    id: str = Field(
+        description=(
+            "The identifier/path to the cartridge. For S3 sources, this should be "
+            "an S3 URI (e.g., 's3://bucket/path/to/cartridge.pt'). "
+            "For local sources, this should be a file path."
+        ),
+    )
+    source: Literal["s3", "local"] = Field(
+        default="s3",
+        description=("The source type of the cartridge. Currently supports 's3' and 'local'."),
+    )
+    force_redownload: bool = Field(
+        default=False,
+        description=(
+            "If true, force redownload the cartridge even if it exists in the cache. "
+            "If false, use cached version if available."
+        ),
+    )
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -710,6 +733,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    cartridges: list[KVCacheCartridge] | None = Field(
+        default=None,
+        description=(
+            "List of KV cache cartridges to load for this request. "
+            "Cartridges are pre-computed KV caches that can be loaded from "
+            "S3 or local storage to speed up inference."
+        ),
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -1130,6 +1162,15 @@ class CompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    cartridges: list[KVCacheCartridge] | None = Field(
+        default=None,
+        description=(
+            "List of KV cache cartridges to load for this request. "
+            "Cartridges are pre-computed KV caches that can be loaded from "
+            "S3 or local storage to speed up inference."
+        ),
     )
 
     vllm_xargs: dict[str, str | int | float] | None = Field(
