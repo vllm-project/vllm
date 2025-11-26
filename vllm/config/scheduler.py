@@ -18,6 +18,7 @@ from typing_extensions import Self, deprecated
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -193,7 +194,7 @@ class SchedulerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
