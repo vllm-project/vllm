@@ -6,7 +6,6 @@ from collections.abc import Sequence
 
 import partial_json_parser
 import regex as re
-from typing import Union
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -334,21 +333,24 @@ class Hermes2ProToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 if current_tool_call is None:
                     return None
-                function_name: Union[str, None] = current_tool_call.get("name")
+                function_name: str | None = current_tool_call.get("name")
                 arguments = current_tool_call.get("arguments")
                 if arguments is not None:
                     arguments = json.dumps(arguments, ensure_ascii=False)
                 if function_name:
                     self.current_tool_name_sent = True
-                    return DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      type="function",
-                                      id=make_tool_call_id(),
-                                      function=DeltaFunctionCall(
-                                          name=function_name,
-                                          arguments=arguments).model_dump(
-                                              exclude_none=True))
-                    ])
+                    return DeltaMessage(
+                        tool_calls=[
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                type="function",
+                                id=make_tool_call_id(),
+                                function=DeltaFunctionCall(
+                                    name=function_name, arguments=arguments
+                                ).model_dump(exclude_none=True),
+                            )
+                        ]
+                    )
                 else:
                     return None
             # case -- otherwise, send the tool call delta
@@ -387,15 +389,21 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # Handle tool call with no argument
-            if tool_call_end and not \
-                self.streamed_args_for_tool[self.current_tool_id] and \
-                (cur_arguments is None or cur_arguments == {}):
-                delta = DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=self.current_tool_id,
-                                  function=DeltaFunctionCall(
-                                      arguments=json.dumps({})).model_dump(
-                                          exclude_none=True))
-                ])
+            if (
+                tool_call_end
+                and not self.streamed_args_for_tool[self.current_tool_id]
+                and (cur_arguments is None or cur_arguments == {})
+            ):
+                delta = DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=json.dumps({})
+                            ).model_dump(exclude_none=True),
+                        )
+                    ]
+                )
                 self.streamed_args_for_tool[self.current_tool_id] = "{}"
             # case -- no arguments have been created yet. skip sending a delta.
             elif not cur_arguments and not prev_arguments:
