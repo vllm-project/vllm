@@ -1299,7 +1299,6 @@ def set_current_vllm_config(
     try:
         _current_vllm_config = vllm_config
         _current_prefix = prefix
-        get_cached_compilation_config.cache_clear()
         yield
     except Exception:
         raise
