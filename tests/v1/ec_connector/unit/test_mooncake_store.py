@@ -1,22 +1,15 @@
-import asyncio
 import ctypes
 import json
-import os
-import numpy as np
 import pytest
 import torch
-from collections import deque
 from dataclasses import dataclass
 from unittest import mock
+from vllm.platforms import current_platform
 from vllm.config import VllmConfig
-from vllm.distributed.ec_transfer.utils import tensor_memory_pool
 from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
-    TensorMemoryPool,
-    InsufficientMemoryError)
+    TensorMemoryPool)
 from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import (
-    ECMooncakeStore,
-    MooncakeStoreConfig,
-    ECMooncakeTensorPoolMetadata)
+    ECMooncakeStore)
 
 DEFAULT_BUFFER_SIZE=1024
 
@@ -104,9 +97,11 @@ def mock_inner_mooncake_store(monkeypatch):
     return fake_store
 
 @pytest.fixture
-def temp_config_file(tmp_path):
-    config_path = tmp_path / "mooncake_config.json"
-    config_data = {
+def vllm_config():
+    config = mock.Mock(spec=VllmConfig)
+    config.ec_transfer_config = mock.Mock()
+    config.device_config.device = current_platform.device_type
+    config.ec_transfer_config.ec_connector_extra_config = {
         "local_hostname": "test_host",
         "metadata_server": "test_meta",
         "global_segment_size": DEFAULT_BUFFER_SIZE,
@@ -119,17 +114,6 @@ def temp_config_file(tmp_path):
         "replica_num": 2,
         "fast_transfer": False,
         "fast_transfer_buffer_size": DEFAULT_BUFFER_SIZE,
-    }
-    with open(config_path, 'w') as f:
-        json.dump(config_data, f)
-    return str(config_path)
-
-@pytest.fixture
-def vllm_config(temp_config_file):
-    config = mock.Mock(spec=VllmConfig)
-    config.ec_transfer_config = mock.Mock()
-    config.ec_transfer_config.ec_connector_extra_config = {
-        "ec_mooncake_config_file_path": temp_config_file
     }
     return config
 
@@ -168,12 +152,7 @@ def test_init_with_fast_transfer(monkeypatch, vllm_config, mock_inner_mooncake_s
     )
 
     # Modify config to enable fast_transfer
-    with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
-        data = json.load(f)
-        data["fast_transfer"] = True
-        f.seek(0)
-        json.dump(data, f)
-        f.truncate()
+    vllm_config.ec_transfer_config.ec_connector_extra_config["fast_transfer"] = True
 
     store = ECMooncakeStore(vllm_config)
     assert store.config.fast_transfer
@@ -194,7 +173,7 @@ def test_batch_exists(ec_mooncake_store, mock_inner_mooncake_store):
     exists = ec_mooncake_store.batch_exists([])
     assert exists == []
 
-def test_batch_get_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
+def test_batch_get_non_fast(ec_mooncake_store, mock_inner_mooncake_store, vllm_config):
     # Prepare serialized data
     tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.float32)
     meta = {
@@ -210,15 +189,15 @@ def test_batch_get_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
 
     mock_inner_mooncake_store.data = {"key1": serialized, "key2": None}
 
-    results = ec_mooncake_store.batch_get(["key1", "key2"])
+    results = ec_mooncake_store.batch_get(["key1", "key2"], device=vllm_config.device_config.device)
     assert torch.equal(results[0].cpu(), tensor.cpu())
     assert results[1] is None
 
-def test_batch_put_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
+def test_batch_put_non_fast(ec_mooncake_store, mock_inner_mooncake_store, vllm_config):
     tensors = [
-        torch.randn((2, 2), dtype=torch.bfloat16, device='cuda'),
+        torch.randn((2, 2), dtype=torch.bfloat16, device=vllm_config.device_config.device),
         torch.randn((1, 4), dtype=torch.float32),
-        torch.tensor([[1, 2]], dtype=torch.int32, device='cuda')]
+        torch.tensor([[1, 2]], dtype=torch.int32, device=vllm_config.device_config.device)]
     keys = ["key1", "key2", "key3"]
 
     ec_mooncake_store.batch_put(keys, tensors)
@@ -234,7 +213,7 @@ def test_batch_put_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
     meta = json.loads(stored1[4:4 + len_meta].decode("utf-8"))
     assert meta["original_dtype"] == "torch.bfloat16"
 
-    results = ec_mooncake_store.batch_get(["key1", "key2", "key3"])
+    results = ec_mooncake_store.batch_get(["key1", "key2", "key3"], device=vllm_config.device_config.device)
 
     assert torch.equal(results[0].cpu(), tensors[0].cpu())
     assert torch.equal(results[1].cpu(), tensors[1].cpu())
@@ -242,12 +221,7 @@ def test_batch_put_non_fast(ec_mooncake_store, mock_inner_mooncake_store):
 
 def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
-    with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
-        data = json.load(f)
-        data["fast_transfer"] = True
-        f.seek(0)
-        json.dump(data, f)
-        f.truncate()
+    vllm_config.ec_transfer_config.ec_connector_extra_config["fast_transfer"] = True
 
     store = ECMooncakeStore(vllm_config)
 
@@ -261,7 +235,7 @@ def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store
         "key1": value1_bytes,
     }
 
-    results = store.batch_get(["key1", "key2"])
+    results = store.batch_get(["key1", "key2"], device=vllm_config.device_config.device)
     assert torch.equal(value1.cpu(), results[0].cpu())
     assert results[1] is None
 
@@ -269,18 +243,13 @@ def test_batch_get_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store
 
 def test_batch_put_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
-    with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
-        data = json.load(f)
-        data["fast_transfer"] = True
-        f.seek(0)
-        json.dump(data, f)
-        f.truncate()
+    vllm_config.ec_transfer_config.ec_connector_extra_config["fast_transfer"] = True
 
     store = ECMooncakeStore(vllm_config)
 
     tensors = [
-        torch.tensor([[1, 2]], dtype=torch.int32, device='cuda'),
-        torch.tensor([[3.0, 4.0]], dtype=torch.float32, device='cuda')]
+        torch.tensor([[1, 2]], dtype=torch.int32, device=vllm_config.device_config.device),
+        torch.tensor([[3.0, 4.0]], dtype=torch.float32, device=vllm_config.device_config.device)]
     keys = ["key1", "key2"]
 
     store.batch_put(keys, tensors)
@@ -295,23 +264,18 @@ def test_batch_put_zero_copy(monkeypatch, vllm_config, mock_inner_mooncake_store
 
 def test_pool_eviction(monkeypatch, vllm_config, mock_inner_mooncake_store):
     # Enable fast_transfer
-    with open(vllm_config.ec_transfer_config.ec_connector_extra_config["ec_mooncake_config_file_path"], 'r+') as f:
-        data = json.load(f)
-        data["fast_transfer"] = True
-        f.seek(0)
-        json.dump(data, f)
-        f.truncate()
+    vllm_config.ec_transfer_config.ec_connector_extra_config["fast_transfer"] = True
 
     store = ECMooncakeStore(vllm_config)
     orig_tensor_pool = store.tensor_pool
     store.tensor_pool = mock.MagicMock(wraps=store.tensor_pool)
 
-    evict_tensor = torch.randn((4, 4), dtype=torch.float32, device='cuda')
+    evict_tensor = torch.randn((4, 4), dtype=torch.float32, device=vllm_config.device_config.device)
     store.batch_put(["evict_key"], [evict_tensor])
     store.wait_for_put()
 
     # Trigger allocation with eviction, 16 * 16 * 4 = 1024
-    new_tensor = torch.randn((16, 16), dtype=torch.float32, device='cuda')
+    new_tensor = torch.randn((16, 16), dtype=torch.float32, device=vllm_config.device_config.device)
     store.batch_put(["new_key"], [new_tensor])
     store.wait_for_put()
 
