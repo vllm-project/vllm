@@ -1625,14 +1625,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         replace_parameter(layer, "w2_weight_packed", marlin_w2_qweight)
         # Repack scales
-        # TODO(czhu): naive cast to fp8 to test the quality
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_weight_scale,
             size_k=layer.w13_weight_packed.shape[2],
             size_n=layer.w13_weight_scale.shape[2],
             group_size=self.group_size,
         )
-        # ).to(torch.float8_e4m3fn).to(torch.bfloat16)
+
         replace_parameter(layer, "w13_weight_scale", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_weight_scale,
@@ -1641,7 +1640,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             size_n=layer.w2_weight_scale.shape[2],
             group_size=self.group_size,
         )
-        # ).to(torch.float8_e4m3fn).to(torch.bfloat16)
+
         replace_parameter(layer, "w2_weight_scale", marlin_w2_scales)
 
         layer.workspace = marlin_make_workspace_new(device, 4)
