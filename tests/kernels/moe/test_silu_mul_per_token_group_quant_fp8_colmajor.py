@@ -29,5 +29,7 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     )
 
     # massive atol to account for float8 rounding errors.
-    torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32), atol=32, rtol=1e-3)
+    torch.testing.assert_close(
+        output.to(torch.float32), ref_output.to(torch.float32), atol=32, rtol=1e-3
+    )
     torch.testing.assert_close(output_scales, ref_output_scales)
