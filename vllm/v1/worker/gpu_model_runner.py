@@ -5319,7 +5319,7 @@ class GPUModelRunner(
                     return module
             raise KeyError(f"Module '{target_name}' not found")
 
-        for layer_name, kv_cache in kv_caches.item():
+        for layer_name, kv_cache in kv_caches.items():
             layer_prefix = layer_name.rsplit(".", 1)[0]
             self_attn_module = find_module_by_name(self.model, layer_prefix)
             if not hasattr(self_attn_module, "get_sink_kv"):
