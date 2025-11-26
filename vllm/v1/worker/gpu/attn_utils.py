@@ -41,12 +41,17 @@ def init_attn_backend(
     attn_metadata_builders: list[AttentionMetadataBuilder] = []
     flashinfer_workspace: torch.Tensor | None = None
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        layer_names = kv_cache_group_spec.layer_names
-        any_layer_name = next(iter(layer_names))
-
         layer_type = cast(type[Any], AttentionLayerBase)
-        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
-        attn_backend = attn_layers[any_layer_name].get_attn_backend()
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config, layer_type, kv_cache_group_spec.layer_names
+        )
+        layer_names = list(attn_layers.keys())
+        if not layer_names:
+            raise RuntimeError(
+                "KV cache group has no attention layers available on this worker."
+            )
+
+        attn_backend = attn_layers[layer_names[0]].get_attn_backend()
         for layer_name in layer_names:
             attn_backends[layer_name] = attn_backend
 

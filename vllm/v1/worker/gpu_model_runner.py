@@ -4558,6 +4558,8 @@ class GPUModelRunner(
             layers = get_layers_from_vllm_config(
                 self.vllm_config, layer_type, kv_cache_group_spec.layer_names
             )
+            if not layers:
+                return ({}, set())
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than
@@ -4565,8 +4567,8 @@ class GPUModelRunner(
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_backend = layers[layer_name].get_attn_backend()
+            for layer_name, layer in layers.items():
+                attn_backend = layer.get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
                     attn_backend = create_fast_prefill_custom_backend(
