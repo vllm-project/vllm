@@ -11,7 +11,6 @@ from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.config import VllmConfig
@@ -567,11 +566,6 @@ class DotsVisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if (
-            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
         self.out_hidden_size = config.hidden_size
         # Keep blocks for compatibility with other vision towers
         num_layers = (

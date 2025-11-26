@@ -33,7 +33,7 @@ from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
+
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.attention.ops.vit_attn_wrappers import (
@@ -846,11 +846,6 @@ class SiglipEncoder(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        } and check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,

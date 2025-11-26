@@ -49,7 +49,6 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import check_upstream_fa_availability
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
