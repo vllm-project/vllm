@@ -16,6 +16,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.attention.layer import Attention
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
@@ -32,8 +33,9 @@ if is_flash_attn_varlen_func_available():
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -54,24 +56,39 @@ from .flash_attn import FlashAttentionMetadata
 logger = init_logger(__name__)
 
 
-class FlashSinkAttentionBackend(AttentionBackend):
+class FlashDiffkvAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    # NOTE(tdoublep): while in principle, FA supports
-    # MultipleOf(16), these are the block sizes that do not
-    # suffer from the NaN propagation problem described here:
-    # https://github.com/Dao-AILab/flash-attention/issues/1974
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
     # TODO: Remove hard code
-    cache_head_size_ratio: float = 2.0
+    head_size_v: int = 128
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        if (
+            model_config
+            and model_config.is_hybrid
+            and (
+                cache_config.mamba_ssm_cache_dtype == "float32"
+                or cache_config.mamba_cache_dtype == "float32"
+            )
+        ):
+            # NOTE(tdoublep): while in principle, FA supports
+            # MultipleOf(16), these are the block sizes that do not
+            # suffer from the NaN propagation problem described here:
+            # https://github.com/Dao-AILab/flash-attention/issues/1974
+            return [16, 32, 64]
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_SINK_ATTN"
+        return "FLASH_DIFFKV_ATTN"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """FlashSinkAttention supports all attention types."""
+        """FlashDiffkvAttention supports all attention types."""
         from vllm.attention import AttentionType
 
         return attn_type in (
@@ -82,16 +99,16 @@ class FlashSinkAttentionBackend(AttentionBackend):
         )
 
     @staticmethod
-    def get_impl_cls() -> type["FlashSinkAttentionImpl"]:
-        return FlashSinkAttentionImpl
+    def get_impl_cls() -> type["FlashDiffkvAttentionImpl"]:
+        return FlashDiffkvAttentionImpl
 
     @staticmethod
-    def get_builder_cls() -> type["FlashSinkAttentionMetadataBuilder"]:
-        return FlashSinkAttentionMetadataBuilder
+    def get_builder_cls() -> type["FlashDiffkvAttentionMetadataBuilder"]:
+        return FlashDiffkvAttentionMetadataBuilder
 
     @classmethod
-    def set_cache_head_size_ratio(cls, ratio: float) -> None:
-        cls.cache_head_size_ratio = ratio
+    def set_head_size_v(cls, head_size_v: int) -> None:
+        cls.head_size_v = head_size_v
 
     @staticmethod
     def get_kv_cache_shape(
@@ -107,16 +124,24 @@ class FlashSinkAttentionBackend(AttentionBackend):
             num_blocks,
             block_size,
             num_kv_heads,
-            int(head_size * FlashSinkAttentionBackend.cache_head_size_ratio),
+            head_size + FlashDiffkvAttentionBackend.head_size_v,
         )
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD":
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            # (num_blocks, num_layers, block_size, num_kv_heads, head_size)
+            return (0, 1, 2, 3, 4)
+        elif cache_layout == "NHD":
             stride_order = (0, 1, 2, 3)
+        elif cache_layout == "HND" and include_num_layers_dimension:
+            # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
+            return (2, 3, 0, 1, 4)
         elif cache_layout == "HND":
             stride_order = (0, 2, 1, 3)
         else:
@@ -131,8 +156,8 @@ class FlashSinkAttentionBackend(AttentionBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -176,12 +201,12 @@ def _get_sliding_window_configs(
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        assert isinstance(layer.impl, FlashSinkAttentionImpl)
+        assert isinstance(layer.impl, FlashDiffkvAttentionImpl)
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
 
 
-class FlashSinkAttentionMetadataBuilder(
+class FlashDiffkvAttentionMetadataBuilder(
     AttentionMetadataBuilder[FlashAttentionMetadata]
 ):
     # FA3:
@@ -242,8 +267,8 @@ class FlashSinkAttentionMetadataBuilder(
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        self.dcp_kv_cache_interleave_size = (
-            self.parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
         )
 
         self.use_full_cuda_graph = (
@@ -322,7 +347,7 @@ class FlashSinkAttentionMetadataBuilder(
         ):
             cache_dtype = self.cache_config.cache_dtype
             if cache_dtype.startswith("fp8"):
-                qkv_dtype = FlashSinkAttentionBackend.get_fp8_dtype_for_flashattn(
+                qkv_dtype = FlashDiffkvAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype
                 )
             else:
@@ -365,7 +390,7 @@ class FlashSinkAttentionMetadataBuilder(
                 dcp_context_kv_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
@@ -450,7 +475,7 @@ class FlashSinkAttentionMetadataBuilder(
         return use_cascade_attention(*args, **kwargs)
 
 
-class FlashSinkAttentionImpl(AttentionImpl):
+class FlashDiffkvAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
 
     def __init__(
@@ -466,11 +491,9 @@ class FlashSinkAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
-        head_size_v: int | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
-        self.head_size_v = head_size_v
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
@@ -512,7 +535,7 @@ class FlashSinkAttentionImpl(AttentionImpl):
             )
 
     def supports_quant_query_input(self) -> bool:
-        return False
+        return True
 
     def forward(
         self,
@@ -525,10 +548,8 @@ class FlashSinkAttentionImpl(AttentionImpl):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
-        sink_key: torch.Tensor | None = None,
-        sink_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashSinkAttention.
+        """Forward pass with FlashAttention.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
@@ -537,8 +558,6 @@ class FlashSinkAttentionImpl(AttentionImpl):
             kv_cache: shape =
                 [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
             attn_metadata: Metadata for attention.
-            sink_key: shape = [sink_len, num_kv_heads, head_size]
-            sink_value: shape = [sink_len, num_kv_heads, head_size_v]
         Returns:
             shape = [num_tokens, num_heads * head_size_v]
         NOTE: FP8 quantization, flash-attn expect the size of
@@ -546,14 +565,11 @@ class FlashSinkAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
-        assert sink_key is not None and sink_value is not None, (
-            "sink_key and sink_value must be provided"
-        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not supported yet "
-                "for FlashSinkAttentionImpl"
+                "fused output quantization is not yet supported for"
+                "FlashDiffkvAttentionImpl"
             )
 
         if attn_metadata is None:
@@ -572,7 +588,6 @@ class FlashSinkAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        sink_len = sink_key.shape[0]
 
         # Handle encoder attention differently - no KV cache needed
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
@@ -585,11 +600,11 @@ class FlashSinkAttentionImpl(AttentionImpl):
                 output[:num_actual_tokens],
                 attn_metadata,
                 layer,
-                sink_key,
-                sink_value,
             )
 
         # For decoder and cross-attention, use KV cache as before
+        key_cache = kv_cache[..., : self.head_size]
+        value_cache = kv_cache[..., self.head_size :]
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -606,29 +621,6 @@ class FlashSinkAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-
-            # store sink_key and sink_value in head blocks
-            key_cache = kv_cache[..., : self.head_size]
-            value_cache = kv_cache[..., self.head_size :]
-            block_size = key_cache.shape[1]
-            assert sink_len % block_size == 0
-            num_sink_blocks = sink_len // block_size
-            sink_kv_slot_mapping = torch.arange(
-                block_size,
-                sink_len + block_size,
-                device=attn_metadata.slot_mapping.device,
-                dtype=attn_metadata.slot_mapping.dtype,
-            )
-            triton_reshape_and_cache_flash_diffkv(
-                sink_key,
-                sink_value,
-                kv_cache,
-                sink_kv_slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
             triton_reshape_and_cache_flash_diffkv(
                 key,
                 value,
@@ -641,7 +633,7 @@ class FlashSinkAttentionImpl(AttentionImpl):
 
         if self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
-            dtype = FlashSinkAttentionBackend.get_fp8_dtype_for_flashattn(
+            dtype = FlashDiffkvAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
             )
             key_cache = key_cache.view(dtype)
@@ -649,29 +641,28 @@ class FlashSinkAttentionImpl(AttentionImpl):
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
-            seqused_k = attn_metadata.seq_lens + sink_len
+            seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
-            max_seqlen_k = attn_metadata.max_seq_len + sink_len
+            max_seqlen_k = attn_metadata.max_seq_len
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
-            sink_block_table = torch.arange(
-                1,
-                num_sink_blocks + 1,
-                device=block_table.device,
-                dtype=block_table.dtype,
-            )
-            sink_block_table = sink_block_table[None, :].expand(
-                block_table.shape[0], -1
-            )
-            block_table = torch.cat((sink_block_table, block_table), dim=1)
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
             if self.dcp_world_size > 1:
-                raise ValueError(
-                    "Decode context parallel is not supported yet "
-                    f"for dcp_world_size = {self.dcp_world_size}"
+                self._forward_with_dcp(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
                 )
+                return output
             else:
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -724,9 +715,88 @@ class FlashSinkAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
             s_aux=self.sinks,
-            sink_len=sink_len,
         )
         return output
+
+    def _forward_with_dcp(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        cu_seqlens_q = attn_metadata.query_start_loc
+        max_seqlen_q = attn_metadata.max_query_len
+        block_table = attn_metadata.block_table
+
+        query = query.contiguous()
+        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        context_attn_out, context_lse = flash_attn_varlen_func(
+            q=query_across_dcp,
+            k=key_cache,
+            v=value_cache,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=attn_metadata.dcp_context_kv_lens,
+            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+            softmax_scale=self.scale,
+            causal=False,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=block_table,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            scheduler_metadata=attn_metadata.scheduler_metadata,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
+        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+            context_attn_out,
+            context_lse.transpose(0, 1),
+            get_dcp_group(),
+            return_lse=True,
+        )
+        context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
+
+        query_attn_out, query_lse = flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_k=cu_seqlens_q,
+            max_seqlen_k=max_seqlen_q,
+            softmax_scale=self.scale,
+            causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+        assert context_attn_out_cor.shape == query_attn_out.shape
+        assert context_lse_cor.shape == query_lse.shape
+        merge_attn_states(
+            output,
+            context_attn_out_cor,
+            context_lse_cor,
+            query_attn_out,
+            query_lse,
+        )
 
     def _forward_encoder_attention(
         self,
@@ -736,20 +806,16 @@ class FlashSinkAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
-        sink_key: torch.Tensor,
-        sink_value: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
 
         Args:
             query: shape = [num_encoder_tokens, num_heads, head_size]
             key: shape = [num_encoder_tokens, num_kv_heads, head_size]
-            value: shape = [num_encoder_tokens, num_kv_heads, head_size_v]
+            value: shape = [num_encoder_tokens, num_kv_heads, head_size]
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
-            sink_key: shape = [sink_len, num_kv_heads, head_size]
-            sink_value: shape = [sink_len, num_kv_heads, head_size_v]
         """
         # For encoder attention, process FP8 quantization if needed
         if self.kv_cache_dtype.startswith("fp8"):
@@ -758,40 +824,10 @@ class FlashSinkAttentionImpl(AttentionImpl):
             )
 
         # Use encoder-specific metadata for sequence information
-        sink_len = sink_key.shape[0]
-        key_list = []
-        value_list = []
-        for seq_id in range(attn_metadata.block_table.shape[0]):
-            seq_start = attn_metadata.query_start_loc[seq_id]
-            seq_end = attn_metadata.query_start_loc[seq_id + 1]
-            key_list.append(
-                torch.cat(
-                    [
-                        sink_key,
-                        key[seq_start:seq_end],
-                    ],
-                    dim=0,
-                )
-            )
-            value_list.append(
-                torch.cat(
-                    [
-                        sink_value,
-                        value[seq_start:seq_end],
-                    ],
-                    dim=0,
-                )
-            )
-        key = torch.cat(key_list, dim=0).contiguous()
-        value = torch.cat(value_list, dim=0).contiguous()
-
         cu_seqlens_q = attn_metadata.query_start_loc
-        cu_seqlens_k = attn_metadata.seq_lens + sink_len
-        cu_seqlens_k = torch.nn.functional.pad(
-            torch.cumsum(cu_seqlens_k, dim=-1), [1, 0], value=0
-        ).to(torch.int32)
+        cu_seqlens_k = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
-        max_seqlen_k = attn_metadata.max_seq_len + sink_len
+        max_seqlen_k = attn_metadata.max_query_len
 
         descale_shape = (
             cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
@@ -926,14 +962,12 @@ def cascade_attention(
     k_descale: torch.Tensor | None = None,
     v_descale: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
-    sink_len: int | None = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
     assert sliding_window == (-1, -1), (
         "Cascade attention does not support sliding window."
     )
-    assert sink_len is not None, "sink_len must be provided."
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
@@ -942,22 +976,15 @@ def cascade_attention(
     assert num_common_kv_blocks > 0
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
-    num_sink_blocks = sink_len // block_size
-    sink_block_table = torch.arange(
-        1, num_sink_blocks + 1, device=block_table.device, dtype=block_table.dtype
-    )
-    sink_block_table = sink_block_table[None, :].expand(block_table.shape[0], -1)
-    block_table = torch.cat((sink_block_table, block_table), dim=1)
-
     # Process shared prefix.
     prefix_output, prefix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
         cu_seqlens_q=cu_prefix_query_lens,
-        seqused_k=prefix_kv_lens + sink_len,
+        seqused_k=prefix_kv_lens,
         max_seqlen_q=num_tokens,
-        max_seqlen_k=common_prefix_len + sink_len,
+        max_seqlen_k=common_prefix_len,
         softmax_scale=softmax_scale,
         causal=False,
         window_size=sliding_window,
@@ -989,7 +1016,7 @@ def cascade_attention(
         softmax_scale=softmax_scale,
         causal=True,
         window_size=sliding_window,
-        block_table=block_table[:, num_sink_blocks + num_common_kv_blocks :],
+        block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         scheduler_metadata=suffix_scheduler_metadata,

@@ -25,6 +25,9 @@ from vllm.attention.backends.abstract import (
     AttentionMetadata,
     MultipleOf,
 )
+from vllm.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash_diffkv,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -321,6 +324,10 @@ class GPUModelRunner(
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.hidden_size = model_config.get_hidden_size()
         self.attention_chunk_size = model_config.attention_chunk_size
+        self.sink_len = getattr(
+            self.vllm_config.model_config.hf_config, "param_sink_number", 0
+        )
+        assert self.sink_len % self.cache_config.block_size == 0
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
 
@@ -443,6 +450,7 @@ class GPUModelRunner(
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            sink_len=self.sink_len,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1590,6 +1598,28 @@ class GPUModelRunner(
                 # graph mode.
                 blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
 
+            # Modify the blk_table_tensor and seq_lens in-place so that attention will
+            # know there are sink_key and sink_value in kv_caches
+            if self.sink_len > 0:
+                seq_lens[:] = seq_lens + self.sink_len
+                seq_lens_cpu[:] = seq_lens_cpu + self.sink_len
+                max_seq_len = max_seq_len + self.sink_len
+                sink_block_table = torch.arange(
+                    1,
+                    self.sink_len // self.cache_config.block_size + 1,
+                    device=blk_table_tensor.device,
+                    dtype=blk_table_tensor.dtype,
+                )
+                sink_block_table = sink_block_table[None, :].expand(
+                    blk_table_tensor.shape[0], -1
+                )
+                num_sink_blocks = sink_block_table.shape[1]
+                blk_table_tensor_clone = blk_table_tensor.clone()
+                blk_table_tensor[:, num_sink_blocks:] = blk_table_tensor_clone[
+                    :, :-num_sink_blocks
+                ]
+                blk_table_tensor[:, :num_sink_blocks] = sink_block_table
+
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1624,6 +1654,8 @@ class GPUModelRunner(
                     if cascade_attn_prefix_lens
                     else 0
                 )
+                if self.sink_len > 0:
+                    cascade_attn_prefix_len = cascade_attn_prefix_len + self.sink_len
                 builder = attn_group.get_metadata_builder()
 
                 extra_attn_metadata_args = {}
@@ -4838,6 +4870,7 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=self.num_spec_tokens,
+                sink_len=self.sink_len,
             )
 
     def _allocate_kv_cache_tensors(
@@ -5165,6 +5198,7 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
+        self.prepare_sink_kv_cache(kv_caches)
 
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
@@ -5269,3 +5303,36 @@ class GPUModelRunner(
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
+
+    def prepare_sink_kv_cache(self, kv_caches) -> None:
+        if self.sink_len == 0:
+            return
+
+        def find_module_by_name(model, target_name: str):
+            for name, module in model.named_modules():
+                if name == target_name:
+                    return module
+            raise KeyError(f"Module '{target_name}' not found")
+
+        for layer_name, kv_cache in kv_caches.item():
+            layer_prefix = layer_name.rsplit(".", 1)[0]
+            self_attn_module = find_module_by_name(self.model, layer_prefix)
+            if not hasattr(self_attn_module, "get_sink_kv"):
+                continue
+            else:
+                sink_kv = self_attn_module.get_sink_kv()
+                sink_kv_slot_mapping = torch.arange(
+                    self.vllm_config.cache_config.block_size,
+                    self.sink_len + self.vllm_config.cache_config.block_size,
+                    device=torch.cuda.current_device(),
+                    dtype=torch.long,
+                )
+                triton_reshape_and_cache_flash_diffkv(
+                    sink_kv["sink_key"],
+                    sink_kv["sink_value"],
+                    kv_cache,
+                    sink_kv_slot_mapping,
+                    self_attn_module.attn.kv_cache_dtype,
+                    self_attn_module.attn._k_scale,
+                    self_attn_module.attn._v_scale,
+                )

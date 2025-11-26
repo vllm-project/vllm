@@ -159,7 +159,7 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True)
-class FullSinkAttentionSpec(AttentionSpec):
+class FullDiffkvAttentionSpec(AttentionSpec):
     head_size_v: int
     sliding_window: int | None = None
     attention_chunk_size: int | None = None
@@ -170,7 +170,7 @@ class FullSinkAttentionSpec(AttentionSpec):
     window attention are regarded as full attention in KV cache manager 
     (blocks are allocated for all tokens), while computed as sliding window 
     attention in model runner.
-    In this case, we use FullSinkAttentionSpec and record the sliding window size.
+    In this case, we use FullDiffkvAttentionSpec and record the sliding window size.
     Default to None for not using sliding window attention.
     """
 
@@ -198,12 +198,12 @@ class FullSinkAttentionSpec(AttentionSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         """
-        Merge a list of FullSinkAttentionSpec objects into a single
-        FullSinkAttentionSpec object.
+        Merge a list of FullDiffkvAttentionSpec objects into a single
+        FullDiffkvAttentionSpec object.
         """
-        assert all(isinstance(spec, FullSinkAttentionSpec) for spec in specs), (
+        assert all(isinstance(spec, FullDiffkvAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be "
-            "FullSinkAttentionSpec."
+            "FullDiffkvAttentionSpec."
         )
 
         sliding_window = set(

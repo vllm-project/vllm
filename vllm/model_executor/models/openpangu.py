@@ -81,12 +81,12 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.flash_sink_attn import FlashSinkAttentionBackend
+from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backends.flash_diffkv_attn import FlashDiffkvAttentionBackend
 from vllm.v1.kv_cache_interface import (
-    FullSinkAttentionSpec,
+    FullDiffkvAttentionSpec,
     KVCacheSpec,
 )
-from vllm.transformers_utils.config import set_default_rope_theta
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -96,7 +96,7 @@ def check_ffn_act_fn(act_fn: str):
         )
 
 
-class AttentionWithSink(Attention):
+class DiffkvAttention(Attention):
     def __init__(
         self,
         num_heads: int,
@@ -138,9 +138,6 @@ class AttentionWithSink(Attention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        # For attention with sink, we have sink k, v
-        sink_key: torch.Tensor | None = None,
-        sink_value: torch.Tensor | None = None,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         """
@@ -194,8 +191,6 @@ class AttentionWithSink(Attention):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
-                    sink_key=sink_key,
-                    sink_value=sink_value,
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
@@ -204,13 +199,11 @@ class AttentionWithSink(Attention):
                     value,
                     output,
                     self.layer_name,
-                    sink_key=sink_key,
-                    sink_value=sink_value,
                 )
             return output.view(-1, hidden_size)
         else:
             raise ValueError(
-                "Unsupport Error, currently only flash_sink_attn "
+                "Unsupport Error, currently only flash_diffkv_attn "
                 "backend with output buffer is supported"
             )
 
@@ -221,7 +214,7 @@ class AttentionWithSink(Attention):
         assert self.attn_type == AttentionType.DECODER
         # Only support for full attention now.
         assert self.sliding_window is None
-        return FullSinkAttentionSpec(
+        return FullDiffkvAttentionSpec(
             block_size=block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
@@ -682,15 +675,14 @@ class OpenPanguEmbeddedAttention(nn.Module):
         )
 
 
-class OpenPanguSinkAttention(nn.Module):
+class OpenPanguDiffkvAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -739,7 +731,6 @@ class OpenPanguSinkAttention(nn.Module):
         self.k_size = self.num_kv_heads * self.head_dim
         self.v_size = self.num_kv_heads * self.v_channels
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.param_sink_number = getattr(config, "param_sink_number", 0)
@@ -770,7 +761,7 @@ class OpenPanguSinkAttention(nn.Module):
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self._init_rotary_emb(
-            config, rope_scaling=rope_scaling, quant_config=quant_config
+            config, rope_parameters=rope_parameters, quant_config=quant_config
         )
 
         if hasattr(config, "interleaved_sliding_window"):
@@ -788,10 +779,8 @@ class OpenPanguSinkAttention(nn.Module):
         else:
             sliding_window = None
 
-        FlashSinkAttentionBackend.set_cache_head_size_ratio(
-            (self.head_dim + self.v_channels) / self.head_dim
-        )
-        self.attn = AttentionWithSink(
+        FlashDiffkvAttentionBackend.set_head_size_v(self.v_channels)
+        self.attn = DiffkvAttention(
             self.num_heads,
             self.head_dim,
             self.v_channels,
@@ -802,7 +791,7 @@ class OpenPanguSinkAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            attn_backend=FlashSinkAttentionBackend,
+            attn_backend=FlashDiffkvAttentionBackend,
         )
 
         if self.param_sink_number > 0:
@@ -904,13 +893,6 @@ class OpenPanguSinkAttention(nn.Module):
 
         q = q.view(-1, self.q_size)
         k = k.view(-1, self.k_size)
-        param_sink_key = self.param_sink_key
-        if (
-            self.param_sink_number > 0
-            and hasattr(self, "k_layernorm")
-            and self.k_layernorm is not None
-        ):
-            param_sink_key = self.k_layernorm(param_sink_key)
 
         attn_output = self.attn(
             q,
@@ -919,23 +901,14 @@ class OpenPanguSinkAttention(nn.Module):
             output_shape=torch.Size(
                 [q.shape[0], q.shape[1] // self.head_dim * self.v_channels]
             ),
-            **(
-                dict(
-                    sink_key=param_sink_key,
-                    sink_value=self.param_sink_value,
-                )
-                if self.param_sink_number > 0
-                else {}
-            ),
         )
-        attn_output = attn_output.reshape(-1, self.num_heads * self.v_channels)
         output, _ = self.o_proj(attn_output)
         return output
 
     def _init_rotary_emb(
         self,
         config: PretrainedConfig,
-        rope_scaling: dict[str, Any] | None,
+        rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = False
@@ -944,10 +917,23 @@ class OpenPanguSinkAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.qk_rope_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
         )
+
+    def get_sink_kv(self) -> dict[str, torch.Tensor]:
+        if self.param_sink_number == 0:
+            raise ValueError("No sink_key and sink_value when param_sink_number == 0")
+
+        if hasattr(self, "k_layernorm") and self.k_layernorm is not None:
+            param_sink_key = self.k_layernorm(self.param_sink_key)
+        else:
+            param_sink_key = self.param_sink_key
+
+        return {
+            "sink_key": param_sink_key,
+            "sink_value": self.param_sink_value,
+        }
 
 
 class OpenPanguDecoderLayer(nn.Module):
@@ -1011,15 +997,20 @@ class OpenPanguDecoderLayer(nn.Module):
                     f"is_causal={config.is_causal} is not support "
                     "for attention with sink"
                 )
-            self.self_attn = OpenPanguSinkAttention(
+            rope_parameters = getattr(config, "rope_scaling", None)
+            if rope_parameters is None:
+                rope_parameters = {
+                    "rope_type": "default",
+                    "rope_theta": config.rope_theta,
+                }
+            self.self_attn = OpenPanguDiffkvAttention(
                 config=config,
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
                 num_kv_heads=getattr(
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
-                rope_theta=rope_theta,
-                rope_scaling=getattr(config, "rope_scaling", None),
+                rope_parameters=rope_parameters,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,
