@@ -77,11 +77,24 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
 
     class MockFilesModule:
         def glob(self, path: str, allow_pattern=None, credentials=None):
-            return GLOBAL_PATCHER.shim_list_safetensors(path, s3_credentials=credentials)
+            return GLOBAL_PATCHER.shim_list_safetensors(
+                path, s3_credentials=credentials
+            )
 
-        def pull_files(self, model_path, dst, allow_pattern=None, ignore_pattern=None, credentials=None):
+        def pull_files(
+            self,
+            model_path,
+            dst,
+            allow_pattern=None,
+            ignore_pattern=None,
+            credentials=None,
+        ):
             return GLOBAL_PATCHER.shim_pull_files(
-                model_path, dst, allow_pattern, ignore_pattern, s3_credentials=credentials
+                model_path,
+                dst,
+                allow_pattern,
+                ignore_pattern,
+                s3_credentials=credentials,
             )
 
     def mock_get_s3_files_module():
