@@ -64,7 +64,6 @@ class IPEXwNa16LinearKernel(MPLinearKernel):
             weight_qscheme=ipex.quantization.WoqWeightQScheme.SYMMETRIC,
         )
         qweight = layer.weight_packed
-        layer.ipex_output_size = qweight.shape[-1]
         g_idx = layer.weight_g_idx if self.config.has_g_idx else None
         scales = layer.weight_scale
         qzeros = None
