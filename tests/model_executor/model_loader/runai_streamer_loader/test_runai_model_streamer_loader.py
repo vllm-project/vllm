@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
+from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
+    list_safetensors as original_list_safetensors, # Import originals to ensure binding
+    pull_files as original_pull_files,
+    SafetensorsStreamer as original_SafetensorsStreamer
+)
 
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
@@ -56,33 +60,38 @@ def test_runai_model_loader_download_files_gcs(
         assert deserialized_outputs
 
 
-STREAMER_MODULE_PATH = "runai_model_streamer"
-VLLM_MODEL_LOADER_MODULE = "vllm.transformers_utils.runai_utils"
+GLOBAL_PATCHER = StreamerPatcher("/dev/null_placeholder") 
 
 
-@patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_pull_files")
-@patch(f"{VLLM_MODEL_LOADER_MODULE}.runai_list_safetensors")
-@patch(f"{STREAMER_MODULE_PATH}.SafetensorsStreamer")
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
-    mock_streamer_class,
-    mock_list_safetensors,
-    mock_pull_files,
     vllm_runner,
     tmp_path: Path,
+    monkeypatch,
 ):
+    GLOBAL_PATCHER.local_path = str(tmp_path)
+    
     test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
 
     # Download model from HF
     mock_model_dir = f"{tmp_path}/gpt2"
     snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
 
-    # Initialize the Patcher to replace the S3 path with the local path
+    # Configure the Patcher to replace the S3 path with the local path
     local_bucket_root = str(tmp_path)
-    patcher = StreamerPatcher(local_bucket_root)
+    GLOBAL_PATCHER.local_path = local_bucket_root
 
-    mock_list_safetensors.side_effect = patcher.shim_list_safetensors
-    mock_pull_files.side_effect = patcher.shim_pull_files
-    mock_streamer_class.side_effect = patcher.create_mock_streamer
+    monkeypatch.setattr(
+        "vllm.transformers_utils.runai_utils.runai_pull_files",
+        GLOBAL_PATCHER.shim_pull_files
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.runai_utils.runai_list_safetensors",
+        GLOBAL_PATCHER.shim_list_safetensors
+    )
+    monkeypatch.setattr(
+        "runai_model_streamer.SafetensorsStreamer",
+        GLOBAL_PATCHER.create_mock_streamer
+    )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
