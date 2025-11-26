@@ -21,7 +21,13 @@ GROUP_SIZE = 128
 FLOAT8_T = torch.float8_e4m3fn
 
 
-def print_timers(timers: list[TMeasurement]):
+def print_timers(timers: list[TMeasurement], cuda_graph_nops: int):
+    print(
+        f"Note : The timings reported above is for {cuda_graph_nops} "
+        "consecutive invocations of the benchmarking functions. "
+        f"Please divide by {cuda_graph_nops} for single invocation "
+        "timings."
+    )
     compare = TBenchmark.Compare(timers)
     compare.print()
 
@@ -178,9 +184,11 @@ def run(Ts: list[int], Ns: list[int], arg_pool_size: int) -> list[TMeasurement]:
         reference_timer = bench_impl(bench_tensors, ImplType.REFERENCE)
         timers.append(reference_timer)
 
-        print_timers([silu_mul_quant_timer, reference_timer])
+        print_timers(
+            [silu_mul_quant_timer, reference_timer], cuda_graph_nops=arg_pool_size
+        )
 
-    print_timers(timers)
+    print_timers(timers, cuda_graph_nops=arg_pool_size)
 
     return timers
 
@@ -190,4 +198,4 @@ if __name__ == "__main__":
     N = [2048, 4096, 8192]
 
     print(f"T = {T}, N = {N}")
-    run(T, N, arg_pool_size=16)
+    run(T, N, arg_pool_size=8)
