@@ -2679,6 +2679,7 @@ class GPUModelRunner(
             # TODO in this PR(Chen): verify this for spec decode and adjust the comment
             curr_block_idx = (self.seq_lens.cpu[i] - 1) // block_size
             if is_global_first_rank():
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {req_state.block_ids[kv_cache_group_id]=}')
                 logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {req_id=}, prev_len {req_state.num_computed_tokens} prev_block_idx {prev_block_idx} curr_len {self.seq_lens.cpu[i]} curr_block_idx {curr_block_idx}')
             if prev_block_idx == curr_block_idx:
                 # same block, no need to copy

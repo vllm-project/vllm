@@ -514,7 +514,7 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
                     logger.info(f'>>> [DEBUG] Scheduler: get_computed_blk: req_id={request.request_id},'
-                               f'{num_new_local_computed_tokens=}, {new_computed_blocks.blocks=}')
+                               f'{num_new_local_computed_tokens=}')
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -780,7 +780,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
-        logger.info(f">>> [DEBUG] Scheduler: scheduler output: {scheduler_output}")
+        # logger.info(f">>> [DEBUG] Scheduler: scheduler output: {scheduler_output}")
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
