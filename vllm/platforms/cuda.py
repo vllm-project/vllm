@@ -150,6 +150,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
