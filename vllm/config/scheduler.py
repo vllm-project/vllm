@@ -11,7 +11,6 @@ from typing_extensions import Self, deprecated
 
 from vllm.config.utils import HashResult, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
