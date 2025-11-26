@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import partial_json_parser
 import regex as re
+from typing import Union
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
