@@ -120,7 +120,8 @@ class CudaGraphManager:
             attn_metadata_builders=attn_metadata_builders,
             num_reqs=batch_size,
             num_tokens=batch_size,
-            query_start_loc=input_buffers.query_start_loc,
+            query_start_loc_gpu=input_buffers.query_start_loc.gpu[: batch_size + 1],
+            query_start_loc_cpu=input_buffers.query_start_loc.cpu[: batch_size + 1],
             seq_lens=input_buffers.seq_lens,
             seq_lens_np=np.full(batch_size, self.max_model_len, dtype=np.int32),
             num_computed_tokens_cpu=None,  # FIXME
