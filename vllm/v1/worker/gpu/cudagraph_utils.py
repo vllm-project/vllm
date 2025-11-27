@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
@@ -127,15 +128,7 @@ class CudaGraphManager:
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
         )
-        if self.dp_size > 1:
-            num_tokens_across_dp = torch.full(
-                (self.dp_size,),
-                batch_size,
-                dtype=torch.int32,
-                device="cpu",
-            )
-        else:
-            num_tokens_across_dp = None
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, batch_size)
 
         # Warm up.
         with set_forward_context(
