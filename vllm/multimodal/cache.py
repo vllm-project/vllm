@@ -501,8 +501,8 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
-        # TODO
-        raise NotImplementedError
+        # TODO: Handle n > 0 for safety if problems arise with this cache
+        return self._shm_cache.is_cached(mm_hash)
 
     @override
     def get_and_update_item(
@@ -532,7 +532,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
             self._p0_cache[mm_hash] = prompt_updates, item.modality
             address_item = self.address_as_item(address, monotonic_id, item.modality)
-            return address_item, mm_item[1]
+            return address_item, prompt_updates
         except (ValueError, MemoryError) as e:
             # put may fail if the object is too large or
             # the cache is full.
