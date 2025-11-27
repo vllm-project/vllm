@@ -42,6 +42,7 @@ def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
+    enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
@@ -76,7 +77,7 @@ def create_scheduler(
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
-        enable_chunked_prefill=True,
+        enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
     )
     model_config = ModelConfig(

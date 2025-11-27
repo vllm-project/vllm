@@ -930,31 +930,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             if num_decodes > 0:
                 pure_decode = num_prefills == 0
-                # possible required padding for cudagraph replay
                 use_cudagraph = (
                     self.enable_cuda_graph
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                if use_cudagraph:
-                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                        num_decode_tokens
-                    )
-                    # Carefully fulfill the padding region with reasonable value
-                    # on cpu.
-                    # Make sure paged_kv_indptr_cpu is not decreasing
-                    self.paged_kv_indptr_cpu[
-                        1 + num_decodes : 1 + num_input_tokens
-                    ].fill_(paged_kv_indptr_cpu[-1])
-                    # Fill the remaining paged_kv_last_page_len_cpu with 1.
-                    # This is because flashinfer treats 0 as a full page
-                    # instead of empty.
-                    self.paged_kv_last_page_len_cpu[num_decodes:num_input_tokens].fill_(
-                        1
-                    )
-
-                else:
-                    num_input_tokens = num_decode_tokens
+                num_input_tokens = num_decode_tokens
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph

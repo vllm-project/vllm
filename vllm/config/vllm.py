@@ -3,7 +3,6 @@
 
 import copy
 import getpass
-import hashlib
 import json
 import os
 import tempfile
@@ -25,6 +24,7 @@ from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
+from vllm.utils.hashing import safe_hash
 
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -96,7 +96,7 @@ class VllmConfig:
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, one can append compilation arguments via 
-    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -193,7 +193,7 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = hashlib.md5(
+                additional_config_hash = safe_hash(
                     json.dumps(additional_config, sort_keys=True).encode(),
                     usedforsecurity=False,
                 ).hexdigest()
@@ -204,9 +204,9 @@ class VllmConfig:
             vllm_factors.append("None")
         factors.append(vllm_factors)
 
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:

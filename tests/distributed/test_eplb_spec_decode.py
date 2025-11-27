@@ -10,10 +10,11 @@ from tests.utils import large_gpu_mark
 
 def get_model_args(
     model_name: str,
-    spec_model_name: str,
+    spec_model_name: str | None,
     spec_method: str,
     tp_size: int,
     model_max_len: int,
+    use_async: bool = False,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
@@ -37,6 +38,8 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
+    if use_async:
+        model_args["eplb_config"] = {"use_async": True}
     return model_args
 
 
@@ -80,6 +83,40 @@ def test_eplb_spec_decode(
         spec_method=method,
         tp_size=tp_size,
         model_max_len=4096,
+    )
+
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
+        tasks=TASK,
+        batch_size=64,
+        num_fewshot=8,
+    )
+    measured_value = results["results"][TASK][FILTER]
+    assert (
+        measured_value - RTOL < expected_gsm8k_value
+        and measured_value + RTOL > expected_gsm8k_value
+    ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
+
+
+@large_gpu_mark(min_gb=80)
+def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
+    """
+    Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
+    """
+
+    TASK = "gsm8k"
+    FILTER = "exact_match,strict-match"
+    RTOL = 0.03
+    expected_gsm8k_value = 0.86
+
+    model_args = get_model_args(
+        model_name="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        spec_model_name=None,
+        spec_method="mtp",
+        tp_size=4,
+        model_max_len=4096,
+        use_async=True,
     )
 
     results = lm_eval.simple_evaluate(

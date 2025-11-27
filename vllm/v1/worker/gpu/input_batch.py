@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numba
-import numba.types as types
 import numpy as np
 import torch
 
@@ -36,6 +35,9 @@ class InputBuffers:
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.cu_num_logits = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
+
+        # Spec decoding.
+        self.next_prefill_tokens = self._make_buffer(max_num_reqs, dtype=torch.int32)
 
         # Structured outputs.
         self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
@@ -144,80 +146,42 @@ class InputBatch:
         )
 
 
-# NOTE: With the type annotations, this function is pre-compiled
-# before the first call.
-@numba.jit(
-    [
-        types.none(
-            types.int32[:],  # idx_mapping
-            types.int32[:],  # num_scheduled_tokens
-            types.int32[:, :],  # prefill_token_ids
-            types.int32[:],  # num_computed_prefill_tokens
-            types.int32[:],  # prefill_len
-            types.int32[:],  # input_ids
-            types.int32[:],  # query_start_loc
-        )
-    ],
-    nopython=True,
-    cache=True,
-)
+@numba.njit(cache=True)
 def _prepare_prefill_inputs(
-    idx_mapping: np.ndarray,  # batch_idx -> req_idx
-    num_scheduled_tokens: np.ndarray,  # [B]
+    idx_mapping: np.ndarray,  # [B]
+    query_lens: np.ndarray,  # [B]
+    query_start_loc: np.ndarray,  # [B + 1]
     prefill_token_ids: np.ndarray,  # [N, max_model_len]
     num_computed_prefill_tokens: np.ndarray,  # [N]
-    prefill_len: np.ndarray,  # [N]
     input_ids: np.ndarray,  # [num_input_tokens]
-    query_start_loc: np.ndarray,  # [B + 1]
 ) -> None:
-    num_reqs = num_scheduled_tokens.shape[0]
-    query_start_loc[0] = 0
-
-    cu_num_tokens = 0
+    num_reqs = idx_mapping.shape[0]
+    query_starts = query_start_loc[:num_reqs]
+    query_ends = query_start_loc[1 : num_reqs + 1]
+    starts = num_computed_prefill_tokens[idx_mapping]
+    ends = starts + query_lens
     for i in range(num_reqs):
-        req_idx = idx_mapping[i]
-        query_len = num_scheduled_tokens[i]
-
-        start = num_computed_prefill_tokens[req_idx]
-        end = min(start + query_len, prefill_len[req_idx])
-        n = end - start
-
-        start_idx = cu_num_tokens
-        input_ids[start_idx : start_idx + n] = prefill_token_ids[req_idx, start:end]
-
-        cu_num_tokens = start_idx + query_len
-        query_start_loc[i + 1] = cu_num_tokens
-
-    # Pad the inputs for CUDA graphs.
-    # Note: pad query_start_loc to be non-decreasing, as kernels
-    # like FlashAttention requires that
-    query_start_loc[num_reqs + 1 :].fill(cu_num_tokens)
+        input_ids[query_starts[i] : query_ends[i]] = prefill_token_ids[
+            idx_mapping[i], starts[i] : ends[i]
+        ]
 
 
 def prepare_prefill_inputs(
     idx_mapping: np.ndarray,
     num_scheduled_tokens: np.ndarray,
-    total_num_tokens: int,
+    query_start_loc: np.ndarray,
     prefill_token_ids: np.ndarray,
     num_computed_prefill_tokens: np.ndarray,
-    prefill_len: np.ndarray,
-    input_ids: CpuGpuBuffer,
-    query_start_loc: CpuGpuBuffer,
+    input_ids: np.ndarray,
 ) -> None:
     _prepare_prefill_inputs(
         idx_mapping,
         num_scheduled_tokens,
+        query_start_loc,
         prefill_token_ids,
         num_computed_prefill_tokens,
-        prefill_len,
-        input_ids.np,
-        query_start_loc.np,
+        input_ids,
     )
-    input_ids.copy_to_gpu(total_num_tokens)
-    # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
-    # tensors from CPU to GPU, because they may include paddings needed
-    # for full CUDA graph mode.
-    query_start_loc.copy_to_gpu()
 
 
 @triton.jit
@@ -380,8 +344,8 @@ def _post_update_kernel(
     sampled_tokens_ptr,
     sampled_tokens_stride,
     num_sampled_ptr,
+    num_rejected_ptr,
     query_start_loc_ptr,
-    cu_num_logits_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
@@ -396,17 +360,10 @@ def _post_update_kernel(
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
     query_len = query_end - query_start
+    num_rejected = tl.load(num_rejected_ptr + req_id)
 
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len
-    # Consider the rejected tokens in spec decoding.
-    if num_sampled > 0:
-        # NOTE(woosuk): We must skip num_sampled == 0 to account for chunked prefills.
-        logits_start = tl.load(cu_num_logits_ptr + req_id)
-        logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
-        num_logits = logits_end - logits_start
-        num_rejected = num_logits - num_sampled
-        num_computed -= num_rejected
+    num_computed += query_len - num_rejected
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
@@ -421,10 +378,10 @@ def post_update(
     sampled_tokens: torch.Tensor,
     # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
+    num_rejected: torch.Tensor,
     # [num_reqs + 1]
     query_start_loc: torch.Tensor,
-    # [num_reqs + 1]
-    cu_num_logits: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -434,7 +391,7 @@ def post_update(
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,
+        num_rejected,
         query_start_loc,
-        cu_num_logits,
         num_warps=1,
     )

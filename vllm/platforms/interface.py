@@ -135,6 +135,11 @@ class Platform:
     _global_graph_pool: Any | None = None
 
     @property
+    def pass_key(self) -> str:
+        """Inductor config key for the PassManager custom pass"""
+        return "post_grad_custom_post_pass"
+
+    @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
         # Be careful with the order of the dtypes. The first dtype will
@@ -176,6 +181,21 @@ class Platform:
         # exact GPU model statelessly here. So we return True for
         # all ROCm platforms for now.
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
+        return "vllm.compilation.pass_manager.PostGradPassManager"
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        """
+        Get the custom compile backend for current platform.
+        """
+        return cls.simple_compile_backend
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):

@@ -73,6 +73,7 @@ class CommonAttentionMetadata:
 
     num_reqs: int
     """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
     num_actual_tokens: int
     """Total number of tokens in batch"""
     max_query_len: int
@@ -90,7 +91,8 @@ class CommonAttentionMetadata:
     num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: np.ndarray | None = None
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
 
     cp_local_seq_lens: torch.Tensor | None = None
     cp_local_seq_lens_cpu: torch.Tensor | None = None
@@ -862,7 +864,9 @@ def split_decodes_and_prefills(
     if require_uniform:
         is_prefill = query_lens != query_lens[0]
     else:
-        is_prefill = query_lens > decode_threshold
+        # 0-query len indicates a padded request; leave this at the back
+        # of the batch with the prefills
+        is_prefill = (query_lens > decode_threshold) | (query_lens == 0)
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
@@ -1096,12 +1100,14 @@ def get_cp_local_seq_lens(
     num_requests = seq_lens.size(0)
     if cp_rank is None:
         rank_offsets = (
-            torch.arange(cp_world_size, dtype=torch.int32)
+            torch.arange(cp_world_size, dtype=torch.int32, device=seq_lens.device)
             .unsqueeze(0)
             .repeat(num_requests, 1)
         )
     else:
-        rank_offsets = torch.Tensor([[cp_rank]]).to(dtype=torch.int32)
+        rank_offsets = torch.tensor(
+            [[cp_rank]], dtype=torch.int32, device=seq_lens.device
+        )
     seq_lens_tiled = (
         seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     )
