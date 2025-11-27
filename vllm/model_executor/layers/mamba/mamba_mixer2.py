@@ -679,18 +679,14 @@ class MambaMixer2(MambaBase, CustomOp):
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
                 torch.split(
-                    attn_metadata.block_idx_last_computed_token[
-                        : num_decodes + num_prefills
-                    ],
+                    attn_metadata.block_idx_last_computed_token,
                     [num_decodes, num_prefills],
                     dim=0,
                 )
             )
             block_idx_last_scheduled_token_d, block_idx_last_scheduled_token_p = (
                 torch.split(
-                    attn_metadata.block_idx_last_scheduled_token[
-                        : num_decodes + num_prefills
-                    ],
+                    attn_metadata.block_idx_last_scheduled_token,
                     [num_decodes, num_prefills],
                     dim=0,
                 )
