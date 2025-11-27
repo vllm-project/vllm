@@ -271,7 +271,7 @@ class EagleSpeculator:
             input_batch.seq_lens,
             num_rejected,
             self.input_buffers.input_ids.gpu,
-            self.input_buffers.positions,
+            pos,
             self.hidden_states,
             self.hidden_states.stride(0),
             query_start_loc.gpu,
