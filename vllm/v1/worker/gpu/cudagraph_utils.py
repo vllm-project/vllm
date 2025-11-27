@@ -240,7 +240,7 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[num_reqs:] = 0
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
-    slot_mappings = block_tables.slot_mappings[:, :num_reqs]
+    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
 
     attn_metadata = build_attn_metadata(
         attn_metadata_builders=attn_metadata_builders,
