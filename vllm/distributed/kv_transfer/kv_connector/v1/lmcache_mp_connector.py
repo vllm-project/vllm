@@ -469,9 +469,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             ops.append(meta.op)
 
         if len(request_ids) > 0:
-            logger.info(
-                "HERE! SUBMITTING THE BATCHED RETRIEVE REQUESTS %s", request_ids
-            )
             self.worker_adapter.batched_submit_retrieve_requests(
                 request_ids, ops, event
             )

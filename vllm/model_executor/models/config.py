@@ -289,9 +289,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        if cache_config.mamba_block_size is None:
-            cache_config.mamba_block_size = model_config.max_model_len
-
         if cache_config.enable_prefix_caching:
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
@@ -299,12 +296,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
+                # By default, mamba block size will be set to max_model_len (see
+                # below). When enabling prefix caching, we align mamba block size
+                # to the block size as the basic granularity for prefix caching.
+                if cache_config.mamba_block_size is None:
+                    cache_config.mamba_block_size = cache_config.block_size
             else:
                 logger.info(
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
                 cache_config.enable_prefix_caching = False
+
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
