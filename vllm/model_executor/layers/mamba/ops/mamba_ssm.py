@@ -73,11 +73,9 @@ def _selective_scan_update_kernel(
     stride_state_dim,
     stride_state_dstate,
     stride_x_batch,
-    stride_x_T,
     stride_x_head,
     stride_x_dim,
     stride_dt_batch,
-    stride_dt_T,
     stride_dt_head,
     stride_dt_dim,
     stride_dt_bias_head,
@@ -86,21 +84,17 @@ def _selective_scan_update_kernel(
     stride_A_dim,
     stride_A_dstate,
     stride_B_batch,
-    stride_B_T,
     stride_B_group,
     stride_B_dstate,
     stride_C_batch,
-    stride_C_T,
     stride_C_group,
     stride_C_dstate,
     stride_D_head,
     stride_D_dim,
     stride_z_batch,
-    stride_z_T,
     stride_z_head,
     stride_z_dim,
     stride_out_batch,
-    stride_out_T,
     stride_out_head,
     stride_out_dim,
     stride_state_indices_batch,
@@ -296,12 +290,10 @@ def selective_state_update(
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim) for single-token
-           or (batch, T, nheads, dim) for multi-token
+        x: (batch, dim) or (batch, nheads, dim)
         dt: (batch, dim) or (batch, nheads, dim)
         A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate) for single-token
-           or (batch, T, ngroups, dstate) for multi-token
+        B: (batch, dstate) or (batch, ngroups, dstate)
         C: (batch, dstate) or (batch, ngroups, dstate)
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
@@ -324,29 +316,18 @@ def selective_state_update(
         state = state.unsqueeze(1)
     if x.dim() == 2:
         x = x.unsqueeze(1)
-    if x.dim() == 3:
-        x = x.unsqueeze(1)
     if dt.dim() == 2:
-        dt = dt.unsqueeze(1)
-    if dt.dim() == 3:
         dt = dt.unsqueeze(1)
     if A.dim() == 2:
         A = A.unsqueeze(0)
     if B.dim() == 2:
         B = B.unsqueeze(1)
-    if B.dim() == 3:
-        B = B.unsqueeze(1)
     if C.dim() == 2:
-        C = C.unsqueeze(1)
-    if C.dim() == 3:
         C = C.unsqueeze(1)
     if D is not None and D.dim() == 1:
         D = D.unsqueeze(0)
-    if z is not None:
-        if z.dim() == 2:
-            z = z.unsqueeze(1)
-        if z.dim() == 3:
-            z = z.unsqueeze(1)
+    if z is not None and z.dim() == 2:
+        z = z.unsqueeze(1)
     if dt_bias is not None and dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
@@ -372,12 +353,12 @@ def selective_state_update(
         N = batch
         max_seqlen = 1
 
-    assert x.shape == (batch, T, nheads, dim)
+    assert x.shape == (batch, nheads, dim)
     assert dt.shape == x.shape
     assert A.shape == (nheads, dim, dstate)
-    ngroups = B.shape[2]
+    ngroups = B.shape[1]
     assert nheads % ngroups == 0, "nheads must be divisible by ngroups"
-    assert B.shape == (batch, T, ngroups, dstate)
+    assert B.shape == (batch, ngroups, dstate)
     assert C.shape == B.shape
     if D is not None:
         assert D.shape == (nheads, dim)
@@ -456,11 +437,9 @@ def selective_state_update(
             x.stride(0),
             x.stride(1),
             x.stride(2),
-            x.stride(3),
             dt.stride(0),
             dt.stride(1),
             dt.stride(2),
-            dt.stride(3),
             *(dt_bias.stride(0), dt_bias.stride(1)) if dt_bias is not None else 0,
             A.stride(0),
             A.stride(1),
@@ -468,16 +447,13 @@ def selective_state_update(
             B.stride(0),
             B.stride(1),
             B.stride(2),
-            B.stride(3),
             C.stride(0),
             C.stride(1),
             C.stride(2),
-            C.stride(3),
             *(D.stride(0), D.stride(1)) if D is not None else 0,
             z_strides[0],
             z_strides[1],
             z_strides[2],
-            z_strides[3],
             out.stride(0),
             out.stride(1),
             out.stride(2),
