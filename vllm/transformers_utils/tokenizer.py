@@ -193,11 +193,17 @@ def get_tokenizer(
         elif is_remote_gguf(tokenizer_name):
             tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
             # Get the HuggingFace Hub path for the GGUF file
-            kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+            gguf_file = get_gguf_file_path_from_hf(
                 tokenizer_name,
                 quant_type,
                 revision=revision,
             )
+            if gguf_file is None:
+                raise ValueError(
+                    f"Could not find GGUF file for repo {tokenizer_name} "
+                    f"with quantization {quant_type}."
+                )
+            kwargs["gguf_file"] = gguf_file
 
     # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format
     # first to use official Mistral tokenizer if possible.
