@@ -316,7 +316,7 @@ class FusedMoEQuantConfig:
     @property
     def w2_chan_scale(self) -> torch.Tensor | None:
         return self._w2.chan_scale
-    
+
     @property
     def use_fp8_w8a8(self) -> bool:
         return self.quant_dtype == torch.float8_e4m3fn
@@ -491,12 +491,22 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias,
-                w1_chan_scale
+                weight_dtype,
+                w_shape,
+                w1_scale,
+                g1_alphas,
+                w1_zp,
+                w1_bias,
+                w1_chan_scale,
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias,
-                w2_chan_scale
+                weight_dtype,
+                w_shape,
+                w2_scale,
+                g2_alphas,
+                w2_zp,
+                w2_bias,
+                w2_chan_scale,
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -704,7 +714,7 @@ def int4_w4afp8_moe_quant_config(
     Construct a quant config for fp8 activations and int4 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn, # quant dtype for activations
+        torch.float8_e4m3fn,  # quant dtype for activations
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         w1_chan_scale=w1_chan_scale,
@@ -712,7 +722,7 @@ def int4_w4afp8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
-        weight_dtype="int4", # weight dtype for weights
+        weight_dtype="int4",  # weight dtype for weights
     )
 
 
