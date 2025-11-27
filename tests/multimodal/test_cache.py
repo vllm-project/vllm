@@ -12,6 +12,8 @@ from vllm.multimodal.cache import (
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorSenderCache,
+    MultiModalReceiverCache,
     engine_receiver_cache_from_config,
     processor_cache_from_config,
 )
@@ -147,7 +149,7 @@ def _compare_caches(
     ]
 
     # Should not be used since there is nothing to convert to text
-    prompt_update = PromptInsertion("dummy", "target", "insertion")
+    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
@@ -160,11 +162,12 @@ def _compare_caches(
             cache_0_p0_out = selected_items
         else:
             for _ in range(is_cached_calls_per_iter):
-                cache_0_p0.is_cached(selected_hashes)
+                cache_0_p0.is_cached(selected_hashes, n=len(selected_hashes))
+
             cache_0_p0_out = [
                 item
                 for item, _ in cache_0_p0.get_and_update(
-                    [(item, prompt_update.content) for item in selected_items],
+                    [(item, [prompt_update]) for item in selected_items],
                     selected_hashes,
                 )
             ]
@@ -173,11 +176,12 @@ def _compare_caches(
             cache_1_p0_out = selected_items
         else:
             for _ in range(is_cached_calls_per_iter):
-                cache_1_p0.is_cached(selected_hashes)
+                cache_1_p0.is_cached(selected_hashes, n=len(selected_hashes))
+
             cache_1_p0_out = [
                 item
                 for item, _ in cache_1_p0.get_and_update(
-                    [(item, prompt_update.content) for item in selected_items],
+                    [(item, [prompt_update]) for item in selected_items],
                     selected_hashes,
                 )
             ]
@@ -230,29 +234,23 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
 
 
 def test_cache_eviction():
-    vllm_config = _create_vllm_config(
-        mm_processor_cache_gb=1e-9,
-        enable_ipc=True,
-    )
-    sender_cache = processor_cache_from_config(vllm_config, MULTIMODAL_REGISTRY)
-    assert sender_cache is not None
-    receiver_cache = engine_receiver_cache_from_config(vllm_config, MULTIMODAL_REGISTRY)
-    assert receiver_cache is not None
+    vllm_config = _create_vllm_config(mm_processor_cache_gb=1e-9, enable_ipc=True)
+    sender_cache = MultiModalProcessorSenderCache(vllm_config.model_config)
+    receiver_cache = MultiModalReceiverCache(vllm_config.model_config)
 
     # Replace internal caches with small LRU for easy testing
-    assert hasattr(sender_cache, "_cache")
-    sender_cache._cache = LRUCache(6, getsizeof=lambda x: 1)  # type: ignore
+    sender_cache._cache = LRUCache(6, getsizeof=sender_cache._cache.getsizeof)
+    receiver_cache._cache = LRUCache(6, getsizeof=sender_cache._cache.getsizeof)
 
-    assert hasattr(receiver_cache, "_cache")
-    receiver_cache._cache = LRUCache(6, getsizeof=lambda x: 1)  # type: ignore
+    request1_hashes = ["image_A", "image_B", "image_C"]
+    request1_items = {
+        h: MultiModalKwargsItem.dummy(h, nbytes=2) for h in request1_hashes
+    }
 
-    # REQUEST 1: 4 unique image hashes
-    request1_hashes = ["image_A", "image_B", "image_C", "image_D"]
-    request1_items = {h: MultiModalKwargsItem.dummy(h) for h in request1_hashes}
-
-    # REQUEST 2: 4 images, one shared ("image_A")
-    request2_hashes = ["image_E", "image_F", "image_G", "image_A"]
-    request2_items = {h: MultiModalKwargsItem.dummy(h) for h in request2_hashes}
+    request2_hashes = ["image_D", "image_E", "image_A", "image_C"]
+    request2_items = {
+        h: MultiModalKwargsItem.dummy(h, nbytes=1) for h in request2_hashes
+    }
 
     ##########################
     # STEP 1: Request 1 send
@@ -261,7 +259,7 @@ def test_cache_eviction():
         request1_hashes, n=len(request1_hashes)
     )
     # Cache is empty
-    assert sender_is_cached_item_req1 == [False, False, False, False]
+    assert sender_is_cached_item_req1 == [False, False, False]
 
     ###########################
     # Process request 1 for P0 Cache
@@ -281,7 +279,7 @@ def test_cache_eviction():
     for h in request1_hashes:
         receiver_cache.get_and_update_item(request1_items[h], h)
 
-    expected_hashes = ["image_A", "image_B", "image_C", "image_D"]
+    expected_hashes = ["image_A", "image_B", "image_C"]
     assert list(sender_cache._cache.order) == expected_hashes
     assert list(receiver_cache._cache.order) == expected_hashes
 
@@ -291,8 +289,9 @@ def test_cache_eviction():
     sender_is_cached_item_req2 = sender_cache.is_cached(
         request2_hashes, n=len(request2_hashes)
     )
-    # Note that the result for image_A is False because it will be evicted
-    assert sender_is_cached_item_req2 == [False, False, False, False]
+    # Note that the result for image_A is False because it will be evicted,
+    # but not image_C
+    assert sender_is_cached_item_req2 == [False, False, False, True]
 
     ###########################
     # Process request 2 for P0 Cache
@@ -311,6 +310,6 @@ def test_cache_eviction():
     for h in request2_hashes:
         receiver_cache.get_and_update_item(request2_items[h], h)
 
-    expected_hashes = ["image_C", "image_D", "image_E", "image_F", "image_G", "image_A"]
+    expected_hashes = ["image_C", "image_D", "image_E", "image_A"]
     assert list(sender_cache._cache.order) == expected_hashes
     assert list(receiver_cache._cache.order) == expected_hashes
