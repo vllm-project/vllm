@@ -1195,7 +1195,12 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal, 
+    SupportsLoRA, 
+    SupportsPP, 
+    SupportsMRoPE, 
+    SupportsEagle3,
 ):
     merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}

@@ -293,7 +293,7 @@ def test_speculators_model_integration(
             False,
             False,
             marks=pytest.mark.skip(
-                reason="Skipping due to architectures of eagle3 is LlamaForCausalLMEagle3"
+                reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
             ),
         ),
         pytest.param(
