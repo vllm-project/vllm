@@ -15,7 +15,7 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 ---
-Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) and [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco for our latest updates on vLLM and to meet the vLLM team! Register now for the largest vLLM community events of the year!
+Join us at [vLLM Malaysia Day, December 2](https://luma.com/js8vwgpy?tk=2AUOYy) in Kuala Lumpur! Hosted by Embedded LLM, AMD and WEKA, this is your chance to meet the vLLM maintainer, join a hands-on workshop with DC GPUs, and discuss the roadmap for 2026. Register now for the largest regional vLLM gathering in ASEAN!
 
 ---
 
