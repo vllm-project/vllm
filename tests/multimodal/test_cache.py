@@ -237,7 +237,9 @@ def test_cache_eviction():
         enable_ipc=True,
     )
     sender_cache = processor_cache_from_config(vllm_config, MULTIMODAL_REGISTRY)
+    assert sender_cache is not None
     receiver_cache = engine_receiver_cache_from_config(vllm_config, MULTIMODAL_REGISTRY)
+    assert receiver_cache is not None
 
     # Replace internal caches with small LRU for easy testing
     assert hasattr(sender_cache, "_cache")
@@ -257,8 +259,9 @@ def test_cache_eviction():
     ##########################
     # STEP 1: Request 1 send
     ##########################
+    sender_cached_items_req1 = sender_cache.peek(request1_hashes)
     sender_is_cached_item_req1 = [
-        sender_cache.peek_item(h) is not None for h in request1_hashes
+        mm_item is not None for mm_item in sender_cached_items_req1
     ]
     print("Request 1 cache hits (Sender):", sender_is_cached_item_req1)
     # Expect all False since empty
@@ -268,8 +271,9 @@ def test_cache_eviction():
     ###########################
     for i, h in enumerate(request1_hashes):
         # Use precomputed cache state
-        is_cached = sender_is_cached_item_req1[i]
-        item_tuple = (request1_items[h], []) if not is_cached else None
+        cached_item = sender_cached_items_req1[i]
+        item_tuple = (request1_items[h], []) if cached_item is None else cached_item
+        print(f"Request 1: key={h} | cached={sender_is_cached_item_req1[i]}")
 
         sender_cache.get_and_update_item(item_tuple, h)
 
@@ -286,8 +290,9 @@ def test_cache_eviction():
     ##########################
     # STEP 2: Request 2 send
     ##########################
+    sender_cached_items_req2 = sender_cache.peek(request2_hashes)
     sender_is_cached_item_req2 = [
-        sender_cache.peek_item(h) is not None for h in request2_hashes
+        mm_item is not None for mm_item in sender_cached_items_req2
     ]
     print("Request 2 cache hits (Sender):", sender_is_cached_item_req2)
     # image_A should be True, others False
@@ -297,9 +302,9 @@ def test_cache_eviction():
     ###########################
     for i, h in enumerate(request2_hashes):
         # Use precomputed cache state again
-        is_cached = sender_is_cached_item_req2[i]
-        item_tuple = (request2_items[h], []) if not is_cached else None
-        print(f"Request 2: key={h} | cached={is_cached}")
+        cached_item = sender_cached_items_req2[i]
+        item_tuple = (request2_items[h], []) if cached_item is None else cached_item
+        print(f"Request 2: key={h} | cached={sender_is_cached_item_req2[i]}")
 
         sender_cache.get_and_update_item(item_tuple, h)
 
@@ -314,8 +319,3 @@ def test_cache_eviction():
     ##########################
     print("Sender contents after Req2:", list(sender_cache._cache.keys()))
     print("Receiver contents after Req2:", list(receiver_cache._cache.keys()))
-
-    sender_keys = list(sender_cache._cache.keys())
-    receiver_keys = list(receiver_cache._cache.keys())
-
-    print("✅ LRU logic and re-use verified successfully.")

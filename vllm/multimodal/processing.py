@@ -1735,17 +1735,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
-                kwargs: MultiModalKwargsItem | None
-                if mm_cached_items[modality][item_idx] is None:
+                if (item := mm_cached_items[modality][item_idx]) is None:
                     missing_next_idx = mm_missing_next_idx[modality]
-                    kwargs = missing_kwargs[missing_next_idx]
-                    updates = missing_prompt_updates[missing_next_idx]
+                    missing_kwargs_item = missing_kwargs[missing_next_idx]
+                    missing_updates_item = missing_prompt_updates[missing_next_idx]
 
+                    item = missing_kwargs_item, missing_updates_item
                     mm_missing_next_idx[modality] += 1
-
-                    item = kwargs, updates
-                else:
-                    item = mm_cached_items[modality][item_idx]
 
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 
