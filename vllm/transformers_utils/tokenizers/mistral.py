@@ -328,8 +328,7 @@ class MistralTokenizer(TokenizerBase):
         # is in, revert to only call self.transformers_tokenizer(...).
         # Hack to fix wrongly added eos token, when fix will be supported the condition
         # below will be False even before the revert is done.
-        has_eos = encoded["input_ids"][-1] == self.eos_token_id
-        if has_eos:
+        if encoded["input_ids"] and encoded["input_ids"][-1] == self.eos_token_id:
             encoded["input_ids"].pop(-1)
             if attention_mask := encoded.get("attention_mask"):
                 attention_mask.pop(-1)
