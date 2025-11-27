@@ -1618,7 +1618,7 @@ class GPUModelRunner(
                 logits_indices
             )
 
-        def _build_group_attn_metadata(
+        def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
             common_attn_metadata: CommonAttentionMetadata,
@@ -1684,10 +1684,10 @@ class GPUModelRunner(
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
                     for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
-                        _build_group_attn_metadata(kv_cache_gid, attn_gid, _cm, ubid)
+                        _build_attn_group_metadata(kv_cache_gid, attn_gid, _cm, ubid)
 
                 else:
-                    _build_group_attn_metadata(kv_cache_gid, attn_gid, cm)
+                    _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
 
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
