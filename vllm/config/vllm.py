@@ -649,7 +649,10 @@ class VllmConfig:
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            self.compilation_config.set_splitting_ops_for_v1()
+            self.compilation_config.set_splitting_ops_for_v1(
+                all2all_backend=self.parallel_config.all2all_backend,
+                data_parallel_size=self.parallel_config.data_parallel_size,
+            )
 
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             # With pipeline parallelism or dynamo partitioning,

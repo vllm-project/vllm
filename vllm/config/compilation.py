@@ -812,7 +812,9 @@ class CompilationConfig:
         # May get recomputed in the model runner if adjustment is needed for spec-decode
         self.compute_bs_to_padded_graph_size()
 
-    def set_splitting_ops_for_v1(self):
+    def set_splitting_ops_for_v1(
+        self, all2all_backend: str | None = None, data_parallel_size: int | None = None
+    ):
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
@@ -859,6 +861,18 @@ class CompilationConfig:
                 )
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
+
+        # split moe op for cudagraph
+        backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
+        dp_size = data_parallel_size if data_parallel_size is not None else 1
+        if backend == "deepep_high_throughput" and dp_size > 1 and self.splitting_ops:
+            moe_ops = [
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ]
+            for op in moe_ops:
+                if op not in self.splitting_ops:
+                    self.splitting_ops.append(op)
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
