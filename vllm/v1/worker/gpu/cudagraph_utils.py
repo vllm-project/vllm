@@ -37,7 +37,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-
+        self.cudagraph_mode: CUDAGraphMode
         if self.compilation_config.cudagraph_mode is None:
             self.cudagraph_mode = CUDAGraphMode.NONE
         else:
