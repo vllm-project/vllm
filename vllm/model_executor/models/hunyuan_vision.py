@@ -847,7 +847,7 @@ class HunYuanVLForConditionalGeneration(
                 .expand(-1, llm_grid_w + 1)
                 .reshape(-1)
             )
-            h_index[pos : pos + token_num] = 0
+            t_index[pos : pos + token_num] = image_index
 
         if xd_num == 4:
             llm_positions = torch.stack([p_index, w_index, h_index, t_index])
