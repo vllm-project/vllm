@@ -33,9 +33,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     int4_w4a16_moe_quant_config,
+    int4_w4afp8_moe_quant_config,
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
-    int4_w4afp8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
@@ -1774,7 +1774,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        __import__('fpdb').ForkedPdb().set_trace()
         assert self.num_bits == 4, "only supporting w4"
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
@@ -2454,10 +2453,12 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = self.weight_quant.num_bits
         self.packed_factor = 32 // self.num_bits
 
-        assert self.weight_quant.symmetric, "Only symmetric quantization is supported for W4A8 MoE"
+        assert self.weight_quant.symmetric, (
+            "Only symmetric quantization is supported for W4A8 MoE"
+        )
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
-        
+
         self.disable_expert_map = False
 
     def create_weights(
@@ -2475,6 +2476,11 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        # requirement for CUTLASS reorder_tensor
+        assert hidden_size % 256 == 0, f"{hidden_size=} must be divisible by 256"
+        assert intermediate_size_per_partition % 256 == 0, (
+            f"{intermediate_size_per_partition=} must be divisible by 256"
+        )
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
@@ -2484,7 +2490,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // self.packed_factor,
-                dtype=params_dtype
+                dtype=params_dtype,
             ),
             requires_grad=False,
         )
@@ -2503,16 +2509,17 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight_packed)
         set_weight_attrs(w2_weight_packed, extra_weight_attrs)
 
-        # TODO(czhu): for both types of scales (and weights) assume TP1 for now
+        # TODO(czhu): fix TP > 1 case, probably this and other stuff
+        # needs change
         # weight_scale refers to the group-wise scales
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // self.group_size,
-                dtype=torch.float8_e4m3fn
+                dtype=torch.float8_e4m3fn,
             ),
-            requires_grad=False
+            requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
 
@@ -2521,9 +2528,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // self.group_size,
-                dtype=torch.float8_e4m3fn
+                dtype=torch.float8_e4m3fn,
             ),
-            requires_grad=False
+            requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         # Add PER-GROUP quantization for FusedMoE.weight_loader.
@@ -2535,14 +2542,14 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # CHANNEL_SCALES
         w13_weight_chan_scale = torch.nn.Parameter(
-                torch.ones(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    1,
-                    dtype=torch.float32,
-                ),
-                requires_grad=False,
-            )
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                1,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w13_weight_chan_scale", w13_weight_chan_scale)
         w2_weight_chan_scale = torch.nn.Parameter(
             torch.ones(num_experts, hidden_size, 1, dtype=torch.float32),
@@ -2600,16 +2607,12 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # S (group-wise scales)
         # sizeof(StrideS) = 16 bytes, so we need to use 2xint64 to encode it
         self.s_strides1 = torch.zeros(
-            (layer.local_num_experts, 2),
-            device=device,
-            dtype=torch.int64
+            (layer.local_num_experts, 2), device=device, dtype=torch.int64
         )
         self.s_strides1[:, 0] = 2 * layer.intermediate_size_per_partition
 
         self.s_strides2 = torch.zeros(
-            (layer.local_num_experts, 2),
-            device=device,
-            dtype=torch.int64
+            (layer.local_num_experts, 2), device=device, dtype=torch.int64
         )
         self.s_strides2[:, 0] = layer.hidden_size
 
@@ -2629,18 +2632,18 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # encode and reorder weight tensors, and get the layout to pass to
         # the grouped gemm kernel. `b_strides1/2` specifies the entire layout
-        w13_weight_shuffled, self.b_strides1 = ops.cutlass_encode_and_reorder_int4b_grouped(
-            layer.w13_weight_packed
+        w13_weight_shuffled, self.b_strides1 = (
+            ops.cutlass_encode_and_reorder_int4b_grouped(layer.w13_weight_packed)
         )
         replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
-        w2_weight_shuffled, self.b_strides2 = ops.cutlass_encode_and_reorder_int4b_grouped(
-            layer.w2_weight_packed
+        w2_weight_shuffled, self.b_strides2 = (
+            ops.cutlass_encode_and_reorder_int4b_grouped(layer.w2_weight_packed)
         )
         replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         return super().maybe_make_prepare_finalize()
-    
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -2649,12 +2652,12 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # the quant config logic assumes group-wise scaling
         # and channel-wise scaling are exclusive.
         return int4_w4afp8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale, # group scale
-            w2_scale=layer.w2_weight_scale, # group scale
+            w1_scale=layer.w13_weight_scale,  # group scale
+            w2_scale=layer.w2_weight_scale,  # group scale
             w1_chan_scale=layer.w13_weight_chan_scale,
             w2_chan_scale=layer.w2_weight_chan_scale,
-            per_act_token_quant=True, # always use dynamc per-token
-            per_out_ch_quant=True, # always use per-channel
+            per_act_token_quant=True,  # always use dynamc per-token
+            per_out_ch_quant=True,  # always use per-channel
         )
 
     def select_gemm_impl(
@@ -2663,20 +2666,36 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
-        from vllm.model_executor.layers.fused_moe import (
-            CutlassExpertsW4A8Fp8
-        )
         assert (
-            prepare_finalize.activation_format == 
-            FusedMoEActivationFormat.Standard, "BatchedExperts not supported"
-        )
+            prepare_finalize.activation_format == FusedMoEActivationFormat.Standard
+        ), "BatchedExperts not supported"
+
+        from vllm.model_executor.layers.fused_moe import CutlassExpertsW4A8Fp8
+
         experts: FusedMoEPermuteExpertsUnpermute
+
+        logger.debug("CutlassExpertsW4A8Fp8(%s)", self.__class__.__name__)
+        experts = CutlassExpertsW4A8Fp8(
+            out_dtype=self.moe.in_dtype,
+            a_strides1=self.a_strides1_c_strides2,
+            a_strides2=self.a_strides2,
+            b_strides1=self.b_strides1,
+            b_strides2=self.b_strides2,
+            c_strides1=self.c_strides1,
+            c_strides2=self.a_strides1_c_strides2,
+            s_strides1=self.s_strides1,
+            s_strides2=self.s_strides2,
+            quant_config=self.moe_quant_config,
+            group_size=self.group_size,
+        )
+
         num_dispatchers = prepare_finalize.num_dispatchers()
         self.disable_expert_map = (
             num_dispatchers > 1 or not experts.supports_expert_map()
         )
+
         return experts
-        
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -2748,7 +2767,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             c_strides2=self.a_strides1_c_strides2,
             s_strides1=self.s_strides1,
             s_strides2=self.s_strides2,
-            group_size=self.group_size
+            group_size=self.group_size,
         )
 
     @property

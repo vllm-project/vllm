@@ -1132,17 +1132,25 @@ def run_cutlass_moe_w4a8_fp8(
     per_out_ch: bool,
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
-    group_size: int
+    group_size: int,
 ):
     a1q = hidden_states
+    M = a1q.size(0)
+    local_E = w1.size(0)
+    device = a1q.device
+    _, K, N_packed = w2.shape
+    N = N_packed * 8  # logical N, pack 8 int4 into 1 int32
 
-    # TODO(czhu): more validation
     assert per_act_token, "W4A8 must use per-token scales"
     assert per_out_ch, "W4A8 must use per-channel scales"
     assert w1_scale is not None
     assert w2_scale is not None
+    assert w1_scale.dtype == torch.float8_e4m3fn
+    assert w2_scale.dtype == torch.float8_e4m3fn
     assert w1.dtype == torch.int32
     assert w2.dtype == torch.int32
+    assert w1_chan_scale.dtype == torch.float32
+    assert w2_chan_scale.dtype == torch.float32
     assert w1.size(0) == w2.size(0), "Weights expert number mismatch"
     assert a1q_scale is not None
     assert a2_scale is None
@@ -1152,14 +1160,8 @@ def run_cutlass_moe_w4a8_fp8(
     assert not use_batched_format, "batched format not supported yet"
     assert group_size == 128, "Only group size 128 supported"
 
-    M = a1q.size(0)
-    local_E = w1.size(0)
-    device = a1q.device
-    _, K, N_packed = w2.shape
-    N = N_packed * 8  # pack 8 int4 into 1 int32
-
     assert global_num_experts != -1
-    assert w1.size(2) * 8 == K
+    assert w1.size(2) * 8 == K, "w1 hidden size mismatch"
 
     if expert_map is not None:
         "Translate info from expert_map to topk_ids"
@@ -1168,11 +1170,9 @@ def run_cutlass_moe_w4a8_fp8(
         )
     else:
         local_topk_ids = topk_ids
-    
+
     topk = local_topk_ids.size(1)
-    a1q_perm = _resize_cache(
-        workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K)
-    )
+    a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K))
     mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     act_out = _resize_cache(workspace2, (M * topk, N))
     # original workspace are based on input hidden_states dtype (bf16)
@@ -1203,8 +1203,13 @@ def run_cutlass_moe_w4a8_fp8(
 
     # For RS gemm SwapAB is always enabled (swap logical M, N in the problem shape)
     ops.get_cutlass_moe_mm_problem_sizes(
-        local_topk_ids, problem_sizes1, problem_sizes2, global_num_experts, N, K,
-        force_swap_ab=True
+        local_topk_ids,
+        problem_sizes1,
+        problem_sizes2,
+        global_num_experts,
+        N,
+        K,
+        force_swap_ab=True,
     )
 
     ops.cutlass_w4a8_moe_mm(
@@ -1220,7 +1225,7 @@ def run_cutlass_moe_w4a8_fp8(
         a_strides1,
         b_strides1,
         c_strides1,
-        s_strides1 
+        s_strides1,
     )
 
     activation_callable(act_out, mm1_out)
@@ -1231,7 +1236,7 @@ def run_cutlass_moe_w4a8_fp8(
 
     if expert_map is not None:
         mm2_out.fill_(0)
-    
+
     ops.cutlass_w4a8_moe_mm(
         mm2_out,
         a2q,
@@ -1245,7 +1250,7 @@ def run_cutlass_moe_w4a8_fp8(
         a_strides2,
         b_strides2,
         c_strides2,
-        s_strides2
+        s_strides2,
     )
 
     # for non-chunking mode the output is resized from workspace13
@@ -1271,7 +1276,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         s_strides1: torch.Tensor,
         s_strides2: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
-        group_size: int
+        group_size: int,
     ):
         super().__init__(quant_config)
         self.out_dtype = out_dtype
@@ -1294,14 +1299,12 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             mk.FusedMoEActivationFormat.Standard,
         )
 
-    # TODO(czhu): check this works
     def supports_chunking(self) -> bool:
         return True
 
-    # TODO(czhu): check this works
     def supports_expert_map(self) -> bool:
         return True
-    
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # topk weights and reduction are fused in moe_unpermute cuda kernel
         return TopKWeightAndReduceNoOP()
@@ -1319,7 +1322,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # TODO(czhu): check this stuff is correct...
         workspace1 = (M * topk, max(N, K))
         workspace2 = (M * topk, max(N // 2, K))
         output = (M, K)
@@ -1387,8 +1389,9 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             self.per_out_ch_quant,
             use_batched_format,
             topk_weights,
-            self.group_size
+            self.group_size,
         )
+
 
 def cutlass_moe_w4a8_fp8(
     a: torch.Tensor,
@@ -1409,7 +1412,7 @@ def cutlass_moe_w4a8_fp8(
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    group_size: int = 128
+    group_size: int = 128,
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -1440,10 +1443,10 @@ def cutlass_moe_w4a8_fp8(
         Shape: [num_experts]
     - c_strides2 (torch.Tensor): The output strides for the second gemm.
         Shape: [num_experts]
-    - s_strides1 (torch.Tensor): The strides for the group-wise scales for the first gemm.
+    - s_strides1 (torch.Tensor): strides for the group-wise scales for the first gemm.
         Shape: [num_experts, 2]
         dtype: torch.int64
-    - s_strides2 (torch.Tensor): The strides for the group-wise scales for the second gemm.
+    - s_strides2 (torch.Tensor): strides for the group-wise scales for the second gemm.
         Shape: [num_experts, 2]
         dtype: torch.int64
     - per_act_token (Optional[bool]): Whether the scale is per-token or
@@ -1479,7 +1482,7 @@ def cutlass_moe_w4a8_fp8(
             s_strides1=s_strides1,
             s_strides2=s_strides2,
             quant_config=quant_config,
-            group_size=group_size
+            group_size=group_size,
         ),
     )
 
