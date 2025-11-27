@@ -1533,15 +1533,6 @@ class GPUModelRunner(
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
 
-        logits_indices_padded = None
-        num_logits_indices = None
-        if logits_indices is not None:
-            num_logits_indices = logits_indices.size(0)
-            if self.cache_config.kv_sharing_fast_prefill:
-                logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
-                    logits_indices
-                )
-
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -1589,7 +1580,7 @@ class GPUModelRunner(
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
-        cm = CommonAttentionMetadata(
+        cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
@@ -1601,8 +1592,6 @@ class GPUModelRunner(
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
-            logits_indices_padded=logits_indices_padded,
-            num_logits_indices=num_logits_indices,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
@@ -1618,8 +1607,16 @@ class GPUModelRunner(
             self.dcp_local_seq_lens.cpu[num_reqs:].fill_(0)
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
-            cm.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
-            cm.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs_padded]
+            cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
+            cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+                :num_reqs_padded
+            ]
+
+        if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
+            cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
+                logits_indices
+            )
 
         def _build_group_attn_metadata(
             kv_cache_gid: int,
@@ -1663,16 +1660,15 @@ class GPUModelRunner(
         # in the same group share the same metadata.
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
-            encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
+            cm = copy(cm_base)  # shallow copy
+
+            # Basically only the encoder seq_lens, block_table and slot_mapping change
+            # for each kv_cache_group.
+            cm.encoder_seq_lens, cm.encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs_padded,
             )
-
-            # Basically only the encoder seq_lens, block_table and slot_mapping change
-            # for each kv_cache_group.
-            cm.encoder_seq_lens = encoder_seq_lens
-            cm.encoder_seq_lens_cpu = encoder_seq_lens_cpu
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = (
                     _get_block_table_and_slot_mapping(kv_cache_gid)
