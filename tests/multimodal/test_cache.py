@@ -153,7 +153,6 @@ def _compare_caches(
         MultiModalHasher.hash_kwargs(item=item.get_data()) for item in all_items
     ]
 
-    # Should not be used since there is nothing to convert to text
     prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
 
     for it in range(n_iter):
