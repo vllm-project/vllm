@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
@@ -119,7 +120,8 @@ class CudaGraphManager:
             attn_metadata_builders=attn_metadata_builders,
             num_reqs=batch_size,
             num_tokens=batch_size,
-            query_start_loc=input_buffers.query_start_loc,
+            query_start_loc_gpu=input_buffers.query_start_loc.gpu[: batch_size + 1],
+            query_start_loc_cpu=input_buffers.query_start_loc.cpu[: batch_size + 1],
             seq_lens=input_buffers.seq_lens,
             seq_lens_np=np.full(batch_size, self.max_model_len, dtype=np.int32),
             num_computed_tokens_cpu=None,  # FIXME
@@ -127,15 +129,7 @@ class CudaGraphManager:
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
         )
-        if self.dp_size > 1:
-            num_tokens_across_dp = torch.full(
-                (self.dp_size,),
-                batch_size,
-                dtype=torch.int32,
-                device="cpu",
-            )
-        else:
-            num_tokens_across_dp = None
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, batch_size)
 
         # Warm up.
         with set_forward_context(
