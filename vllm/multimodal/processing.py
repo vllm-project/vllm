@@ -1194,7 +1194,13 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
-A collection of hashes with a similar structure as
+A collection of the multi-modal hash for each item, with a similar structure as
+[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
+"""
+
+MultiModalIsCached = dict[str, list[bool]]
+"""
+A collection of the `is_cached` flag for each item, with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
 
@@ -1217,11 +1223,6 @@ class MultiModalProcessingInfo(NamedTuple):
     kwargs: MultiModalKwargsOptionalItems
     hashes: MultiModalHashes
     prompt_updates: MultiModalPromptUpdates
-
-
-OptionalPreCachedMediaItems: TypeAlias = dict[
-    str, list[tuple[MultiModalKwargsItem | None, Sequence[ResolvedPromptUpdate]] | None]
-]
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
@@ -1676,18 +1677,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache,
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
-    ) -> tuple[OptionalPreCachedMediaItems, MultiModalDataItems]:
-        mm_cached_items = {
-            modality: cache.peek(hashes) for modality, hashes in mm_hashes.items()
+    ) -> tuple[MultiModalIsCached, MultiModalDataItems]:
+        num_total_mm_items = sum(len(items) for items in mm_data_items.values())
+        mm_is_cached = {
+            modality: cache.is_cached(hashes, n=num_total_mm_items)
+            for modality, hashes in mm_hashes.items()
         }
 
         mm_missing_idxs = {
             modality: [
                 idx
-                for idx, cached_item in enumerate(cached_items)
-                if cached_item is None
+                for idx, item_is_cached in enumerate(items_is_cached)
+                if not item_is_cached
             ]
-            for modality, cached_items in mm_cached_items.items()
+            for modality, items_is_cached in mm_is_cached.items()
         }
         mm_missing_data = {}
         for modality, idxs in mm_missing_idxs.items():
@@ -1703,7 +1706,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        return mm_cached_items, self._to_mm_items(mm_missing_data)
+        return mm_is_cached, self._to_mm_items(mm_missing_data)
 
     def _recompute_cached_prompt_update(
         self,
@@ -1720,9 +1723,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         cache: BaseMultiModalProcessorCache,
         mm_hashes: MultiModalHashes,
+        mm_is_cached: MultiModalIsCached,
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
-        mm_cached_items: OptionalPreCachedMediaItems,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
@@ -1735,13 +1738,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
-                if (item := mm_cached_items[modality][item_idx]) is None:
+                if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     missing_kwargs_item = missing_kwargs[missing_next_idx]
                     missing_updates_item = missing_prompt_updates[missing_next_idx]
 
-                    item = missing_kwargs_item, missing_updates_item
                     mm_missing_next_idx[modality] += 1
+
+                    item = missing_kwargs_item, missing_updates_item
+                else:
+                    item = None
 
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 
@@ -1838,7 +1844,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_uuids=mm_uuids,
         )
 
-        mm_cached_items, mm_missing_data_items = self._get_cache_missing_items(
+        mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
@@ -1875,9 +1881,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
             cache,
             mm_hashes=mm_hashes,
+            mm_is_cached=mm_is_cached,
             mm_missing_kwargs=mm_missing_kwargs,
             mm_missing_prompt_updates=mm_missing_prompt_updates,
-            mm_cached_items=mm_cached_items,
         )
 
         mm_info = MultiModalProcessingInfo(

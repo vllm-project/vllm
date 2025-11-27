@@ -156,24 +156,6 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         self.__delitem__(key)
         return value
 
-    @overload
-    def peek(self, key: _K, /) -> _V | None: ...
-
-    @overload
-    def peek(self, key: _K, /, default: _V | _T) -> _V | _T: ...
-
-    def peek(self, key: _K, /, default: _V | _T | None = None) -> _V | _T | None:
-        value: _V | _T | None
-        if key in self:
-            value = cachetools.Cache.__getitem__(self, key)
-
-            self._hits += 1
-        else:
-            value = default
-
-        self._total += 1
-        return value
-
     def put(self, key: _K, value: _V) -> None:
         self.__setitem__(key, value)
 
