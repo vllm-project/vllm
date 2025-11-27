@@ -336,6 +336,7 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+    is_3d_moe_weight: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}

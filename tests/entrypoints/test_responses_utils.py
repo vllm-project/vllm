@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
 from openai.types.responses.response_reasoning_item import (
     Content,
     ResponseReasoningItem,
@@ -75,6 +78,18 @@ class TestResponsesUtils:
             formatted_item["reasoning"]
             == 'Hmm, the user has just started with a simple "Hello,"'
         )
+
+        tool_call_output = ResponseFunctionToolCallOutputItem(
+            id="temp_id",
+            type="function_call_output",
+            call_id="temp",
+            output="1234",
+            status="completed",
+        )
+        formatted_item = construct_chat_message_with_tool_call(tool_call_output)
+        assert formatted_item["role"] == "tool"
+        assert formatted_item["content"] == "1234"
+        assert formatted_item["tool_call_id"] == "temp"
 
         item = ResponseReasoningItem(
             id="lol",

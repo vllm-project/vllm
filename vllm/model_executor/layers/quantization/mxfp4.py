@@ -8,6 +8,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -184,8 +185,6 @@ class Mxfp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,
@@ -196,9 +195,10 @@ class Mxfp4Config(QuantizationConfig):
             # TODO: Add support for MXFP4 Linear Method.
             # MXFP4 LinearMethod is available in AMD-Quark, refer to that implementation
             # if you are interested in enabling MXFP4 here.
-            logger.warning_once(
+            logger.debug_once(
                 "MXFP4 linear layer is not implemented - falling back to "
-                "UnquantizedLinearMethod."
+                "UnquantizedLinearMethod.",
+                scope="local",
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
@@ -208,9 +208,10 @@ class Mxfp4Config(QuantizationConfig):
                 return Mxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             # TODO: Add support for MXFP4 Attention.
-            logger.warning_once(
+            logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
-                "Skipping quantization for this layer."
+                "Skipping quantization for this layer.",
+                scope="local",
             )
         return None
 
