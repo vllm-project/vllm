@@ -1095,12 +1095,14 @@ def get_dcp_local_seq_lens(
     num_requests = seq_lens.size(0)
     if dcp_rank is None:
         rank_offsets = (
-            torch.arange(dcp_size, dtype=torch.int32)
+            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
             .unsqueeze(0)
             .repeat(num_requests, 1)
         )
     else:
-        rank_offsets = torch.Tensor([[dcp_rank]]).to(dtype=torch.int32)
+        rank_offsets = torch.tensor(
+            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
+        )
     seq_lens_tiled = (
         seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     )
