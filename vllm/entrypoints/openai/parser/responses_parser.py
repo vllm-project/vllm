@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from collections.abc import Callable
 
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
@@ -12,6 +13,7 @@ from openai.types.responses.response_reasoning_item import (
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = logging.getLogger(__name__)
@@ -23,8 +25,8 @@ class ResponsesParser:
     def __init__(
         self,
         *,
-        tokenizer,
-        reasoning_parser_cls: ReasoningParser,
+        tokenizer: AnyTokenizer,
+        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
     ):
@@ -80,8 +82,8 @@ class ResponsesParser:
 
 def get_responses_parser_for_simple_context(
     *,
-    tokenizer,
-    reasoning_parser_cls: ReasoningParser,
+    tokenizer: AnyTokenizer,
+    reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
 ) -> ResponsesParser:

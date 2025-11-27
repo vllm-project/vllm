@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Union
 
@@ -196,7 +197,7 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: AnyTokenizer,
-        reasoning_parser_cls: ReasoningParser,
+        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
         request: ResponsesRequest,
     ):
         self.num_prompt_tokens = 0
