@@ -1652,6 +1652,15 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
+        if spec_decode_common_attn_metadata is not None and (
+            num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
+        ):
+            # Currently the drafter still only uses piecewise cudagraphs, and
+            # therefore does not want to use padded attention metadata.
+            spec_decode_common_attn_metadata = (
+                spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+            )
+
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _compute_cascade_attn_prefix_lens(
@@ -2910,15 +2919,6 @@ class GPUModelRunner(
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
-
-                if spec_decode_common_attn_metadata is not None and pad_attn:
-                    # Currently the drafter still only uses piecewise cudagraphs, and
-                    # therefore does not want to use padded attention metadata.
-                    spec_decode_common_attn_metadata = (
-                        spec_decode_common_attn_metadata.unpadded(
-                            num_tokens_unpadded, num_reqs
-                        )
-                    )
 
             (
                 input_ids,
