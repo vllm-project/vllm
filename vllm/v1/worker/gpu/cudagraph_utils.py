@@ -172,6 +172,8 @@ def get_cudagraph_sizes(
         else max_num_tokens
     )
     capture_sizes = [x for x in capture_sizes if x <= upper_bound]
+    if not capture_sizes:
+        return {}
 
     cudagraph_sizes: dict[int, int] = {}
     for i in range(1, capture_sizes[-1] + 1):
