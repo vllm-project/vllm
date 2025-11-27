@@ -10,8 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
