@@ -152,8 +152,8 @@ class SimpleContext(ConversationContext):
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
-        self.input_messages = ResponseRawMessageAndToken(message="", tokens=[])
-        self.output_messages = ResponseRawMessageAndToken(message="", tokens=[])
+        self.input_messages = ResponseRawMessageAndToken(message=[], tokens=[])
+        self.output_messages = ResponseRawMessageAndToken(message=[], tokens=[])
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -165,11 +165,11 @@ class SimpleContext(ConversationContext):
 
         if len(self.input_messages.tokens) == 0:
             if output.prompt:
-                self.input_messages.message += output.prompt
+                self.input_messages.message.append(output.prompt)
             if output.prompt_token_ids:
-                self.input_messages.tokens.extend(output.prompt_token_ids)
-        self.output_messages.tokens.extend(output.outputs[0].token_ids)
-        self.output_messages.message += output.outputs[0].text
+                self.input_messages.tokens.append(output.prompt_token_ids)
+        self.output_messages.message.append(output.outputs[0].text)
+        self.output_messages.tokens.append(output.outputs[0].token_ids)
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")
