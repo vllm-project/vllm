@@ -4977,6 +4977,9 @@ class GPUModelRunner(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
             for layer_name in kv_cache_tensor.shared_by:
+                if layer_name in self.runner_only_attn_layers:
+                    # These layers reuse another layer's KV cache tensor.
+                    continue
                 kv_cache_raw_tensors[layer_name] = tensor
 
         layer_names = set()
