@@ -214,11 +214,10 @@ class EagleSpeculator:
             hidden_states = last_hidden_states
         num_tokens = input_batch.num_tokens_after_padding
         self.hidden_states[:num_tokens] = hidden_states
-        self.input_buffers.positions[:num_tokens] = input_batch.positions
 
         # Get the input ids and last token indices for the speculator.
         last_token_indices = prepare_eagle_inputs(
-            self.input_buffers.input_ids.gpu,
+            self.input_buffers,
             input_batch,
             num_sampled,
             num_rejected,
@@ -312,7 +311,9 @@ class EagleSpeculator:
 def _prepare_eagle_inputs_kernel(
     last_token_indices_ptr,
     eagle_input_ids_ptr,
+    eagle_positions_ptr,
     target_input_ids_ptr,
+    target_positions_ptr,
     idx_mapping_ptr,
     last_sampled_ptr,
     next_prefill_tokens_ptr,
@@ -350,9 +351,16 @@ def _prepare_eagle_inputs_kernel(
     tl.store(last_token_indices_ptr + batch_idx, last_token_index)
     tl.store(eagle_input_ids_ptr + last_token_index, next_token)
 
+    # Copy positions.
+    for i in range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        target_pos = tl.load(target_positions_ptr + query_start + block, mask=mask)
+        tl.store(eagle_positions_ptr + query_start + block, target_pos, mask=mask)
+
 
 def prepare_eagle_inputs(
-    eagle_input_ids: torch.Tensor,
+    input_buffers: InputBuffers,
     input_batch: InputBatch,
     # [num_reqs]
     num_sampled: torch.Tensor,
@@ -367,12 +375,14 @@ def prepare_eagle_inputs(
     last_token_indices = torch.empty(
         num_reqs,
         dtype=torch.int64,
-        device=eagle_input_ids.device,
+        device=num_sampled.device,
     )
     _prepare_eagle_inputs_kernel[(num_reqs,)](
         last_token_indices,
-        eagle_input_ids,
+        input_buffers.input_ids.gpu,
+        input_buffers.positions,
         input_batch.input_ids,
+        input_batch.positions,
         input_batch.idx_mapping,
         last_sampled,
         next_prefill_tokens,
