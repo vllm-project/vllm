@@ -1421,6 +1421,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),
+    # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
         int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
     ),

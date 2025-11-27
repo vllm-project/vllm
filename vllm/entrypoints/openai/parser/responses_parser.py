@@ -24,7 +24,7 @@ class ResponsesParser:
         self,
         *,
         tokenizer,
-        reasoning_parser: ReasoningParser,
+        reasoning_parser_cls: ReasoningParser,
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
     ):
@@ -36,7 +36,7 @@ class ResponsesParser:
         self.tokenizer = tokenizer
         self.request = request
 
-        self.reasoning_parser_instance = reasoning_parser(tokenizer)
+        self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
 
     def process(self, output: CompletionOutput) -> "ResponsesParser":
         reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
@@ -81,7 +81,7 @@ class ResponsesParser:
 def get_responses_parser_for_simple_context(
     *,
     tokenizer,
-    reasoning_parser: ReasoningParser,
+    reasoning_parser_cls: ReasoningParser,
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
 ) -> ResponsesParser:
@@ -98,7 +98,7 @@ def get_responses_parser_for_simple_context(
     """
     return ResponsesParser(
         tokenizer=tokenizer,
-        reasoning_parser=reasoning_parser,
+        reasoning_parser_cls=reasoning_parser_cls,
         response_messages=response_messages,
         request=request,
     )

@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.responses_utils import construct_tool_dicts
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -195,9 +196,8 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: AnyTokenizer,
-        reasoning_parser: ReasoningParser,
+        reasoning_parser_cls: ReasoningParser,
         request: ResponsesRequest,
-        tool_dicts: list[dict] | None = None,
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -209,18 +209,15 @@ class ParsableContext(ConversationContext):
 
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
-            reasoning_parser=reasoning_parser,
+            reasoning_parser_cls=reasoning_parser_cls,
             response_messages=response_messages,
             request=request,
         )
-        self.request = request
-        self.tokenizer = tokenizer
-        self.reasoning_parser = reasoning_parser
 
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.tool_dicts = tool_dicts
+        self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])

@@ -96,7 +96,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
-    convert_tool_responses_to_completions_format,
+    construct_tool_dicts,
     extract_tool_types,
     make_response_output_items_from_parsable_context,
 )
@@ -190,7 +190,6 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_parser = self._get_tool_parser(
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
-        self.exclude_tools_when_tool_choice_none = False
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -381,14 +380,8 @@ class OpenAIServingResponses(OpenAIServing):
                         context = ParsableContext(
                             response_messages=messages,
                             tokenizer=tokenizer,
-                            reasoning_parser=self.reasoning_parser,
+                            reasoning_parser_cls=self.reasoning_parser,
                             request=request,
-                            tool_dicts=[
-                                convert_tool_responses_to_completions_format(
-                                    tool.model_dump()
-                                )
-                                for tool in request.tools
-                            ],
                         )
                     else:
                         context = SimpleContext()
@@ -512,15 +505,7 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
         tokenizer: AnyTokenizer,
     ):
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [
-                convert_tool_responses_to_completions_format(tool.model_dump())
-                for tool in request.tools
-            ]
+        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
