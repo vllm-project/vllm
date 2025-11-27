@@ -1865,33 +1865,18 @@ class EngineArgs:
     def _set_default_chunked_prefill_and_prefix_caching_args(
         self, model_config: ModelConfig
     ) -> None:
-        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
-            CpuArchEnum.RISCV,
-        ):
-            logger.info(
-                "Chunked prefill and prefix caching is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; Chunked prefill and prefix caching have been "
-                "disabled by default.",
-            )
-            self.enable_chunked_prefill = False
-            self.enable_prefix_caching = False
-            return
+        default_chunked_prefill = model_config.is_chunked_prefill_supported
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.prefill_context_parallel_size > 1:
-            self.enable_chunked_prefill = False
-            self.enable_prefix_caching = False
+            default_chunked_prefill = False
+            default_prefix_caching = False
             logger.warning_once(
                 "--prefill-context-parallel-size > 1 is not compatible with "
                 "chunked prefill and prefix caching now. Chunked prefill "
                 "and prefix caching have been disabled by default.",
                 scope="local",
             )
-            return
-
-        default_chunked_prefill = model_config.is_chunked_prefill_supported
-        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
@@ -1941,6 +1926,26 @@ class EngineArgs:
                 "or produce incorrect outputs.",
                 scope="local",
             )
+
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+            CpuArchEnum.POWERPC,
+            CpuArchEnum.S390X,
+            CpuArchEnum.RISCV,
+        ):
+            logger.info(
+                "Chunked prefill is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self, usage_context: UsageContext, model_config: ModelConfig

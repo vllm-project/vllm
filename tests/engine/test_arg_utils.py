@@ -277,7 +277,7 @@ def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
 
-    # should be None by default (depends on model).
+    # should default to on.
     engine_args = EngineArgs.from_cli_args(args=args)
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.cache_config.enable_prefix_caching, (

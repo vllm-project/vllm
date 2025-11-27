@@ -19,8 +19,6 @@ import torch
 from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 else:
@@ -28,8 +26,6 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
-
-logger = init_logger(__name__)
 
 
 def config(cls: ConfigT) -> ConfigT:
