@@ -110,7 +110,23 @@ jobs:
                 keywords: [
                   {
                     term: "[CPU]",
-                    searchIn: "title"  // only search in title
+                    searchIn: "title"
+                  },
+                  {
+                    term: "x86",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "ARM",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "Apple Silicon",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "IBM Z",
+                    searchIn: "title"
                   },
                 ],
               },
