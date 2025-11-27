@@ -11,8 +11,12 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 # Provide absolute path and huggingface lora ids
 lora_fixture_name = ["sql_lora_files", "sql_lora_huggingface_id"]
 LLAMA_LORA_MODULES = [
-    "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-    "lm_head"
+    "qkv_proj",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+    "embed_tokens",
+    "lm_head",
 ]
 
 
@@ -22,13 +26,13 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
     embedding_modules = LlamaForCausalLM.embedding_modules
     embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
-    expected_lora_modules: list[str] = []
+    expected_lora_lst: list[str] = []
     for module in LLAMA_LORA_MODULES:
         if module in packed_modules_mapping:
-            expected_lora_modules.extend(packed_modules_mapping[module])
+            expected_lora_lst.extend(packed_modules_mapping[module])
         else:
-            expected_lora_modules.append(module)
-
+            expected_lora_lst.append(module)
+    expected_lora_modules = set(expected_lora_lst)
     lora_path = get_adapter_absolute_path(lora_name)
 
     # lora loading should work for either absolute path and huggingface id.
@@ -40,7 +44,8 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
         lora_model_id=1,
         device="cpu",
         embedding_modules=embedding_modules,
-        embedding_padding_modules=embed_padding_modules)
+        embedding_padding_modules=embed_padding_modules,
+    )
 
     # Assertions to ensure the model is loaded correctly
     assert lora_model is not None, "LoRAModel is not loaded correctly"

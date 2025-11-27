@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from .tokenizer import AnyTokenizer
 
 
-def _replace_none_with_empty(tokens: list[Optional[str]]):
+def _replace_none_with_empty(tokens: list[str | None]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
@@ -23,27 +22,33 @@ def _convert_tokens_to_string_with_added_encoders(
     # NOTE(woosuk): The following code is slow because it runs a for loop over
     # the output_tokens. In Python, running a for loop over a list can be slow
     # even when the loop body is very simple.
+    # Performance improvements: avoid repeated attribute and function lookups;
+    # localize frequently used objects;
+
     sub_texts: list[str] = []
     current_sub_text: list[str] = []
-    all_special_tokens = set(tokenizer.all_special_tokens)
+    convert_tokens_to_string = tokenizer.convert_tokens_to_string
+    added_vocab_set = set(tokenizer.get_added_vocab())
+    all_special_tokens = (
+        set(tokenizer.all_special_tokens) if skip_special_tokens else ()
+    )
+
     for token in output_tokens:
-        if skip_special_tokens and token in all_special_tokens:
+        # Use precomputed set for skip-special check
+        if token in all_special_tokens:
             continue
-        if token in tokenizer.get_added_vocab():
+        if token in added_vocab_set:
             if current_sub_text:
-                sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-                sub_texts.append(sub_text)
-                current_sub_text = []
+                sub_texts.append(convert_tokens_to_string(current_sub_text))
+                current_sub_text.clear()
             sub_texts.append(token)
         else:
             current_sub_text.append(token)
     if current_sub_text:
-        sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-        sub_texts.append(sub_text)
+        sub_texts.append(convert_tokens_to_string(current_sub_text))
     if spaces_between_special_tokens:
         return " ".join(sub_texts)
-    else:
-        return "".join(sub_texts)
+    return "".join(sub_texts)
 
 
 # 5 is an arbitrary value that should work for all
@@ -65,11 +70,11 @@ def convert_prompt_ids_to_tokens(
     # We do not need to convert the whole prompt to tokens.
     # Offset a little more in case we have special tokens.
     new_tokens = tokenizer.convert_ids_to_tokens(
-        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
-        skip_special_tokens=skip_special_tokens)
+        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2 :],
+        skip_special_tokens=skip_special_tokens,
+    )
     read_offset = len(new_tokens)
-    prefix_offset = max(
-        read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    prefix_offset = max(read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
     _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
@@ -87,7 +92,7 @@ def convert_ids_list_to_tokens(
 
     Returns:
       Python list of token string representations
-    
+
     """
     token_str_lst = []
     for token_id in token_ids:
@@ -105,7 +110,7 @@ def convert_ids_list_to_tokens(
 def detokenize_incrementally(
     tokenizer: AnyTokenizer,
     all_input_ids: list[int],
-    prev_tokens: Optional[list[str]],
+    prev_tokens: list[str] | None,
     prefix_offset: int,
     read_offset: int,
     skip_special_tokens: bool = False,
@@ -139,18 +144,17 @@ def detokenize_incrementally(
     # This is the first iteration for this sequence
     is_first_iter = prev_tokens is None
     if is_first_iter:
-        (prev_tokens, prefix_offset,
-         read_offset) = convert_prompt_ids_to_tokens(
-             tokenizer,
-             all_input_ids[:-1],
-             skip_special_tokens=skip_special_tokens)
+        (prev_tokens, prefix_offset, read_offset) = convert_prompt_ids_to_tokens(
+            tokenizer, all_input_ids[:-1], skip_special_tokens=skip_special_tokens
+        )
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
     if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
+            [new_token_id], skip_special_tokens=skip_special_tokens
+        )
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
     else:
@@ -166,9 +170,9 @@ def detokenize_incrementally(
     # surrounding ids.
     if tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:read_offset])
-        new_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:])
+            output_tokens[prefix_offset:read_offset]
+        )
+        new_text = tokenizer.convert_tokens_to_string(output_tokens[prefix_offset:])
     else:
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
@@ -190,5 +194,5 @@ def detokenize_incrementally(
         # by the model
         return new_tokens, "", prefix_offset, read_offset
 
-    new_text = new_text[len(prefix_text):]
+    new_text = new_text[len(prefix_text) :]
     return new_tokens, new_text, read_offset, len(output_tokens)

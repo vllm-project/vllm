@@ -9,19 +9,16 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinLinearMethod)
-from vllm.model_executor.layers.quantization.marlin import MarlinLinearMethod
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod)
+    UnquantizedEmbeddingMethod,
+)
 
 PROMPT = "On the surface of Mars, we found"
 
 MODELS_QUANT = [
     ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head", True),
-    ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-10-25-2024", False),
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", False),
-    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", False)
 ]
 
 
@@ -32,23 +29,24 @@ def test_lm_head(
     lm_head_quantized: bool,
     monkeypatch,
 ) -> None:
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-    with vllm_runner(model_id, dtype=torch.float16,
-                     max_model_len=2048) as vllm_model:
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as vllm_model:
 
         def check_model(model):
             lm_head_layer = model.lm_head
             if lm_head_quantized:
-                assert isinstance(lm_head_layer.quant_method,
-                                  (GPTQLinearMethod, GPTQMarlinLinearMethod,
-                                   MarlinLinearMethod))
+                assert isinstance(
+                    lm_head_layer.quant_method,
+                    (GPTQLinearMethod, GPTQMarlinLinearMethod),
+                )
             else:
-                assert isinstance(lm_head_layer.quant_method,
-                                  UnquantizedEmbeddingMethod)
+                assert isinstance(
+                    lm_head_layer.quant_method, UnquantizedEmbeddingMethod
+                )
 
         vllm_model.apply_model(check_model)
 
-        print(
-            vllm_model.generate_greedy(prompts=["Hello my name is"],
-                                       max_tokens=10)[0][1])
+        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])

@@ -5,7 +5,6 @@ set -xu
 
 remove_docker_container() { 
     docker rm -f tpu-test || true; 
-    docker rm -f vllm-tpu || true;
 }
 
 trap remove_docker_container EXIT
@@ -62,13 +61,12 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo "--- Installing Python dependencies ---"
 python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git \
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
-    && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4 \
-    && python3 -m pip install --progress-bar off hf-transfer
+    && python3 -m pip install --progress-bar off "lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d" \
+    && python3 -m pip install --progress-bar off hf-transfer tblib==3.1.0
 echo "--- Python dependencies installed ---"
-export VLLM_USE_V1=1
+
 export VLLM_XLA_CHECK_RECOMPILATION=1
 export VLLM_XLA_CACHE_PATH=
-echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
 # tpu-info
@@ -135,7 +133,7 @@ run_and_track_test 1 "test_compilation.py" \
 run_and_track_test 2 "test_basic.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py"
 run_and_track_test 3 "test_accuracy.py::test_lm_eval_accuracy_v1_engine" \
-    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
+    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
 run_and_track_test 4 "test_quantization_accuracy.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py"
 run_and_track_test 5 "examples/offline_inference/tpu.py" \

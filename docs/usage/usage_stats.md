@@ -6,7 +6,7 @@ A subset of the data, after cleaning and aggregation, will be publicly released 
 
 ## What data is collected?
 
-The list of data collected by the latest version of vLLM can be found here: <gh-file:vllm/usage/usage_lib.py>
+The list of data collected by the latest version of vLLM can be found here: [vllm/usage/usage_lib.py](../../vllm/usage/usage_lib.py)
 
 Here is an example as of v0.4.0:
 
@@ -51,7 +51,7 @@ tail ~/.config/vllm/usage_stats.json
 
 ## Opting out
 
-You can opt-out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
+You can opt out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
 
 ```bash
 # Any of the following methods can disable usage stats collection

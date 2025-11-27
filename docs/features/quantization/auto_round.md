@@ -58,7 +58,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from auto_round import AutoRound
 
 model_name = "Qwen/Qwen3-0.6B"
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 bits, group_size, sym = 4, 128, True
@@ -97,7 +97,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-# Acknowledgement
+## Acknowledgement
 
 Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and
 ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound.

@@ -4,7 +4,7 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():
@@ -12,10 +12,9 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="intfloat/e5-mistral-7b-instruct",
+        model="intfloat/e5-small",
         runner="pooling",
         enforce_eager=True,
-        max_model_len=1024,
     )
     return parser.parse_args()
 
