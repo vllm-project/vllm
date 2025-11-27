@@ -105,6 +105,15 @@ jobs:
                   }
                 ],
               },
+              cpu : {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "[CPU]",
+                    searchIn: "title"  // only search in title
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],
