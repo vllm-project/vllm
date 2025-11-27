@@ -8,16 +8,15 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -59,8 +58,6 @@ class XPUPlatform(Platform):
             "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
             "only NHD layout is supported by XPU attention kernels."
         )
-
-        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
@@ -116,8 +113,6 @@ class XPUPlatform(Platform):
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod

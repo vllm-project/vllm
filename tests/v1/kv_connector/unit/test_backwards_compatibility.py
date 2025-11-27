@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -24,7 +25,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from .utils import create_scheduler, create_vllm_config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -68,7 +68,7 @@ class OldStyleTestConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         pass
@@ -119,7 +119,7 @@ class NewStyleTestConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         pass

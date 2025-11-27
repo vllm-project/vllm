@@ -18,6 +18,7 @@ from compressed_tensors.quantization import (
 from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -131,8 +132,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
