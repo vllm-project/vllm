@@ -197,7 +197,7 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
+        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
         request: ResponsesRequest,
     ):
         self.num_prompt_tokens = 0
@@ -207,6 +207,9 @@ class ParsableContext(ConversationContext):
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
+
+        if reasoning_parser_cls is None:
+            raise ValueError("reasoning_parser_cls must be provided.")
 
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
