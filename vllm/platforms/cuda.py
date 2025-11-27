@@ -335,7 +335,7 @@ class CudaPlatformBase(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention import AttentionType
+        from vllm.attention.backends.abstract import AttentionType
 
         if attn_type is None:
             attn_type = AttentionType.DECODER
