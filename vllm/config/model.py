@@ -14,6 +14,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -61,7 +61,6 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -1751,6 +1750,14 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    def is_model_moe(
+        self,
+    ) -> bool:
+        return self.get_num_experts() > 1
+
+    def is_quantized(self) -> bool:
+        return getattr(self.hf_config, "quantization_config", None) is not None
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

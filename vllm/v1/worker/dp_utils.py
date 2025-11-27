@@ -24,12 +24,14 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     device = get_dp_group().device
     group = get_dp_group().device_group
 
-    # Transfering this tensor from GPU to CPU will introduce a GPU sync
+    # Transferring this tensor from GPU to CPU will introduce a GPU sync
     # point that could adversely affect performance of vllm with asynch
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
+        logger.info_once(
+            "Using CPU all reduce to synchronize DP padding between ranks."
+        )
         device = "cpu"
         group = get_dp_group().cpu_group
     return device, group
