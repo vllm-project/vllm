@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
@@ -21,6 +22,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import bind_kv_cache
 
+
+logger = init_logger(__name__)
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -46,15 +49,19 @@ def init_attn_backend(
         attn_layers = get_layers_from_vllm_config(
             vllm_config, layer_type, kv_cache_group_spec.layer_names
         )
-        layer_names = list(attn_layers.keys())
-        if not layer_names:
-            raise RuntimeError(
-                "KV cache group has no attention layers available on this worker."
+        primary_layer = next(iter(attn_layers.values()), None)
+        if primary_layer is None:
+            logger.debug(
+                "No attention layers found for KV cache group %s on this rank.",
+                kv_cache_group_spec.layer_names,
             )
+            continue
 
-        attn_backend = attn_layers[layer_names[0]].get_attn_backend()
+        layer_names = kv_cache_group_spec.layer_names
+        attn_backend = primary_layer.get_attn_backend()
         for layer_name in layer_names:
-            attn_backends[layer_name] = attn_backend
+            layer = attn_layers.get(layer_name, primary_layer)
+            attn_backends[layer_name] = layer.get_attn_backend()
 
         attn_metadata_builder = attn_backend.get_builder_cls()(
             kv_cache_group_spec.kv_cache_spec,
