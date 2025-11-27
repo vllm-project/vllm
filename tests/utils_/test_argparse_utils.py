@@ -28,6 +28,7 @@ def parser():
     parser.add_argument("--enable-feature", action="store_true")
     parser.add_argument("--hf-overrides", type=json.loads)
     parser.add_argument("-O", "--compilation-config", type=json.loads)
+    parser.add_argument("--optimization-level", type=int)
     return parser
 
 
@@ -217,8 +218,8 @@ def test_dict_args(parser):
             "key15": "-minus.and.dot",
         },
     }
+    assert parsed_args.optimization_level == 1
     assert parsed_args.compilation_config == {
-        "mode": 1,
         "use_inductor_graph_partition": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
@@ -241,12 +242,13 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     parsed_args = parser.parse_args(args)
     # Should be the last value
     assert parsed_args.hf_overrides == {"key1": "val2"}
-    assert parsed_args.compilation_config == {"mode": 3}
+    assert parsed_args.optimization_level == 3
+    assert parsed_args.compilation_config == {"mode": 2}
 
     assert len(caplog_vllm.records) == 1
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
-    assert "-O.mode" in caplog_vllm.text
+    assert "--optimization-level" in caplog_vllm.text
 
 
 def test_model_specification(
@@ -383,7 +385,7 @@ def test_compilation_mode_string_values(parser):
     assert args.compilation_config == {"mode": 0}
 
     args = parser.parse_args(["-O3"])
-    assert args.compilation_config == {"mode": 3}
+    assert args.optimization_level == 3
 
     args = parser.parse_args(["-O.mode=NONE"])
     assert args.compilation_config == {"mode": "NONE"}
