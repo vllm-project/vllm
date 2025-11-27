@@ -100,6 +100,32 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    # TODO(lucas): remove once we have FULL-CG spec-decode support
+    def unpadded(
+        self, num_actual_tokens: int, num_actual_reqs: int
+    ) -> "CommonAttentionMetadata":
+        maybe_slice_reqs = lambda x: x[:num_actual_reqs] if x is not None else None
+        return CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
+            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            max_seq_len=self.max_seq_len,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            logits_indices_padded=self.logits_indices_padded,
+            num_logits_indices=self.num_logits_indices,
+            encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
+            encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
+            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+        )
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
