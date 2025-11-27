@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import enum
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -18,13 +16,6 @@ from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.processor import Processor
-
-logger = init_logger(__name__)
-
-
-class Device(enum.Enum):
-    GPU = enum.auto()
-    CPU = enum.auto()
 
 
 class EngineClient(ABC):
