@@ -1774,6 +1774,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        __import__('fpdb').ForkedPdb().set_trace()
         assert self.num_bits == 4, "only supporting w4"
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
@@ -2656,15 +2657,26 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_out_ch_quant=True, # always use per-channel
         )
 
-    # TODO(czhu): is this needed?
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        print('hi')
         assert self.moe_quant_config is not None
-
+        from vllm.model_executor.layers.fused_moe import (
+            CutlassExpertsW4A8Fp8
+        )
+        assert (
+            prepare_finalize.activation_format == 
+            FusedMoEActivationFormat.Standard, "BatchedExperts not supported"
+        )
+        experts: FusedMoEPermuteExpertsUnpermute
+        num_dispatchers = prepare_finalize.num_dispatchers()
+        self.disable_expert_map = (
+            num_dispatchers > 1 or not experts.supports_expert_map()
+        )
+        return experts
+        
     def apply(
         self,
         layer: torch.nn.Module,
