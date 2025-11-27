@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import torch
 
+import os
+
 from tests.v1.attention.utils import create_vllm_config
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (
@@ -88,6 +90,53 @@ def test_hybrid_ssm_adapter_state_shape_and_dtype():
     assert decode_out.shape == hidden_states.shape
 
 
+def test_hybrid_ssm_adapter_prefix_sum_mode():
+    """HybridSSMAdapter should produce a simple prefix-sum history signal when enabled.
+
+    This tests the lightweight, non-zero SSM rule used for experimentation:
+    VLLM_HYBRID_SSM_MODE=prefix_sum.
+    """
+    vllm_config = create_vllm_config(add_mock_model_methods=False)
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+
+    hidden_size = 4
+    ssm_state_size = 2
+    conv_kernel_size = 3
+    intermediate_size = 4 * hidden_size
+
+    # Enable the analytic SSM mode for this adapter instance.
+    os.environ["VLLM_HYBRID_SSM_MODE"] = "prefix_sum"
+    try:
+        with set_current_vllm_config(vllm_config):
+            adapter = HybridSSMAdapter(
+                hidden_size=hidden_size,
+                ssm_state_size=ssm_state_size,
+                conv_kernel_size=conv_kernel_size,
+                intermediate_size=intermediate_size,
+                model_config=model_config,
+                cache_config=cache_config,
+                prefix="hybrid.ssm.prefix",
+            )
+    finally:
+        # Do not leak the env var to other tests.
+        del os.environ["VLLM_HYBRID_SSM_MODE"]
+
+    # Simple 1D sequence so the prefix sum is easy to reason about.
+    hidden_states = torch.arange(1, 6, dtype=torch.float32).unsqueeze(-1)
+
+    class DecodeMeta:
+        num_decode_tokens = hidden_states.shape[0]
+
+    out = adapter.forward_history_branch_decode(
+        hidden_states, attn_metadata=DecodeMeta()
+    )
+
+    # Expect prefix sums along the token dimension.
+    expected = torch.cumsum(hidden_states, dim=0)
+    assert torch.allclose(out, expected)
+
+
 def test_hybrid_attention_impl_fuses_ssm_output():
     """HybridAttentionImpl should add SSM contribution on top of attention."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -144,10 +193,10 @@ def test_hybrid_attention_impl_fuses_ssm_output():
     output = torch.empty_like(query)
 
     class _StubMetadata:
-        pass
+        def __init__(self, num_actual_tokens: int):
+            self.num_actual_tokens = num_actual_tokens
 
-    attn_metadata = _StubMetadata()
-    attn_metadata.num_actual_tokens = num_tokens
+    attn_metadata = _StubMetadata(num_tokens)
 
     out = impl.forward(
         layer,

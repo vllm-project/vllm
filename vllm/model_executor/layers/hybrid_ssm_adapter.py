@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -69,6 +71,15 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
 
         # Layer name used by vLLM's compilation / forward context.
         self.layer_name = prefix
+
+        # Simple debug / experimentation knob for the history branch.
+        # By default the adapter returns a zero contribution (\"disabled\").
+        # Set VLLM_HYBRID_SSM_MODE=prefix_sum to enable a trivial, non-zero
+        # SSM rule that accumulates a prefix sum over the flattened token
+        # dimension. This keeps the implementation lightweight while
+        # allowing end-to-end testing of HybridAttentionImpl fusion without
+        # introducing new CUDA kernels.
+        self.ssm_mode: str = os.getenv("VLLM_HYBRID_SSM_MODE", "disabled")
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
@@ -190,9 +201,20 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         """History branch for prefill tokens.
 
-        For now this method returns a zero contribution while ensuring that
+        By default this method returns a zero contribution while ensuring that
         the tensor is correctly shaped and indexed over the same flattened
         token set as the sliding-window attention output.
+
+        When the environment variable ``VLLM_HYBRID_SSM_MODE`` is set to
+        ``\"prefix_sum\"``, a simple, fully deterministic SSM rule is enabled:
+
+        - The adapter computes a prefix sum over the first
+          ``num_prefill_tokens`` positions along the token dimension and
+          returns zeros elsewhere.
+
+        This is intentionally lightweight and does not touch any custom CUDA
+        kernels, but it allows the hybrid backend to observe a non‑trivial,
+        history‑dependent contribution for experimentation and unit tests.
         """
         if attn_metadata is None:
             attn_metadata = self._get_mamba_attn_metadata()
@@ -205,7 +227,15 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         if num_actual_tokens <= 0:
             return torch.zeros_like(hidden_states)
 
+        # Fast path: keep the adapter as a no-op unless explicitly enabled.
+        if self.ssm_mode != "prefix_sum":
+            return torch.zeros_like(hidden_states)
+
+        # Generic over hidden_states rank: we treat dim 0 as the flattened
+        # token dimension and preserve all remaining dimensions.
+        prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
         ssm_out = torch.zeros_like(hidden_states)
+        ssm_out[:num_actual_tokens] = prefix
         return ssm_out
 
     def forward_history_branch_decode(
@@ -216,10 +246,16 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         """History branch for decode tokens.
 
         The adapter is expected to produce an SSM contribution aligned with the
-        flattened decode token set. The current implementation produces a zero
-        tensor but wires in the same metadata shape as Mamba-1 so that a
-        future implementation can swap in the full Mamba pipeline without
-        changing call sites.
+        flattened decode token set.
+
+        By default this method returns a zero tensor but wires in the same
+        metadata shape as Mamba-1 so that a future implementation can swap in
+        the full Mamba pipeline without changing call sites.
+
+        When ``VLLM_HYBRID_SSM_MODE=prefix_sum`` is set, a simple prefix-sum
+        history rule is applied over the first ``num_decode_tokens`` (or, if
+        unavailable, ``num_actual_tokens``) positions along the token
+        dimension, mirroring the prefill behavior.
         """
         if attn_metadata is None:
             attn_metadata = self._get_mamba_attn_metadata()
@@ -228,11 +264,24 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             # Profiling / shape-only runs: match the input shape.
             return torch.zeros_like(hidden_states)
 
-        num_actual_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
+        # Prefer decode-specific counts when available (used in unit tests),
+        # but fall back to the generic num_actual_tokens field exposed by
+        # Triton-style attention metadata.
+        num_actual_tokens: int | None = getattr(
+            attn_metadata, "num_decode_tokens", None
+        )
+        if num_actual_tokens is None:
+            num_actual_tokens = getattr(attn_metadata, "num_actual_tokens", 0)
+
         if num_actual_tokens <= 0:
             return torch.zeros_like(hidden_states)
 
+        if self.ssm_mode != "prefix_sum":
+            return torch.zeros_like(hidden_states)
+
+        prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
         ssm_out = torch.zeros_like(hidden_states)
+        ssm_out[:num_actual_tokens] = prefix
         return ssm_out
 
 
