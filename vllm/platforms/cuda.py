@@ -267,25 +267,17 @@ class CudaPlatformBase(Platform):
     ) -> "AttentionBackendEnum":
         from vllm.attention.backends.registry import AttentionBackendEnum
 
-        # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-        if cls.has_device_capability(100):
-            return AttentionBackendEnum.TORCH_SDPA
-
-        if dtype not in (torch.float16, torch.bfloat16):
-            return AttentionBackendEnum.XFORMERS
-
-        if cls.has_device_capability(80):
+        # Try FlashAttention first
+        try:
             backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
             if backend_class.supports_head_size(
                 head_size
             ) and backend_class.supports_dtype(dtype):
                 return AttentionBackendEnum.FLASH_ATTN
-            else:
-                return AttentionBackendEnum.XFORMERS
-        else:
-            # Fallback for Volta/Turing GPUs or FA not supported
-            return AttentionBackendEnum.XFORMERS
+        except ImportError:
+            pass
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(
@@ -343,7 +335,7 @@ class CudaPlatformBase(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention import AttentionType
+        from vllm.attention.backends.abstract import AttentionType
 
         if attn_type is None:
             attn_type = AttentionType.DECODER
@@ -415,9 +407,6 @@ class CudaPlatformBase(Platform):
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        logger.info(
-            "Valid backends: %s", [b[0].name for b in valid_backends_priorities]
-        )
         sorted_indices = sorted(
             range(len(valid_backends_priorities)),
             key=lambda i: valid_backends_priorities[i][1],
@@ -425,8 +414,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         logger.info(
-            "Using %s backend.",
+            "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
+            [b[0].name for b in valid_backends_priorities],
         )
 
         return selected_backend.get_path()

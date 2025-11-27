@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import json
 import os
 import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeAlias, TypeVar
 
 import huggingface_hub
 from huggingface_hub import (
@@ -24,7 +26,9 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from packaging.version import Version
+from transformers import GenerationConfig, PretrainedConfig
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -38,7 +42,10 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
     parse_safetensors_file_metadata,
+    split_remote_gguf,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -77,10 +84,12 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32=DeepseekV3Config,
+    deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -199,7 +208,19 @@ class MistralConfigParser(ConfigParserBase):
 
         from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
-        config = adapt_config_dict(config_dict)
+        # Get missing fields from HF config if available
+        try:
+            hf_config_dict, _ = PretrainedConfig.get_config_dict(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+        except OSError:  # Not found
+            hf_config_dict = {}
+
+        config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
         # to int and add the layer_types list[str] to make it HF compatible
@@ -351,6 +372,41 @@ def list_repo_files(
     return with_retry(lookup_files, "Error retrieving file list")
 
 
+def list_filtered_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> list[str]:
+    try:
+        all_files = list_repo_files(
+            repo_id=model_name_or_path,
+            revision=revision,
+            token=token,
+            repo_type=repo_type,
+        )
+    except Exception:
+        logger.error(
+            "Error retrieving file list. Please ensure your `model_name_or_path`"
+            "`repo_type`, `token` and `revision` arguments are correctly set. "
+            "Returning an empty list."
+        )
+        return []
+
+    file_list = []
+    # Filter patterns on filenames
+    for pattern in allow_patterns:
+        file_list.extend(
+            [
+                file
+                for file in all_files
+                if fnmatch.fnmatch(os.path.basename(file), pattern)
+            ]
+        )
+    return file_list
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -389,50 +445,94 @@ def file_or_path_exists(
     )
 
 
-def patch_rope_scaling(config: PretrainedConfig) -> None:
+def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
+    """Some models may have no rope_theta in their config but still use RoPE.
+    This function sets a default rope_theta if it's missing."""
+    if getattr(config, "rope_parameters", None) is None:
+        config.rope_parameters = {"rope_type": "default"}
+    if "rope_theta" not in config.rope_parameters:
+        config.rope_parameters["rope_theta"] = default_theta
+
+
+def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        patch_rope_scaling(text_config)
+    # Patch rope_parameters differently based on Transformers version
+    if Version(version("transformers")) >= Version("5.0.0.dev0"):
+        from transformers.modeling_rope_utils import (
+            rope_config_validation,
+            standardize_rope_params,
+        )
 
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is not None:
-        patch_rope_scaling_dict(rope_scaling)
+        # When Transformers v5 is installed, legacy rope_theta may be present
+        # when using custom code models written for Transformers v4
+        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+            standardize_rope_params(config, rope_theta=rope_theta)
+            rope_config_validation(config)
+            # Delete rope_theta to avoid confusion in downstream code
+            del config.rope_theta
+    else:
+        # When Transformers v4 is installed, legacy rope_scaling may be present
+        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
+            config.rope_parameters = rope_scaling
+        # When Transformers v4 is installed, legacy rope_theta may be present
+        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+            if not hasattr(config, "rope_parameters"):
+                config.rope_parameters = {"rope_type": "default"}
+            config.rope_parameters["rope_theta"] = rope_theta
+
+    # No RoPE parameters to patch
+    if not hasattr(config, "rope_parameters"):
+        return
+
+    # Add original_max_position_embeddings if present
+    if ompe := getattr(config, "original_max_position_embeddings", None):
+        config.rope_parameters["original_max_position_embeddings"] = ompe
+
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if set(config.rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        for rope_parameters_layer_type in config.rope_parameters.values():
+            patch_rope_parameters_dict(rope_parameters_layer_type)
+    else:
+        patch_rope_parameters_dict(config.rope_parameters)
 
 
-def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
-    if "rope_type" in rope_scaling and "type" in rope_scaling:
-        rope_type = rope_scaling["rope_type"]
-        rope_type_legacy = rope_scaling["type"]
-        if rope_type != rope_type_legacy:
+def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
+    if "rope_type" in rope_parameters and "type" in rope_parameters:
+        rope_type = rope_parameters["rope_type"]
+        rope_type_legacy = rope_parameters["type"]
+        if (rope_type_legacy == "su" and rope_type == "longrope") or (
+            rope_type_legacy == "mrope" and rope_type == "default"
+        ):
+            pass  # No action needed
+        elif rope_type != rope_type_legacy:
             raise ValueError(
                 f"Found conflicts between 'rope_type={rope_type}' (modern "
                 f"field) and 'type={rope_type_legacy}' (legacy field). "
                 "You should only specify one of them."
             )
 
-    if "rope_type" not in rope_scaling and "type" in rope_scaling:
-        rope_scaling["rope_type"] = rope_scaling["type"]
+    if "rope_type" not in rope_parameters and "type" in rope_parameters:
+        rope_parameters["rope_type"] = rope_parameters["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
 
-    if "rope_type" not in rope_scaling:
-        raise ValueError("rope_scaling should have a 'rope_type' key")
+    if "rope_type" not in rope_parameters:
+        raise ValueError("rope_parameters should have a 'rope_type' key")
 
-    if rope_scaling["rope_type"] == "su":
-        rope_scaling["rope_type"] = "longrope"
+    if rope_parameters["rope_type"] == "su":
+        rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_scaling["rope_type"] == "mrope":
-        assert "mrope_section" in rope_scaling
-        rope_scaling["rope_type"] = "default"
+    elif rope_parameters["rope_type"] == "mrope":
+        assert "mrope_section" in rope_parameters
+        rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is None:
         return False
 
-    return "mrope_section" in rope_scaling
+    return "mrope_section" in rope_parameters
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
@@ -455,6 +555,23 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
         return False
 
     return uses_mrope(thinker_text_config)
+
+
+def uses_xdrope_dim(config: PretrainedConfig) -> int:
+    """Detect if the model with this config uses XD-ROPE."""
+    xdrope_section = getattr(config, "xdrope_section", None)
+    if xdrope_section is not None and isinstance(xdrope_section, list):
+        return len(xdrope_section)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return 0
+
+    if isinstance(rope_scaling, dict) and "xdrope_section" in rope_scaling:
+        xdrope_section = rope_scaling["xdrope_section"]
+        if xdrope_section is not None and isinstance(xdrope_section, list):
+            return len(xdrope_section)
+
+    return 0
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
@@ -519,10 +636,12 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    if check_gguf_file(model):
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+    elif is_remote_gguf(model):
+        repo_id, _ = split_remote_gguf(model)
+        gguf_model_repo = Path(repo_id)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -568,17 +687,44 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
-        kwargs["gguf_file"] = Path(model).name
-        model = Path(model).parent
+    _is_gguf = is_gguf(model)
+    _is_remote_gguf = is_remote_gguf(model)
+    if _is_gguf:
+        if check_gguf_file(model):
+            # Local GGUF file
+            kwargs["gguf_file"] = Path(model).name
+            model = Path(model).parent
+        elif _is_remote_gguf:
+            # Remote GGUF - extract repo_id from repo_id:quant_type format
+            # The actual GGUF file will be downloaded later by GGUFModelLoader
+            # Keep model as repo_id:quant_type for download, but use repo_id for config
+            model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
-            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
-                config_format = "hf"
-            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            # First check for Mistral to avoid defaulting to
+            # Transformers implementation.
+            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
+            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                config_format = "hf"
+            # Remote GGUF models must have config.json in repo,
+            # otherwise the config can't be parsed correctly.
+            # FIXME(Isotr0py): Support remote GGUF repos without config.json
+            elif _is_remote_gguf and not file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision
+            ):
+                err_msg = (
+                    "Could not find config.json for remote GGUF model repo. "
+                    "To load remote GGUF model through `<repo_id>:<quant_type>`, "
+                    "ensure your model has config.json (HF format) file. "
+                    "Otherwise please specify --hf-config-path <original_repo> "
+                    "in engine args to fetch config from unquantized hf model."
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
@@ -599,9 +745,6 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
-                "   Loading GGUF from a remote repo directly is not yet "
-                "supported.\n"
             ).format(model=model)
 
             raise ValueError(error_message) from e
@@ -615,7 +758,7 @@ def get_config(
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
-    if is_gguf:
+    if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
@@ -678,7 +821,14 @@ def get_config(
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
 
-    patch_rope_scaling(config)
+    # Exhaustively patch RoPE parameters everywhere they might be
+    patch_rope_parameters(config)
+    patch_rope_parameters(config.get_text_config())
+    SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+    sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
+    if sub_configs:
+        for sub_config in sub_configs:
+            patch_rope_parameters(getattr(config, sub_config))
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
@@ -768,6 +918,8 @@ def get_pooling_config(model: str, revision: str | None = "main") -> dict | None
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
     """
+    if is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
 
     modules_file_name = "modules.json"
 
@@ -987,6 +1139,8 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
+    elif is_remote_gguf(model):
+        model, _ = split_remote_gguf(model)
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
