@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
-import fnmatch
 from pathlib import Path
 
 import gguf
 from gguf.constants import Keys, VisionProjectorType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
+
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import list_filtered_repo_files
 
@@ -194,11 +194,10 @@ def get_gguf_file_path_from_hf(
         allow_patterns=gguf_patterns,
         revision=revision,
     )
-    
+
     if len(matching_files) == 0:
         raise ValueError(
-            "Could not find GGUF file for repo %s "
-            "with quantization %s.",
+            "Could not find GGUF file for repo %s with quantization %s.",
             repo_id,
             quant_type,
         )
@@ -207,4 +206,3 @@ def get_gguf_file_path_from_hf(
     matching_files.sort(key=lambda x: (x.count("-"), x))
     gguf_filename = matching_files[0]
     return gguf_filename
-
