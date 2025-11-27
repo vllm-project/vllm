@@ -75,10 +75,7 @@ class EagleCudaGraphManager:
             self.max_model_len,
             kv_cache_config,
         )
-        num_tokens_across_dp = make_num_tokens_across_dp(
-            self.dp_size,
-            num_tokens,
-        )
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
         # Warm up.
         generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)

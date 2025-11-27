@@ -111,7 +111,7 @@ class EagleSpeculator:
         self,
         num_tokens: int,
         attn_metadata: dict[str, Any],
-        num_tokens_across_dp: torch.Tensor | None = None,
+        num_tokens_across_dp: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with set_forward_context(
             attn_metadata,
@@ -136,7 +136,7 @@ class EagleSpeculator:
         self,
         num_reqs: int,
         attn_metadata: dict[str, Any],
-        num_tokens_across_dp: torch.Tensor | None = None,
+        num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
@@ -229,6 +229,7 @@ class EagleSpeculator:
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
             input_batch.attn_metadata,
+            num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -303,7 +304,7 @@ class EagleSpeculator:
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
         )
-        self.generate_draft(num_reqs, attn_metadata)
+        self.generate_draft(num_reqs, attn_metadata, num_tokens_across_dp=None)  # FIXME
         return self.draft_tokens[:num_reqs]
 
 
