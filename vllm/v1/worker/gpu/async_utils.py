@@ -21,7 +21,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
     ):
-        # NOTE(woosuk): It is crucial to retain references to the GPU tensors,
+        # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
         # the one where the tensors were created.
         self.model_runner_output = model_runner_output
