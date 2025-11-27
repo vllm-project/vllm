@@ -1821,10 +1821,7 @@ class ModelConfig:
                     return True
             # vllm currently does not have pooling models using hybrid,
             # attention_free, or encoder_decoder attn types.
-            if attn_type == "encoder_decoder":
-                return False
-            else:
-                return True
+            return attn_type != "encoder_decoder"
         else:
             if attn_type == "encoder_decoder":
                 logger.debug("Encoder decoder models does not support chunked prefill.")
