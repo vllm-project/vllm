@@ -45,6 +45,7 @@ multiprocess==0.70.16
 
 # Plugins test
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
+torchgeo==0.7.0
 
 # Required for suffix decoding test
 arctic-inference == 0.1.1
