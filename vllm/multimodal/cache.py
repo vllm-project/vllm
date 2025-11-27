@@ -533,7 +533,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def update_cache_item_eviction_order(self, mm_hash: str) -> None:
-        return None
+        """Touch the item in shared memory cache to prevent eviction.
+        Increments writer_flag on sender side."""
+        if self._shm_cache.is_cached(mm_hash):
+            self._shm_cache.touch(mm_hash, is_writer=True)
 
     @override
     def clear_cache(self) -> None:
@@ -771,7 +774,10 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def update_cache_item_eviction_order(self, mm_hash: str) -> None:
-        return None
+        """Touch the item in shared memory cache to prevent eviction.
+        Increments reader_count on receiver side."""
+        if self._shm_cache.is_cached(mm_hash):
+            self._shm_cache.touch(mm_hash, is_writer=False)
 
     @override
     def clear_cache(self) -> None:

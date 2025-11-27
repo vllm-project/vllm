@@ -247,6 +247,36 @@ class SingleWriterShmRingBuffer:
         ):
             yield data_view, (id, size)
 
+    def touch(self, key: str, is_writer: bool = True) -> None:
+        """
+        Touch an existing cached item to update its eviction status.
+        
+        For writers (ShmObjectStoreSenderCache): Increment writer_flag
+        For readers (ShmObjectStoreReceiverCache): Increment reader_count
+        
+        Args:
+            key: String key of the object to touch
+            is_writer: If True, increment writer_flag (sender side).
+                      If False, increment reader_count (receiver side).
+            
+        Raises:
+            KeyError: If the key is not found in the storage
+        """
+        if key not in self.key_index:
+            raise KeyError(f"Key '{key}' not found in the storage.")
+        
+        address, monotonic_id = self.key_index[key]
+        
+        if is_writer:
+            # Writer side: increment writer_flag to raise eviction threshold
+            self.increment_writer_flag(monotonic_id)
+        else:
+            # Reader side: increment reader_count to indicate active use
+            with self.ring_buffer.access_buf(address) as (data_view, _):
+                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
+                new_count = reader_count + 1
+                data_view[: self.flag_bytes] = self.ring_buffer.int2byte(new_count)
+
     def free_buf(
         self,
         is_free_fn: Callable[[int, memoryview], bool],
