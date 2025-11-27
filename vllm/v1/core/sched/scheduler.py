@@ -1572,6 +1572,7 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
+        # TODO change to supports_hma
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
@@ -1612,13 +1613,23 @@ class Scheduler(SchedulerInterface):
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = len(block_ids) * self.block_size
+            # FIXME this should only be changed if hma is enabled
+            # FIXME group with env var changes
+            # (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            # FIXME Same thing here, these are blocks across layers now!!
+            print("SCHEDULER block_ids", block_ids,"\n", flush=True)
+            # Get number of blocks on full attention layer, we can retrieve at most 
+            # this many tokens
+            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size
             # Handle the case where num request tokens less than one block.
+            print("SCHEDULER request.num_tokens", request.num_tokens,"\n", flush=True)
+            # FIXME I don't understand why we do this and not just req.num_tokens
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1
             # This will cache the blocks iff caching is enabled.
+            # FIXME I think this should be per-group..?
             self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
             # Update the request state for scheduling.

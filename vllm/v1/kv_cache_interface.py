@@ -399,6 +399,6 @@ class KVCacheConfig:
     For models with only one type of attention, there is only one group that
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
-    see `_get_kv_cache_config_uniform_page_size` for more details.
+    see `_get_kv_cache_groups_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]

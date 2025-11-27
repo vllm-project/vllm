@@ -105,6 +105,13 @@ class SupportsHMA(ABC):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        # TODO FOR ASYNC USE THSI ONE
+        # theres issue about overallocating memory as if all layers weer not sliding windo
+        # shoudl I turn it on experimentally HMA? something like an env var for turning it on
+        # so that nixl doesnt turn it on by default
+        # and keep disabling HMA for all other connectors
+        # what model should I test with, gemma3? 
+
         raise NotImplementedError
 
 
