@@ -803,7 +803,11 @@ def unified_attention(
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold
     if (
-        num_par_softmax_segments is None
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
     ):
@@ -859,7 +863,9 @@ def unified_attention(
             USE_FP8=output_scale is not None,
         )
     else:
-        kernel_unified_attention_3d[(num_seqs, num_kv_heads, num_par_softmax_segments)](
+        kernel_unified_attention_3d[
+            (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+        ](
             segm_output_ptr=softmax_segm_output,
             segm_max_ptr=softmax_segm_max,
             segm_expsum_ptr=softmax_segm_expsum,
@@ -904,7 +910,7 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
         )
-        reduce_segments[(num_seqs, num_query_heads)](
+        reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
             segm_output_ptr=softmax_segm_output,
             segm_max_ptr=softmax_segm_max,
