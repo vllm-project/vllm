@@ -11,13 +11,22 @@ progress tracking.
 import contextlib
 from typing import Any
 
-import helion
-import helion.language as hl
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.compilation.helion.benchmark import DistributedKernelBenchmark
+from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.model_executor.custom_op import CustomOp
+
+# Try to import Helion - it's an optional dependency
+try:
+    import helion
+    import helion.language as hl
+
+    HELION_AVAILABLE = True
+except ImportError:
+    HELION_AVAILABLE = False
 
 try:
     import flashinfer.comm as flashinfer_comm
@@ -129,103 +138,136 @@ def copy_engine_all_reduce_w_progress(
     return backend_stream
 
 
-@helion.kernel(
-    config=helion.Config(
-        block_sizes=[2],
-        indexing=[
-            "pointer",
-            "pointer",
-            "pointer",
-            "tensor_descriptor",
-            "pointer",
-            "tensor_descriptor",
-            "pointer",
-            "pointer",
-            "tensor_descriptor",
-            "pointer",
-            "pointer",
-            "tensor_descriptor",
-        ],
-        load_eviction_policies=["last", "first", "", "", "first", "first", "first", ""],
-        num_stages=1,
-        num_warps=8,
-        pid_type="persistent_interleaved",
-        range_flattens=[False],
-        range_multi_buffers=[None],
-        range_num_stages=[3],
-        range_unroll_factors=[1],
-        range_warp_specializes=[],
-        reduction_loops=[None],
-    ),
-    static_shapes=True,
-)
-def _allreduce_add_rmsnorm_helion_kernel(
-    allreduce_buf: torch.Tensor,
-    residual: torch.Tensor,
-    rms_gamma: torch.Tensor,
-    progress: torch.Tensor,
-    rms_eps: float,
-    SPLITS_PER_RANK: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Helion kernel for AllReduce + Add + RMSNorm with progress-based overlap.
+# Only define the Helion kernel if Helion is available
+if HELION_AVAILABLE:
 
-    This kernel waits for AllReduce chunks to complete (via progress tensor)
-    and processes them as they become available, overlapping computation with
-    communication.
-
-    Operation: RMSNorm(AllReduce(input) + residual), returns both normalized
-    and residual
-
-    Algorithm:
-    1. Wait for chunk to be ready (via hl.wait on progress tensor)
-    2. Add residual connection
-    3. Compute variance: sum(x^2) / hidden_size
-    4. Compute normalization: rsqrt(variance + epsilon)
-    5. Apply normalization and weight scaling
-
-    Args:
-        allreduce_buf: Buffer being filled by AllReduce [M, K]
-        residual: Residual tensor to add [M, K]
-        rms_gamma: RMSNorm gamma weights [K]
-        progress: Progress tracking tensor [SPLITS_PER_RANK]
-        rms_eps: Epsilon for numerical stability
-        SPLITS_PER_RANK: Number of splits per rank
-
-    Returns:
-        Tuple of (normalized_output, updated_residual) both [M, K]
-    """
-    M, K = allreduce_buf.size()
-    out = torch.empty([M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device)
-    residual_out = torch.empty(
-        [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
+    @torch.library.custom_op(
+        "my_helion_lib::allreduce_add_rmsnorm",
+        mutates_args=(),
+        device_types="cuda",
     )
+    @helion.kernel(
+        config=helion.Config(
+            block_sizes=[2],
+            indexing=[
+                "pointer",
+                "pointer",
+                "pointer",
+                "tensor_descriptor",
+                "pointer",
+                "tensor_descriptor",
+                "pointer",
+                "pointer",
+                "tensor_descriptor",
+                "pointer",
+                "pointer",
+                "tensor_descriptor",
+            ],
+            load_eviction_policies=["last", "first", "", "", "first", "first", "first", ""],
+            num_stages=1,
+            num_warps=8,
+            pid_type="persistent_interleaved",
+            range_flattens=[False],
+            range_multi_buffers=[None],
+            range_num_stages=[3],
+            range_unroll_factors=[1],
+            range_warp_specializes=[],
+            reduction_loops=[None],
+        ),
+        static_shapes=True,
+    )
+    def _allreduce_add_rmsnorm_helion_kernel(
+        allreduce_buf: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        progress: torch.Tensor,
+        rms_eps: float,
+        SPLITS_PER_RANK: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Helion kernel for AllReduce + Add + RMSNorm with progress-based overlap.
 
-    # Process rows (M dimension) as they become available
-    for tile_m in hl.tile(M):
-        split_id = tile_m.begin // (M // SPLITS_PER_RANK)
+        This kernel waits for AllReduce chunks to complete (via progress tensor)
+        and processes them as they become available, overlapping computation with
+        communication.
 
-        hl.wait(progress, [split_id], signal=1)
+        Operation: RMSNorm(AllReduce(input) + residual), returns both normalized
+        and residual
 
-        allreduce_data = allreduce_buf[tile_m, :]
-        residual_data = residual[tile_m, :]
-        added = allreduce_data + residual_data
-        residual_out[tile_m, :] = added
+        Algorithm:
+        1. Wait for chunk to be ready (via hl.wait on progress tensor)
+        2. Add residual connection
+        3. Compute variance: sum(x^2) / hidden_size
+        4. Compute normalization: rsqrt(variance + epsilon)
+        5. Apply normalization and weight scaling
 
-        # Use FP32 for all intermediate computations to match tight tolerance
-        # requirements and match FlashInfer's fp32_acc=True behavior
-        # TODO(gmagogsfm): Support fp32_acc=False
-        added_fp32 = added.float()
-        squared = added_fp32 * added_fp32
-        mean_sq = torch.mean(squared, dim=-1, keepdim=True)
+        Args:
+            allreduce_buf: Buffer being filled by AllReduce [M, K]
+            residual: Residual tensor to add [M, K]
+            rms_gamma: RMSNorm gamma weights [K]
+            progress: Progress tracking tensor [SPLITS_PER_RANK]
+            rms_eps: Epsilon for numerical stability
+            SPLITS_PER_RANK: Number of splits per rank
 
-        rsqrt_var = torch.rsqrt(mean_sq + rms_eps)
-        normalized = (added_fp32 * rsqrt_var * rms_gamma[None, :].float()).to(
-            added.dtype
+        Returns:
+            Tuple of (normalized_output, updated_residual) both [M, K]
+        """
+        M, K = allreduce_buf.size()
+        out = torch.empty([M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device)
+        residual_out = torch.empty(
+            [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
         )
-        out[tile_m, :] = normalized
 
-    return out, residual_out
+        # Process rows (M dimension) as they become available
+        for tile_m in hl.tile(M):
+            split_id = tile_m.begin // (M // SPLITS_PER_RANK)
+
+            hl.wait(progress, [split_id], signal=1)
+
+            allreduce_data = allreduce_buf[tile_m, :]
+            residual_data = residual[tile_m, :]
+            added = allreduce_data + residual_data
+            residual_out[tile_m, :] = added
+
+            # Use FP32 for all intermediate computations to match tight tolerance
+            # requirements and match FlashInfer's fp32_acc=True behavior
+            # TODO(gmagogsfm): Support fp32_acc=False
+            added_fp32 = added.float()
+            squared = added_fp32 * added_fp32
+            mean_sq = torch.mean(squared, dim=-1, keepdim=True)
+
+            rsqrt_var = torch.rsqrt(mean_sq + rms_eps)
+            normalized = (added_fp32 * rsqrt_var * rms_gamma[None, :].float()).to(
+                added.dtype
+            )
+            out[tile_m, :] = normalized
+
+        return out, residual_out
+
+    @_allreduce_add_rmsnorm_helion_kernel.register_fake
+    def _allreduce_add_rmsnorm_helion_kernel_fake(
+        allreduce_buf: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        progress: torch.Tensor,
+        rms_eps: float,
+        SPLITS_PER_RANK: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Fake/meta implementation for allreduce_add_rmsnorm Helion kernel.
+        Defines the input/output shape relationship without actual computation.
+
+        Shape contract:
+        - allreduce_buf: [M, K]
+        - residual: [M, K]
+        - rms_gamma: [K]
+        - progress: [SPLITS_PER_RANK]
+        - returns: tuple of (normalized_output, updated_residual) both [M, K]
+        """
+        M, K = allreduce_buf.size()
+        out = torch.empty([M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device)
+        residual_out = torch.empty([M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device)
+        return out, residual_out
 
 
 def helion_allreduce_add_rmsnorm(
@@ -239,12 +281,14 @@ def helion_allreduce_add_rmsnorm(
     Fuses AllReduce + Add + RMSNorm operations with communication/compute overlap.
 
     This is the main entry point for the fused operation. It:
-    1. Starts an asynchronous AllReduce with progress tracking
-    2. Launches a Helion kernel that processes chunks as they arrive
-    3. Ensures proper stream synchronization
+    1. Converts regular tensor to symmetric memory if needed
+    2. Starts an asynchronous AllReduce with progress tracking
+    3. Launches a Helion kernel that processes chunks as they arrive
+    4. Ensures proper stream synchronization
 
     Args:
         input_shared: Shared tensor across ranks to be reduced [M, K]
+                     Can be either a regular tensor or symmetric memory tensor
         residual: Residual tensor to add [M, K]
         rms_gamma: RMSNorm gamma weights [K]
         rms_eps: RMSNorm epsilon for numerical stability
@@ -256,39 +300,165 @@ def helion_allreduce_add_rmsnorm(
         - updated_residual: AllReduce(input) + residual
 
     Example:
-        >>> # In a distributed setting with symmetric memory
-        >>> input_shared = symm_mem.empty(
-        ...     1024, 4096, dtype=torch.bfloat16, device="cuda"
-        ... )
+        >>> # In a distributed setting
+        >>> input_tensor = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
         >>> residual = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
         >>> rms_gamma = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
         >>> norm_out, residual_out = helion_allreduce_add_rmsnorm(
-        ...     input_shared, residual, rms_gamma
+        ...     input_tensor, residual, rms_gamma
         ... )
     """
-    allreduce_out = torch.empty_like(input_shared)
+    if not HELION_AVAILABLE:
+        raise ImportError(
+            "Helion is not installed. Please install Helion to use "
+            "helion_allreduce_add_rmsnorm. Alternatively, use FlashInfer's "
+            "trtllm_allreduce_fusion or call AllReduce and RMSNorm separately."
+        )
+
+    # Check if we're in fake mode (torch.compile tracing)
+    # During tracing, inputs are FakeTensors and we can't create real symmetric memory
+    from torch._guards import detect_fake_mode
+
+    fake_mode = detect_fake_mode(input_shared)
+
+    if fake_mode is not None:
+        # We're in fake mode (tracing)
+        # We still need to call the torch.ops to get it into the graph
+        # Create fake tensors for allreduce_out and progress
+        M, K = input_shared.shape
+        allreduce_out = torch.empty([M, K], dtype=input_shared.dtype, device=input_shared.device)
+        progress = torch.empty(splits_per_rank, dtype=torch.uint32, device=input_shared.device)
+
+        # Call through torch.ops - the @register_fake implementation will handle it
+        norm_out, residual_out = torch.ops.my_helion_lib.allreduce_add_rmsnorm(
+            allreduce_out,
+            residual,
+            rms_gamma,
+            progress,
+            rms_eps,
+            splits_per_rank,
+        )
+        return norm_out, residual_out
+
+    # Real execution - check if input is already symmetric memory
+    # If not, convert it to symmetric memory
+    symm_mem_group = dist.group.WORLD
+    try:
+        # Try to rendezvous - this will succeed if it's already symmetric memory
+        test_handle = symm_mem.rendezvous(input_shared, group=symm_mem_group)
+        if test_handle is None:
+            # Not a symmetric memory tensor, need to convert
+            raise RuntimeError("Not symmetric memory")
+        # It's already symmetric memory, use it directly
+        input_symm = input_shared
+    except (RuntimeError, Exception):
+        # Convert regular tensor to symmetric memory
+        input_symm = symm_mem.empty(
+            *input_shared.shape,
+            dtype=input_shared.dtype,
+            device=input_shared.device,
+        )
+        input_symm.copy_(input_shared)
+
+    allreduce_out = torch.empty_like(input_symm)
     progress = torch.zeros(
         splits_per_rank,
         dtype=torch.uint32,
-        device=input_shared.device,
+        device=input_symm.device,
     )
 
     backend_stream = copy_engine_all_reduce_w_progress(
-        allreduce_out, input_shared, progress, splits_per_rank
+        allreduce_out, input_symm, progress, splits_per_rank
     )
 
-    norm_out, residual_out = _allreduce_add_rmsnorm_helion_kernel(
+    # Call through torch.ops for FX traceability
+    norm_out, residual_out = torch.ops.my_helion_lib.allreduce_add_rmsnorm(
         allreduce_out,
         residual,
         rms_gamma,
         progress,
         rms_eps,
-        SPLITS_PER_RANK=splits_per_rank,
+        splits_per_rank,
     )
 
     torch.cuda.current_stream().wait_stream(backend_stream)
 
     return norm_out, residual_out
+
+
+@CustomOp.register("allreduce_add_rmsnorm_helion")
+class AllReduceAddRMSNormHelion(HelionCustomOp):
+    """
+    Fused AllReduce + Add + RMSNorm with communication/compute overlap using Helion.
+
+    This is a distributed operation that requires multi-GPU setup and symmetric memory.
+    It overlaps AllReduce communication with RMSNorm computation for improved performance.
+
+    Operation: RMSNorm(AllReduce(input) + residual)
+
+    The operation:
+    1. Splits AllReduce into chunks with progress tracking
+    2. Processes each chunk with Add + RMSNorm as it arrives
+    3. Overlaps communication and computation across chunks
+
+    Shapes:
+        input_shared: (num_tokens, hidden_size) - symmetric memory tensor
+        residual: (num_tokens, hidden_size)
+        rms_gamma: (hidden_size,)
+        output: tuple of (normalized, updated_residual) both (num_tokens, hidden_size)
+
+    Requirements:
+    - Multi-GPU distributed environment (torch.distributed initialized)
+    - input_shared must be allocated with symm_mem.empty() or symm_mem.zeros()
+    - Helion must be enabled
+
+    Note: When Helion is disabled, use FlashInfer's trtllm_allreduce_fusion
+    or separate AllReduce + RMSNorm operations instead.
+    """
+
+    def __init__(self, splits_per_rank: int = 4):
+        """
+        Initialize the AllReduceAddRMSNormHelion operation.
+
+        Args:
+            splits_per_rank: Number of splits for overlapping communication
+                           and computation. Higher values provide more overlap
+                           but may increase overhead. Default: 4
+        """
+        super().__init__()
+        self.splits_per_rank = splits_per_rank
+
+    def forward_helion(
+        self,
+        input_shared: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        rms_eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Helion implementation with overlapped AllReduce.
+
+        Args:
+            input_shared: Shared tensor across ranks to be reduced [M, K]
+                         Must be allocated with symm_mem.empty()
+            residual: Residual tensor to add [M, K]
+            rms_gamma: RMSNorm gamma weights [K]
+            rms_eps: RMSNorm epsilon for numerical stability
+
+        Returns:
+            Tuple of (normalized_output, updated_residual) both [M, K]
+            - normalized_output: RMSNorm(AllReduce(input) + residual)
+            - updated_residual: AllReduce(input) + residual
+        """
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not installed. Please install Helion to use "
+                "AllReduceAddRMSNormHelion. Alternatively, use FlashInfer's "
+                "trtllm_allreduce_fusion or call AllReduce and RMSNorm separately."
+            )
+        return helion_allreduce_add_rmsnorm(
+            input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
+        )
 
 
 class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
@@ -329,6 +499,9 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
         self._flashinfer_workspace = None
         self._flashinfer_ipc_handles = None
         self._buffer_cache: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+
+        # Initialize the CustomOp
+        self.op = AllReduceAddRMSNormHelion(splits_per_rank=4)
 
     def supports_cudagraph(self) -> bool:
         """
@@ -553,12 +726,13 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
             M, K, input_data.dtype, "helion_input", input_data, residual_data
         )
 
-        norm_out, residual_out = helion_allreduce_add_rmsnorm(
+        # Create op with the correct splits_per_rank for this test
+        op = AllReduceAddRMSNormHelion(splits_per_rank=splits_per_rank)
+        norm_out, residual_out = op.forward_helion(
             input_helion,
             residual_helion,
             gamma,
             eps,
-            splits_per_rank,
         )
 
         return norm_out, residual_out

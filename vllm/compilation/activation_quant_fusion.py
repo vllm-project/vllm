@@ -27,11 +27,15 @@ from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
-# Import Helion kernel definitions to ensure ops are registered
-# This import has side effects - it registers the custom ops
+# Import Helion CustomOp
 # Helion may not be available in all environments
-with suppress(ImportError):
-    import vllm.compilation.helion.silu_mul_fp8  # noqa: F401
+try:
+    from vllm.compilation.helion.silu_mul_fp8 import SiluMulFp8Helion
+
+    HELION_IMPORT_AVAILABLE = True
+except ImportError:
+    HELION_IMPORT_AVAILABLE = False
+    SiluMulFp8Helion = None
 
 logger = init_logger(__name__)
 
@@ -90,10 +94,14 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
     Fusion for SiluMul+Fp8StaticQuant Pattern
     """
 
-    def __init__(self, use_helion: bool = False):
+    def __init__(self):
         super().__init__(kFp8StaticTensorSym)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
-        self.use_helion = use_helion
+
+        # Create Helion op instance if available
+        self.helion_op = None
+        if HELION_IMPORT_AVAILABLE:
+            self.helion_op = SiluMulFp8Helion()
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
@@ -108,8 +116,12 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
-            if self.use_helion:
-                return torch.ops.my_helion_lib.silu_mul_fp8(input, scale)
+            # Check if Helion is enabled using the CustomOp's enabled() method
+            # This encapsulates all the enable/disable logic in one place
+            if self.helion_op is not None and self.helion_op.enabled():
+                # Call the Helion CustomOp's forward method
+                # This will internally call torch.ops.my_helion_lib.silu_mul_fp8
+                return self.helion_op.forward_helion(input, scale)
             else:
                 d = input.shape[-1] // 2
                 output_shape = input.shape[:-1] + (d,)
@@ -191,15 +203,15 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
 
     @enable_fake_mode
-    def __init__(self, config: VllmConfig, use_helion: bool):
+    def __init__(self, config: VllmConfig):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="activation_quant_fusion_pass"
         )
 
-        # TODO(gmagogsfm): Add a global flag to enable Helion kernels.
-        pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern(use_helion)
+        # SiluMul+FP8 fusion automatically uses Helion if available
+        pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
         pattern_silu_mul_fp8.register(self.patterns)
 
         if silu_and_mul_nvfp4_quant_supported:

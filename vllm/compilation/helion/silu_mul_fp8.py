@@ -4,99 +4,108 @@
 Helion custom op for fused SiLU-and-mul with FP8 quantization.
 """
 
-import helion
-import helion.language as hl
 import torch
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
 from vllm.model_executor.custom_op import CustomOp
 
+# Try to import Helion - it's an optional dependency
+try:
+    import helion
+    import helion.language as hl
 
-# TODO(gmagogsfm): Instead of specifying one config, we should
-# use Helion bound kernel to generate many kernels according to input shapes
-@torch.library.custom_op(
-    "my_helion_lib::silu_mul_fp8", mutates_args=(), device_types="cuda"
-)
-@helion.kernel(
-    autotune_baseline_atol=0.0,
-    autotune_baseline_rtol=0.0,
-    config=helion.Config(
-        block_sizes=[1, 2048],
-        flatten_loops=[True],
-        indexing=["tensor_descriptor", "pointer", "tensor_descriptor", "pointer"],
-        l2_groupings=[32],
-        load_eviction_policies=["first", "first", "first"],
-        loop_orders=[[0, 1]],
-        num_stages=7,
-        num_warps=4,
-        pid_type="persistent_interleaved",
-        range_flattens=[None],
-        range_multi_buffers=[None],
-        range_num_stages=[1],
-        range_unroll_factors=[0],
-        range_warp_specializes=[],
-    ),
-)
-def _silu_mul_fp8_helion_kernel(
-    input: torch.Tensor, scale: torch.Tensor
-) -> torch.Tensor:
-    """
-    Helion kernel for fused SiLU-and-mul with FP8 quantization.
-
-    Operation: quantize_fp8(SiLU(input[..., :d]) * input[..., d:2*d])
-    where SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
-
-    Args:
-        input (Tensor): Input tensor with last dimension = 2*d
-        scale (Tensor): Scalar scale factor for FP8 quantization
-
-    Returns:
-        Tensor: Output tensor with shape [..., d] and dtype float8_e4m3fn
-    """
-    d = input.shape[-1] // 2
-    output_shape = input.shape[:-1] + (d,)
-
-    out = torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
-
-    input_part_a = input[..., :d]
-    input_part_b = input[..., d:]
-
-    assert scale.numel() == 1, "Scale must be a scalar Tensor"
-
-    for tile_idx in hl.tile(out.shape):
-        a_vals = input_part_a[tile_idx].to(torch.float32)
-        sigmoid_a = torch.sigmoid(a_vals)
-        silu_result = a_vals * sigmoid_a
-        silu_result = silu_result.to(input.dtype)
-        b_vals = input_part_b[tile_idx]
-        result = silu_result * b_vals
-        result_f32 = result.to(torch.float32)
-        scale_val = hl.load(scale, [0])
-        inv_scale = 1.0 / scale_val
-        result_scaled = result_f32 * inv_scale
-        out[tile_idx] = result_scaled.to(out.dtype)
-
-    return out
+    HELION_AVAILABLE = True
+except ImportError:
+    HELION_AVAILABLE = False
 
 
-@_silu_mul_fp8_helion_kernel.register_fake
-def _silu_mul_fp8_helion_kernel_fake(
-    input: torch.Tensor, scale: torch.Tensor
-) -> torch.Tensor:
-    """
-    Fake/meta implementation for silu_mul_fp8 Helion kernel.
-    Defines the input/output shape relationship without actual computation.
+# Only define the kernel if Helion is available
+if HELION_AVAILABLE:
 
-    Shape contract:
-    - input: [..., 2*d]
-    - scale: scalar (numel == 1)
-    - returns: [..., d] with dtype float8_e4m3fn
-    """
-    d = input.shape[-1] // 2
-    output_shape = input.shape[:-1] + (d,)
+    # TODO(gmagogsfm): Instead of specifying one config, we should
+    # use Helion bound kernel to generate many kernels according to input shapes
+    @torch.library.custom_op(
+        "my_helion_lib::silu_mul_fp8", mutates_args=(), device_types="cuda"
+    )
+    @helion.kernel(
+        autotune_baseline_atol=0.0,
+        autotune_baseline_rtol=0.0,
+        config=helion.Config(
+            block_sizes=[1, 2048],
+            flatten_loops=[True],
+            indexing=["tensor_descriptor", "pointer", "tensor_descriptor", "pointer"],
+            l2_groupings=[32],
+            load_eviction_policies=["first", "first", "first"],
+            loop_orders=[[0, 1]],
+            num_stages=7,
+            num_warps=4,
+            pid_type="persistent_interleaved",
+            range_flattens=[None],
+            range_multi_buffers=[None],
+            range_num_stages=[1],
+            range_unroll_factors=[0],
+            range_warp_specializes=[],
+        ),
+    )
+    def _silu_mul_fp8_helion_kernel(
+        input: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Helion kernel for fused SiLU-and-mul with FP8 quantization.
 
-    return torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
+        Operation: quantize_fp8(SiLU(input[..., :d]) * input[..., d:2*d])
+        where SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+
+        Args:
+            input (Tensor): Input tensor with last dimension = 2*d
+            scale (Tensor): Scalar scale factor for FP8 quantization
+
+        Returns:
+            Tensor: Output tensor with shape [..., d] and dtype float8_e4m3fn
+        """
+        d = input.shape[-1] // 2
+        output_shape = input.shape[:-1] + (d,)
+
+        out = torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
+
+        input_part_a = input[..., :d]
+        input_part_b = input[..., d:]
+
+        assert scale.numel() == 1, "Scale must be a scalar Tensor"
+
+        for tile_idx in hl.tile(out.shape):
+            a_vals = input_part_a[tile_idx].to(torch.float32)
+            sigmoid_a = torch.sigmoid(a_vals)
+            silu_result = a_vals * sigmoid_a
+            silu_result = silu_result.to(input.dtype)
+            b_vals = input_part_b[tile_idx]
+            result = silu_result * b_vals
+            result_f32 = result.to(torch.float32)
+            scale_val = hl.load(scale, [0])
+            inv_scale = 1.0 / scale_val
+            result_scaled = result_f32 * inv_scale
+            out[tile_idx] = result_scaled.to(out.dtype)
+
+        return out
+
+    @_silu_mul_fp8_helion_kernel.register_fake
+    def _silu_mul_fp8_helion_kernel_fake(
+        input: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Fake/meta implementation for silu_mul_fp8 Helion kernel.
+        Defines the input/output shape relationship without actual computation.
+
+        Shape contract:
+        - input: [..., 2*d]
+        - scale: scalar (numel == 1)
+        - returns: [..., d] with dtype float8_e4m3fn
+        """
+        d = input.shape[-1] // 2
+        output_shape = input.shape[:-1] + (d,)
+
+        return torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
 
 
 # Now define the vLLM CustomOp wrapper
@@ -137,6 +146,11 @@ class SiluMulFp8Helion(HelionCustomOp):
         Returns:
             Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
         """
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not installed. Please install Helion to use SiluMulFp8Helion. "
+                "Alternatively, use the CUDA baseline implementation."
+            )
         return torch.ops.my_helion_lib.silu_mul_fp8(input, scale)
 
 
