@@ -29,6 +29,7 @@ from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_barrier
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
+    free_kv_cache,
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
@@ -119,6 +120,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_speculative_steps = 0
             self.speculator = None
 
+        self.kv_caches: list[torch.Tensor] = []
+
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -207,7 +210,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not all(b.get_name() == "FLASH_ATTN" for b in self.attn_backends.values()):
             raise NotImplementedError("Only FLASH_ATTN backend is supported currently.")
 
-        self.kv_caches: list[torch.Tensor] = []
         init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
@@ -217,6 +219,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         # Attention groups are not supported.
         self.attn_groups = []  # type: ignore
+
+    def free_kv_cache(self) -> None:
+        if not self.kv_caches:
+            return
+        free_kv_cache(
+            self.compilation_config.static_forward_context,
+            self.kv_caches,
+        )
 
     def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
