@@ -178,9 +178,8 @@ class CacheConfig:
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
-
-        factors = get_compile_factors(self, ignored_factors)
-        return factors
+        
+        return get_compile_factors(self, ignored_factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

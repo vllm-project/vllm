@@ -1001,7 +1001,7 @@ def wait_for_engine_startup(
                     f"dp lb mode"
                 )
 
-        parallel_factors = parallel_config.compile_factors() or {}
+        parallel_factors = parallel_config.compile_factors()
         parallel_hash = hash_factors(parallel_factors)
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info and config hash.

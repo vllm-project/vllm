@@ -509,7 +509,7 @@ class EplbState:
             new_logical_replica_count=new_logical_replica_count,
         )
 
-        model_factors = model_config.compile_factors() or {}
+        model_factors = model_config.compile_factors()
         model_hash = hash_factors(model_factors)
         self.model_states[model_hash] = model_state
 

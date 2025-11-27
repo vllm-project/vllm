@@ -127,55 +127,48 @@ class VllmConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-
-        # summarize vllm config
-        vllm_factors: list[Any] = []
         from vllm import __version__
 
-        vllm_factors.append(__version__)
-
-        def _append_config(config_obj: SupportsCompileFactors | None) -> None:
+        def _compile(config_obj: SupportsCompileFactors | None) -> CompileFactors:
             if config_obj is None:
-                vllm_factors.append({})
-            else:
-                vllm_factors.append(config_obj.compile_factors())
+                return {}
+            return config_obj.compile_factors()
 
-        _append_config(self.model_config)
-        _append_config(self.cache_config)
-        _append_config(self.parallel_config)
-        _append_config(self.scheduler_config)
-        _append_config(self.device_config)
-        _append_config(self.load_config)
-        if self.lora_config:
-            vllm_factors.append(self.lora_config.compile_factors())
-            # LoRA creates static buffers based on max_num_batched_tokens.
-            # The tensor sizes and strides get captured in the torch.compile
-            # graph explicitly.
-            vllm_factors.append(self.scheduler_config.max_num_batched_tokens)
-        else:
-            vllm_factors.append({})
-        _append_config(self.speculative_config)
-        _append_config(self.structured_outputs_config)
-        vllm_factors.append(self.observability_config.compile_factors())
-        if self.compilation_config:
-            vllm_factors.append(self.compilation_config.compile_factors())
-        else:
-            vllm_factors.append({})
-        _append_config(self.kv_transfer_config)
-        _append_config(self.ec_transfer_config)
+        factors: dict[str, Any] = {
+            "version": __version__,
+            "model": _compile(self.model_config),
+            "cache": _compile(self.cache_config),
+            "parallel": _compile(self.parallel_config),
+            "scheduler": _compile(self.scheduler_config),
+            "device": _compile(self.device_config),
+            "load": _compile(self.load_config),
+            "speculative": _compile(self.speculative_config),
+            "structured_outputs": _compile(self.structured_outputs_config),
+            "observability": self.observability_config.compile_factors(),
+            "compilation": (
+                self.compilation_config.compile_factors()
+                if self.compilation_config
+                else {}
+            ),
+            "kv_transfer": _compile(self.kv_transfer_config),
+            "ec_transfer": _compile(self.ec_transfer_config),
+        }
+
+        factors["lora"] = (
+            self.lora_config.compile_factors() if self.lora_config else {}
+        )
+        factors["max_num_batched_tokens"] = self.scheduler_config.max_num_batched_tokens
+
         if self.additional_config:
             additional_config = self.additional_config
             if isinstance(additional_config, dict):
-                assert isinstance(additional_config, SupportsCompileFactors)
-                vllm_factors.append(additional_config)
+                factors["additional"] = additional_config
             else:
-                vllm_factors.append(additional_config.compile_factors())
+                factors["additional"] = additional_config.compile_factors()
         else:
-            vllm_factors.append({})
+            factors["additional"] = {}
 
-        factors.append(vllm_factors)
-        return {"vllm": factors}
+        return factors
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
         # if batch_size > self.compilation_config.max_cudagraph_capture_size,

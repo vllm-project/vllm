@@ -100,7 +100,7 @@ class CompilerManager:
         self.compiler = make_compiler(compilation_config)
 
     def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
-        return self.compiler.compile_factors(vllm_config) or {}
+        return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
     def compile_context(self, runtime_shape: int | None = None):

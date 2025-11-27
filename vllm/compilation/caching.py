@@ -170,7 +170,7 @@ def compute_env_and_config_hashes(
 
     env_factors = envs.compile_factors()
     env_hash = hash_factors(env_factors)
-    config_factors = vllm_config.compile_factors() or {}
+    config_factors = vllm_config.compile_factors()
     config_hash = hash_factors(config_factors)
     return env_hash, config_hash, env_factors, config_factors
 
