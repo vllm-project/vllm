@@ -138,6 +138,32 @@ vllm serve facebook/opt-125m --dtype=bfloat16
 
 Note, it is recommended to manually reserve 1 CPU for vLLM front-end process when `world_size == 1`.
 
+### What are supported models on CPU?
+
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+
+### How to Find Optimized Runtime Configurations for Supported CPU Models?
+
+For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+, you can obtain optimized runtime configurations by running the vLLM Benchmark Suite in TEST_MODE.  
+
+To generate these optimized server and client commands, follow the instructions in  
+[running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark)  
+ and execute the Benchmark Suite on a CPU environment using TEST_MODE.  
+
+Below is an example command that generates optimized configurations for all CPU-supported models.
+If RUN_FULL_TESTS=1 is not set, the script will only produce commands for the default model.
+
+```bash
+ON_CPU=1 TEST_MODE=1 RUN_FULL_TESTS=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+When executed, the Benchmark Suite writes results to the benchmark/results/ directory.
+Within this directory, the generated .commands files contain all optimized server and client commands for the various supported models.
+
+For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
+, which publishes default-model CPU results produced using the same Benchmark Suite.
+
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
 - Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to the same NUMA node respectively, and 1 CPU per rank will be reserved for other vLLM components when `world_size > 1`. If you have any performance problems or unexpected binding behaviours, please try to bind threads as following.
