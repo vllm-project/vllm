@@ -160,7 +160,7 @@ def _compare_caches(
             cache_0_p0_out = selected_items
         else:
             for _ in range(is_cached_calls_per_iter):
-                cache_0_p0.peek(selected_hashes)
+                cache_0_p0.is_cached(selected_hashes)
             cache_0_p0_out = [
                 item
                 for item, _ in cache_0_p0.get_and_update(
@@ -173,7 +173,7 @@ def _compare_caches(
             cache_1_p0_out = selected_items
         else:
             for _ in range(is_cached_calls_per_iter):
-                cache_1_p0.peek(selected_hashes)
+                cache_1_p0.is_cached(selected_hashes)
             cache_1_p0_out = [
                 item
                 for item, _ in cache_1_p0.get_and_update(
