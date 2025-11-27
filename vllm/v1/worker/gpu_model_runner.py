@@ -2736,13 +2736,6 @@ class GPUModelRunner(
             Model output tensor
         """
 
-        # Enable layerwise NVTX tracing for the model
-        # Position the registration here after CUDA graph has been captured
-        # and models have been torch compiled
-        if self.observability_config.enable_layerwise_nvtx_tracing:
-            pyt_hooks = PytHooks()
-            pyt_hooks.register_hooks(self.model, module_prefix="model")
-
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3022,6 +3015,21 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            # Enable layerwise NVTX tracing for the model
+            # Position the registration here after CUDA graph has been captured
+            # and models have been torch compiled
+            if self.observability_config.enable_layerwise_nvtx_tracing:
+                if cudagraph_runtime_mode != CUDAGraphMode.NONE:
+                    logger.warning(
+                        "layerwise NVTX tracing is enabled, \
+                         but cudagraph runtime mode is not NONE"
+                    )
+                    logger.warning("Layers captured by cudagraph will not be traced")
+                if not hasattr(self, "_nvtx_hooks_registered"):
+                    pyt_hooks = PytHooks()
+                    pyt_hooks.register_hooks(self.model, module_prefix="model")
+                    self._nvtx_hooks_registered = True
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
