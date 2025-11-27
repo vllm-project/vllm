@@ -26,13 +26,13 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
     embedding_modules = LlamaForCausalLM.embedding_modules
     embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
-    expected_lora_modules: list[str] = []
+    expected_lora_lst: list[str] = []
     for module in LLAMA_LORA_MODULES:
         if module in packed_modules_mapping:
-            expected_lora_modules.extend(packed_modules_mapping[module])
+            expected_lora_lst.extend(packed_modules_mapping[module])
         else:
-            expected_lora_modules.append(module)
-
+            expected_lora_lst.append(module)
+    expected_lora_modules = set(expected_lora_lst)
     lora_path = get_adapter_absolute_path(lora_name)
 
     # lora loading should work for either absolute path and huggingface id.
