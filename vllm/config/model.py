@@ -1752,6 +1752,14 @@ class ModelConfig:
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
+    def is_model_moe(
+        self,
+    ) -> bool:
+        return self.get_num_experts() > 1
+
+    def is_quantized(self) -> bool:
+        return getattr(self.hf_config, "quantization_config", None) is not None
+
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
     """
