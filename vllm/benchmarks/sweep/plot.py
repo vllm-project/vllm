@@ -318,6 +318,10 @@ def _plot_fig(
     df = filter_by.apply(df)
     df = bin_by.apply(df)
 
+    # Sort by curve_by columns alphabetically for consistent legend ordering
+    if curve_by:
+        df = df.sort_values(by=curve_by)
+
     df["row_group"] = (
         pd.concat(
             [k + "=" + df[k].astype(str) for k in row_by],
@@ -412,7 +416,7 @@ def plot(
     fig_name: str = "FIGURE",
     error_bars: bool = True,
     fig_width: float = 6.4,
-    fig_dpi: int = 150,
+    fig_dpi: int = 300,
 ):
     all_data = [
         run_data
@@ -475,7 +479,7 @@ class SweepPlotArgs:
     fig_name: str = "FIGURE"
     error_bars: bool = True
     fig_width: float = 6.4
-    fig_dpi: int = 150
+    fig_dpi: int = 300
 
     parser_name: ClassVar[str] = "plot"
     parser_help: ClassVar[str] = "Plot performance curves from parameter sweep results."
@@ -625,8 +629,8 @@ class SweepPlotArgs:
         parser.add_argument(
             "--fig-dpi",
             type=int,
-            default=150,
-            help="Resolution of the output figure in dots per inch. Default: 150",
+            default=300,
+            help="Resolution of the output figure in dots per inch. Default: 300",
         )
         parser.add_argument(
             "--dry-run",
