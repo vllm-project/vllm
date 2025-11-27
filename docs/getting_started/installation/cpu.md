@@ -145,17 +145,18 @@ For the full and up-to-date list of models validated on CPU platforms, please se
 ### How to Find Optimized Runtime Configurations for Supported CPU Models?
 
 For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
-, you can obtain optimized runtime configurations by running the vLLM Benchmark Suite in TEST_MODE.  
+, optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](https://github.com/vllm-project/vllm/blob/main/.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks#performance-benchmark-details).
 
-To generate these optimized server and client commands, follow the instructions in  
+To benchmark the supported models using these optimized settings, follow the steps in 
 [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark)  
- and execute the Benchmark Suite on a CPU environment using TEST_MODE.  
+ and run the Benchmark Suite on a CPU environment.  
 
-Below is an example command that generates optimized configurations for all CPU-supported models.
+Below is an example command to benchmark all CPU-supported models using optimized configurations.
 If RUN_FULL_TESTS=1 is not set, the script will only produce commands for the default model.
 
 ```bash
-ON_CPU=1 TEST_MODE=1 RUN_FULL_TESTS=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+ON_CPU=1 RUN_FULL_TESTS=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 When executed, the Benchmark Suite writes results to the benchmark/results/ directory.
