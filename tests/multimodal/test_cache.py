@@ -285,6 +285,8 @@ def _run_test_cache_eviction(
     expected_hashes = ["image_A", "image_B", "image_C"]
     if isinstance(p0_cache, MultiModalProcessorSenderCache):
         assert list(p0_cache._cache.order) == expected_hashes
+    elif isinstance(p0_cache, ShmObjectStoreSenderCache):
+        assert list(p0_cache._p0_cache) == expected_hashes
     if isinstance(p1_cache, MultiModalReceiverCache):
         assert list(p1_cache._cache.order) == expected_hashes
 
@@ -318,6 +320,8 @@ def _run_test_cache_eviction(
     expected_hashes = ["image_C", "image_D", "image_E", "image_A"]
     if isinstance(p0_cache, MultiModalProcessorSenderCache):
         assert list(p0_cache._cache.order) == expected_hashes
+    elif isinstance(p0_cache, ShmObjectStoreSenderCache):
+        assert list(p0_cache._p0_cache) == expected_hashes
     if isinstance(p1_cache, MultiModalReceiverCache):
         assert list(p1_cache._cache.order) == expected_hashes
 
