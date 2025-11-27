@@ -8,7 +8,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -97,19 +97,25 @@ class PassConfig:
 
     This is separate from general `CompilationConfig` so that inductor passes
     don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
+    the `PassManager` is set as a property of config.
 
-    enable_fusion: bool = False
+    You must pass PassConfig to VLLMConfig constructor via the CompilationConfig
+    constructor. VLLMConfig's post_init does further initialization.
+    If used outside of the VLLMConfig, some fields may be left in an
+    improper state.
+    """
+
+    enable_fusion: bool = Field(default=None)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
+    enable_attn_fusion: bool = Field(default=None)
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = False
+    enable_noop: bool = Field(default=None)
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
+    enable_sequence_parallelism: bool = Field(default=None)
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
+    enable_async_tp: bool = Field(default=None)
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
+    enable_fi_allreduce_fusion: bool = Field(default=None)
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -166,6 +172,22 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         return InductorPass.hash_dict(asdict(self))
+
+    @field_validator(
+        "enable_fusion",
+        "enable_attn_fusion",
+        "enable_noop",
+        "enable_sequence_parallelism",
+        "enable_async_tp",
+        "enable_fi_allreduce_fusion",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
 
     def __post_init__(self) -> None:
         if not self.enable_noop:
@@ -243,7 +265,13 @@ class DynamicShapesConfig:
 @config
 @dataclass
 class CompilationConfig:
-    """Configuration for compilation. It has three parts:
+    """Configuration for compilation.
+
+    You must pass CompilationConfig to VLLMConfig constructor.
+    VLLMConfig's post_init does further initialization. If used outside of the
+    VLLMConfig, some fields will be left in an improper state.
+
+    It has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -264,7 +292,6 @@ class CompilationConfig:
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
-        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
@@ -283,14 +310,14 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int | None = None
+    level: int = Field(default=None)
     """
     Level is deprecated and will be removed in the next release,
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: CompilationMode | None = None
+    mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -331,9 +358,9 @@ class CompilationConfig:
     We use string to avoid serialization issues when using compilation in a
     distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation mode is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph). The backend can not be custom for compilation
-    mode 3, i.e. the backend must be either eager or inductor. Furthermore,
+    compilation mode is 3, the backend supports both whole graph and piecewise 
+    compilation, available backends include eager, inductor, and custom backends, 
+    the latter of which can be defined via `get_compile_backend`. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
@@ -348,7 +375,7 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
+    disabled when running with Inductor: mode>=VLLM_COMPILE and backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
@@ -374,24 +401,6 @@ class CompilationConfig:
     Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
-    use_inductor: bool | None = None
-    """
-    Whether to use inductor compilation.
-
-    This flag is deprecated and will be removed in the next release 0.12.0.
-    Please use the 'backend' option instead.
-
-    - False: inductor compilation is not used. graph runs in eager
-        (custom_ops enabled by default).
-    - True: inductor compilation is used (custom_ops disabled by default).
-        One graph for symbolic shape and one graph per size in compile_sizes
-        are compiled using configurations in inductor_compile_config.
-
-    This setting is ignored if mode<VLLM_COMPILE.
-
-    For future compatibility:
-    If use_inductor is True, backend="inductor" otherwise backend="eager".
-    """
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
@@ -409,7 +418,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode | None = None
+    cudagraph_mode: CUDAGraphMode = Field(default=None)
     """
     The mode of the cudagraph:
 
@@ -471,7 +480,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool = Field(default=None)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -667,6 +676,20 @@ class CompilationConfig:
             )
         return value
 
+    @field_validator(
+        "level",
+        "mode",
+        "cudagraph_mode",
+        "use_inductor_graph_partition",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     def __post_init__(self) -> None:
         if self.level is not None:
             logger.warning(
@@ -759,16 +782,8 @@ class CompilationConfig:
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
 
-        if self.use_inductor is not None:
-            logger.warning_once(
-                "The 'use_inductor' flag is deprecated and will be "
-                "removed in the next release (v0.12.0). "
-                "Please use the 'backend' option instead.",
-            )
-            self.backend = "inductor" if self.use_inductor else "eager"
-
         if self.backend == "":
-            self.backend = current_platform.simple_compile_backend
+            self.backend = current_platform.get_compile_backend()
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
@@ -800,9 +815,7 @@ class CompilationConfig:
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
+            logger.info("Using OOT custom backend for compilation.")
 
         from vllm.compilation.backends import VllmBackend
 
@@ -976,6 +989,13 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def is_custom_op_enabled(self, op: str) -> bool:
+        if "all" in self.custom_ops:
+            return f"-{op}" not in self.custom_ops
+
+        assert "none" in self.custom_ops
+        return f"+{op}" in self.custom_ops
 
     def adjust_cudagraph_sizes_for_spec_decode(
         self, uniform_decode_query_len: int, tensor_parallel_size: int
