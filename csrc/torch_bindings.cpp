@@ -359,8 +359,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   Tensor c_strides,"
       "   Tensor group_scale_strides,"
       "   str? maybe_schedule"
-      ") -> ()",
-      {stride_tag});
+      ") -> ()");
   ops.def(
       "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
       "Tensor)");
