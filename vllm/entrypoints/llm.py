@@ -406,7 +406,7 @@ class LLM:
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
                 If provided, must be a list of integers matching the length
-                of `prompts`,where each priority value corresponds to the prompt
+                of `prompts`, where each priority value corresponds to the prompt
                 at the same index.
 
         Returns:
