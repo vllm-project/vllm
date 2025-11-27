@@ -105,7 +105,7 @@ jobs:
                   }
                 ],
               },
-              cpu : {
+              cpu: {
                 // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
                   {
