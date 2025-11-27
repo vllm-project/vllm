@@ -1788,28 +1788,10 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type == "all":
+                if pooling_type in ["all", "mean", "step", "cls"]:
                     logger.debug(
-                        "Pooling models with all pooling does not support "
-                        "chunked prefill."
-                    )
-                    return False
-                elif pooling_type == "mean":
-                    logger.debug(
-                        "Pooling models with mean pooling does not support "
-                        "chunked prefill."
-                    )
-                    return False
-                elif pooling_type == "step":
-                    logger.debug(
-                        "Pooling models with step pooling does not support "
-                        "chunked prefill."
-                    )
-                    return False
-                elif pooling_type == "cls":
-                    logger.debug(
-                        "Pooling models with cls pooling does not support "
-                        "chunked prefill."
+                        f"Pooling models with {pooling_type} pooling does not "
+                        f"support chunked prefill."
                     )
                     return False
                 else:
@@ -1842,28 +1824,10 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type == "all":
+                if pooling_type in ["all", "mean", "step", "cls"]:
                     logger.debug(
-                        "Pooling models with all pooling does not support "
-                        "prefix caching."
-                    )
-                    return False
-                elif pooling_type == "mean":
-                    logger.debug(
-                        "Pooling models with mean pooling does not support "
-                        "prefix caching."
-                    )
-                    return False
-                elif pooling_type == "step":
-                    logger.debug(
-                        "Pooling models with step pooling does not support "
-                        "prefix caching."
-                    )
-                    return False
-                elif pooling_type == "cls":
-                    logger.debug(
-                        "Pooling models with cls pooling does not support "
-                        "prefix caching."
+                        f"Pooling models with {pooling_type} pooling does not "
+                        f"support prefix caching."
                     )
                     return False
                 else:
