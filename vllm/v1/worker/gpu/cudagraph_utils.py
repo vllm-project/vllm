@@ -227,9 +227,10 @@ def prepare_inputs_to_capture(
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
+    num_tokens_per_req = num_tokens // num_reqs
     query_start_loc = input_buffers.query_start_loc
-    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-    query_start_loc.np[num_reqs:] = num_reqs
+    query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1) * num_tokens_per_req
+    query_start_loc.np[num_reqs:] = num_tokens
     query_start_loc.copy_to_gpu()
     seq_lens_np = np.full(num_reqs, max_model_len, dtype=np.int32)
     # HACK(woosuk): To optimize warmup time, we use 1 (instead of max_model_len)
@@ -239,7 +240,7 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[num_reqs:] = 0
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
-    slot_mappings = block_tables.slot_mappings[:, :num_reqs]
+    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
 
     attn_metadata = build_attn_metadata(
         attn_metadata_builders=attn_metadata_builders,
