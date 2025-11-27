@@ -24,13 +24,14 @@ LLAMA_LORA_MODULES = [
 def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     lora_name = request.getfixturevalue(lora_fixture_name)
     packed_modules_mapping = Qwen3ForCausalLM.packed_modules_mapping
-    expected_lora_modules: list[str] = []
+
+    expected_lora_lst: list[str] = []
     for module in LLAMA_LORA_MODULES:
         if module in packed_modules_mapping:
-            expected_lora_modules.extend(packed_modules_mapping[module])
+            expected_lora_lst.extend(packed_modules_mapping[module])
         else:
-            expected_lora_modules.append(module)
-
+            expected_lora_lst.append(module)
+    expected_lora_modules = set(expected_lora_lst)
     lora_path = get_adapter_absolute_path(lora_name)
 
     # lora loading should work for either absolute path and huggingface id.

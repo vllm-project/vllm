@@ -37,7 +37,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-
+        self.cudagraph_mode: CUDAGraphMode
         if self.compilation_config.cudagraph_mode is None:
             self.cudagraph_mode = CUDAGraphMode.NONE
         else:
@@ -233,10 +233,11 @@ def prepare_inputs_to_capture(
     query_start_loc.np[num_reqs:] = num_tokens
     query_start_loc.copy_to_gpu()
     seq_lens_np = np.full(num_reqs, max_model_len, dtype=np.int32)
-    # HACK(woosuk): To optimize warmup time, we use 1 (instead of max_model_len)
-    # for seq_lens. This leads to a mismatch between seq_lens (GPU) and
-    # seq_lens_np (CPU), which might cause issues in some attention backends.
-    input_buffers.seq_lens[:num_reqs] = 1
+    # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
+    # rather than max_model_len. This introduces a discrepancy between
+    # seq_lens (on GPU) and seq_lens_np (on CPU), which may cause issues for
+    # certain attention backends.
+    input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
