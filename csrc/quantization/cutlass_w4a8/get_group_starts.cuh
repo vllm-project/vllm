@@ -1,5 +1,4 @@
 // see csrc/quantization/w8a8/cutlass/moe/get_group_starts.cuh
-// slightly diff logic cause scales and weights are different
 #pragma once
 
 #include <cuda.h>
@@ -10,10 +9,8 @@
 #include "cutlass/bfloat16.h"
 #include "cutlass/float8.h"
 
-// TODO: maybe in general we can have better naming for the types?
-// e.g. ElementB is actually the underlying torch type int32 for 8x int4 packing
-// ElementGroupScale is also the cutlass packed type, packing 8 float8 scales to
-// 1
+// ElementB is int32 (packed int4)
+// ElementGroupScale is cutlass::Array<cutlass::float_e4m3_t, 8> (packed fp8)
 template <typename ElementA, typename ElementB, typename ElementC,
           typename ElementAccumulator, typename ElementGroupScale>
 __global__ void get_group_gemm_starts(
@@ -30,13 +27,13 @@ __global__ void get_group_gemm_starts(
 
   int64_t expert_offset = expert_offsets[expert_id];
 
-  // w8a8 code works for these
+  // same as w8a8
   a_offsets[expert_id] = a_base_as_int + expert_offset * k;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] = a_scales_base_as_int + expert_offset;
   b_scales_offsets[expert_id] = b_scales_base_as_int + (n * expert_id);
 
-  // these need some custom change for w4a8
+  // w4a8 specific
   constexpr int pack_factor = 8;  // pack 8 int4 into int32
   b_offsets[expert_id] = b_base_as_int + (expert_id * k * n / pack_factor);
   b_group_scales_offsets[expert_id] =
