@@ -333,6 +333,8 @@ class MLACommonPrefillMetadata:
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
         workspace: torch.Tensor
+        token_to_seq: torch.Tensor
+        chunk_total_token: list[int]
 
         # for mla DCP
         padded_local_chunk_seq_lens: list[list[int]] | None = None
@@ -832,6 +834,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 torch.cumsum(
                     chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
                 )
+                chunk_total_token = cu_seq_lens_cpu[:, -1]
+
+                max_token_num_over_chunk = chunk_total_token.max().item()
+                token_to_seq_tensor_cpu = torch.zeros(
+                    [num_chunks, max_token_num_over_chunk], dtype=torch.int32
+                )
+                range_idx = torch.arange(num_prefills, dtype=torch.int32)
+                for i in range(num_chunks):
+                    chunk_token_to_seq_tensor = torch.repeat_interleave(
+                        range_idx, chunk_seq_lens[i]
+                    )
+                    chunk_len = chunk_token_to_seq_tensor.shape[0]
+                    token_to_seq_tensor_cpu[i, :chunk_len] = chunk_token_to_seq_tensor
 
                 if self.dcp_world_size > 1:
                     local_context_lens_allranks = get_dcp_local_seq_lens(
@@ -899,6 +914,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
+                        token_to_seq=token_to_seq_tensor_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        chunk_total_token=chunk_total_token.tolist(),
                         workspace=self.chunked_prefill_workspace,
                         padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
                         local_context_lens_allranks=local_context_lens_allranks.tolist(),
@@ -915,6 +934,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
+                        token_to_seq=token_to_seq_tensor_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        chunk_total_token=chunk_total_token,
                         workspace=self.chunked_prefill_workspace,
                     )
 
