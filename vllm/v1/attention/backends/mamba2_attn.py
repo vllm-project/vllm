@@ -385,6 +385,16 @@ class Mamba2AttentionMetadataBuilder(
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
             else:
+                if self.vllm_config.cache_config.enable_prefix_caching:
+                    block_idx_first_scheduled_token = block_idx_first_scheduled_token[
+                        ~spec_sequence_masks
+                    ]
+                    block_idx_last_scheduled_token = block_idx_last_scheduled_token[
+                        ~spec_sequence_masks
+                    ]
+                    block_idx_last_computed_token = block_idx_last_computed_token[
+                        ~spec_sequence_masks
+                    ]
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks, query_lens
                 )
