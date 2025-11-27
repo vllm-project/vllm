@@ -4,10 +4,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 import torch
 from torch import nn
@@ -46,7 +42,6 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -295,7 +290,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         hidden_states_d, hidden_states_p = torch.split(
@@ -468,11 +462,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
     def mamba_type(self) -> str:
         return "mamba2"
 
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
-
-        return Mamba2AttentionBackend
-
 
 def plamo2_mamba_mixer(
     hidden_states: torch.Tensor,
@@ -577,10 +566,6 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
-        self.rope_scaling = (
-            config.rope_scaling if hasattr(config, "rope_scaling") else None
-        )
         max_position = config.max_position_embeddings
         if hasattr(vllm_config.model_config, "max_model_len") and isinstance(
             vllm_config.model_config.max_model_len, int
@@ -591,8 +576,7 @@ class Plamo2AttentionMixer(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.q_norm = RMSNorm(config.hidden_size_per_head, eps=config.rms_norm_eps)
         self.q_norm.weight = torch.nn.Parameter(
@@ -751,12 +735,10 @@ class Plamo2Model(torch.nn.Module):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.embed_tokens",
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -765,7 +747,7 @@ class Plamo2Model(torch.nn.Module):
         self.layers = Plamo2Decoder(vllm_config=vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -779,7 +761,7 @@ class Plamo2Model(torch.nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -827,27 +809,23 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.vocab_size = self.config.vocab_size
-        self.unpadded_vocab_size = self.config.vocab_size
-        num_embeddings = ((self.vocab_size + 15) // 16) * 16
         self.lm_head = ParallelLMHead(
-            num_embeddings,
+            self.vocab_size,
             self.config.hidden_size,
-            org_num_embeddings=self.config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             prefix=f"{prefix}.lm_head",
         )
         if self.config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.config.vocab_size
+            config.vocab_size, self.config.vocab_size
         )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

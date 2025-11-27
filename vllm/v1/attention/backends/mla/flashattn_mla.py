@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.attention.utils.fa_utils import (
@@ -17,10 +18,12 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -37,6 +40,13 @@ logger = init_logger(__name__)
 
 
 class FlashAttnMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
@@ -48,6 +58,26 @@ class FlashAttnMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashAttnMLAImpl"]:
         return FlashAttnMLAImpl
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 9
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if not flash_attn_supports_mla():
+            return "FlashAttention MLA not supported on this device"
+        return None
 
 
 @dataclass
@@ -65,7 +95,7 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
     reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
@@ -146,7 +176,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_device.max().item()
+        max_seq_len = seq_lens_cpu.max().item()
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0

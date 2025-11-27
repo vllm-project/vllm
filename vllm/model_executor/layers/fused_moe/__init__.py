@@ -5,9 +5,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
-    FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -16,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.triton_utils import HAS_TRITON
 
@@ -39,6 +44,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",

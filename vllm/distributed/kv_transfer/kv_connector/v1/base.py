@@ -38,7 +38,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 import torch
 
@@ -47,7 +47,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -142,6 +142,18 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 
 class KVConnectorBase_V1(ABC):
+    """
+    Base class for KV connectors.
+
+    Attributes:
+        prefer_cross_layer_blocks (bool): Indicates whether this connector
+            prefers KV blocks that hold KV data for all layers (for speeding
+            up KV data transfers).
+            Defaults to False.
+    """
+
+    prefer_cross_layer_blocks: ClassVar[bool] = False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -204,10 +216,17 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ConnectorMetadata: the connector metadata.
         """
-
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
+
+    def has_connector_metadata(self) -> bool:
+        """Check whether the connector metadata is currently set.
+
+        Returns:
+            bool: True if connector metadata exists, False otherwise.
+        """
+        return self._connector_metadata is not None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -216,6 +235,23 @@ class KVConnectorBase_V1(ABC):
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+        """
+        return
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+    ):
+        """
+        Initialize with a single KV cache tensor used by all layers.
+        The first dimension should be num_layers.
+        This function will only be called for models with uniform layers,
+        and only if the prefers_cross_layer_blocks is set to True.
+        Only one of the functions
+        {register_kv_caches, register_cross_layers_kv_cache} will be called.
+
+        Args:
+            kv_cache: a cross-layers kv cache tensor
+            attn_backend: The attention backend that corresponds to all layers
         """
         return
 

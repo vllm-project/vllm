@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import MultipleOf
+from vllm.attention.layer import Attention
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -186,7 +186,7 @@ def _make_mock_backend_for_kernel_block_size(
 ):
     class _MockBackend:
         @staticmethod
-        def get_supported_kernel_block_size():
+        def get_supported_kernel_block_sizes():
             return supported_sizes
 
     return _MockBackend()
@@ -466,19 +466,29 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     # This test checks if GPUModelRunner initializes correctly when an attention
     # backend enforces a non-default KV cache stride order.
     n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
-    expected_kv_cache_shape = [
-        2,
-        NUM_BLOCKS,
-        BLOCK_SIZE,
-        n_heads,
-        model_runner.model_config.get_head_size(),
-    ]
+    head_size = model_runner.model_config.get_head_size()
+
+    # Get the expected shape from the backend's get_kv_cache_shape method
+    # to ensure compatibility with different backends (triton vs flexattention)
+    attn_backend = None
+    for attn_group in model_runner._attn_group_iterator():
+        attn_backend = attn_group.backend
+        break
+
+    assert attn_backend is not None, "No attention backend found"
+    expected_kv_cache_shape = list(
+        attn_backend.get_kv_cache_shape(NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size)
+    )
+
     # TODO mla test
     default_stride = tuple(range(5))
     # Permutation that gets you back to expected kv shape
     for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
 
-        def rnd_stride_order(test_stride=test_stride):
+        def rnd_stride_order(
+            include_num_layers_dimension: bool = False, test_stride=test_stride
+        ):
+            assert not include_num_layers_dimension
             return test_stride
 
         # Patch the attention backend class and re-trigger the KV cache creation
@@ -951,7 +961,7 @@ def test_hybrid_block_table_initialization():
     max_num_reqs = 10
     max_num_blocks_per_req = 20
     max_num_batched_tokens = 512
-    dcp_kv_cache_interleave_size = 8
+    cp_kv_cache_interleave_size = 8
 
     block_table = BlockTable(
         block_size=block_size,
@@ -961,7 +971,7 @@ def test_hybrid_block_table_initialization():
         pin_memory=False,
         device=torch.device(DEVICE),
         kernel_block_size=kernel_block_sizes[0],
-        dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
 
     # Verify hybrid block configuration
@@ -980,8 +990,10 @@ def test_hybrid_block_table_initialization():
     req_index = 0
     block_table.append_row(kvcache_manager_blocks, req_index)
     # Get expected kernel blocks from the implementation for verification.
-    expected_kernel_blocks = block_table._map_to_kernel_blocks(
-        np.array(kvcache_manager_blocks)
+    expected_kernel_blocks = block_table.map_to_kernel_blocks(
+        np.array(kvcache_manager_blocks),
+        block_table.blocks_per_kv_block,
+        block_table._kernel_block_arange,
     )
     # Verify block table state
     assert block_table.num_blocks_per_row[req_index] == len(expected_kernel_blocks)

@@ -63,7 +63,7 @@ class RocmAttentionMetadata:
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
@@ -152,10 +152,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -163,12 +160,11 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
+        if not cls.supports_head_size(head_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
+                f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
@@ -242,12 +238,9 @@ class RocmAttentionImpl(AttentionImpl):
 
         RocmAttentionBackend.validate_head_size(head_size)
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "RocmAttentionImpl"
+                "Encoder self-attention is not implemented for RocmAttentionImpl"
             )
 
         self.fp8_dtype = current_platform.fp8_dtype()

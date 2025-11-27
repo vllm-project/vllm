@@ -10,19 +10,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
+from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
-from vllm.distributed.kv_transfer import (
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-    is_v1_kv_transfer_group,
-)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -55,31 +54,6 @@ else:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
-USE_XFORMERS_OPS = None
-
-
-def check_xformers_availability():
-    global USE_XFORMERS_OPS
-    if USE_XFORMERS_OPS is not None:
-        return USE_XFORMERS_OPS
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        try:
-            from importlib.util import find_spec
-
-            find_spec("xformers.ops")
-            USE_XFORMERS_OPS = True
-        except ImportError:
-            USE_XFORMERS_OPS = False
-
-    # the warning only needs to be shown once
-    if not USE_XFORMERS_OPS:
-        logger.warning("Xformers is not available, falling back.")
-
-    return USE_XFORMERS_OPS
 
 
 def check_upstream_fa_availability(dtype: torch.dtype):
@@ -99,40 +73,44 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend,
+    attn_backend: AttentionBackendEnum,
     use_upstream_fa: bool,
-    attn_backend_override: _Backend | None = None,
-) -> tuple[_Backend, Callable | None]:
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> tuple[AttentionBackendEnum, Callable | None]:
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = _Backend.ROCM_AITER_FA
+            attn_backend = AttentionBackendEnum.ROCM_AITER_FA
 
         elif (
             check_upstream_fa_availability(torch.get_default_dtype())
             and on_gfx9()
             and attn_backend_override is None
         ):
-            attn_backend = _Backend.FLASH_ATTN
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
             use_upstream_fa = True
         else:
-            return _Backend.TORCH_SDPA, None
+            return AttentionBackendEnum.TORCH_SDPA, None
 
     elif current_platform.is_cuda():
-        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            attn_backend = _Backend.FLASH_ATTN
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
             use_upstream_fa = True
     elif current_platform.is_xpu():
-        assert attn_backend == _Backend.FLASH_ATTN, (
+        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
         use_upstream_fa = False
     else:
-        return _Backend.TORCH_SDPA, None
+        return AttentionBackendEnum.TORCH_SDPA, None
 
-    if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-        if attn_backend == _Backend.ROCM_AITER_FA:
+    if attn_backend in {
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    }:
+        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
             if use_upstream_fa:
@@ -291,6 +269,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
+                attn_type=attn_type,
             )
         else:
             self.attn_backend = attn_backend
@@ -309,7 +288,8 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        self.backend = backend_name_to_enum(self.attn_backend.get_name())
+        backend_name = self.attn_backend.get_name()
+        self.backend = AttentionBackendEnum.__members__.get(backend_name)
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -530,13 +510,12 @@ class MultiHeadAttention(nn.Module):
             backend
             if backend
             in {
-                _Backend.TORCH_SDPA,
-                _Backend.XFORMERS,
-                _Backend.PALLAS,
-                _Backend.ROCM_AITER_FA,
-                _Backend.FLASH_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.PALLAS,
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.FLASH_ATTN,
             }
-            else _Backend.TORCH_SDPA
+            else AttentionBackendEnum.TORCH_SDPA
         )
 
         self.attn_backend, self._flash_attn_varlen_func = (
@@ -547,17 +526,17 @@ class MultiHeadAttention(nn.Module):
             )
         )
 
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability():
-            self.attn_backend = _Backend.TORCH_SDPA
-
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
         # this condition is just to make sure that the
         # use_upstream_fa in the log is correct
-        if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
+        if (
+            current_platform.is_rocm()
+            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        ):
             use_upstream_fa = True
 
         logger.info_once(
@@ -606,17 +585,11 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
             )
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(
-                query, key, value, scale=self.scale
-            )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS:
+        elif self.attn_backend == AttentionBackendEnum.PALLAS:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
 
@@ -745,18 +718,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-            # Mirror Attention.forward scale calculation path
-            if self.calculate_kv_scales and getattr(
-                attn_metadata, "enable_kv_scales_calculation", False
-            ):
-                self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -786,14 +756,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                # We can still access forward context to check calculation flag
-                if self.calculate_kv_scales:
-                    forward_context = get_forward_context()
-                    attn_metadata = forward_context.attn_metadata
-                    if isinstance(attn_metadata, dict):
-                        attn_metadata = attn_metadata[self.layer_name]
-                    if getattr(attn_metadata, "enable_kv_scales_calculation", False):
-                        self.calc_kv_scales(q, kv_c_normed, k_pe)
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
@@ -843,37 +805,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
 
-def wait_for_kv_layer_from_connector(layer_name: str):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    assert isinstance(attn_metadata, dict)
-    connector.wait_for_layer_load(layer_name)
-
-
-def maybe_save_kv_layer_to_connector(
-    layer_name: str,
-    kv_cache_layer: list[torch.Tensor],
-):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    assert isinstance(attn_metadata, dict)
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata[layer_name])
-
-
 def maybe_calc_kv_scales(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -881,17 +812,13 @@ def maybe_calc_kv_scales(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
 
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-
-    if attn_metadata is None or not getattr(
-        attn_metadata, "enable_kv_scales_calculation", False
-    ):
+    # Only calculate if the layer's calculate_kv_scales flag is True
+    # This flag gets set to False after the first forward pass
+    if not self.calculate_kv_scales:
         return
 
-    self = forward_context.no_compile_layers[layer_name]
     self.calc_kv_scales(query, key, value)
 
 
@@ -912,23 +839,46 @@ direct_register_custom_op(
 )
 
 
+def get_attention_context(
+    layer_name: str,
+) -> tuple[dict | object | None, Attention | MLAAttention, torch.Tensor]:
+    """Extract attention context for a given layer.
+
+    This helper function extracts the attention metadata, attention layer
+    instance, and KV cache tensor for a specific layer.
+
+    Args:
+        layer_name: The name/identifier of the attention layer.
+
+    Returns:
+        A tuple containing:
+        - attn_metadata: Attention metadata for this specific layer, or None if
+            no metadata available
+        - attn_layer: The attention layer instance (Attention or MLAAttention)
+        - kv_cache: The KV cache tensor for current virtual engine
+
+        Note: attn_metadata may be None, but attn_layer and kv_cache are always
+        extracted from the forward context.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    return attn_metadata, attn_layer, kv_cache
+
+
+@maybe_transfer_kv_layer
 def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 
 
@@ -948,6 +898,7 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -957,13 +908,7 @@ def unified_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
         self,
         query,
@@ -975,8 +920,6 @@ def unified_attention_with_output(
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
-
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_attention_with_output_fake(
@@ -999,23 +942,16 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_mla_attention(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 
 
@@ -1037,6 +973,7 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
@@ -1046,13 +983,7 @@ def unified_mla_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
         self,
         q,
@@ -1064,8 +995,6 @@ def unified_mla_attention_with_output(
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
-
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_mla_attention_with_output_fake(
