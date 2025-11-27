@@ -69,7 +69,6 @@ if current_platform.is_rocm():
             k_scale = tl.load(k_scale_ptr)
             v_scale = tl.load(v_scale_ptr)
 
-        # for token_id in tl.range(bid, num_tokens, num_programs):
         key_ptr_offset = key_ptr + token_id * head_size * num_heads
         value_ptr_offset = value_ptr + token_id * head_size * num_heads
         batch_idx = tl.load(token_to_batch_ptr + token_id)
@@ -336,7 +335,6 @@ class AiterFlashAttentionMetadataBuilder(
             num_prefill_tokens,
         ) = split_ret
 
-        print("split ret is: ", split_ret, flush=True)
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         seq_lens = common_attn_metadata.seq_lens_cpu
