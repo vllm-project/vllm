@@ -109,7 +109,7 @@ jobs:
                 // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
                   {
-                    term: "[CPU]",
+                    term: "CPU Backend",
                     searchIn: "title"
                   },
                   {
