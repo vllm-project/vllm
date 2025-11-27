@@ -145,9 +145,8 @@ void get_cutlass_moe_mm_problem_sizes_caller(
 
   // Swap-AB should be disabled for FP4 path
   bool may_swap_ab =
-      force_swap_ab.value_or(
-          (!blockscale_offsets.has_value()) &&
-          (topk_ids.numel() <= SWAP_AB_THRESHOLD));
+      force_swap_ab.value_or((!blockscale_offsets.has_value()) &&
+                             (topk_ids.numel() <= SWAP_AB_THRESHOLD));
 
   launch_compute_problem_sizes(topk_ids, problem_sizes1, problem_sizes2,
                                atomic_buffer, num_experts, n, k, stream,

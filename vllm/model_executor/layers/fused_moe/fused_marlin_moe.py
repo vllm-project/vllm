@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.scalar_type import ScalarType, scalar_types
 
+
 # print utilities
 def print_args_info(*args, **kwargs):
     print("=== positional args ===")
@@ -39,6 +40,7 @@ def print_args_info(*args, **kwargs):
             print(f"  stride: {tuple(a.stride())}")
             print(f"  dtype : {a.dtype}")
             print(f"  device: {a.device}")
+
 
 def default_activation_func(
     activation: str, output: torch.Tensor, input: torch.Tensor

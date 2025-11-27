@@ -3,7 +3,6 @@
 #include <array>
 #include <cuda_runtime.h>
 
-
 namespace vllm::cutlass_w4a8_utils {
 
 /*
@@ -48,8 +47,8 @@ static bool upload_lut() {
   return (e == cudaSuccess);
 }
 
-bool unified_encode_int4b(cutlass::int4b_t const* in,
-                                 cutlass::int4b_t* out, size_t num_int4_elems) {
+bool unified_encode_int4b(cutlass::int4b_t const* in, cutlass::int4b_t* out,
+                          size_t num_int4_elems) {
   // Build/upload LUT
   if (!upload_lut()) return false;
 
@@ -71,4 +70,4 @@ bool unified_encode_int4b(cutlass::int4b_t const* in,
   return (err == cudaSuccess);
 }
 
-} // namespace vllm::cutlass_w4a8_utils
+}  // namespace vllm::cutlass_w4a8_utils
