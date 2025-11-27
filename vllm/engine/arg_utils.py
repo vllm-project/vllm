@@ -64,8 +64,6 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.model import (
-    APC_REASONS,
-    CP_REASONS,
     ConvertOption,
     HfOverrides,
     LogprobsMode,
@@ -73,7 +71,6 @@ from vllm.config.model import (
     RunnerOption,
     TaskOption,
     TokenizerMode,
-    is_current_platform_chunked_prefill_supported,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
@@ -81,7 +78,7 @@ from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStra
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger, suppress_logging
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import (
@@ -1868,61 +1865,79 @@ class EngineArgs:
     def _set_default_chunked_prefill_and_prefix_caching_args(
         self, model_config: ModelConfig
     ) -> None:
-        is_chunked_prefill_supported = model_config.is_chunked_prefill_supported
-        is_prefix_caching_supported = model_config.is_prefix_caching_supported
+        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+            CpuArchEnum.POWERPC,
+            CpuArchEnum.S390X,
+            CpuArchEnum.RISCV,
+        ):
+            logger.info(
+                "Chunked prefill and prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; Chunked prefill and prefix caching have been "
+                "disabled by default.",
+            )
+            self.enable_chunked_prefill = False
+            self.enable_prefix_caching = False
+            return
 
         if self.prefill_context_parallel_size > 1:
-            is_chunked_prefill_supported = (
-                CP_REASONS.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_CHUNKED_PREFILL
+            self.enable_chunked_prefill = False
+            self.enable_prefix_caching = False
+            logger.warning_once(
+                "--prefill-context-parallel-size > 1 is not compatible with "
+                "chunked prefill and prefix caching now. Chunked prefill "
+                "and prefix caching have been disabled by default.",
+                scope="local",
             )
-            is_prefix_caching_supported = (
-                APC_REASONS.PREFILL_CONTEXT_PARALLEL_NOT_SUPPORT_PREFIX_CACHING
-            )
+            return
 
-        if not is_current_platform_chunked_prefill_supported():
-            is_chunked_prefill_supported = (
-                CP_REASONS.PLATFORM_NOT_SUPPORT_CHUNKED_PREFILL
-            )
-            is_prefix_caching_supported = (
-                APC_REASONS.PLATFORM_NOT_SUPPORT_PREFIX_CACHING
-            )
+        default_chunked_prefill = model_config.is_chunked_prefill_supported
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.enable_chunked_prefill is None:
-            self.enable_chunked_prefill = is_chunked_prefill_supported.value
+            self.enable_chunked_prefill = default_chunked_prefill
 
             logger.debug(
-                "%s %s chunked prefill by default. ",
-                is_chunked_prefill_supported.reason,
-                "Enabling" if is_chunked_prefill_supported.value else "Disabling",
+                "%s chunked prefill by default",
+                "Enabling" if default_chunked_prefill else "Disabling",
             )
-        elif self.enable_chunked_prefill:
-            is_chunked_prefill_supported.warning_if_false(
-                template="{reason} Enabling this manually may cause the engine "
-                "to crash or produce incorrect outputs."
-            )
-
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = is_prefix_caching_supported.value
-
-            logger.debug(
-                "%s %s prefix caching by default.",
-                is_prefix_caching_supported.reason,
-                "Enabling" if is_prefix_caching_supported.value else "Disabling",
-            )
-        elif self.enable_prefix_caching:
-            is_prefix_caching_supported.warning_if_false(
-                template="{reason} Enabling this manually may cause the engine "
-                "to crash or produce incorrect outputs."
-            )
-
-        if (
+        elif (
             model_config.runner_type == "generate"
             and not self.enable_chunked_prefill
-            and is_chunked_prefill_supported
+            and default_chunked_prefill
         ):
             logger.warning_once(
                 "This model does not officially support disabling chunked prefill. "
                 "Disabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+                scope="local",
+            )
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_chunked_prefill
+            and not default_chunked_prefill
+        ):
+            logger.warning_once(
+                "This model does not officially support chunked prefill. "
+                "Enabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+                scope="local",
+            )
+
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = default_prefix_caching
+
+            logger.debug(
+                "%s prefix caching by default",
+                "Enabling" if default_prefix_caching else "Disabling",
+            )
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_prefix_caching
+            and not default_prefix_caching
+        ):
+            logger.warning_once(
+                "This model does not officially support prefix caching. "
+                "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
                 scope="local",
             )

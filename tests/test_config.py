@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
@@ -10,8 +10,7 @@ import pytest
 from vllm.compilation.backends import VllmBackend
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig, update_config
 from vllm.config.load import LoadConfig
-from vllm.config.model import APC_REASONS, CP_REASONS
-from vllm.config.utils import BoolWithReason, get_field
+from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -556,174 +555,214 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_result", "expected_attn_type"),
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
     [
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
-            CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
+            True,
+            "Pooling models with causal attn support chunked prefill.",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
-            CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
+            True,
+            "Pooling models with causal attn support chunked prefill.",
         ),
         (
             "BAAI/bge-base-en",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         (
             "boltuix/NeuroBERT-NER",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         (
             "intfloat/e5-small",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
-            CP_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_CHUNKED_PREFILL,
             "decoder",
+            True,
+            "Pooling models with causal attn support chunked prefill.",
         ),
         (
             "google/siglip-base-patch16-224",
-            CP_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
-            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "decoder",
+            True,
+            "Generative models support chunked prefill.",
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
-            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "hybrid",
+            True,
+            "Generative models support chunked prefill.",
         ),
         (
             "ibm-granite/granite-4.0-h-small",
-            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "hybrid",
+            True,
+            "Generative models support chunked prefill.",
         ),
         (
             "state-spaces/mamba-130m-hf",
-            CP_REASONS.GENERATIVE_MODELS_SUPPORT_CHUNKED_PREFILL,
             "attention_free",
+            True,
+            "Generative models support chunked prefill.",
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
-            CP_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_CHUNKED_PREFILL,
             "encoder_decoder",
+            False,
+            "Encoder decoder models does not support chunked prefill.",
         ),
     ],
 )
 def test_is_chunked_prefill_supported(
-    model_id: str, expected_result: BoolWithReason, expected_attn_type: str
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
 ):
     model_config = ModelConfig(model_id)
     assert model_config.attn_type == expected_attn_type
-    assert model_config.is_chunked_prefill_supported == expected_result
+    with caplog_vllm.at_level(level=logging.DEBUG):
+        assert model_config.is_chunked_prefill_supported == expected_result
+    assert reason in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_result", "expected_attn_type"),
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
     [
         # pooling models
         (
             "jason9693/Qwen2.5-1.5B-apeach",
-            APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
+            True,
+            "Pooling models with causal attn support prefix caching.",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
-            APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
+            True,
+            "Pooling models with causal attn support prefix caching.",
         ),
         (
             "BAAI/bge-base-en",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         (
             "boltuix/NeuroBERT-NER",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         (
             "intfloat/e5-small",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
-            APC_REASONS.POOLING_MODELS_WITH_CAUSAL_ATTN_SUPPORT_PREFIX_CACHING,
             "decoder",
+            True,
+            "Pooling models with causal attn support prefix caching.",
         ),
         (
             "google/siglip-base-patch16-224",
-            APC_REASONS.POOLING_MODELS_WITH_BIDI_ATTN_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
-            APC_REASONS.GENERATIVE_MODELS_SUPPORT_PREFIX_CACHING,
             "decoder",
+            True,
+            "Generative models support prefix caching.",
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
-            APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "hybrid",
+            False,
+            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
-            APC_REASONS.HYBRID_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "hybrid",
+            False,
+            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
-            APC_REASONS.ATTN_FREE_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "attention_free",
+            False,
+            "Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
-            APC_REASONS.ENCODER_DECODER_MODELS_NOT_SUPPORT_PREFIX_CACHING,
             "encoder_decoder",
+            False,
+            "Encoder decoder models does not support prefix caching.",
         ),
     ],
 )
 def test_is_prefix_caching_supported(
-    model_id: str, expected_result: BoolWithReason, expected_attn_type: str
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
 ):
     model_config = ModelConfig(model_id)
     assert model_config.attn_type == expected_attn_type
-    assert model_config.is_prefix_caching_supported == expected_result
+    with caplog_vllm.at_level(level=logging.DEBUG):
+        assert model_config.is_prefix_caching_supported == expected_result
+    assert reason in caplog_vllm.text

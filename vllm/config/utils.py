@@ -297,33 +297,3 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
-
-
-class BoolWithReason:
-    def __init__(self, value: bool, reason: str, soft_failed: bool = False):
-        self.value = value
-        self.reason = reason
-        self.soft_failed = soft_failed
-
-    def __bool__(self):
-        return self.value
-
-    def __repr__(self):
-        return f"value={self.value} reason={self.reason}"
-
-    def raise_if_false(self, template: str | None = None):
-        if self.value:
-            return
-
-        if self.soft_failed:
-            return self.warning_if_false(template)
-
-        msg = self.reason if template is None else template.format(reason=self.reason)
-        raise ValueError(msg)
-
-    def warning_if_false(self, template: str | None = None):
-        if self.value:
-            return None
-
-        msg = self.reason if template is None else template.format(reason=self.reason)
-        logger.warning_once(msg, scope="local")
