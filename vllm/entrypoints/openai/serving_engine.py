@@ -70,6 +70,7 @@ from vllm.entrypoints.openai.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
+    ToolCall,
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
@@ -1374,32 +1375,55 @@ class OpenAIServing:
         enable_auto_tools: bool,
         tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
         content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        function_calls = list[FunctionCall]()
+    ) -> tuple[list[ToolCall] | None, str | None]:
+        """Parse tool calls from model output content.
+
+        Returns:
+            A tuple of (tool_calls, remaining_content).
+            For auto tool_choice, tool_calls contain IDs from the parser.
+            For named/required tool_choice, tool_calls have no explicit IDs
+            (callers should add appropriate IDs).
+        """
+        tool_calls_result = list[ToolCall]()
         if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
             assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
+            # Forced Function Call - no ID from parser, caller will add
+            tool_calls_result.append(
+                ToolCall(
+                    function=FunctionCall(
+                        name=request.tool_choice.name, arguments=content
+                    ),
+                    type="function",
+                )
             )
             content = None  # Clear content since tool is called.
         elif request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
         ):
             assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            # Forced Function Call - no ID from parser, caller will add
+            tool_calls_result.append(
+                ToolCall(
+                    function=FunctionCall(
+                        name=request.tool_choice.function.name, arguments=content
+                    ),
+                    type="function",
+                )
             )
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
             assert content is not None
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
+            tool_calls_result.extend(
                 [
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    ToolCall(
+                        function=FunctionCall(
+                            name=tool_call.name,
+                            arguments=json.dumps(
+                                tool_call.parameters, ensure_ascii=False
+                            ),
+                        ),
+                        type="function",
                     )
                     for tool_call in tool_calls
                 ]
@@ -1421,14 +1445,8 @@ class OpenAIServing:
                 request=request,  # type: ignore
             )
             if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
+                # Return the full ToolCall objects from parser (with IDs preserved)
+                tool_calls_result.extend(tool_call_info.tool_calls)
                 content = tool_call_info.content
                 if content and content.strip() == "":
                     content = None
@@ -1436,7 +1454,7 @@ class OpenAIServing:
                 # No tool calls.
                 return None, content
 
-        return function_calls, content
+        return tool_calls_result, content
 
     @staticmethod
     def _get_decoded_token(

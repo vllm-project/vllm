@@ -137,7 +137,13 @@ class OpenAIServingChat(OpenAIServing):
         if self.model_config.hf_config.model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
-            self.tool_call_id_type = "random"
+            # Kimi family models may report different HF model_type values
+            # (e.g., "kimi_linear"). Treat any Kimi variant the same.
+            model_type = getattr(self.model_config.hf_config, "model_type", "") or ""
+            if isinstance(model_type, str) and model_type.lower().startswith("kimi"):
+                self.tool_call_id_type = "kimi_k2"
+            else:
+                self.tool_call_id_type = "random"
 
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
@@ -870,7 +876,11 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                             else:
                                 delta_tool_call = DeltaToolCall(
-                                    id=make_tool_call_id(),
+                                    id=make_tool_call_id(
+                                        id_type=self.tool_call_id_type,
+                                        func_name=tool_choice_function_name,
+                                        idx=history_tool_call_cnt,
+                                    ),
                                     type="function",
                                     function=DeltaFunctionCall(
                                         name=tool_choice_function_name,
@@ -879,6 +889,9 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i,
                                 )
                                 function_name_returned[i] = True
+                                # Increment tool call index for Kimi-style IDs
+                                if self.tool_call_id_type == "kimi_k2":
+                                    history_tool_call_cnt += 1
 
                             delta_message = DeltaMessage(
                                 tool_calls=[
@@ -1428,25 +1441,40 @@ class OpenAIServingChat(OpenAIServing):
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
                 assert tool_calls is not None and len(tool_calls) > 0
+                # tool_calls now contains ToolCall objects, set proper IDs
+                tool_call_class_items = []
+                for tc in tool_calls:
+                    tool_call_class_items.append(
+                        tool_call_class(
+                            id=make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tc.function.name,
+                                idx=history_tool_call_cnt,
+                            ),
+                            function=tc.function,
+                        )
+                    )
+                    history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
                     content="",
-                    tool_calls=[tool_call_class(function=tc) for tc in tool_calls],
+                    tool_calls=tool_call_class_items,
                 )
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
                 assert tool_calls is not None and len(tool_calls) > 0
-                for tool_call in tool_calls:
+                # tool_calls now contains ToolCall objects, set proper IDs
+                for tc in tool_calls:
                     tool_call_class_items.append(
                         tool_call_class(
                             id=make_tool_call_id(
                                 id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
+                                func_name=tc.function.name,
                                 idx=history_tool_call_cnt,
                             ),
-                            function=tool_call,
+                            function=tc.function,
                         )
                     )
                     history_tool_call_cnt += 1
@@ -1474,17 +1502,14 @@ class OpenAIServingChat(OpenAIServing):
                 # call. The same is not true for named function calls
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
+                    # tool_calls already contains ToolCall objects with IDs
+                    # preserved from the parser (e.g., Kimi-K2 parser returns
+                    # IDs like "functions.get_weather:0")
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
                         content=content,
-                        tool_calls=[
-                            ToolCall(
-                                function=tc,
-                                type="function",
-                            )
-                            for tc in tool_calls
-                        ],
+                        tool_calls=tool_calls,
                     )
 
                 else:
