@@ -214,7 +214,7 @@ class CoreEngineProcManager:
 
     def start_engine_core_monitor(self):
         sentinels = [proc.sentinel for proc in self.processes]
-        while self.processes:
+        while sentinels:
             died = multiprocessing.connection.wait(sentinels)
             for sentinel in died:
                 died_proc = next(
@@ -238,7 +238,7 @@ class CoreEngineProcManager:
                     sentinels.remove(sentinel)
                 logger.error(
                     "Engine core proc %s died unexpectedly",
-                    died_proc,
+                    died_proc.name,
                 )
 
     def join_first(self):

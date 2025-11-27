@@ -352,9 +352,7 @@ class GroupCoordinator:
             # processes through the CPU.
             with suppress_stdout():
                 if not enable_fault_tolerance:
-                    cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo"
-                    )
+                    cpu_group = torch.distributed.new_group(ranks, backend="gloo")
                 else:
                     cpu_group = torch.distributed.new_group(
                         ranks, backend="gloo", timeout=gloo_comm_timeout
@@ -1255,6 +1253,7 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+
 def get_all_model_groups() -> list[GroupCoordinator]:
     group_list = []
     global _TP
@@ -1282,6 +1281,7 @@ def get_all_model_groups() -> list[GroupCoordinator]:
         group_list.append(_PCP)
 
     return group_list
+
 
 @contextmanager
 def graph_capture(device: torch.device):
