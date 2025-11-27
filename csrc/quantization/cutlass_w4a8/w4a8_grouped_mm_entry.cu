@@ -248,10 +248,10 @@ struct W4A8GroupedGemmKernel {
 void mm(
     torch::Tensor& out_tensors,
     const torch::Tensor& a_tensors,
-    const torch::Tensor& b_tensors, // expected to be correctly packed/reordered/encoded
+    const torch::Tensor& b_tensors,
     const torch::Tensor& a_scales,
     const torch::Tensor& b_scales,
-    const torch::Tensor& b_group_scales, // expected to be packed fp8
+    const torch::Tensor& b_group_scales,
     const int64_t b_group_size,
     const torch::Tensor& expert_offsets,
     const torch::Tensor& problem_sizes,
@@ -261,8 +261,6 @@ void mm(
     const torch::Tensor& group_scale_strides,
     c10::optional<std::string> maybe_schedule
 ) {
-    // no dispatch logic for now, just call one kernel
-    // TODO: inputs validation
     using TileShape           = Shape<_128,_16>;                           // Threadblock-level tile size
     using ClusterShape        = Shape<_1,_1,_1>;                                // Shape of the threadblocks in a cluster
     using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;

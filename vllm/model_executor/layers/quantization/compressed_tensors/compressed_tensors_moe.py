@@ -2643,18 +2643,17 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        # should be like dense w4a8; input is token, weights are per-chan but also per group
-        # TODO(czhu): need to have both per-chan and per-group weights for this stuff
-        # but dont actually know what it is needed for? should figure this out
-        # before adding a bunch of fields
+        # Store quantization scales; both per-group and per-channel
+        # Note we haven't specified the group size here because
+        # the quant config logic assumes group-wise scaling
+        # and channel-wise scaling are exclusive.
         return int4_w4afp8_moe_quant_config(
             w1_scale=layer.w13_weight_scale, # group scale
             w2_scale=layer.w2_weight_scale, # group scale
             w1_chan_scale=layer.w13_weight_chan_scale,
             w2_chan_scale=layer.w2_weight_chan_scale,
-            per_act_token_quant=True, # always use dynamc per-tok
-            per_out_ch_quant=True, # always use per-chan
-            block_shape=layer.weight_block_size, # should it be [0, group_size] ? 
+            per_act_token_quant=True, # always use dynamc per-token
+            per_out_ch_quant=True, # always use per-channel
         )
 
     # TODO(czhu): is this needed?
@@ -2663,6 +2662,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        print('hi')
         assert self.moe_quant_config is not None
 
     def apply(
@@ -2735,7 +2735,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             c_strides1=self.c_strides1,
             c_strides2=self.a_strides1_c_strides2,
             s_strides1=self.s_strides1,
-            s_strides2=self.s_strides2
+            s_strides2=self.s_strides2,
+            group_size=self.group_size
         )
 
     @property

@@ -1132,6 +1132,7 @@ def run_cutlass_moe_w4a8_fp8(
     per_out_ch: bool,
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
+    group_size: int
 ):
     a1q = hidden_states
 
@@ -1149,6 +1150,7 @@ def run_cutlass_moe_w4a8_fp8(
     if expert_map is not None:
         assert expert_num_tokens is None
     assert not use_batched_format, "batched format not supported yet"
+    assert group_size == 128, "Only group size 128 supported"
 
     M = a1q.size(0)
     local_E = w1.size(0)
@@ -1212,7 +1214,7 @@ def run_cutlass_moe_w4a8_fp8(
         a1q_scale,
         w1_chan_scale,
         w1_scale,
-        128,  # TODO(czhu): part of quant_config/dont hardcode?
+        group_size,
         expert_offsets,
         problem_sizes1,
         a_strides1,
@@ -1237,7 +1239,7 @@ def run_cutlass_moe_w4a8_fp8(
         a2q_scale,
         w2_chan_scale,
         w2_scale,
-        128,
+        group_size,
         expert_offsets,
         problem_sizes2,
         a_strides2,
@@ -1268,11 +1270,9 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         c_strides2: torch.Tensor,
         s_strides1: torch.Tensor,
         s_strides2: torch.Tensor,
-        quant_config: FusedMoEQuantConfig
+        quant_config: FusedMoEQuantConfig,
+        group_size: int
     ):
-        # TODO(czhu) quant config might need some other things set
-        # like use_fp8w8a8 is true here but maybe should not be
-        # also might not need set all these attr? idk
         super().__init__(quant_config)
         self.out_dtype = out_dtype
         self.a_strides1 = a_strides1
@@ -1283,6 +1283,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.c_strides2 = c_strides2
         self.s_strides1 = s_strides1
         self.s_strides2 = s_strides2
+        self.group_size = group_size
 
     @property
     def activation_formats(
@@ -1386,6 +1387,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             self.per_out_ch_quant,
             use_batched_format,
             topk_weights,
+            self.group_size
         )
 
 def cutlass_moe_w4a8_fp8(
@@ -1407,6 +1409,7 @@ def cutlass_moe_w4a8_fp8(
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
+    group_size: int = 128
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -1454,6 +1457,7 @@ def cutlass_moe_w4a8_fp8(
     - apply_router_weight_on_input (bool): When true, the topk weights are
         applied directly on the inputs. This is only applicable when topk is 1.
     - global_num_experts (int): The total number of experts.
+    - group_size (int): The number of weights per scale factor
 
     Returns:
     - torch.Tensor: The bf16 output tensor after applying the MoE layer.
@@ -1475,6 +1479,7 @@ def cutlass_moe_w4a8_fp8(
             s_strides1=s_strides1,
             s_strides2=s_strides2,
             quant_config=quant_config,
+            group_size=group_size
         ),
     )
 
