@@ -172,8 +172,8 @@ def test_splitting_ops_dynamic():
     config = VllmConfig()
     # Default V1 config leaves cudagraph mode unset; splitting ops are only
     # populated when the engine decides to use piecewise compilation.
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert not config.compilation_config.splitting_ops_contain_attention()
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
     config = VllmConfig(
