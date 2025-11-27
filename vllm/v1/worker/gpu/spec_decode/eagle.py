@@ -259,9 +259,9 @@ class EagleSpeculator:
             # Early exit.
             return draft_tokens.view(-1, 1)
 
-        # Store the draft tokens for the first step.
+        # Save the draft tokens for the first step.
         self.draft_tokens[:num_reqs, 0] = draft_tokens
-
+        # Prepare the inputs for the decode steps.
         query_start_loc = self.input_buffers.query_start_loc
         _prepare_eagle_docode_kernel[(num_reqs + 1,)](
             draft_tokens,
@@ -288,9 +288,11 @@ class EagleSpeculator:
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
         if cudagraph_size is not None:
+            # Run CUDA graph.
             self.cudagraph_manager.run(cudagraph_size)
             return self.draft_tokens[:num_reqs]
 
+        # Run eager mode.
         query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
         query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
         # HACK(woosuk)
