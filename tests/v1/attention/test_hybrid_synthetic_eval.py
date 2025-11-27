@@ -66,8 +66,9 @@ def test_hybrid_attention_prefix_sum_synthetic_task():
         kv_cache_dtype="auto",
     )
 
-    # Replace Triton impl with a stub that simply copies query into output.
-    class _CopyTritonImpl:
+    # Replace Triton impl with a stub that writes zeros to output so that
+    # only the SSM branch contributes to the final result.
+    class _ZeroTritonImpl:
         def forward(
             self,
             layer,
@@ -80,9 +81,9 @@ def test_hybrid_attention_prefix_sum_synthetic_task():
             output_scale=None,
             output_block_scale=None,
         ):
-            output.copy_(query)
+            output.zero_()
 
-    impl._triton_impl = _CopyTritonImpl()  # type: ignore[attr-defined]
+    impl._triton_impl = _ZeroTritonImpl()  # type: ignore[attr-defined]
 
     # Hybrid adapter that performs a prefix sum over the token dimension.
     adapter = _PrefixSumAdapter()
