@@ -67,6 +67,7 @@ def test_without_spec_decoding(
         (True, "uni", True, None, False),
         (False, "mp", True, None, True),
         (True, "mp", True, None, True),
+        (True, "uni", True, None, True),
         (False, "ray", False, None, False),
         (True, "ray", False, None, True),
         (False, "ray", True, None, False),
