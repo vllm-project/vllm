@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from pathlib import Path
-
 import pytest
-from huggingface_hub import snapshot_download
 
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
@@ -52,3 +49,4 @@ def test_runai_model_loader_download_files_gcs(
     with vllm_runner(test_gcs_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
+        
