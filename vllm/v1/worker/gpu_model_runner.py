@@ -1563,11 +1563,9 @@ class GPUModelRunner(
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
-        def _get_block_table_and_slot_mapping(
-            kv_cache_gid: int,
-            kv_cache_group: KVCacheGroupSpec,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+        def _get_block_table_and_slot_mapping(kv_cache_gid: int):
+            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
                     dtype=torch.int32,
@@ -1590,10 +1588,7 @@ class GPUModelRunner(
 
             return blk_table_tensor, slot_mapping
 
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(
-            0, kv_cache_groups[0]
-        )
-
+        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         cm = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -1625,8 +1620,6 @@ class GPUModelRunner(
 
             cm.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
             cm.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[:num_reqs_padded]
-
-        spec_decode_common_attn_metadata = None
 
         def _build_group_attn_metadata(
             kv_cache_gid: int,
@@ -1662,14 +1655,13 @@ class GPUModelRunner(
                     **extra_attn_metadata_args,
                 )
 
-            attn_metadata_dict: dict[str, Any] = (
-                attn_metadata if ubid is None else attn_metadata[ubid]  # type: ignore[index,assignment]
-            )
+            attn_metadata_dict = attn_metadata if ubid is None else attn_metadata[ubid]  # type: ignore
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
+        spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
             encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
@@ -1683,7 +1675,7 @@ class GPUModelRunner(
             cm.encoder_seq_lens_cpu = encoder_seq_lens_cpu
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = (
-                    _get_block_table_and_slot_mapping(kv_cache_gid, kv_cache_group)
+                    _get_block_table_and_slot_mapping(kv_cache_gid)
                 )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
