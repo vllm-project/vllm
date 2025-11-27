@@ -651,10 +651,11 @@ class SingleWriterShmObjectStorage:
             self.increment_writer_flag(monotonic_id)
         else:
             # Reader side: increment reader_count to indicate active use
-            with self.ring_buffer.access_buf(address) as (data_view, _):
-                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
-                new_count = reader_count + 1
-                data_view[: self.flag_bytes] = self.ring_buffer.int2byte(new_count)
+            with self._reader_lock:
+                with self.ring_buffer.access_buf(address) as (data_view, _):
+                    reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
+                    new_count = reader_count + 1
+                    data_view[: self.flag_bytes] = self.ring_buffer.int2byte(new_count)
 
     def handle(self):
         """Get handle for sharing across processes."""
