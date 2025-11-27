@@ -154,9 +154,7 @@ class VllmConfig:
             "ec_transfer": _compile(self.ec_transfer_config),
         }
 
-        factors["lora"] = (
-            self.lora_config.compile_factors() if self.lora_config else {}
-        )
+        factors["lora"] = self.lora_config.compile_factors() if self.lora_config else {}
         factors["max_num_batched_tokens"] = self.scheduler_config.max_num_batched_tokens
 
         if self.additional_config:

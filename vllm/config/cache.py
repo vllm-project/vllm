@@ -178,7 +178,7 @@ class CacheConfig:
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
-        
+
         return get_compile_factors(self, ignored_factors)
 
     def metrics_info(self):
