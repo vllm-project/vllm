@@ -455,13 +455,13 @@ def _prepare_eagle_docode_kernel(
     # NOTE(woosuk): To prevent out-of-range access, we clamp these values
     # if they reach the max model length.
     position = tl.load(positions_ptr + req_idx)
-    position = _increment_pos(position, max_model_len)
+    position = tl.minimum(position + 1, max_model_len - 1)
     tl.store(positions_ptr + req_idx, position)
 
     target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
     num_rejected = tl.load(num_rejected_ptr + req_idx)
     seq_len = target_seq_len - num_rejected
-    seq_len = _increment_seq_len(seq_len, max_model_len)
+    seq_len = tl.minimum(seq_len + 1, max_model_len)
     tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
@@ -533,14 +533,12 @@ def _update_eagle_inputs_kernel(
         )
 
     # Increment position and seq_lens.
-    # NOTE(woosuk): To prevent out-of-range access, we clamp these values
-    # if they reach the max model length.
     position = tl.load(positions_ptr + req_idx)
-    position = _increment_pos(position, max_model_len)
+    position = tl.minimum(position + 1, max_model_len - 1)
     tl.store(positions_ptr + req_idx, position)
 
     seq_len = tl.load(seq_lens_ptr + req_idx)
-    seq_len = _increment_seq_len(seq_len, max_model_len)
+    seq_len = tl.minimum(seq_len + 1, max_model_len)
     tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
@@ -565,15 +563,3 @@ def update_eagle_inputs(
         hidden_size,
         BLOCK_SIZE=1024,
     )
-
-
-@triton.jit
-def _increment_pos(pos, max_model_len):
-    pos = pos + 1
-    return tl.where(pos < max_model_len, pos, 0)
-
-
-@triton.jit
-def _increment_seq_len(seq_len, max_model_len):
-    seq_len = seq_len + 1
-    return tl.where(seq_len < max_model_len, seq_len, 1)
