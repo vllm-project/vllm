@@ -512,23 +512,13 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
-
-  int sh_a_max_row = pipe_stages * moe_block_size +
-                     (max_shared_mem - sh_cache_size) / thread_k_blocks /
-                         (is_a_8bit ? 16 : 32);
-  int max_num_stage_groups =
-      ((sh_a_max_row - moe_block_size) / moe_block_size + 1) / pipe_stages;
-  max_num_stage_groups = max(max_num_stage_groups, 1);
-  if (prob_k > thread_k_blocks * 16 * pipe_stages * max_num_stage_groups)
-    max_num_stage_groups = 1;
-  max_num_stage_groups = 1;
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
-      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, max_num_stage_groups);
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce);
   // clang-format on
 }
 
