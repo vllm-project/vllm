@@ -237,6 +237,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_computed_tokens = torch.zeros(
             input_batch.num_reqs, dtype=torch.int32, device=self.device
         )
+        query_start_loc = self.input_buffers.query_start_loc
+        query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
+        query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
@@ -500,6 +503,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
         self.input_buffers.query_start_loc.copy_to_gpu()
         query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[: num_reqs + 1]
         query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
 
         # Copy prefill tokens from CPU to GPU.
@@ -553,9 +557,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
 
         # Layer name -> attention metadata.
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
