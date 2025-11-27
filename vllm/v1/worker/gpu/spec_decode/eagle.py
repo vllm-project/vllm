@@ -533,6 +533,8 @@ def _update_eagle_inputs_kernel(
         )
 
     # Increment position and seq_lens.
+    # NOTE(woosuk): To prevent out-of-range access, we clamp these values
+    # if they reach the max model length.
     position = tl.load(positions_ptr + req_idx)
     position = tl.minimum(position + 1, max_model_len - 1)
     tl.store(positions_ptr + req_idx, position)
