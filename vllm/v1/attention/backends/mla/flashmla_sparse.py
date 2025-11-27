@@ -30,6 +30,8 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    reshape_attn_output_for_spec_decode,
+    reshape_query_for_spec_decode,
     split_decodes_and_prefills,
     split_prefill_chunks,
 )
@@ -137,6 +139,7 @@ class FlashMLASparseMetadataFP8(FlashMLASparseMetadataBF16):
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
+        decode_query_len: int  # needed for reshape in spec decode
 
     @dataclass
     class PrefillMetadata:
@@ -384,8 +387,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             [self.model_config.max_model_len], device=device, dtype=torch.int32
         )
         # this is ignored by `flash_mla_with_kvcache` if indices not None
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.dummy_block_table = torch.empty(
-            (1, 1), dtype=torch.int32, device=self.device
+            (max_num_seqs, 1), dtype=torch.int32, device=self.device
         )
 
         # Equation taken from FlashMLA/csrc/pybind.cpp
@@ -403,12 +407,15 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             dtype=torch.int32,
             device=device,
         )
+        # Sized for per-request semantics (one entry per decode + 1)
         self.num_splits_buffer = torch.empty(
-            # We pack all the tokens into one batch for sparse attention.
-            # Otherwise, we can exceed the sm of `get_mla_metadata`.
-            (2,),
+            (max_num_seqs + 1,),
             dtype=torch.int32,
             device=device,
+        )
+        # Per-request cache_seqlens buffer (all set to topk_tokens)
+        self.decode_cache_seqlens_buffer = torch.full(
+            (max_num_seqs,), self.topk_tokens, dtype=torch.int32, device=device
         )
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
@@ -425,7 +432,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 1
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold or 1,
+                require_uniform=True,
             )
         )
 
@@ -535,9 +544,16 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             )
 
         if num_decodes > 0:
+            # Compute decode_query_len (uniform due to require_uniform=True)
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
+
+            # Per-request cache_seqlens: [topk_tokens] * num_decodes
+            decode_cache_seqlens = self.decode_cache_seqlens_buffer[:num_decodes]
+
             tile_scheduler_metadata, num_splits = get_mla_metadata(
-                cache_seqlens=self.topk_tokens_tensor,
-                num_q_tokens_per_head_k=num_tokens * self.num_heads,
+                cache_seqlens=decode_cache_seqlens,
+                num_q_tokens_per_head_k=decode_query_len * self.num_heads,
                 topk=self.topk_tokens,
                 num_heads_q=self.num_heads,
                 num_heads_k=1,
@@ -550,18 +566,16 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 :num_sm_parts
             ]
             tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
-            self.num_splits_buffer.copy_(num_splits)
+
+            num_splits_view = self.num_splits_buffer[: num_decodes + 1]
+            num_splits_view.copy_(num_splits)
 
             fp8_metadata.decode = FlashMLASparseMetadataFP8.DecodeMetadata(
                 scheduler_metadata=tile_scheduler_metadata_buffer,
-                num_splits=self.num_splits_buffer,
-                # cache_lens and block_table are basically unused in sparse case
-                # but the decode kernel will treat -1 and indices >= cache_lens
-                # as invalid so we make sure cache_lens is large enough to not
-                # accidentally mark indices invalid, we will use -1 exclusively
-                # to mark invalid indices
-                cache_lens=self.max_model_len_tensor,
-                dummy_block_table=self.dummy_block_table,
+                num_splits=num_splits_view,
+                cache_lens=decode_cache_seqlens,
+                dummy_block_table=self.dummy_block_table[:num_decodes],
+                decode_query_len=decode_query_len,
             )
 
         return fp8_metadata
@@ -692,8 +706,19 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         metadata: FlashMLASparseMetadataFP8.DecodeMetadata,
     ) -> torch.Tensor:
+        num_decodes = metadata.cache_lens.size(0)
+
+        # Reshape q: (num_decode_tokens, num_heads, head_dim)
+        #         -> (num_decodes, seq_len, num_heads, head_dim)
+        q = reshape_query_for_spec_decode(q, num_decodes)
+        seq_len = q.shape[1]
+
+        # Reshape topk_indices: (num_decode_tokens, topk)
+        #                    -> (num_decodes, seq_len, topk)
+        topk_indices = topk_indices.view(num_decodes, seq_len, -1)
+
         _attn_out, _ = flash_mla_with_kvcache(
-            q=q.unsqueeze(0),  # unsqueeze to add batch_dim
+            q=q,
             k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
             block_table=metadata.dummy_block_table,
             head_dim_v=512,
@@ -701,11 +726,13 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             tile_scheduler_metadata=metadata.scheduler_metadata,
             num_splits=metadata.num_splits,
             is_fp8_kvcache=True,
-            indices=topk_indices.unsqueeze(0),  # unsqueeze to add batch_dim
+            indices=topk_indices,
             softmax_scale=self.softmax_scale,
         )
 
-        return _attn_out
+        # Reshape output: (num_decodes, seq_len, num_heads, head_dim_v)
+        #              -> (num_decode_tokens, num_heads, head_dim_v)
+        return reshape_attn_output_for_spec_decode(_attn_out)
 
     def forward(
         self,
