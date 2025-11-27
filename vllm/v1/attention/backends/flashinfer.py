@@ -676,9 +676,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         if decode_wrapper is None:
             if use_cudagraph:
-                paged_kv_indptr = self.paged_kv_indptr[: batch_size + 1]
-                paged_kv_indices = self.paged_kv_indices
-                paged_kv_last_page_len = self.paged_kv_last_page_len[:batch_size]
+                paged_kv_indptr = self.paged_kv_indptr.gpu[: batch_size + 1]
+                paged_kv_indices = self.paged_kv_indices.gpu
+                paged_kv_last_page_len = self.paged_kv_last_page_len.gpu[:batch_size]
             else:
                 paged_kv_indptr = None
                 paged_kv_indices = None
@@ -979,7 +979,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 prefill_wrapper = self._get_prefill_wrapper()
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
-                    prefill_start:
+                    prefill_start:num_reqs
                 ]
                 assert paged_kv_last_page_len_prefill_cpu.shape[0] == num_prefills
                 paged_kv_indptr_prefill_cpu = self.paged_kv_indptr.cpu[
