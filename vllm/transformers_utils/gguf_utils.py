@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
+import fnmatch
 from pathlib import Path
 
 import gguf
 from gguf.constants import Keys, VisionProjectorType
+from huggingface_hub import HfFileSystem
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
@@ -164,3 +166,61 @@ def maybe_patch_hf_config_from_gguf(
             hf_config = new_hf_config
 
     return hf_config
+
+
+def get_gguf_file_path_from_hf(
+    repo_id: str | Path,
+    quant_type: str,
+    revision: str | None = None,
+) -> str | None:
+    """Get the GGUF file path from HuggingFace Hub based on repo_id and quant_type.
+
+    Args:
+        repo_id: The HuggingFace repository ID (e.g., "Qwen/Qwen3-0.6B")
+        quant_type: The quantization type (e.g., "Q4_K_M", "F16")
+        revision: Optional revision/branch name
+
+    Returns:
+        The path to the GGUF file on HuggingFace Hub (e.g., "filename.gguf"),
+        or None if not found
+    """
+    repo_id = str(repo_id)
+    try:
+        fs = HfFileSystem()
+        # List all files in the repository
+        file_list = fs.ls(repo_id, detail=False, revision=revision)
+
+        # Patterns to match GGUF files with the quant_type
+        patterns = [
+            f"*-{quant_type}.gguf",
+            f"*-{quant_type}-*.gguf",
+            f"*/*-{quant_type}.gguf",
+            f"*/*-{quant_type}-*.gguf",
+        ]
+
+        # Find matching files
+        matching_files = []
+        for pattern in patterns:
+            matches = fnmatch.filter(file_list, pattern)
+            matching_files.extend(matches)
+
+        if not matching_files:
+            logger.warning(
+                "No GGUF file found in %s with quant_type %s", repo_id, quant_type
+            )
+            return None
+
+        # Sort to ensure consistent ordering (prefer non-sharded files)
+        matching_files.sort(key=lambda x: (x.count("-"), x))
+        gguf_filename = matching_files[0]
+
+        return gguf_filename.replace(repo_id + "/", "", 1)
+    except Exception as e:
+        logger.warning(
+            "Failed to get GGUF file path from HuggingFace Hub for %s "
+            "with quant_type %s: %s",
+            repo_id,
+            quant_type,
+            e,
+        )
+        return None

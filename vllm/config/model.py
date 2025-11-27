@@ -40,7 +40,6 @@ from vllm.transformers_utils.gguf_utils import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import (
-    is_gguf,
     is_remote_gguf,
     maybe_model_redirect,
     split_remote_gguf,
@@ -440,13 +439,6 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            # Check if this is a GGUF model (either local file or remote GGUF)
-            if is_gguf(self.model):
-                raise ValueError(
-                    "Using a tokenizer is mandatory when loading a GGUF model. "
-                    "Please specify the tokenizer path or name using the "
-                    "--tokenizer argument."
-                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
