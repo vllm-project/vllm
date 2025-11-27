@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import inspect
 import os
 import pickle
@@ -12,7 +11,9 @@ from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable
@@ -115,7 +116,8 @@ class VllmSerializableFunction(SerializableCallable):
             the AOT compiled path.
             """
             compile_inputs = [
-                inp or example_inputs[i] for i, inp in enumerate(fn.example_inputs)
+                inp if inp is not None else example_inputs[i]
+                for i, inp in enumerate(fn.example_inputs)
             ]
             with tracing(TracingContext(fake_mode)):
                 fn.optimized_call = vllm_backend(
@@ -138,7 +140,7 @@ def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
     factors = []
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = envs.compute_hash()
+    env_hash = hash_factors(envs.compile_factors())
     factors.append(env_hash)
 
     # 1. factors come from the vllm_config (it mainly summarizes how the
@@ -158,7 +160,7 @@ def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
             # e.g. exec(). We can't actually check these.
             continue
         hash_content.append(content)
-    return hashlib.md5(
+    return safe_hash(
         "\n".join(hash_content).encode(), usedforsecurity=False
     ).hexdigest()
 
