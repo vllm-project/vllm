@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -17,6 +18,8 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sampler import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.states import SamplingMetadata
+
+logger = init_logger(__name__)
 
 
 class EagleSpeculator:
@@ -172,6 +175,7 @@ class EagleSpeculator:
     def capture_model(self) -> None:
         if self.num_speculative_steps == 1:
             return
+        logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
             self.generate_draft,
             self.input_buffers,
