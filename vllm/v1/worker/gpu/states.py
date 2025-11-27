@@ -23,6 +23,10 @@ class SamplingMetadata:
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
 
+    repetition_penalty: torch.Tensor
+    frequency_penalty: torch.Tensor
+    presence_penalty: torch.Tensor
+
     seeds: torch.Tensor
     pos: torch.Tensor
 
@@ -44,6 +48,9 @@ class SamplingMetadata:
         # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
         top_p = None
         top_k = None
+        repetition_penalty = torch.ones(num_reqs, dtype=torch.float32, device=device)
+        frequency_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
+        presence_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         max_num_logprobs = 20
@@ -52,6 +59,9 @@ class SamplingMetadata:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
@@ -119,6 +129,9 @@ class RequestState:
         self.temperature = self._make_param(self.max_num_reqs, torch.float32)
         self.top_p = self._make_param(self.max_num_reqs, torch.float32)
         self.top_k = self._make_param(self.max_num_reqs, torch.int32)
+        self.repetition_penalty = self._make_param(self.max_num_reqs, torch.float32)
+        self.frequency_penalty = self._make_param(self.max_num_reqs, torch.float32)
+        self.presence_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.seeds = self._make_param(self.max_num_reqs, torch.int64)
 
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
@@ -178,6 +191,9 @@ class RequestState:
         else:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
+        self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
+        self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
+        self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
 
         if sampling_params.seed is not None:
             seed = sampling_params.seed
@@ -220,6 +236,13 @@ class RequestState:
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
+        rep_penalty = self.repetition_penalty.np[idx_mapping]
+        rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
+        freq_penalty = self.frequency_penalty.np[idx_mapping]
+        freq_penalty = self.frequency_penalty.copy_np_to_gpu(freq_penalty)
+        pres_penalty = self.presence_penalty.np[idx_mapping]
+        pres_penalty = self.presence_penalty.copy_np_to_gpu(pres_penalty)
+
         seeds = self.seeds.np[idx_mapping]
         seeds = self.seeds.copy_np_to_gpu(seeds)
 
@@ -232,6 +255,9 @@ class RequestState:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            repetition_penalty=rep_penalty,
+            frequency_penalty=freq_penalty,
+            presence_penalty=pres_penalty,
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
@@ -304,6 +330,12 @@ def _expand_sampling_metadata_kernel(
     top_k_ptr,
     expanded_top_k_ptr,
     seeds_ptr,
+    rep_penalty_ptr,
+    expanded_rep_penalty_ptr,
+    freq_penalty_ptr,
+    expanded_freq_penalty_ptr,
+    pres_penalty_ptr,
+    expanded_pres_penalty_ptr,
     expanded_seeds_ptr,
     cu_num_logits_ptr,
     BLOCK_SIZE: tl.constexpr,
@@ -327,6 +359,15 @@ def _expand_sampling_metadata_kernel(
         top_k = tl.load(top_k_ptr + req_idx)
         tl.store(expanded_top_k_ptr + start_idx + block, top_k, mask=mask)
 
+    rep_penalty = tl.load(rep_penalty_ptr + req_idx)
+    tl.store(expanded_rep_penalty_ptr + start_idx + block, rep_penalty, mask=mask)
+
+    freq_penalty = tl.load(freq_penalty_ptr + req_idx)
+    tl.store(expanded_freq_penalty_ptr + start_idx + block, freq_penalty, mask=mask)
+
+    pres_penalty = tl.load(pres_penalty_ptr + req_idx)
+    tl.store(expanded_pres_penalty_ptr + start_idx + block, pres_penalty, mask=mask)
+
     seed = tl.load(seeds_ptr + req_idx)
     tl.store(expanded_seeds_ptr + start_idx + block, seed, mask=mask)
 
@@ -341,6 +382,9 @@ def expand_sampling_metadata(
     expanded_temp = create_empty(sampling_metadata.temperature)
     expanded_top_p = create_empty(sampling_metadata.top_p)
     expanded_top_k = create_empty(sampling_metadata.top_k)
+    expanded_repetition_penalty = create_empty(sampling_metadata.repetition_penalty)
+    expanded_frequency_penalty = create_empty(sampling_metadata.frequency_penalty)
+    expanded_presence_penalty = create_empty(sampling_metadata.presence_penalty)
     expanded_seeds = create_empty(sampling_metadata.seeds)
 
     num_reqs = cu_num_logits.shape[0] - 1
@@ -351,6 +395,12 @@ def expand_sampling_metadata(
         expanded_top_p,
         sampling_metadata.top_k,
         expanded_top_k,
+        sampling_metadata.repetition_penalty,
+        expanded_repetition_penalty,
+        sampling_metadata.frequency_penalty,
+        expanded_frequency_penalty,
+        sampling_metadata.presence_penalty,
+        expanded_presence_penalty,
         sampling_metadata.seeds,
         expanded_seeds,
         cu_num_logits,
@@ -361,6 +411,9 @@ def expand_sampling_metadata(
         top_p=expanded_top_p,
         top_k=expanded_top_k,
         seeds=expanded_seeds,
+        repetition_penalty=expanded_repetition_penalty,
+        frequency_penalty=expanded_frequency_penalty,
+        presence_penalty=expanded_presence_penalty,
         pos=sampling_metadata.pos,
         max_num_logprobs=sampling_metadata.max_num_logprobs,
     )
