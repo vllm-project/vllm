@@ -157,18 +157,12 @@ class EagleSpeculator:
 
             if step < self.num_speculative_steps - 1:
                 # Update the inputs for the next step.
-                _update_eagle_inputs_kernel[(num_reqs,)](
-                    self.input_buffers.input_ids.gpu,
-                    pos,
-                    self.hidden_states,
-                    self.hidden_states.stride(0),
-                    self.input_buffers.seq_lens,
-                    self.max_model_len,
+                update_eagle_inputs(
                     draft_tokens,
                     hidden_states,
-                    hidden_states.stride(0),
-                    self.hidden_size,
-                    BLOCK_SIZE=1024,
+                    self.input_buffers,
+                    self.hidden_states,
+                    self.max_model_len,
                 )
                 self.block_tables.compute_slot_mappings(query_start_loc, pos)
 
@@ -507,6 +501,29 @@ def _update_eagle_inputs_kernel(
     seq_len = tl.load(seq_lens_ptr + req_idx)
     seq_len = _increment_seq_len(seq_len, max_model_len)
     tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
+def update_eagle_inputs(
+    draft_tokens: torch.Tensor,
+    output_hidden_states: torch.Tensor,
+    input_buffers: InputBuffers,
+    hidden_states: torch.Tensor,
+    max_model_len: int,
+):
+    num_reqs, hidden_size = output_hidden_states.shape
+    _update_eagle_inputs_kernel[(num_reqs,)](
+        input_buffers.input_ids.gpu,
+        input_buffers.positions,
+        hidden_states,
+        hidden_states.stride(0),
+        input_buffers.seq_lens,
+        max_model_len,
+        draft_tokens,
+        output_hidden_states,
+        output_hidden_states.stride(0),
+        hidden_size,
+        BLOCK_SIZE=1024,
+    )
 
 
 @triton.jit
