@@ -35,7 +35,10 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.dp_utils import get_batch_metadata_across_dp
+from vllm.v1.worker.gpu.dp_utils import (
+    get_batch_metadata_across_dp,
+    make_num_tokens_across_dp,
+)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -223,11 +226,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_computed_tokens = torch.zeros(
             input_batch.num_reqs, dtype=torch.int32, device=self.device
         )
+        query_start_loc = self.input_buffers.query_start_loc
+        query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
+        query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
-            query_start_loc=self.input_buffers.query_start_loc,
+            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_np=input_batch.seq_lens_np,
             num_computed_tokens_cpu=num_computed_tokens,
@@ -255,12 +262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
-        if self.dp_size == 1:
-            num_tokens_across_dp: torch.Tensor | None = None
-        else:
-            num_tokens_across_dp = torch.full(
-                (self.dp_size,), num_tokens, dtype=torch.int32, device="cpu"
-            )
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(
@@ -517,6 +519,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
         self.input_buffers.query_start_loc.copy_to_gpu()
         query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[: num_reqs + 1]
         query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
 
         # Copy prefill tokens from CPU to GPU.
@@ -574,7 +577,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc=self.input_buffers.query_start_loc,
+            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens,
             seq_lens_np=seq_lens_np,
             num_computed_tokens_cpu=num_computed_tokens,
@@ -816,7 +820,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.req_states.last_sampled_tokens,
             next_prefill_tokens,
         )
-        self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
         return draft_tokens
 
     def get_cudagraph_and_dp_padding(
@@ -1006,7 +1009,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.do_spec_decode:
-            _ = self.propose_draft(
+            draft_tokens = self.propose_draft(
                 input_batch,
                 sampling_metadata,
                 hidden_states,
@@ -1014,6 +1017,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_sampled,
                 num_rejected,
             )
+            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
 
         if self.use_async_scheduling:
             return async_output
