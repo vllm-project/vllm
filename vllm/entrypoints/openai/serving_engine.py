@@ -1337,7 +1337,11 @@ class OpenAIServing:
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
+        elif request.tool_choice == "required" or (
+            request.tool_choice == "auto" and request.tools
+        ):
+            # When tool_choice is "required" or "auto" with tools present,
+            # parse tool calls directly from the JSON array format
             assert content is not None
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
             function_calls.extend(
@@ -1353,7 +1357,7 @@ class OpenAIServing:
         elif (
             tool_parser_cls
             and enable_auto_tools
-            and (request.tool_choice == "auto" or request.tool_choice is None)
+            and request.tool_choice is None
         ):
             # Automatic Tool Call Parsing
             try:
