@@ -3,11 +3,12 @@
 
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.platforms import current_platform
+import torch
 
 
 def is_quant_method_supported(quant_method: str) -> bool:
     # Currently, all quantization methods require Nvidia or AMD GPUs
-    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+    if not (current_platform.is_cuda() or current_platform.is_rocm() or current_platform.is_xpu()):
         return False
 
     try:

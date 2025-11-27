@@ -177,7 +177,7 @@ class Platform:
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
     def is_sleep_mode_available(self) -> bool:
         # TODO: Actually only mi3xx has the sleep mode support now

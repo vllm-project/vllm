@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 import torch.cuda
 
+from vllm.platforms import current_platform
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -24,7 +25,10 @@ LORA_PATH = "davzoku/finqa_adapter_1b"
 
 def _cleanup():
     gc.collect()
-    torch.cuda.empty_cache()
+    if current_platform.is_xpu():
+        torch.xpu.empty_cache()
+    else:
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture(autouse=True)
