@@ -85,15 +85,17 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
     def load_bytes(self, data: bytes) -> Image.Image:
         image = Image.open(BytesIO(data))
-        image.load()
+        image._image_bytes = data # Store original bytes for hashing
         return self._convert_image_mode(image)
 
     def load_base64(self, media_type: str, data: str) -> Image.Image:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> Image.Image:
-        image = Image.open(filepath)
-        image.load()
+        with open(filepath, "rb") as f:
+            data = f.read()
+        image = Image.open(BytesIO(data))
+        image._image_bytes = data # Store original bytes for hashing
         return self._convert_image_mode(image)
 
     def encode_base64(
