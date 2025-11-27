@@ -220,7 +220,7 @@ async def benchmark_multimodal_processor(
     """
     Run the multimodal processor benchmark.
     """
-    
+
     model_id = args.model
     model_name = getattr(args, "served_model_name", None)
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
@@ -300,6 +300,12 @@ async def benchmark_multimodal_processor(
             "MM processor timing stats will not be collected."
         )
 
+    debug = getattr(args, "debug_mm_stats", False)
+    instance_urls = _get_instance_urls(args, base_url)
+    should_clear_registry = not getattr(args, "no_clear_mm_stats_registry", False)
+    if should_clear_registry:
+        await _clear_mm_processor_stats_registry(instance_urls, debug=debug)
+
     benchmark_result = await benchmark(
         task_type=task_type,
         endpoint_type=args.backend,
@@ -329,13 +335,6 @@ async def benchmark_multimodal_processor(
         ready_check_timeout_sec=getattr(args, "ready_check_timeout_sec", 600),
     )
 
-    debug = getattr(args, "debug_mm_stats", False)
-    instance_urls = _get_instance_urls(args, base_url)
-    
-    should_clear_registry = not getattr(args, "no_clear_mm_stats_registry", False)
-    if should_clear_registry:
-        await _clear_mm_processor_stats_registry(instance_urls, debug=debug)
-    
     session = aiohttp.ClientSession()
     try:
         mm_stats_by_stage = await collect_mm_processor_stats(
