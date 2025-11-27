@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
@@ -51,7 +51,7 @@ class OffloadingSpec(ABC):
     def get_handlers(
         self,
         kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type["AttentionBackend"]],
+        attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         """
         Get offloading handlers along with their respective src and dst types.
