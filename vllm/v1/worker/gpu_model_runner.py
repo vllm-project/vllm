@@ -34,6 +34,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    resolve_layers_from_vllm_config,
     update_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -4498,15 +4499,34 @@ class GPUModelRunner(
             kv_cache_group_spec: KVCacheGroupSpec,
         ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
             layer_type = cast(type[Any], AttentionLayerBase)
-            layers = get_layers_from_vllm_config(
+            layers, missing_layer_names = resolve_layers_from_vllm_config(
                 self.vllm_config, layer_type, kv_cache_group_spec.layer_names
             )
-            primary_layer = next(iter(layers.values()), None)
-            if primary_layer is None:
+            if missing_layer_names:
                 logger.debug(
-                    "No attention layers found for KV cache group %s on this rank.",
-                    kv_cache_group_spec.layer_names,
+                    "Skipping %d remote layer(s) for KV cache group on this rank: %s",
+                    len(missing_layer_names),
+                    ", ".join(missing_layer_names[:3])
+                    + ("..." if len(missing_layer_names) > 3 else ""),
                 )
+
+            local_layer_names = [
+                layer_name
+                for layer_name in kv_cache_group_spec.layer_names
+                if layer_name in layers
+            ]
+            if local_layer_names != kv_cache_group_spec.layer_names:
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    kv_cache_group_spec.kv_cache_spec = UniformTypeKVCacheSpecs(
+                        {
+                            name: layer_kv_cache_spec.kv_cache_specs[name]
+                            for name in local_layer_names
+                        }
+                    )
+                kv_cache_group_spec.layer_names = local_layer_names
+
+            if not local_layer_names:
                 return ({}, set())
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
@@ -4515,9 +4535,8 @@ class GPUModelRunner(
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name in kv_cache_group_spec.layer_names:
-                layer = layers.get(layer_name, primary_layer)
-                attn_backend = layer.get_attn_backend()
+            for layer_name in local_layer_names:
+                attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
                     attn_backend = create_fast_prefill_custom_backend(
