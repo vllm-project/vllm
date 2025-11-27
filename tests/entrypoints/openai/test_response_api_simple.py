@@ -51,12 +51,13 @@ async def test_enable_response_messages(client: OpenAI, model_name: str):
         extra_body={"enable_response_messages": True},
     )
     assert response.status == "completed"
-    assert type(response.input_messages["message"][0]) is str
-    assert len(response.input_messages["message"][0]) > 10
-    assert type(response.input_messages["tokens"][0][0]) is int
-    assert type(response.output_messages["message"][0]) is str
-    assert len(response.output_messages["message"][0]) > 10
-    assert type(response.output_messages["tokens"][0][0]) is int
+    assert response.input_messages[0]["type"] == "raw_message_tokens"
+    assert type(response.input_messages[0]["message"]) is str
+    assert len(response.input_messages[0]["message"]) > 10
+    assert type(response.input_messages[0]["tokens"][0]) is int
+    assert type(response.output_messages[0]["message"]) is str
+    assert len(response.output_messages[0]["message"]) > 10
+    assert type(response.output_messages[0]["tokens"][0]) is int
 
 
 @pytest.mark.asyncio

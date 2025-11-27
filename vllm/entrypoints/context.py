@@ -152,8 +152,8 @@ class SimpleContext(ConversationContext):
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
-        self.input_messages = ResponseRawMessageAndToken(message=[], tokens=[])
-        self.output_messages = ResponseRawMessageAndToken(message=[], tokens=[])
+        self.input_messages: list[ResponseRawMessageAndToken] = []
+        self.output_messages: list[ResponseRawMessageAndToken] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -163,13 +163,21 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
-        if len(self.input_messages.tokens) == 0:
-            if output.prompt:
-                self.input_messages.message.append(output.prompt)
-            if output.prompt_token_ids:
-                self.input_messages.tokens.append(output.prompt_token_ids)
-        self.output_messages.message.append(output.outputs[0].text)
-        self.output_messages.tokens.append(output.outputs[0].token_ids)
+        if len(self.input_messages) == 0:
+            output_prompt = output.prompt or ""
+            output_prompt_token_ids = output.prompt_token_ids or []
+            self.input_messages.append(
+                ResponseRawMessageAndToken(
+                    message=output_prompt,
+                    tokens=output_prompt_token_ids,
+                )
+            )
+        self.output_messages.append(
+            ResponseRawMessageAndToken(
+                message=output.outputs[0].text,
+                tokens=output.outputs[0].token_ids,
+            )
+        )
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")

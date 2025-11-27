@@ -2233,12 +2233,13 @@ class ResponseRawMessageAndToken(OpenAIBaseModel):
     """Class to show the raw message.
     If message / tokens diverge, tokens is the source of truth"""
 
-    message: list[str]
-    tokens: list[list[int]]
+    message: str
+    tokens: list[int]
+    type: Literal["raw_message_tokens"] = "raw_message_tokens"
 
 
 ResponseInputOutputMessage: TypeAlias = (
-    list[ChatCompletionMessageParam] | ResponseRawMessageAndToken
+    list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 
 
