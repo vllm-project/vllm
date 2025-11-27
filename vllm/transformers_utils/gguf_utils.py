@@ -8,6 +8,11 @@ from pathlib import Path
 import gguf
 from gguf.constants import Keys, VisionProjectorType
 from huggingface_hub import HfFileSystem
+from huggingface_hub.errors import (
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
@@ -215,7 +220,7 @@ def get_gguf_file_path_from_hf(
         gguf_filename = matching_files[0]
 
         return gguf_filename.replace(repo_id + "/", "", 1)
-    except Exception as e:
+    except (RepositoryNotFoundError, RevisionNotFoundError, HfHubHTTPError) as e:
         logger.warning(
             "Failed to get GGUF file path from HuggingFace Hub for %s "
             "with quant_type %s: %s",
