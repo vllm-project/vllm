@@ -1551,7 +1551,7 @@ class GPUModelRunner(
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
                 blk_table_tensor = torch.zeros(
-                    (num_tokens_padded, 1),
+                    (num_reqs_padded, 1),
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -2910,6 +2910,15 @@ class GPUModelRunner(
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
+
+                if spec_decode_common_attn_metadata is not None and pad_attn:
+                    # Currently the drafter still only uses piecewise cudagraphs, and
+                    # therefore does not want to use padded attention metadata.
+                    spec_decode_common_attn_metadata = (
+                        spec_decode_common_attn_metadata.unpadded(
+                            num_tokens_unpadded, num_reqs
+                        )
+                    )
 
             (
                 input_ids,
