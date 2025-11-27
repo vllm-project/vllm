@@ -31,7 +31,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -152,6 +151,10 @@ class AsyncLLM(EngineClient):
             )
             self.logger_manager.log_engine_initialized()
 
+        # Pause / resume state for async RL workflows.
+        self._pause_cond = asyncio.Condition()
+        self._paused = False
+
         self.output_handler: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -160,11 +163,23 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        if (
+            envs.VLLM_TORCH_PROFILER_DIR
+            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+        ):
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
                 envs.VLLM_TORCH_PROFILER_DIR,
             )
+            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
+                logger.warning_once(
+                    "Torch profiler received max_iters or delay_iters setting. These "
+                    "are not compatible with the AsyncLLM profiler and will be ignored "
+                    "for the AsyncLLM process. Engine process profiling will still "
+                    "respect these settings. Consider setting "
+                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
+                    "AsyncLLM profiling."
+                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
@@ -179,12 +194,6 @@ class AsyncLLM(EngineClient):
             self.profiler = None
 
     @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=(
-            "This argument will have no effect. Use `enable_log_requests` instead."
-        ),
-    )
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
@@ -197,7 +206,6 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -305,14 +313,15 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, parent_params)
@@ -391,6 +400,10 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            # Wait until generation is resumed if the engine is paused.
+            async with self._pause_cond:
+                await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
@@ -539,6 +552,58 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    async def pause_generation(
+        self,
+        *,
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """
+        Pause generation to allow model weight updates.
+
+        New generation/encoding requests are blocked until resume.
+
+        Args:
+            wait_for_inflight_requests: When ``True`` waits for in-flight
+                requests to finish before pausing. When ``False`` (default),
+                immediately aborts any in-flight requests.
+            clear_cache: Whether to clear KV cache and prefix cache after
+                draining. Set to ``False`` to preserve cache for faster resume.
+                Default is ``True`` (clear caches).
+        """
+
+        async with self._pause_cond:
+            if self._paused:
+                return
+            self._paused = True
+
+        if not wait_for_inflight_requests:
+            request_ids = list(self.output_processor.request_states.keys())
+            if request_ids:
+                await self.abort(request_ids)
+
+        # Wait for running requests to drain before clearing cache.
+        if self.output_processor.has_unfinished_requests():
+            await self.output_processor.wait_for_requests_to_drain()
+
+        # Clear cache
+        if clear_cache:
+            await self.reset_prefix_cache()
+            await self.reset_mm_cache()
+
+    async def resume_generation(self) -> None:
+        """Resume generation after :meth:`pause_generation`."""
+
+        async with self._pause_cond:
+            self._paused = False
+            self._pause_cond.notify_all()  # Wake up all waiting requests
+
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
+
+        async with self._pause_cond:
+            return self._paused
+
     async def encode(
         self,
         prompt: PromptType,
@@ -569,6 +634,10 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            # Respect pause state before accepting new requests.
+            async with self._pause_cond:
+                await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}

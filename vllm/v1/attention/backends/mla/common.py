@@ -308,6 +308,15 @@ class MLACommonBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        # `stride_order` indicates the permutation that gets
+        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # (num_blocks, num_layers, block_size, head_size)
+        return (1, 0, 2, 3) if include_num_layers_dimension else (0, 1, 2)
+
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
@@ -331,6 +340,8 @@ class MLACommonPrefillMetadata:
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
         workspace: torch.Tensor
+        token_to_seq: torch.Tensor
+        chunk_total_token: list[int]
 
         # for mla DCP
         padded_local_chunk_seq_lens: list[list[int]] | None = None
@@ -536,7 +547,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         # Don't try to access the runner on AMD
@@ -755,6 +766,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+        dcp_local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -829,6 +841,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 torch.cumsum(
                     chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
                 )
+                chunk_total_token = cu_seq_lens_cpu[:, -1]
+
+                max_token_num_over_chunk = chunk_total_token.max().item()
+                token_to_seq_tensor_cpu = torch.zeros(
+                    [num_chunks, max_token_num_over_chunk], dtype=torch.int32
+                )
+                range_idx = torch.arange(num_prefills, dtype=torch.int32)
+                for i in range(num_chunks):
+                    chunk_token_to_seq_tensor = torch.repeat_interleave(
+                        range_idx, chunk_seq_lens[i]
+                    )
+                    chunk_len = chunk_token_to_seq_tensor.shape[0]
+                    token_to_seq_tensor_cpu[i, :chunk_len] = chunk_token_to_seq_tensor
 
                 if self.dcp_world_size > 1:
                     local_context_lens_allranks = get_dcp_local_seq_lens(
@@ -896,6 +921,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
+                        token_to_seq=token_to_seq_tensor_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        chunk_total_token=chunk_total_token.tolist(),
                         workspace=self.chunked_prefill_workspace,
                         padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
                         local_context_lens_allranks=local_context_lens_allranks.tolist(),
@@ -912,6 +941,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
+                        token_to_seq=token_to_seq_tensor_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        chunk_total_token=chunk_total_token,
                         workspace=self.chunked_prefill_workspace,
                     )
 
@@ -944,18 +977,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
+            dcp_tot_seq_lens_device = None
+            if self.dcp_world_size > 1:
+                dcp_tot_seq_lens_device = seq_lens[:num_decodes]
+                seq_lens_cpu = dcp_local_seq_lens_cpu
+                seq_lens = dcp_local_seq_lens
+
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
-                seq_lens_device=dcp_local_seq_lens[:num_decodes]
-                if self.dcp_world_size > 1 and dcp_local_seq_lens is not None
-                else seq_lens[:num_decodes],
+                seq_lens_device=seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
-                dcp_tot_seq_lens_device=seq_lens[:num_decodes]
-                if self.dcp_world_size > 1
-                else None,
+                dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 
         attn_metadata = self.metadata_cls(
@@ -1203,15 +1238,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
         if self.is_aiter_triton_fp8_bmm_enabled:
+            out = out.view(-1, self.num_heads, self.v_head_dim)
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
-            # Convert from (B, N, V) to (B, N * V)
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
-            # Copy result
-            out.copy_(x)
         else:
             # Convert from (B, N * V) to (N, B, V)
             out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
@@ -1286,8 +1319,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 get_current_vllm_config()
             )
         )
-        self.dcp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -1626,16 +1659,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
-
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
                 cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                batch_size=attn_metadata.num_prefills,
+                token_to_seq=prefill_metadata.chunked_context.token_to_seq[i],
+                num_tokens=prefill_metadata.chunked_context.chunk_total_token[i],
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=k_scale,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
@@ -1790,7 +1822,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ) -> None:
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
@@ -1803,7 +1836,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        output = self._run_prefill_new_tokens(
+        output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
@@ -1812,7 +1845,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         if has_context:
-            suffix_output, suffix_lse = output
+            suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
@@ -1828,7 +1861,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
-            output = torch.empty_like(suffix_output)
+            # unpad if necessary
+            if self._pad_v:
+                context_output = context_output[..., : v.shape[-1]]
+                suffix_output = suffix_output[..., : v.shape[-1]]
+
+            output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
                 prefix_output=context_output,
@@ -1836,12 +1874,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
-
-        # unpad if necessary
-        if self._pad_v:
-            output = output[..., : v.shape[-1]]
-
-        return output.flatten(start_dim=-2)
+        else:
+            output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
+            output.copy_(output_prefill)
 
     @abstractmethod
     def _forward_decode(
@@ -1936,13 +1971,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
+            self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
                 prefill_k_pe,
                 kv_cache,
                 attn_metadata,
                 layer._k_scale,
+                output=output[num_decode_tokens:],
             )
 
         if has_decode:

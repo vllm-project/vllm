@@ -72,6 +72,7 @@ class CommonAttentionMetadata:
 
     num_reqs: int
     """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
     num_actual_tokens: int
     """Total number of tokens in batch"""
     max_query_len: int
@@ -89,9 +90,11 @@ class CommonAttentionMetadata:
     num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: np.ndarray | None = None
+    encoder_seq_lens: torch.Tensor | None = None
+    encoder_seq_lens_cpu: np.ndarray | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
 
@@ -855,7 +858,9 @@ def split_decodes_and_prefills(
     if require_uniform:
         is_prefill = query_lens != query_lens[0]
     else:
-        is_prefill = query_lens > decode_threshold
+        # 0-query len indicates a padded request; leave this at the back
+        # of the batch with the prefills
+        is_prefill = (query_lens > decode_threshold) | (query_lens == 0)
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
@@ -1079,9 +1084,9 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
 
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
-    dcp_world_size: int = 1,
+    dcp_size: int = 1,
     dcp_rank: int | None = None,
-    dcp_kv_cache_interleave_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
     use this function to calculate split decode seq_lens of each dcp rank.
@@ -1090,26 +1095,28 @@ def get_dcp_local_seq_lens(
     num_requests = seq_lens.size(0)
     if dcp_rank is None:
         rank_offsets = (
-            torch.arange(dcp_world_size, dtype=torch.int32)
+            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
             .unsqueeze(0)
             .repeat(num_requests, 1)
         )
     else:
-        rank_offsets = torch.Tensor([[dcp_rank]]).to(dtype=torch.int32)
+        rank_offsets = torch.tensor(
+            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
+        )
     seq_lens_tiled = (
         seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
     )
     base = (
         seq_lens_tiled
-        // dcp_kv_cache_interleave_size
-        // dcp_world_size
-        * dcp_kv_cache_interleave_size
+        // cp_kv_cache_interleave_size
+        // dcp_size
+        * cp_kv_cache_interleave_size
     )
-    remainder = seq_lens_tiled - base * dcp_world_size
+    remainder = seq_lens_tiled - base * dcp_size
     remainder = torch.clip(
-        remainder - rank_offsets * dcp_kv_cache_interleave_size,
+        remainder - rank_offsets * cp_kv_cache_interleave_size,
         0,
-        dcp_kv_cache_interleave_size,
+        cp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)

@@ -3,7 +3,6 @@
 
 import copy
 import getpass
-import hashlib
 import json
 import os
 import tempfile
@@ -25,6 +24,7 @@ from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
+from vllm.utils.hashing import safe_hash
 
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -96,7 +96,7 @@ class VllmConfig:
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, one can append compilation arguments via 
-    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -193,7 +193,7 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = hashlib.md5(
+                additional_config_hash = safe_hash(
                     json.dumps(additional_config, sort_keys=True).encode(),
                     usedforsecurity=False,
                 ).hexdigest()
@@ -204,9 +204,9 @@ class VllmConfig:
             vllm_factors.append("None")
         factors.append(vllm_factors)
 
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
@@ -481,6 +481,14 @@ class VllmConfig:
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                # prefill context parallel do not support full cudagraphs
+                elif self.parallel_config.prefill_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Prefill context parallel (PCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 elif self.model_config is not None:
                     if self.model_config.pooler_config is not None:
                         logger.warning_once(
@@ -610,22 +618,34 @@ class VllmConfig:
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
             assert (
-                self.parallel_config.dcp_kv_cache_interleave_size
+                self.parallel_config.cp_kv_cache_interleave_size
                 <= self.cache_config.block_size
                 and self.cache_config.block_size
-                % self.parallel_config.dcp_kv_cache_interleave_size
+                % self.parallel_config.cp_kv_cache_interleave_size
                 == 0
             ), (
                 f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by dcp_kv_cache_interleave_size "
-                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
         assert (
-            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            self.parallel_config.cp_kv_cache_interleave_size == 1
             or self.speculative_config is None
-        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
+        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:

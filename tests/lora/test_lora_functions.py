@@ -13,8 +13,8 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.lora.request import LoRARequest
 from vllm.v1.engine.llm_engine import LLMEngine
 
-MODEL_PATH = "meta-llama/Llama-2-7b-hf"
-LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
+LORA_MODULE_PATH = "charent/self_cognition_Alice"
 LORA_RANK = 8
 
 
