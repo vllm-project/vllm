@@ -930,7 +930,7 @@ class EagleProposer:
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
