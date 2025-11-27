@@ -103,7 +103,6 @@ class LoRAModel:
     def check_lora_name(self, lora_name: str) -> bool:
         return lora_name in self.loras
 
-    # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
         cls,
