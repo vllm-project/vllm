@@ -257,25 +257,18 @@ class EagleSpeculator:
         # Save the draft tokens for the first step.
         self.draft_tokens[:num_reqs, 0] = draft_tokens
         # Prepare the inputs for the decode steps.
-        query_start_loc = self.input_buffers.query_start_loc
-        _prepare_eagle_docode_kernel[(num_reqs + 1,)](
+        prepare_eagle_decode(
             draft_tokens,
             hidden_states,
-            hidden_states.stride(0),
             last_token_indices,
             input_batch.seq_lens,
             num_rejected,
-            self.input_buffers.input_ids.gpu,
-            pos,
+            self.input_buffers,
             self.hidden_states,
-            self.hidden_states.stride(0),
-            query_start_loc.gpu,
-            self.input_buffers.seq_lens,
-            self.hidden_size,
             self.max_model_len,
             self.max_num_reqs,
-            BLOCK_SIZE=1024,
         )
+        query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
         slot_mappings = self.block_tables.compute_slot_mappings(
             query_start_loc_gpu, pos
@@ -455,6 +448,39 @@ def _prepare_eagle_docode_kernel(
     seq_len = target_seq_len - num_rejected
     seq_len = _increment_seq_len(seq_len, max_model_len)
     tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
+def prepare_eagle_decode(
+    draft_tokens: torch.Tensor,
+    output_hidden_states: torch.Tensor,
+    last_token_indices: torch.Tensor,
+    target_seq_lens: torch.Tensor,
+    num_rejected: torch.Tensor,
+    input_buffers: InputBuffers,
+    input_hidden_states: torch.Tensor,
+    max_model_len: int,
+    max_num_reqs: int,
+):
+    num_reqs = draft_tokens.shape[0]
+    hidden_size = output_hidden_states.shape[-1]
+    _prepare_eagle_docode_kernel[(num_reqs + 1,)](
+        draft_tokens,
+        output_hidden_states,
+        output_hidden_states.stride(0),
+        last_token_indices,
+        target_seq_lens,
+        num_rejected,
+        input_buffers.input_ids.gpu,
+        input_buffers.positions,
+        input_hidden_states,
+        input_hidden_states.stride(0),
+        input_buffers.query_start_loc.gpu,
+        input_buffers.seq_lens,
+        hidden_size,
+        max_model_len,
+        max_num_reqs,
+        BLOCK_SIZE=1024,
+    )
 
 
 @triton.jit
