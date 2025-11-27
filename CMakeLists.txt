@@ -109,6 +109,8 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    elseif (VLLM_TARGET_DEVICE STREQUAL "mps")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/metal_extension.cmake)
     else()
         return()
     endif()

@@ -347,6 +347,19 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
+    if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
+        raise NotImplementedError(
+            f"VLLM_USE_V1=1 is not supported with {feature_name}."
+        )
+    msg = f"{feature_name} is not supported by the V1 Engine. "
+    msg += "Falling back to V0. "
+    if recommend_to_remove:
+        msg += f"We recommend to remove {feature_name} from your config "
+        msg += "in favor of the V1 Engine."
+    logger.warning(msg)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -1354,6 +1367,49 @@ class EngineArgs:
             usage_context, model_config
         )
 
+        # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
+        #   and fall back to V0 for experimental or unsupported features.
+        # * If VLLM_USE_V1=1, we enable V1 for supported + experimental
+        #   features and raise error for unsupported features.
+        # * If VLLM_USE_V1=0, we disable V1.
+        use_v1 = False
+        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
+        if try_v1 and self._is_v1_supported_oracle(model_config):
+            use_v1 = True
+
+        # If user explicitly set VLLM_USE_V1, sanity check we respect it.
+        if envs.is_set("VLLM_USE_V1"):
+            assert use_v1 == envs.VLLM_USE_V1
+        # Otherwise, set the VLLM_USE_V1 variable globally.
+        else:
+            envs.set_vllm_use_v1(use_v1)
+
+        # Set default arguments for V1 Engine.
+        self._set_default_args(usage_context, model_config)
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
+        if (current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() in (
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.S390X,
+                CpuArchEnum.ARM,
+                CpuArchEnum.RISCV,
+            )):
+            logger.info(
+                "Chunked prefill is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
+        assert self.enable_chunked_prefill is not None
+
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1739,6 +1795,257 @@ class EngineArgs:
         )
 
         return config
+
+    def _set_default_args(
+        self, usage_context: UsageContext, model_config: ModelConfig
+    ) -> None:
+        """Set Default Arguments for V1 Engine."""
+
+        # V1 uses chunked prefills and prefix caching by default
+        # for non-pooling tasks.
+        # For pooling tasks the default is False
+        if model_config.runner_type != "pooling":
+            self.enable_chunked_prefill = True
+
+            # TODO: When prefix caching supports prompt embeds inputs, this
+            # check can be removed.
+            if self.enable_prompt_embeds and self.enable_prefix_caching is not False:
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V1. Prefix caching has "
+                    "been disabled."
+                )
+                self.enable_prefix_caching = False
+
+            if self.enable_prefix_caching is None:
+                # Disable prefix caching default for hybrid models
+                # since the feature is still experimental.
+                if model_config.is_hybrid:
+                    self.enable_prefix_caching = False
+                else:
+                    self.enable_prefix_caching = True
+        else:
+            pooling_type = model_config.pooler_config.pooling_type
+            is_causal = getattr(model_config.hf_config, "is_causal", True)
+            incremental_prefill_supported = (
+                pooling_type is not None
+                and pooling_type.lower() == "last"
+                and is_causal
+            )
+
+            action = "Enabling" if incremental_prefill_supported else "Disabling"
+
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = incremental_prefill_supported
+                logger.info("(%s) chunked prefill by default", action)
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = incremental_prefill_supported
+                logger.info("(%s) prefix caching by default", action)
+
+        # When no user override, set the default values based on the usage
+        # context.
+        # Use different default values for different hardware.
+
+        # Try to query the device name on the current platform. If it fails,
+        # it may be because the platform that imports vLLM is not the same
+        # as the platform that vLLM is running on (e.g. the case of scaling
+        # vLLM with Ray) and has no GPUs. In this case we use the default
+        # values for non-H100/H200 GPUs.
+        try:
+            device_memory = current_platform.get_device_total_memory()
+            device_name = current_platform.get_device_name().lower()
+        except Exception:
+            # This is only used to set default_max_num_batched_tokens
+            device_memory = 0
+
+        # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
+        # throughput, see PR #17885 for more details.
+        # So here we do an extra device name check to prevent such regression.
+        from vllm.usage.usage_lib import UsageContext
+
+        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and MI300x, use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 256,
+                UsageContext.OPENAI_API_SERVER: 256,
+            }
+
+        # tpu specific default values.
+        if current_platform.is_tpu():
+            default_max_num_batched_tokens_tpu = {
+                UsageContext.LLM_CLASS: {
+                    "V6E": 2048,
+                    "V5E": 1024,
+                    "V5P": 512,
+                },
+                UsageContext.OPENAI_API_SERVER: {
+                    "V6E": 1024,
+                    "V5E": 512,
+                    "V5P": 256,
+                },
+            }
+
+        # cpu specific default values.
+        if current_platform.is_cpu():
+            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 4096 * world_size,
+                UsageContext.OPENAI_API_SERVER: 2048 * world_size,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 256 * world_size,
+                UsageContext.OPENAI_API_SERVER: 128 * world_size,
+            }
+
+        use_context_value = usage_context.value if usage_context else None
+        if (
+            self.max_num_batched_tokens is None
+            and usage_context in default_max_num_batched_tokens
+        ):
+            if current_platform.is_tpu():
+                chip_name = current_platform.get_device_name()
+                if chip_name in default_max_num_batched_tokens_tpu[usage_context]:
+                    self.max_num_batched_tokens = default_max_num_batched_tokens_tpu[
+                        usage_context
+                    ][chip_name]
+                else:
+                    self.max_num_batched_tokens = default_max_num_batched_tokens[
+                        usage_context
+                    ]
+            else:
+                if not self.enable_chunked_prefill:
+                    self.max_num_batched_tokens = model_config.max_model_len
+                else:
+                    self.max_num_batched_tokens = default_max_num_batched_tokens[
+                        usage_context
+                    ]
+            logger.debug(
+                "Setting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens,
+                use_context_value,
+            )
+
+        if self.max_num_seqs is None and usage_context in default_max_num_seqs:
+            self.max_num_seqs = min(
+                default_max_num_seqs[usage_context],
+                self.max_num_batched_tokens or sys.maxsize,
+            )
+
+            logger.debug(
+                "Setting max_num_seqs to %d for %s usage context.",
+                self.max_num_seqs,
+                use_context_value,
+            )
+
+    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
+        """Oracle for whether to use V0 or V1 Engine by default."""
+
+        #############################################################
+        # Unsupported Feature Flags on V1.
+
+        if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
+            _raise_or_fallback(
+                feature_name="--logits-processor-pattern", recommend_to_remove=False
+            )
+            return False
+
+        # No Concurrent Partial Prefills so far.
+        if (
+            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
+            or self.max_long_partial_prefills
+            != SchedulerConfig.max_long_partial_prefills
+        ):
+            _raise_or_fallback(
+                feature_name="Concurrent Partial Prefill", recommend_to_remove=False
+            )
+            return False
+
+        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
+        if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method", None)
+            else:
+                method = self.speculative_config.method
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or mtp."
+                )
+
+        V1_BACKENDS = [
+            "FLASH_ATTN",
+            "PALLAS",
+            "TRITON_ATTN",
+            "TRITON_MLA",
+            "CUTLASS_MLA",
+            "FLASHMLA",
+            "FLASH_ATTN_MLA",
+            "FLASHINFER",
+            "FLASHINFER_MLA",
+            "ROCM_AITER_MLA",
+            "TORCH_SDPA",
+            "FLEX_ATTENTION",
+            "TREE_ATTN",
+            "XFORMERS",
+            "ROCM_ATTN",
+            "ROCM_AITER_UNIFIED_ATTN",
+            "METAL",
+        ]
+        if (
+            envs.is_set("VLLM_ATTENTION_BACKEND")
+            and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS
+        ):
+            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
+            return False
+
+        #############################################################
+        # Experimental Features - allow users to opt in.
+
+        if self.pipeline_parallel_size > 1:
+            supports_pp = getattr(
+                self.distributed_executor_backend, "supports_pp", False
+            )
+            if not supports_pp and self.distributed_executor_backend not in (
+                ParallelConfig.distributed_executor_backend,
+                "ray",
+                "mp",
+                "external_launcher",
+            ):
+                name = (
+                    "Pipeline Parallelism without Ray distributed "
+                    "executor or multiprocessing executor or external "
+                    "launcher"
+                )
+                _raise_or_fallback(feature_name=name, recommend_to_remove=False)
+                return False
+
+        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
+            _raise_or_fallback(
+                feature_name="sliding window (CPU backend)", recommend_to_remove=False
+            )
+            return False
+
+        #############################################################
+
+        return True
 
     def _check_feature_supported(self, model_config: ModelConfig):
         """Raise an error if the feature is not supported."""

@@ -241,6 +241,16 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # DEBUG: Log positions passed to RoPE (only for layer 0 to reduce verbosity)
+        if not hasattr(self, '_debug_logged_count'):
+            self._debug_logged_count = 0
+        if self._debug_logged_count < 20:  # Log first 20 calls
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[MPS_ROPE_DEBUG] Layer positions: shape={positions.shape}, values={positions[:min(10, positions.shape[0])]}, device={positions.device}")
+            self._debug_logged_count += 1
+
         q, k = self.rotary_emb(positions, q, k)
         if self.do_llama_4_scaling:
             attn_scale = self._get_llama_4_attn_scale(positions)

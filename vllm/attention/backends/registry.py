@@ -76,6 +76,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    METAL = "vllm.v1.attention.backends.metal_attn.MetalAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""
 

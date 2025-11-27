@@ -155,22 +155,55 @@ def xpu_platform_plugin() -> str | None:
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
+def mps_platform_plugin() -> str | None:
+    is_mps = False
+    logger.debug("Checking if MPS platform is available.")
+    try:
+        import sys
+        import torch
+
+        # Check if running on macOS and PyTorch MPS is available
+        if sys.platform.startswith("darwin"):
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                is_mps = True
+                logger.debug("Confirmed MPS platform is available.")
+            else:
+                logger.debug("MPS platform is not available: PyTorch MPS backend not available or not built.")
+        else:
+            logger.debug("MPS platform is not available: not running on macOS.")
+    except Exception as e:
+        logger.debug("MPS platform is not available because: %s", str(e))
+
+    return "vllm.platforms.mps.MpsPlatform" if is_mps else None
+
+
 def cpu_platform_plugin() -> str | None:
     is_cpu = False
     logger.debug("Checking if CPU platform is available.")
     try:
         is_cpu = vllm_version_matches_substr("cpu")
         if is_cpu:
-            logger.debug(
-                "Confirmed CPU platform is available because vLLM is built with CPU."
-            )
-        if not is_cpu:
+            # On macOS, MPS platform takes priority over CPU
+            # Only activate CPU if MPS is not available
             import sys
+            import torch
 
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
+            if sys.platform.startswith("darwin"):
+                mps_available = (hasattr(torch.backends, 'mps') and
+                                torch.backends.mps.is_available() and
+                                torch.backends.mps.is_built())
+                if mps_available:
+                    logger.debug(
+                        "CPU platform deferred to MPS platform on macOS."
+                    )
+                    is_cpu = False
+                else:
+                    logger.debug(
+                        "Confirmed CPU platform is available because vLLM is built with CPU and MPS is not available."
+                    )
+            else:
                 logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
+                    "Confirmed CPU platform is available because vLLM is built with CPU."
                 )
 
     except Exception as e:
@@ -184,6 +217,7 @@ builtin_platform_plugins = {
     "cuda": cuda_platform_plugin,
     "rocm": rocm_platform_plugin,
     "xpu": xpu_platform_plugin,
+    "mps": mps_platform_plugin,  # Check MPS before CPU on macOS
     "cpu": cpu_platform_plugin,
 }
 

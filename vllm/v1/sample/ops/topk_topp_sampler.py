@@ -48,14 +48,18 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
 
         elif current_platform.is_cpu():
-            arch = current_platform.get_cpu_architecture()
-            # Fall back to native implementation for POWERPC and RISCV.
-            # On PowerPC argmax produces incorrect output with torch.compile.
-            # PR: https://github.com/vllm-project/vllm/pull/26987
-            if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
+            # MPS uses CPU enum but doesn't support torch.compile well
+            if current_platform.is_mps():
                 self.forward = self.forward_native
             else:
-                self.forward = self.forward_cpu
+                arch = current_platform.get_cpu_architecture()
+                # Fall back to native implementation for POWERPC and RISCV.
+                # On PowerPC argmax produces incorrect output with torch.compile.
+                # PR: https://github.com/vllm-project/vllm/pull/26987
+                if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
+                    self.forward = self.forward_native
+                else:
+                    self.forward = self.forward_cpu
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
