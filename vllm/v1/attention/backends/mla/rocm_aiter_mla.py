@@ -77,7 +77,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
     def __init__(
         self,
@@ -282,11 +282,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_sharing_target_layer_name,
             **mla_args,
         )
-        assert num_heads == 16 or num_heads == 128, (
-            f"Aiter MLA only supports 16 or 128 number of heads.\n"
-            f"Provided {num_heads} number of heads.\n"
-            "Try adjusting tensor_parallel_size value."
-        )
+        # assert num_heads == 16 or num_heads == 128, (
+        #     f"Aiter MLA only supports 16 or 128 number of heads.\n"
+        #     f"Provided {num_heads} number of heads.\n"
+        #     "Try adjusting tensor_parallel_size value."
+        # )
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
