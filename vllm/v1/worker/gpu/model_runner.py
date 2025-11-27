@@ -310,7 +310,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         self._dummy_sampler_run(sample_hidden_states)
         if self.do_spec_decode:
-            self.speculator.run_model(self.max_num_tokens, attn_metadata=None)
+            num_tokens_across_dp = make_num_tokens_across_dp(
+                self.dp_size, self.max_num_tokens
+            )
+            self.speculator.run_model(
+                self.max_num_tokens,
+                attn_metadata=None,
+                num_tokens_across_dp=num_tokens_across_dp,
+            )
         torch.cuda.synchronize()
         del hidden_states, sample_hidden_states
         gc.collect()
