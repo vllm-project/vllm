@@ -8,12 +8,13 @@ from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -41,7 +42,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
-from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -58,7 +59,6 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -100,6 +100,8 @@ class Worker(WorkerBase):
             self.profiler = CudaProfilerWrapper()
         else:
             self.profiler = None
+
+        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -237,9 +239,17 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device
-        )
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.gpu.model_runner import (
+                GPUModelRunner as GPUModelRunnerV2,
+            )
+
+            # HACK(woosuk): This is a temporary fix to avoid type errors.
+            self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -478,6 +488,7 @@ class Worker(WorkerBase):
             hidden_states, last_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs,
                 skip_eplb=True,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
@@ -525,12 +536,39 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_input_tokens = self.model_runner._get_num_input_tokens(num_scheduled_tokens)
-        all_gather_tensors = {
-            "residual": not is_residual_scattered_for_sp(
-                self.vllm_config, num_input_tokens
+        all_gather_tensors = {}
+        compilation_config = self.vllm_config.compilation_config
+        parallel_config = self.vllm_config.parallel_config
+
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and compilation_config.pass_config.enable_sequence_parallelism
+            and forward_pass
+        ):
+            # currently only supported by V1 GPUModelRunner
+            assert isinstance(self.model_runner, GPUModelRunner)
+            num_scheduled_tokens_np = np.array(
+                list(scheduler_output.num_scheduled_tokens.values()),
+                dtype=np.int32,
             )
-        }
+            # TODO(lucas): This is pretty gross; ideally we should only ever call
+            # `_determine_batch_execution_and_padding` once (will get called again
+            # in `execute_model`) but this requires a larger refactor of PP.
+            _, batch_desc, _, _ = (
+                self.model_runner._determine_batch_execution_and_padding(
+                    num_tokens=num_scheduled_tokens,
+                    num_reqs=len(num_scheduled_tokens_np),
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
+                    use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
+                )
+            )
+            all_gather_tensors = {
+                "residual": not is_residual_scattered_for_sp(
+                    self.vllm_config, batch_desc.num_tokens
+                )
+            }
+
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict = get_pp_group().recv_tensor_dict(
                 all_gather_group=get_tp_group(),
@@ -573,7 +611,12 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        if self.use_v2_model_runner:
+            self.model_runner.execute_model(
+                SchedulerOutput.make_empty(), dummy_run=True
+            )
+        else:
+            self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
