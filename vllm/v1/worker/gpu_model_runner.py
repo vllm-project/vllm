@@ -1655,8 +1655,9 @@ class GPUModelRunner(
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
-            # Currently the drafter still only uses piecewise cudagraphs, and
-            # therefore does not want to use padded attention metadata.
+            # Currently the drafter still only uses piecewise cudagraphs (and modifies
+            # the attention metadata in directly), and therefore does not want to use
+            # padded attention metadata.
             spec_decode_common_attn_metadata = (
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
             )
