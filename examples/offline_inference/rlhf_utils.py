@@ -16,13 +16,18 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     the data-plane communication (NCCL) between external (train processes)
     and vLLM workers.
     """
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
 
     pg = StatelessProcessGroup.create(
         host=master_address, port=master_port, rank=rank, world_size=world_size
     )
-    pynccl = PyNcclCommunicator(pg, device=device)
+
+    if "xpu" in device:
+        from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
+        pynccl = XpuCommunicator(pg, device=device)
+    else:
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        pynccl = PyNcclCommunicator(pg, device=device)
     return pynccl
 
 
