@@ -170,16 +170,15 @@ def parse_fine_tuned_lora_name(
 
 def is_base_embeddding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
-    input_embedding_subfix = ".embed_tokens.base_layer.weight"
-    output_embedding_subfix = ".lm_head.base_layer.weight"
-
-    return name.endswith(input_embedding_subfix) or name.endswith(
-        output_embedding_subfix
+    embedding_suffixes = (
+        ".embed_tokens.base_layer.weight",
+        ".lm_head.base_layer.weight",
     )
+    return name.endswith(embedding_suffixes)
 
 
 def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: list[str]
+    load_modules: str | list[str], expected_lora_modules: set[str]
 ) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,
@@ -195,8 +194,8 @@ def is_regex_target_modules(
         except re.error:
             return False
 
-    def is_subset(sub_list, full_list):
-        return set(sub_list).issubset(set(full_list))
+    def is_subset(sub_list, full_set):
+        return set(sub_list).issubset(full_set)
 
     # Similar to PEFT's processing logic, regex-related operations are only
     #  executed when the load_modules is a `str`.
@@ -290,7 +289,7 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-            if not hasattr(model, "is_3d_moe_weight"):
+            if not model.is_3d_moe_weight:
                 # 3D MoE LoRA does not need `packed_modules_mapping`
                 packed_modules_mapping["experts"] = [
                     weight_name.rstrip(".")
