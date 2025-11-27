@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -112,32 +113,26 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         )
 
-        # Set initial value for the threshold for the number of sequences used
-        # to select between the 2D and 3D kernels for decode.
+        # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
+        # A lower bound for num_q_blocks is the number of sequences.
+        # To ensure the minimum launch grid size is achieved, the number of sequences
+        # must be at least equal to the threshold below.
+        # If this threshold is not reached (i.e., the batch size is not large enough),
+        # the 3D kernel will be selected instead.
         self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+
+        # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
             capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            if not capture_sizes:
-                # If no CUDA Graph capture sizes are specified, the threshold
-                # is reset to zero, forcing the 2D kernel to be used.
-                self.seq_threshold_3D = 0
-            else:
-                # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-                # as threshold. This ensures that each captured graph covers the
-                # correct execution path.
-                upd_seq_threshold_3D = min(
-                    capture_sizes,
-                    key=lambda x: abs(x - self.seq_threshold_3D),
-                )
+            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
 
-                # If the updated threshold becomes significantly larger than the
-                # initial value, it is reset to zero. This enforces the use of the
-                # 2D kernel only and ensures that the size of the allocated
-                # intermediate structures remains bounded.
-                if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
-                    self.seq_threshold_3D = upd_seq_threshold_3D
-                else:
-                    self.seq_threshold_3D = 0
+            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
+            # as threshold. This ensures that each captured graph covers the
+            # correct execution path.
+            self.seq_threshold_3D = min(
+                capture_sizes,
+                key=lambda x: abs(x - self.seq_threshold_3D),
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -166,10 +161,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         num_queries_per_kv = self.num_heads_q // self.num_heads_kv
         BLOCK_M = (
-            16
-            if num_queries_per_kv <= 16
-            else 1 << (num_queries_per_kv - 1).bit_length()
-        )  # next power of 2 value
+            16 if num_queries_per_kv <= 16 else next_power_of_2(num_queries_per_kv)
+        )
         BLOCK_Q = BLOCK_M // num_queries_per_kv
 
         if max_seq_len > 1:
