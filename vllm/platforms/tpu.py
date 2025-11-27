@@ -267,7 +267,7 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_inference.platforms.tpu_platforms import (
+    from tpu_inference.platforms import (
         TpuPlatform as TpuInferencePlatform,
     )
 
