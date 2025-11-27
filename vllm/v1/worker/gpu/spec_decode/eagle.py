@@ -226,6 +226,7 @@ class EagleSpeculator:
         )
 
         # Prefill: Run the eagle speculator with eager mode.
+        # TODO(woosuk): Support CUDA graph for prefill.
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
             input_batch.attn_metadata,
@@ -568,9 +569,11 @@ def update_eagle_inputs(
 
 @triton.jit
 def _increment_pos(pos, max_model_len):
-    return tl.where(pos < max_model_len, pos + 1, 0)
+    pos = pos + 1
+    return tl.where(pos < max_model_len, pos, 0)
 
 
 @triton.jit
 def _increment_seq_len(seq_len, max_model_len):
-    return tl.where(seq_len < max_model_len, seq_len + 1, 1)
+    seq_len = seq_len + 1
+    return tl.where(seq_len < max_model_len, seq_len, 1)
