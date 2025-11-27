@@ -88,15 +88,15 @@ class WorkerLoRAManager:
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_modules: list[str] = []
+            expected_lora_lst: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_lora_lst.extend(packed_modules_mapping[module])
                 else:
-                    expected_lora_modules.append(module)
+                    expected_lora_lst.append(module)
                 if module == "experts":
-                    expected_lora_modules.append(module)
-            expected_lora_modules = list(set(expected_lora_modules))
+                    expected_lora_lst.append(module)
+            expected_lora_modules = set(expected_lora_lst)
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
