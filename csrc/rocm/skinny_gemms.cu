@@ -1616,28 +1616,37 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
     }
 
     if (!doRdc) {
-     if (m + (threadIdx.x%16) < M)
+     if (m + (threadIdx.x%16) < M) {
+      scalar_t biases[N/NTILE/GrpsShrB][4];
+      if (BIAS)
+      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+       for (uint32_t j=0; j<4; j++) {
+        int mindx = m + (threadIdx.x%16);
+        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
+        if constexpr (std::is_same_v<scalar_t, half>) {
+              biases[nt][j] = __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+        } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              biases[nt][j] =
+                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
+        }
+       }
+      }
       for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
        for (uint32_t j=0; j<4; j++) {
         int mindx = m + (threadIdx.x%16);
         int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
         int adr = mindx+M*nindx;
-
-        if (BIAS) {
-          if constexpr (std::is_same_v<scalar_t, half>) {
-              sum4[nt][0][j] += __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              sum4[nt][0][j] +=
-                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-          }
-	}
-
-        if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
+        if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+	  if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
 	  C[adr] = __float2bfloat16(sum4[nt][0][j]);
-	else
+	}
+	else {
+	  if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
 	  C[adr] = __float2half(sum4[nt][0][j]);
+	}
        }
       }
+     }
     } else {
      if (m + (threadIdx.x%16) < M) {
       int my_cntr[N/NTILE/GrpsShrB][4];
@@ -1650,12 +1659,18 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
        }
       }
       float vals[N/NTILE/GrpsShrB][4];
+      scalar_t biases[N/NTILE/GrpsShrB][4];
       for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
        for (uint32_t j=0; j<4; j++) {
-        int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
-	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
+       	int mindx = m + (threadIdx.x%16);
+        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
+        int adr = mindx+M*nindx;
 	// read-back glbl[] here, can't use return from atomic above
-	if (my_cntr[nt][j] + 1 == k_rnd) vals[nt][j] = glbl[adr];
+	if (my_cntr[nt][j] + 1 == k_rnd) {
+	  vals[nt][j] = glbl[adr];
+	  if (BIAS)
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+	}
        }
       }
       for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
@@ -1664,18 +1679,14 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
         int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
         int adr = mindx+M*nindx;
         if (my_cntr[nt][j] + 1 == k_rnd) {
-          if (BIAS) {
-            if constexpr (std::is_same_v<scalar_t, half>) {
-              vals[nt][j] += __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              vals[nt][j] +=
-                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-            }
-	  }
-          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>)
+          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+	    if (BIAS) vals[nt][j] += __bfloat162float(biases[nt][j]);
             C[adr] = __float2bfloat16(vals[nt][j]);
-          else
+	  }
+          else {
+	    if (BIAS) vals[nt][j] += __half2float(biases[nt][j]);
             C[adr] = __float2half(vals[nt][j]);
+	  }
         }
        }
       }
