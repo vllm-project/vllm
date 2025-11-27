@@ -42,11 +42,23 @@ def _create_vllm_config(
     mock_config.compilation_config = compilation_config
     mock_config.scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
     mock_config.parallel_config = ParallelConfig()
+    mock_config.speculative_config = None  # No speculative decoding
     if not lora_config:
         mock_config.lora_config = None
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1()
+
+    # mimic VllmConfig.__post_init__
+    if compilation_config.cudagraph_capture_sizes:
+        compilation_config.max_cudagraph_capture_size = (
+            compilation_config.cudagraph_capture_sizes[-1]
+        )
+
+        compilation_config.post_init_cudagraph_sizes()
+        mock_config.pad_for_cudagraph = (
+            lambda batch_size: compilation_config.bs_to_padded_graph_size[batch_size]
+        )
 
     return mock_config
 
@@ -109,9 +121,11 @@ class TestCudagraphDispatcher:
         # 1. non-uniform batch, size in cudagraph size list
         desc_full_exact = BatchDescriptor(
             num_tokens=8,
-            uniform_decode=False,
+            uniform=False,
         )
-        rt_mode, key = dispatcher.dispatch(desc_full_exact)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=False, has_lora=False
+        )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_full_exact
@@ -122,32 +136,37 @@ class TestCudagraphDispatcher:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 2. uniform decode batch, size in cudagraph size list
-        desc_uniform_exact = BatchDescriptor(num_tokens=8, uniform_decode=True)
-        rt_mode, key = dispatcher.dispatch(desc_uniform_exact)
+        desc_uniform_exact = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=True)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=True, has_lora=False
+        )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_uniform_exact.non_uniform
+            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
         elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.non_uniform
+            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 3. No key match
-        desc_no_match = BatchDescriptor(num_tokens=15, uniform_decode=False)
-        rt_mode, key = dispatcher.dispatch(desc_no_match)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=15, uniform_decode=False, has_lora=False
+        )
         assert rt_mode == CUDAGraphMode.NONE
-        assert key is None
+        assert key == BatchDescriptor(num_tokens=15)
 
         # 4. Cascade attention should have a fall back mode
-        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
-        rt_mode, key = dispatcher.dispatch(desc_full_exact, use_cascade_attn=True)
+        desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=False, has_lora=False, use_cascade_attn=True
+        )
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.non_uniform
+            assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
