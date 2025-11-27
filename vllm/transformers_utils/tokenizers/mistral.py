@@ -404,6 +404,8 @@ class MistralTokenizer(TokenizerBase):
         )
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
+        # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
             ids = [ids]
 
