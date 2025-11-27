@@ -725,6 +725,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         ]
 
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
         self.use_sparse = use_sparse
 
         # Initialize q/k/v range constants.
@@ -793,7 +794,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata,
-    ) -> torch.Tensor:
+        output: torch.Tensor,
+    ) -> None:
         """Prefill path orchestration in the layer."""
         assert attn_metadata.prefill is not None
         if self.impl.dcp_world_size is None:
@@ -810,7 +812,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         # Run prefill for new tokens
-        output = self.impl._run_prefill_new_tokens(  # type: ignore[attr-defined]
+        output_prefill = self.impl._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
@@ -820,7 +822,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Handle chunked context if present
         if has_context:
-            suffix_output, suffix_lse = output
+            suffix_output, suffix_lse = output_prefill
             prefill_metadata = attn_metadata.prefill
             chunked_context = prefill_metadata.chunked_context
 
@@ -904,7 +906,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         dst=workspace,
                         block_table=prefill_metadata.block_table,
                         cu_seq_lens=chunked_context.cu_seq_lens[i],
-                        batch_size=attn_metadata.num_prefills,
+                        token_to_seq=chunked_context.token_to_seq[i],
+                        num_tokens=chunked_context.chunk_total_token[i],
                         kv_cache_dtype=self.kv_cache_dtype,
                         scale=self._k_scale,
                         seq_starts=chunked_context.starts[i],
@@ -926,7 +929,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
                 # Run attention kernel for this chunk
-                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(  # type: ignore[attr-defined]
+                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
                     prefill=prefill_metadata,
                     chunk_idx=i,
                     q=q,
@@ -962,11 +965,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 suffix_lse=suffix_lse,
             )
 
-        # Unpad if necessary
-        if self.impl._pad_v:  # type: ignore[attr-defined]
-            output = output[..., : v.shape[-1]]
+            # Unpad if necessary
+            if self.impl._pad_v:
+                assert context_output is not None
+                context_output = context_output[..., : v.shape[-1]]
+                suffix_output = suffix_output[..., : v.shape[-1]]
 
-        return output.flatten(start_dim=-2)
+            output = output.view(-1, self.num_heads, self.v_head_dim)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+        else:
+            output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
+            output.copy_(output_prefill)
 
     def forward_decode(
         self,
@@ -987,33 +1002,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # (B, N, P) -> (N, B, P)
         decode_q_nope = decode_q_nope.transpose(0, 1)
 
-        if self.impl.q_pad_num_heads is not None:  # type: ignore[attr-defined]
+        if self.impl.q_pad_num_heads is not None:
             B, N, L = decode_q_pe.shape
-            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))  # type: ignore[attr-defined]
+            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))
             decode_pe_padded.resize_((B, N, L))
             decode_pe_padded.copy_(decode_q_pe)
             decode_q_pe = decode_pe_padded
 
-        if self.impl.is_aiter_triton_fp8_bmm_enabled:  # type: ignore[attr-defined]
+        if self.is_aiter_triton_fp8_bmm_enabled:
             # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
             decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 decode_q_nope,
-                self.W_K,  # type: ignore[attr-defined]
-                self.W_K_scale,  # type: ignore[attr-defined]
+                self.W_K,
+                self.W_K_scale,
                 group_size=128,
                 transpose_bm=True,
             )
         else:
             N, B, P = decode_q_nope.shape
-            _, _, L = self.W_UK_T.shape  # type: ignore[attr-defined]
-            if self.impl.q_pad_num_heads is not None:  # type: ignore[attr-defined]
+            _, _, L = self.W_UK_T.shape
+            if self.impl.q_pad_num_heads is not None:
                 decode_ql_nope = decode_q_nope.new_empty(
-                    (self.impl.q_pad_num_heads, B, L)  # type: ignore[attr-defined]
+                    (self.impl.q_pad_num_heads, B, L)
                 )
                 decode_ql_nope.resize_((N, B, L))
             else:
                 decode_ql_nope = decode_q_nope.new_empty((N, B, L))
-            torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)  # type: ignore[attr-defined]
+            torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
         if fp8_attention:
@@ -1038,7 +1053,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             decode_q = torch.cat(decode_q, dim=-1)
             decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
-        attn_out, lse = self.impl._forward_decode(  # type: ignore[attr-defined]
+        attn_out, lse = self.impl._forward_decode(
             decode_q, kv_cache, attn_metadata, self
         )
 
@@ -1104,10 +1119,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Process decode and prefill branches
         if has_prefill:
-            prefill_out = self.forward_prefill(
-                prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+            self.forward_prefill(
+                prefill_q,
+                prefill_k_c,
+                prefill_k_pe,
+                kv_cache,
+                attn_metadata,
+                output=output[num_decode_tokens:],
             )
-            output[num_decode_tokens:] = prefill_out
 
         if has_decode:
             decode_out = self.forward_decode(decode_q, kv_cache, attn_metadata)
@@ -1163,7 +1182,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if self.impl.is_aiter_triton_fp8_bmm_enabled:
+        if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1213,10 +1232,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        if self.impl.is_aiter_triton_fp8_bmm_enabled:  # type: ignore[attr-defined]
-            # (N, B, L) x (N, L, V) -> (N, B, V) -> (B, N, V)
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            out = out.view(-1, self.num_heads, self.v_head_dim)
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
