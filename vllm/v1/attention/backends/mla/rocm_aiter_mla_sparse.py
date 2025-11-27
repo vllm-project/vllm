@@ -326,12 +326,15 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         seq_len = (topk_indices != -1).sum(dim=-1)
         torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
         attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
+        print("paged_kv_indptr:", attn_metadata.paged_kv_indptr)
         fetch_id_to_ragged_triton(
             topk_indices,
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
             attn_metadata.topk_tokens,
         )
+
+        print("paged_kv_indices:", attn_metadata.paged_kv_indices)
 
         rocm_aiter_ops.mla_decode_fwd(
             q,

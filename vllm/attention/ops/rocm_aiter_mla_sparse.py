@@ -71,6 +71,7 @@ def indexer_k_quant_and_cache_triton(
     k: torch.Tensor,
     kv_cache: torch.Tensor,  # [num_blocks, block_size, head_dim + 4]
     slot_mapping: torch.Tensor,
+    quant_block_size,
     scale_fmt,
     block_tile_size=16,
     head_tile_size=16,
