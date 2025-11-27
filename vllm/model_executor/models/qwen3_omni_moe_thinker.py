@@ -24,7 +24,7 @@
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -49,8 +49,9 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -81,6 +82,7 @@ from .interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
+    SupportsTranscription,
 )
 from .qwen2_5_omni_thinker import (
     Qwen2_5OmniAudioFeatureInputs,
@@ -1132,6 +1134,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
+    SupportsTranscription,
 ):
     merge_by_field_config = True
 
@@ -1142,6 +1145,29 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "thinker.": "",
         }
     )
+
+    supported_languages = {
+        "en": "English",
+        "zh": "Chinese",
+        "ko": "Korean",
+        "ja": "Japanese",
+        "de": "German",
+        "ru": "Russian",
+        "it": "Italian",
+        "fr": "French",
+        "es": "Spanish",
+        "pt": "Portuguese",
+        "ms": "Malay",
+        "nl": "Dutch",
+        "id": "Indonesian",
+        "tr": "Turkish",
+        "vi": "Vietnamese",
+        "yue": "Cantonese",
+        "ar": "Arabic",
+        "ur": "Urdu",
+    }
+
+    supports_transcription_only = False
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1769,3 +1795,92 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         mrope_position_delta = llm_positions.max() + 1 - seq_len
         return llm_positions, mrope_position_delta
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls,
+        model_config: ModelConfig,
+        task_type: Literal["transcribe", "translate"],
+    ) -> SpeechToTextConfig:
+        """
+        Configure speech-to-text settings for Qwen3-Omni.
+
+        Qwen3-Omni supports:
+        - Audio understanding up to 40 minutes (2400 seconds)
+        - Sample rate: 16kHz (standard for speech models)
+        - Native audio processing without server-side chunking
+        """
+        return SpeechToTextConfig(
+            sample_rate=16_000,  # 16kHz sampling rate
+            max_audio_clip_s=2400,  # 40 minutes maximum (40 * 60 = 2400 seconds)
+            # Disable server-side chunking since Qwen3-Omni handles long audio natively
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
+        """
+        Build the prompt for Qwen3-Omni transcription/translation.
+
+        Returns a dictionary with audio in multi_modal_data and the appropriate prompt.
+        """
+        # Prepare the audio data
+        audio_data = (audio, stt_config.sample_rate)
+
+        # Build the task-specific prompt
+        if task_type == "transcribe":
+            # For transcription, specify the source language
+            if language:
+                prompt_text = f"Transcribe the {cls.supported_languages.get(language, language)} audio into text."
+            else:
+                prompt_text = "Transcribe the audio into text."
+        elif task_type == "translate":
+            # For translation, typically translate to English
+            target_lang = to_language or "en"
+            target_lang_name = cls.supported_languages.get(target_lang, target_lang)
+            if language:
+                source_lang_name = cls.supported_languages.get(language, language)
+                prompt_text = f"Listen to the provided {source_lang_name} speech and produce a translation in {target_lang_name} text."
+            else:
+                prompt_text = f"Translate the audio into {target_lang_name} text."
+
+        # Add any user-provided prompt context
+        if request_prompt:
+            prompt_text = f"{request_prompt}\n{prompt_text}"
+
+        placeholder = cls.get_placeholder_str("audio", 0) or ""
+
+        prompt = (
+            "<start_of_turn>user\n"
+            f"{prompt_text} {placeholder}"
+            "<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
+
+        # Return the prompt in the expected format
+        return {
+            "prompt": prompt,
+            "multi_modal_data": {
+                "audio": audio_data,
+            },
+        }
+
+    @classmethod
+    def validate_language(cls, language: str | None) -> str | None:
+        if language is None:
+            logger.warning(
+                "Defaulting to language='en'. If you wish to transcribe "
+                "audio in a different language, pass the `language` field "
+                "in the TranscriptionRequest."
+            )
+            language = "en"
+        return super().validate_language(language)
