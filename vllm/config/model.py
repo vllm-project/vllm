@@ -1820,7 +1820,7 @@ class ModelConfig:
                     )
                     return True
             # vllm currently does not have pooling models using hybrid,
-            # attention_free, or encoder_decoder attn types.
+            # attention_free or encoder_decoder attn types.
             return attn_type != "encoder_decoder"
         else:
             if attn_type == "encoder_decoder":
@@ -1874,7 +1874,7 @@ class ModelConfig:
                     )
                     return True
             # vllm currently does not have pooling models using hybrid,
-            # attention_free, or encoder_decoder attn types.
+            # attention_free or encoder_decoder attn types.
             return False
         else:
             if attn_type == "hybrid":
