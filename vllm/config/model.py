@@ -1790,8 +1790,9 @@ class ModelConfig:
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type in ["all", "mean", "step", "cls"]:
                     logger.debug(
-                        f"Pooling models with {pooling_type} pooling does not "
-                        f"support chunked prefill."
+                        "Pooling models with %s pooling does not "
+                        "support chunked prefill.",
+                        pooling_type,
                     )
                     return False
                 else:
@@ -1826,8 +1827,9 @@ class ModelConfig:
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type in ["all", "mean", "step", "cls"]:
                     logger.debug(
-                        f"Pooling models with {pooling_type} pooling does not "
-                        f"support prefix caching."
+                        "Pooling models with %s pooling does not "
+                        "support prefix caching.",
+                        pooling_type,
                     )
                     return False
                 else:
