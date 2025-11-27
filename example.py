@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Example demonstrating tool calling + structured output issue in vLLM.
 When both are used together, tools are ignored even with tool_choice='auto'.
@@ -6,10 +8,7 @@ When both are used together, tools are ignored even with tool_choice='auto'.
 from openai import OpenAI
 
 # Initialize client (assumes vLLM server running on localhost:8000)
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="dummy"
-)
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
 # Define a simple tool
 tools = [
@@ -21,14 +20,11 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city name"
-                    }
+                    "location": {"type": "string", "description": "The city name"}
                 },
-                "required": ["location"]
-            }
-        }
+                "required": ["location"],
+            },
+        },
     }
 ]
 
@@ -39,18 +35,14 @@ response_format = {
         "name": "response",
         "schema": {
             "type": "object",
-            "properties": {
-                "answer": {"type": "string"}
-            },
-            "required": ["answer"]
-        }
-    }
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
+    },
 }
 
 # Test: tool should be called for this query
-messages = [
-    {"role": "user", "content": "What's the weather in San Francisco?"}
-]
+messages = [{"role": "user", "content": "What's the weather in San Francisco?"}]
 
 print("Testing tool calling + structured output together...\n")
 
@@ -60,7 +52,7 @@ response = client.chat.completions.create(
     messages=messages,
     tools=tools,
     tool_choice="auto",
-    response_format=response_format
+    response_format=response_format,
 )
 
 print("Response with both tools and response_format:")
@@ -71,7 +63,9 @@ print(f"Content: {response.choices[0].message.content}")
 if response.choices[0].message.tool_calls:
     print("✅ GOOD: Tool was called (expected behavior)")
 else:
-    print("❌ BAD: Tool was NOT called (bug - should call tool even with response_format)")
+    print(
+        "❌ BAD: Tool was NOT called (bug - should call tool even with response_format)"
+    )
 print()
 
 # Test WITHOUT structured output (should work)
@@ -79,7 +73,7 @@ response2 = client.chat.completions.create(
     model="Qwen/Qwen2.5-1.5B-Instruct",  # Replace with your model
     messages=messages,
     tools=tools,
-    tool_choice="auto"
+    tool_choice="auto",
 )
 
 print("Response with only tools (no response_format):")
@@ -90,4 +84,6 @@ print(f"Content: {response2.choices[0].message.content}")
 if response2.choices[0].message.tool_calls:
     print("✅ GOOD: Tool was called (expected behavior)")
 else:
-    print("❌ BAD: Tool was NOT called (unexpected - should work without response_format)")
+    print(
+        "❌ BAD: Tool was NOT called (unexpected - should work without response_format)"
+    )

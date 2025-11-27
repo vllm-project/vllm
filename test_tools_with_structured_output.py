@@ -6,19 +6,19 @@ Test demonstrating tool calling + structured output issue in vLLM.
 When both are used together, tools are ignored even with tool_choice='auto'.
 """
 
-import pytest
-import pytest_asyncio
-import openai
-
 # Use RemoteOpenAIServer for self-contained test
 import sys
 from pathlib import Path
+
+import openai
+import pytest
+import pytest_asyncio
 
 # Add tests directory to path to import utilities
 tests_dir = Path(__file__).parent / "tests"
 sys.path.insert(0, str(tests_dir))
 
-from utils import RemoteOpenAIServer
+from utils import RemoteOpenAIServer  # noqa: E402
 
 # Use a small model for testing
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -33,14 +33,11 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city name"
-                    }
+                    "location": {"type": "string", "description": "The city name"}
                 },
-                "required": ["location"]
-            }
-        }
+                "required": ["location"],
+            },
+        },
     }
 ]
 
@@ -51,29 +48,29 @@ response_format = {
         "name": "response",
         "schema": {
             "type": "object",
-            "properties": {
-                "answer": {"type": "string"}
-            },
-            "required": ["answer"]
-        }
-    }
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
+    },
 }
 
 # Test message
-messages = [
-    {"role": "user", "content": "What's the weather in San Francisco?"}
-]
+messages = [{"role": "user", "content": "What's the weather in San Francisco?"}]
 
 
 @pytest.fixture(scope="module")
 def server():
     """Start vLLM server with necessary flags for tool calling."""
     args = [
-        "--dtype", "half",
+        "--dtype",
+        "half",
         "--enable-auto-tool-choice",
-        "--structured-outputs-config.backend", "xgrammar",
-        "--tool-call-parser", "hermes",
-        "--gpu-memory-utilization", "0.4",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--tool-call-parser",
+        "hermes",
+        "--gpu-memory-utilization",
+        "0.4",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -102,15 +99,15 @@ async def test_tools_with_structured_output(client: openai.AsyncOpenAI):
         messages=messages,
         tools=tools,
         tool_choice="auto",
-        response_format=response_format
+        response_format=response_format,
     )
 
     message = response.choices[0].message
 
     # Check if tool was called
-    print(f"\n{'='*60}")
-    print(f"TEST: Tools + Structured Output Together")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("TEST: Tools + Structured Output Together")
+    print(f"{'=' * 60}")
     print(f"Tool calls: {message.tool_calls}")
     print(f"Content: {message.content}")
     print(f"Finish reason: {response.choices[0].finish_reason}")
@@ -121,11 +118,15 @@ async def test_tools_with_structured_output(client: openai.AsyncOpenAI):
         print("✅ GOOD: Tool was called (expected behavior - bug may be fixed!)")
         # Test passes - correct behavior
     else:
-        print("❌ BAD: Tool was NOT called (bug - should call tool even with response_format)")
+        print(
+            "❌ BAD: Tool was NOT called "
+            "(bug - should call tool even with response_format)"
+        )
         # Fail the test to document the bug
         pytest.fail(
-            "Bug confirmed: Tools are ignored when response_format is present. "
-            "Expected tool to be called for weather query, but got text response instead."
+            "Bug confirmed: Tools are ignored when response_format is "
+            "present. Expected tool to be called for weather query, but "
+            "got text response instead."
         )
 
 
@@ -138,18 +139,15 @@ async def test_tools_without_structured_output(client: openai.AsyncOpenAI):
     """
     # Test WITHOUT structured output (should work)
     response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto"
+        model=MODEL_NAME, messages=messages, tools=tools, tool_choice="auto"
     )
 
     message = response.choices[0].message
 
     # Check if tool was called
-    print(f"\n{'='*60}")
-    print(f"BASELINE: Tools Only (no response_format)")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("BASELINE: Tools Only (no response_format)")
+    print(f"{'=' * 60}")
     print(f"Tool calls: {message.tool_calls}")
     print(f"Content: {message.content}")
     print(f"Finish reason: {response.choices[0].finish_reason}")
@@ -176,14 +174,14 @@ async def test_structured_output_without_tools(client: openai.AsyncOpenAI):
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "Say hello to the world"}],
-        response_format=response_format
+        response_format=response_format,
     )
 
     message = response.choices[0].message
 
-    print(f"\n{'='*60}")
-    print(f"BASELINE: Structured Output Only (no tools)")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("BASELINE: Structured Output Only (no tools)")
+    print(f"{'=' * 60}")
     print(f"Content: {message.content}")
     print(f"Finish reason: {response.choices[0].finish_reason}")
 
