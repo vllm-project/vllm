@@ -43,7 +43,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
-    flashinfer_disable_q_quantization,
+    disable_flashinfer_q_quantization,
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
@@ -358,7 +358,8 @@ class FlashInferBackend(AttentionBackend):
             supports_trtllm_attention,
         )
 
-        # Respect explicit disable flag (e.g., VLLM_USE_TRTLLM_ATTENTION=0)
+        # Respect explicit disable flag (e.g.,
+        # --attention-config.use_trtllm_attention=0)
         if force_use_trtllm_attention() is False:
             return False
 
@@ -497,11 +498,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
         # Use model dtype as q dtype when TRTLLM attn is not supported, or
-        # VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION is set to 1. Otherwise, try to
-        # use fp8 q if kv cache is fp8, and will fall back to model dtype
+        # --attention-config.disable_flashinfer_q_quantization is set to 1. Otherwise,
+        # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        if can_use_trtllm and not flashinfer_disable_q_quantization():
+        if can_use_trtllm and not disable_flashinfer_q_quantization():
             self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
@@ -1044,7 +1045,7 @@ class FlashInferImpl(AttentionImpl):
         )
 
     def supports_quant_query_input(self) -> bool:
-        if flashinfer_disable_q_quantization():
+        if disable_flashinfer_q_quantization():
             return False
 
         return self.support_trtllm_attn
