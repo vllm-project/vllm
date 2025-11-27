@@ -106,9 +106,6 @@ class TPUWorker:
                 "Profiling enabled. Traces will be saved to: %s", self.profile_dir
             )
 
-        if self.model_config.seed is None:
-            self.model_config.seed = 0
-
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -349,6 +346,6 @@ class TPUWorker:
 
 
 if USE_TPU_INFERENCE:
-    from tpu_inference.worker import TPUWorker as TpuInferenceWorker
+    from tpu_inference.worker.tpu_worker import TPUWorker as TpuInferenceWorker
 
     TPUWorker = TpuInferenceWorker  # type: ignore
