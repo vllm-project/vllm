@@ -9,7 +9,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 
 # Provide absolute path and huggingface lora ids
-lora_fixture_name = ["qwen3_lora_files", "qwen3_lora_huggingface_id"]
+lora_fixture_name = ["llama32_lora_files", "llama32_lora_huggingface_id"]
 LLAMA_LORA_MODULES = [
     "qkv_proj",
     "o_proj",
