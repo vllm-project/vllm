@@ -340,7 +340,12 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
+        # Vision tower QKV has packed_modules_list=[] (already packed in checkpoint)
+        # Language models have packed_modules_list=[module_name]
+        # (single LoRA for qkv_proj)
+        return type(source_layer) is QKVParallelLinear and (
+            len(packed_modules_list) <= 1
+        )
 
 
 class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
