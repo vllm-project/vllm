@@ -19,6 +19,7 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     list_filtered_repo_files,
 )
+from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import (
     check_gguf_file,
@@ -190,7 +191,14 @@ def get_tokenizer(
             kwargs["gguf_file"] = Path(tokenizer_name).name
             tokenizer_name = Path(tokenizer_name).parent
         elif is_remote_gguf(tokenizer_name):
-            tokenizer_name, _ = split_remote_gguf(tokenizer_name)
+            tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
+            # Get the HuggingFace Hub path for the GGUF file
+            gguf_file = get_gguf_file_path_from_hf(
+                tokenizer_name,
+                quant_type,
+                revision=revision,
+            )
+            kwargs["gguf_file"] = gguf_file
 
     # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format
     # first to use official Mistral tokenizer if possible.
