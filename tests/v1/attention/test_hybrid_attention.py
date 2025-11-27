@@ -7,7 +7,10 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.config import set_current_vllm_config
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    model_parallel_is_initialized,
+)
 from vllm.model_executor.layers.hybrid_ssm_adapter import HybridSSMAdapter
 from vllm.v1.attention.backends.hybrid_attn import HybridAttentionImpl
 
@@ -43,7 +46,13 @@ def test_hybrid_ssm_adapter_state_shape_and_dtype():
         MambaStateShapeCalculator,
     )
 
-    tp_world_size = get_tensor_model_parallel_world_size()
+    if model_parallel_is_initialized():
+        tp_world_size = get_tensor_model_parallel_world_size()
+    else:
+        # In single-process unit tests, model parallel is often not initialized.
+        # Fall back to the tensor-parallel size from the vLLM config, which is
+        # 1 by default in these tests.
+        tp_world_size = vllm_config.parallel_config.tensor_parallel_size
     expected_shapes = MambaStateShapeCalculator.mamba1_state_shape(
         tp_world_size=tp_world_size,
         intermediate_size=intermediate_size,

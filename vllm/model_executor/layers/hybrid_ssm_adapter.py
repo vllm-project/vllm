@@ -11,7 +11,10 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    model_parallel_is_initialized,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -89,8 +92,15 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         This mirrors ``MambaMixer.get_state_shape`` by delegating to
         ``MambaStateShapeCalculator`` so that the adapter can share the same
         ``MambaSpec`` / ``MambaManager`` infrastructure.
+
+        In unit tests or single-process runs where model parallel has not been
+        initialized yet, we conservatively assume a tensor-parallel world size
+        of 1 instead of requiring a full distributed setup.
         """
-        tp_world_size = get_tensor_model_parallel_world_size()
+        if model_parallel_is_initialized():
+            tp_world_size = get_tensor_model_parallel_world_size()
+        else:
+            tp_world_size = 1
         return MambaStateShapeCalculator.mamba1_state_shape(
             tp_world_size=tp_world_size,
             intermediate_size=self.intermediate_size,

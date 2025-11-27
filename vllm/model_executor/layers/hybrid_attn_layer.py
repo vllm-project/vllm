@@ -39,8 +39,26 @@ class HybridAttentionLayer(Attention, AttentionLayerBase):
         prefix: str = "",
         **extra_impl_args,
     ) -> None:
-        # Initialize the history branch adapter first so it can participate in
-        # the v1 KV cache spec discovery.
+        # First, initialize the underlying Attention module so that nn.Module
+        # internals (such as _modules) are ready before we attach submodules
+        # like the SSM adapter.
+        #
+        # We force the attention backend to be HybridAttentionBackend while
+        # reusing all of Attention's internal wiring (KV cache quantization,
+        # static forward context registration, etc.).
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            cache_config=cache_config,
+            prefix=prefix,
+            attn_backend=HybridAttentionBackend,
+            **extra_impl_args,
+        )
+
+        # Initialize the history branch adapter so it can participate in the
+        # v1 KV cache spec discovery with a distinct layer prefix.
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
         self.ssm_adapter = HybridSSMAdapter(
@@ -51,20 +69,6 @@ class HybridAttentionLayer(Attention, AttentionLayerBase):
             model_config=model_config,
             cache_config=cache_config or vllm_config.cache_config,
             prefix=f"{prefix}.ssm",
-        )
-
-        # Force the attention backend to be HybridAttentionBackend while reusing
-        # all of Attention's internal wiring (KV cache quantization, static
-        # forward context registration, etc.).
-        super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            cache_config=cache_config,
-            prefix=prefix,
-            attn_backend=HybridAttentionBackend,
-            **extra_impl_args,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
