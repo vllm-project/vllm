@@ -19,6 +19,7 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import get_default_quantization_hf_config
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -200,6 +201,9 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    quantization_schema: str | None = None
+    """Specify the online quantization schema, if not defined, will read from
+    the huggingface config."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -464,9 +468,18 @@ class ModelConfig:
             # We'll determine how to apply dict overrides after loading the config
             hf_overrides_kw = {}
             dict_overrides = {}
+            if self.quantization_schema:
+                quant_config_override = get_default_quantization_hf_config(
+                    self.quantization, self.quantization_schema
+                )
+                if quant_config_override:
+                    dict_overrides["quantization_config"] = quant_config_override
             for key, value in self.hf_overrides.items():
                 if isinstance(value, dict):
-                    dict_overrides[key] = value
+                    if dict_overrides.get(key):
+                        dict_overrides[key] = {**dict_overrides[key], **value}
+                    else:
+                        dict_overrides[key] = value
                 else:
                     hf_overrides_kw[key] = value
             hf_overrides_fn = None

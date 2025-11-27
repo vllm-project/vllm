@@ -438,6 +438,11 @@ class Llama4Model(LlamaModel):
         # [num_experts, hidden_in, hidden_out], so we must transpose the last
         # two dimensions to match the expected layout of the parameters.
         if fused and loaded_weight.ndim == 3:
+            if self.vllm_config.model_config.quantization_schema:
+                # For online quantization, load the weight to device
+                # before transpose to avoid expensive contiguous operators
+                param_device = list(params_dict.values())[0].device
+                loaded_weight = loaded_weight.to(param_device)
             loaded_weight = loaded_weight.transpose(-1, -2)
 
             # If the gate_proj and up_proj weights are fused into a single

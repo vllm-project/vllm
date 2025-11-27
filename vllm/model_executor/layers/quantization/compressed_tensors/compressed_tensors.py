@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -831,6 +832,14 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
+
+    def process_weights_before_loading(
+        self,
+        layer: torch.nn.Module,
+        param: torch.nn.Parameter | BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return layer.scheme.process_weights_before_loading(layer, param, loaded_weight)
 
     def create_weights(
         self,

@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    fp8_channelwise_quantize,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -697,6 +698,42 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         self.disable_expert_map = False
 
+    def process_weights_before_loading(
+        self,
+        layer: torch.nn.Module,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        current_platform_fp8_dtype = current_platform.fp8_dtype()
+        if self.weight_quant.strategy == QuantizationStrategy.CHANNEL:
+            if (
+                param.data.dtype == current_platform_fp8_dtype
+                and loaded_weight.dtype != current_platform_fp8_dtype
+            ):
+                logger.debug("Quantizing %s to fp8", layer.layer_name)
+                quantized, scale = fp8_channelwise_quantize(
+                    loaded_weight.to(param.data.device)
+                )
+                logger.debug("Quantizing %s to fp8 done", layer.layer_name)
+                return {
+                    "quantized": quantized,
+                    "scale": scale,
+                }
+            else:
+                return {}
+        else:
+            if (
+                param.data.dtype == current_platform_fp8_dtype
+                and loaded_weight.dtype != current_platform_fp8_dtype
+            ):
+                logger.warning(
+                    "Not supporting online quantization for strategy "
+                    " %s, this will lead to downcasting "
+                    "of your weight which could impact accuracy.",
+                    self.weight_quant.strategy,
+                )
+            return {}
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -806,6 +843,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w13_weight, {"scale": "w13_weight_scale"})
+            set_weight_attrs(w2_weight, {"scale": "w2_weight_scale"})
 
         elif self.weight_quant.strategy == QuantizationStrategy.BLOCK:
             w13_weight_scale = torch.nn.Parameter(

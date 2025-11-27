@@ -10,6 +10,7 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
     CompressedTensorsLinearMethod,
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+    CompressedTensorsW8A8Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
@@ -767,3 +771,126 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="FP8 online quantization requires CUDA",
+)
+def test_compressed_tensors_fp8_online_quantization_channelwise(vllm_runner):
+    """Test online FP8 channelwise quantization.
+
+    This test verifies that models can be quantized on-the-fly during loading
+    using the compressed-tensors quantization method with FP8 channelwise strategy.
+    """
+    # Use a small unquantized model for testing
+    model_path = "meta-llama/Llama-3.2-1B-Instruct"
+
+    with vllm_runner(
+        model_path,
+        quantization="compressed-tensors",
+        quantization_schema="fp8_channelwise",
+        enforce_eager=True,
+        dtype="bfloat16",
+        hf_overrides={
+            "quantization_config": {"ignore": ["re:.*self_attn", "re:.*lm_head"]}
+        },
+    ) as llm:
+        fp8_dtype = current_platform.fp8_dtype()
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            # Check that linear layers are using compressed-tensors quantization
+            if hasattr(layer, "mlp"):
+                gate_up_proj = layer.mlp.gate_up_proj
+                down_proj = layer.mlp.down_proj
+
+                assert isinstance(
+                    gate_up_proj.quant_method, CompressedTensorsLinearMethod
+                )
+                assert isinstance(gate_up_proj.scheme, CompressedTensorsW8A8Fp8)
+
+                assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
+                assert isinstance(down_proj.scheme, CompressedTensorsW8A8Fp8)
+
+                # Verify weights are in FP8
+                assert gate_up_proj.weight.dtype is fp8_dtype
+                assert down_proj.weight.dtype is fp8_dtype
+
+                # Verify per-channel scales
+                assert gate_up_proj.weight_scale.dtype is torch.float32
+                assert down_proj.weight_scale.dtype is torch.float32
+                # For channelwise, scales should have more than 1 element
+                assert gate_up_proj.weight_scale.numel() > 1
+                assert down_proj.weight_scale.numel() > 1
+            if hasattr(layer, "self_attn"):
+                qkv_proj = layer.self_attn.qkv_proj
+                assert isinstance(qkv_proj.quant_method, UnquantizedLinearMethod)
+                assert qkv_proj.weight.dtype is torch.bfloat16
+
+        llm.apply_model(check_model)
+
+        # Verify the model can generate output
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+        assert len(output[0][1]) > 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="FP8 online quantization requires CUDA",
+)
+def test_compressed_tensors_fp8_online_quantization_channelwise_moe(vllm_runner):
+    """Test online FP8 channelwise quantization on MOE model.
+
+    This test verifies that models can be quantized on-the-fly during loading
+    using the compressed-tensors quantization method with FP8 channelwise strategy.
+    """
+    # Use a small unquantized model for testing
+    model_path = "Qwen/Qwen1.5-MoE-A2.7B"
+
+    with vllm_runner(
+        model_path,
+        quantization="compressed-tensors",
+        quantization_schema="fp8_channelwise",
+        enforce_eager=True,
+        dtype="bfloat16",
+        hf_overrides={
+            "quantization_config": {"ignore": ["re:.*self_attn", "re:.*lm_head"]}
+        },
+    ) as llm:
+        fp8_dtype = current_platform.fp8_dtype()
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            # Check that linear layers are using compressed-tensors quantization
+            if hasattr(layer, "mlp") and hasattr(layer.mlp, "experts"):
+                experts = layer.mlp.experts
+                assert isinstance(
+                    experts.quant_method, CompressedTensorsW8A8Fp8MoEMethod
+                )
+
+                # Verify weights are in FP8
+                assert experts.w13_weight.dtype is fp8_dtype
+                assert experts.w2_weight.dtype is fp8_dtype
+
+                # Verify per-channel scales
+                assert experts.w13_weight_scale.dtype is torch.float32
+                assert experts.w2_weight_scale.dtype is torch.float32
+                # For channelwise, scales should have more than 1 element
+                assert experts.w13_weight_scale.numel() > 1
+                assert experts.w2_weight_scale.numel() > 1
+            if hasattr(layer, "self_attn"):
+                # skipped by ignore list
+                qkv_proj = layer.self_attn.qkv_proj
+                assert isinstance(qkv_proj.quant_method, UnquantizedLinearMethod)
+                assert qkv_proj.weight.dtype is torch.bfloat16
+
+        llm.apply_model(check_model)
+
+        # Verify the model can generate output
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+        assert len(output[0][1]) > 0

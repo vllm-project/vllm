@@ -8,8 +8,12 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    fp8_channelwise_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -29,10 +33,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     maybe_create_device_identity,
 )
 from vllm.model_executor.parameter import (
+    BasevLLMParameter,
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -41,6 +48,7 @@ strategy_to_parameter_type = {
     QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,
 }
+logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
@@ -128,11 +136,47 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
+        set_weight_attrs(weight, {"scale": "weight_scale"})
 
         # INPUT SCALE
         if self.is_static_input_scheme:
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
+
+    def process_weights_before_loading(
+        self,
+        layer: torch.nn.Module,
+        param: torch.nn.Parameter | BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        current_platform_fp8_dtype = current_platform.fp8_dtype()
+        if self.weight_quant.strategy == QuantizationStrategy.CHANNEL:
+            if (
+                param.data.dtype == current_platform_fp8_dtype
+                and loaded_weight.dtype != current_platform_fp8_dtype
+            ):
+                quantized, scale = fp8_channelwise_quantize(
+                    loaded_weight.to(param.data.device)
+                )
+                logger.debug("Quantized %s to fp8", layer.prefix)
+                return {
+                    "quantized": quantized,
+                    "scale": scale,
+                }
+            else:
+                return {}
+        else:
+            if (
+                param.data.dtype == current_platform_fp8_dtype
+                and loaded_weight.dtype != current_platform_fp8_dtype
+            ):
+                logger.warning(
+                    "Not supporting online quantization for strategy "
+                    " %s, this will lead to downcasting "
+                    "of your weight which could impact accuracy.",
+                    self.weight_quant.strategy,
+                )
+            return {}
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
