@@ -208,7 +208,7 @@ prefill:
     #   - http_port: HTTP port for health checks (use {PORT})
     #   - node_name: Unique node identifier (use {NODE_NAME})
     # -------------------------------------------------------------------------
-    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"30.221.162.206:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
+    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"127.0.0.1:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
     
     # Maximum tokens to process in a single prefill batch
     max_num_batched_tokens: 8192
@@ -268,7 +268,7 @@ decode:
     
     # KV Transfer Configuration for decode workers
     # Note: kv_role is set to "kv_consumer" to receive KV cache from prefill
-    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"30.221.162.206:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
+    kv_transfer_config: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_size":"9E+9","kv_ip":"{KV_IP}","kv_connector_extra_config":{"store_timeout":99999999,"proxy":"127.0.0.1:8079","http_port":"{PORT}","node_name":"{NODE_NAME}"}}'
     
     # Maximum tokens per batch for decode
     # Lower than prefill since decode is memory-bound
