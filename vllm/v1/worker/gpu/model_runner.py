@@ -519,6 +519,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_buffers.query_start_loc.np[num_reqs + 1 :] = num_tokens
         self.input_buffers.query_start_loc.copy_to_gpu()
         query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[: num_reqs + 1]
         query_start_loc_np = self.input_buffers.query_start_loc.np[: num_reqs + 1]
 
         # Copy prefill tokens from CPU to GPU.
@@ -571,9 +572,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE(woosuk): This only works for FA3 backend.
         seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
 
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
