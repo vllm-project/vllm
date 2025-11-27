@@ -275,16 +275,18 @@ class BatchDCPPrefillWrapper:
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    # Note: Not sure for all platforms,
-    # but on Blackwell, only support a page size of
-    # 16, 32, 64
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Note: Not sure for all platforms, but on Blackwell,
+        # only support a page size of 16, 32, 64.
+        return [16, 32, 64]
 
     @staticmethod
     def get_name() -> str:
@@ -647,6 +649,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 buffer_size, dtype=torch.uint8, device=self.device
             )
         return self._workspace_buffer
+
+    def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
+        self._workspace_buffer = workspace_buffer
 
     def _get_prefill_wrapper(
         self,
@@ -1039,30 +1044,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             else:
                 pure_decode = num_prefills == 0
-                # possible required padding for cudagraph replay
                 use_cudagraph = (
                     self.enable_cuda_graph
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                if use_cudagraph:
-                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                        num_decode_tokens
-                    )
-                    # Carefully fulfill the padding region with reasonable value
-                    # on cpu.
-                    # Make sure paged_kv_indptr_cpu is not decreasing
-                    self.paged_kv_indptr.cpu[
-                        1 + num_decodes : 1 + num_input_tokens
-                    ].fill_(paged_kv_indptr_cpu[-1])
-                    # Fill the remaining paged_kv_last_page_len_cpu with 1.
-                    # This is because flashinfer treats 0 as a full page
-                    # instead of empty.
-                    self.paged_kv_last_page_len.cpu[num_decodes:num_input_tokens].fill_(
-                        1
-                    )
-                else:
-                    num_input_tokens = num_decode_tokens
+                num_input_tokens = num_decode_tokens
+
                 decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph
                 )

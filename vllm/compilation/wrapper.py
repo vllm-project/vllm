@@ -6,6 +6,7 @@ import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
+from typing import Any
 
 import torch
 import torch._C._dynamo.guards
@@ -85,6 +86,12 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
+    def check_invariants_and_forward(self, *args, **kwargs):
+        assert hasattr(self, "_check_shape_invariants")
+        self._check_shape_invariants(*args, **kwargs)
+
+        return self.forward(*args, **kwargs)
+
     def __init__(self):
         self.compiled = False
 
@@ -104,6 +111,21 @@ class TorchCompileWithNoGuardsWrapper:
             # Drop all the guards.
             options["guard_filter_fn"] = lambda x: [False for _ in x]
 
+        # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
+        from vllm.compilation.decorators import DynamicShapesType
+
+        ds_type = vllm_config.compilation_config.dynamic_shapes_config.type
+        compiled_ptr: Any = self.forward
+        if ds_type == DynamicShapesType.UNBACKED:
+            if envs.VLLM_USE_BYTECODE_HOOK:
+                # reason is that bytecode does this hack torch._dynamo.eval_frame.
+                # remove_from_cache(self.original_code_object()) to force a new
+                # re-compilation.
+                raise ValueError(
+                    "UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0. "
+                )
+            compiled_ptr = self.check_invariants_and_forward
+
         if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 torch._dynamo.config.enable_aot_compile = True
@@ -114,7 +136,7 @@ class TorchCompileWithNoGuardsWrapper:
                 logger.warning(msg)
 
         self._compiled_callable = torch.compile(
-            self.forward,
+            compiled_ptr,
             fullgraph=True,
             dynamic=False,
             backend=backend,
