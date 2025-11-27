@@ -13,7 +13,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sampler import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
@@ -95,9 +98,9 @@ class EagleSpeculator:
 
     def set_attn(
         self,
-        kv_cache_config,
-        attn_metadata_builders,
-        block_tables,
+        kv_cache_config: KVCacheConfig,
+        attn_metadata_builders: list[AttentionMetadataBuilder],
+        block_tables: BlockTables,
     ) -> None:
         self.kv_cache_config = kv_cache_config
         self.attn_metadata_builders = attn_metadata_builders
