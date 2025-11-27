@@ -9,7 +9,6 @@ from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast, Optional
 
-import ray
 import numpy as np
 import torch
 import torch.distributed
@@ -56,6 +55,7 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+import ray
 
 logger = init_logger(__name__)
 
