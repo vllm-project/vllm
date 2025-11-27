@@ -793,10 +793,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
                 f"but got {activation}"
             )
-            print(f"daniel FlashinferMoeBackend is here!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print(f"shape of x: {x.shape}")
-            print(f"shape of layer.w13_weight: {layer.w13_weight.shape}")
-            print(f"shape of layer.w2_weight: {layer.w2_weight.shape}")
             return flashinfer_cutlass_moe_fp8(
                 x,
                 layer,
