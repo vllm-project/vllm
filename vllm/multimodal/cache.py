@@ -626,6 +626,7 @@ def processor_cache_from_config(
 
     if not _enable_mm_input_shm_cache(vllm_config):
         return MultiModalProcessorSenderCache(model_config)
+
     return ShmObjectStoreSenderCache(vllm_config)
 
 

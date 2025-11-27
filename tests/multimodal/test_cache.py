@@ -230,9 +230,6 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
 
 
 def test_cache_eviction():
-    #
-    # SETUP
-    #
     vllm_config = _create_vllm_config(
         mm_processor_cache_gb=1e-9,
         enable_ipc=True,
@@ -263,8 +260,8 @@ def test_cache_eviction():
     sender_is_cached_item_req1 = sender_cache.is_cached(
         request1_hashes, n=len(request1_hashes)
     )
-    print("Request 1 cache hits (Sender):", sender_is_cached_item_req1)
-    # Expect all False since empty
+    # Cache is empty
+    assert sender_is_cached_item_req1 == [False, False, False, False]
 
     ###########################
     # Process request 1 for P0 Cache
@@ -284,9 +281,9 @@ def test_cache_eviction():
     for h in request1_hashes:
         receiver_cache.get_and_update_item(request1_items[h], h)
 
-    # After request 1, caches each contain image_A–D
-    print("Sender contents after Req1:", list(sender_cache._cache.keys()))
-    print("Receiver contents after Req1:", list(receiver_cache._cache.keys()))
+    expected_hashes = ["image_A", "image_B", "image_C", "image_D"]
+    assert list(sender_cache._cache.order) == expected_hashes
+    assert list(receiver_cache._cache.order) == expected_hashes
 
     ##########################
     # STEP 2: Request 2 send
@@ -294,8 +291,8 @@ def test_cache_eviction():
     sender_is_cached_item_req2 = sender_cache.is_cached(
         request2_hashes, n=len(request2_hashes)
     )
-    print("Request 2 cache hits (Sender):", sender_is_cached_item_req2)
-    # image_A should be True, others False
+    # Note that the result for image_A is False because it will be evicted
+    assert sender_is_cached_item_req2 == [False, False, False, False]
 
     ###########################
     # Process request 2 for P0 Cache
@@ -314,8 +311,6 @@ def test_cache_eviction():
     for h in request2_hashes:
         receiver_cache.get_and_update_item(request2_items[h], h)
 
-    ##########################
-    # STEP 3: Final states
-    ##########################
-    print("Sender contents after Req2:", list(sender_cache._cache.keys()))
-    print("Receiver contents after Req2:", list(receiver_cache._cache.keys()))
+    expected_hashes = ["image_C", "image_D", "image_E", "image_F", "image_G", "image_A"]
+    assert list(sender_cache._cache.order) == expected_hashes
+    assert list(receiver_cache._cache.order) == expected_hashes
