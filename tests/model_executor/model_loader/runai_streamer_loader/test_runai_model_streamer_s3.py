@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-import pytest
 from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 
