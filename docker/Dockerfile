@@ -55,7 +55,7 @@ ARG UV_INDEX_URL=${PIP_INDEX_URL}
 ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 
 # PyTorch provides its own indexes for standard and nightly builds
-ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl/test
 
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
@@ -135,7 +135,7 @@ WORKDIR /workspace
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+    uv pip install --python /opt/venv/bin/python3 --prerelease=allow -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # CUDA arch list used by torch
@@ -297,7 +297,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+    uv pip install --python /opt/venv/bin/python3 --prerelease=allow -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 WORKDIR /workspace
@@ -361,7 +361,7 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
+    uv pip install --python /opt/venv/bin/python3 --prerelease=allow -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
@@ -459,7 +459,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/requirements-cuda.txt \
+    uv pip install --system --prerelease=allow -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
@@ -516,7 +516,7 @@ ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
+    uv pip install --prerelease=allow --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -538,7 +538,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
+    uv pip install --prerelease=allow --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
@@ -581,7 +581,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        uv pip install --system -r requirements/dev.txt \
+        uv pip install --prerelease=allow --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
