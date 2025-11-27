@@ -405,6 +405,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list matching the length of `prompts`,
+                where each priority value corresponds to the prompt at the same index.
 
         Returns:
             A list of `RequestOutput` objects containing the
