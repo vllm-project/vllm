@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import MptConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (

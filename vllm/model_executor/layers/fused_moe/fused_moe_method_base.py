@@ -50,10 +50,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        return maybe_make_prepare_finalize(
+            self.moe, self.moe_quant_config, routing_tables
+        )
 
     def select_gemm_impl(
         self,
@@ -85,10 +90,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def allow_inplace(self) -> bool:
         return False
 
+    @property
+    def method_name(self) -> str:
+        return self.__class__.__name__
+
     @abstractmethod
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,

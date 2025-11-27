@@ -4,12 +4,15 @@
 import ast
 import dataclasses
 import hashlib
+import json
 import operator
 import os
 import pprint
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import torch
@@ -23,7 +26,9 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
+from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -59,13 +64,14 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
-    else:
-        assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
-        )
-
+    elif compilation_config.backend == "eager":
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
+    else:
+        logger.debug("Using custom backend: %s", compilation_config.backend)
+        compiler = resolve_obj_by_qualname(current_platform.get_compile_backend())()
+        assert isinstance(compiler, CompilerInterface)
+        return compiler
 
 
 class CompilerManager:
@@ -424,7 +430,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 self.vllm_backend.compiler_manager.compile(
                     submod,
                     args,
-                    self.compilation_config.inductor_compile_config,
+                    self.vllm_backend.inductor_config,
                     self.compilation_config,
                     graph_index=index,
                     num_graphs=len(self.compile_submod_names),
@@ -526,6 +532,9 @@ class VllmBackend:
     sym_tensor_indices: list[int]
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
+    # Copy of CompilationConfig.inductor_compile_config +
+    # an entry for PostGradPassManager
+    inductor_config: dict[str, Any]
 
     def __init__(
         self,
@@ -541,7 +550,10 @@ class VllmBackend:
         self.prefix = prefix or model_tag
 
         # Passes to run on the graph post-grad.
-        self.post_grad_pass_manager = PostGradPassManager()
+        self.pass_manager = resolve_obj_by_qualname(
+            current_platform.get_pass_manager_cls()
+        )()
+        self.pass_key = current_platform.pass_key
 
         self.sym_tensor_indices = []
         self.input_buffers = []
@@ -553,62 +565,75 @@ class VllmBackend:
             self.compilation_config
         )
 
+        # Deepcopy the inductor config to detach the post-grad custom pass
+        # from CompilationConfig.
+        # We want to avoid PostGradPassManager in CompilationConfig because
+        # in future we need PostGradPassManager.uuid() to be executed
+        # only at compile time.
+        self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
-        config = self.compilation_config
-        self.post_grad_pass_manager.configure(self.vllm_config)
+        self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
-        inductor_config = config.inductor_compile_config
-        PASS_KEY = "post_grad_custom_post_pass"
-        if PASS_KEY in inductor_config:
-            if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
-                # PassManager already added to config, make sure it's correct
-                assert (
-                    inductor_config[PASS_KEY].uuid()
-                    == self.post_grad_pass_manager.uuid()
+        if self.pass_key in self.inductor_config:
+            if isinstance(self.inductor_config[self.pass_key], PostGradPassManager):
+                raise ValueError(
+                    "PostGradPassManager can not be kept in CompilationConfig."
                 )
             else:
                 # Config should automatically wrap all inductor passes
-                assert isinstance(inductor_config[PASS_KEY], InductorPass)
-                self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
-        inductor_config[PASS_KEY] = self.post_grad_pass_manager
+                assert isinstance(self.inductor_config[self.pass_key], InductorPass)
+                self.pass_manager.add(self.inductor_config[self.pass_key])
+        self.inductor_config[self.pass_key] = self.pass_manager
 
     def __call__(
         self, graph: fx.GraphModule, example_inputs
     ) -> VllmSerializableFunction:
-        from .caching import _compute_code_hash, compilation_config_hash_factors
-
         vllm_config = self.vllm_config
+        # Minimal hashing here with existing utilities, reused below.
+
+        env_factors = envs.compile_factors()
+        env_hash = hash_factors(env_factors)
+        # Compute config/compiler/code hashes once and reuse
+        config_hash = vllm_config.compute_hash()
+        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+        forward_code_files = list(sorted(self.compilation_config.traced_files))
+
+        logger.debug(
+            "Traced files (to be considered for compilation cache):\n%s",
+            lazy(lambda: "\n".join(forward_code_files)),
+        )
+        hash_content = []
+        for filepath in forward_code_files:
+            hash_content.append(filepath)
+            if filepath == "<string>":
+                # This means the function was dynamically generated, with
+                # e.g. exec(). We can't actually check these.
+                continue
+            try:
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            except Exception:
+                logger.warning("Failed to read file %s", filepath)
+                continue
+        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        # Clear after consumption
+        self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-
-            factors = compilation_config_hash_factors(vllm_config)
-            # 2. factors come from the code files that are traced by Dynamo (
-            #    it mainly summarizes how the model is used in forward pass)
-            code_hash = _compute_code_hash(self.compilation_config.traced_files)
-            self.compilation_config.traced_files.clear()
-            factors.append(code_hash)
-
-            # 3. compiler hash
-            compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-            factors.append(compiler_hash)
-
-            # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(
-                str(factors).encode(), usedforsecurity=False
-            ).hexdigest()[:10]
-
+            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            # Use SHA-256 for cache key hashing to be consistent across
+            # compute_hash functions. Truncate for a short cache dir name.
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
             cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
-                hash_key,
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
             self.compilation_config.cache_dir = cache_dir
 
@@ -621,9 +646,8 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        disable_cache = not is_compile_cache_enabled(
-            self.compilation_config.inductor_compile_config
-        )
+        # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
+        disable_cache = not is_compile_cache_enabled(self.inductor_config)
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
@@ -637,6 +661,50 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(
             local_cache_dir, disable_cache, self.prefix
         )
+
+        # Reuses existing cache key
+
+        logger.debug(
+            "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
+            env_hash,
+            config_hash,
+            compiler_hash,
+            code_hash,
+            local_cache_dir,
+        )
+
+        # Persist and log only hash-relevant factors together.
+        try:
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                lazy(partial(pprint.pformat, env_factors, width=120)),
+                config_hash,
+            )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            if not os.path.exists(meta_path):
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {
+                            "env": env_factors,  # raw factors used for env_hash
+                            "config_hash": config_hash,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                        },
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
+        except Exception:
+            # Best-effort only; metadata write failures are non-fatal.
+            logger.warning(
+                (
+                    "Could not write compile cache metadata at %s; continuing without "
+                    "metadata. Compiled cache remains valid; diagnostics may be "
+                    "limited."
+                ),
+                local_cache_dir,
+                exc_info=True,
+            )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
