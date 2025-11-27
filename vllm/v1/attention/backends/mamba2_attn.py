@@ -183,13 +183,6 @@ class Mamba2AttentionMetadataBuilder(
         else:
             self.use_spec_decode = False
 
-        if (
-            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            and self.use_spec_decode
-        ):
-            raise ValueError(
-                "Full CUDA graph is not supported for Mamba2AttentionBackend and specdec. Remove this once for-loop on ssm kernel update is removed"
-            )
         # Pre-allocate tensors for CUDA graph support (similar to GDN)
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),

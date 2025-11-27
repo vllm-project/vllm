@@ -970,36 +970,24 @@ class MambaMixer2(MambaBase, CustomOp):
 
                     selective_state_update(
                         ssm_state,
-                        hidden_states_d_spec.view(
-                            num_spec_decodes,
-                            -1,
-                            self.num_heads // self.tp_size,
-                            self.head_dim,
-                        ),
-                        dt_d_spec.view(
-                            num_spec_decodes,
-                            -1,
-                            self.num_heads // self.tp_size,
-                            self.head_dim,
-                        ),
+                        hidden_states_d_spec,
+                        dt_d_spec,
                         A_d,
-                        B_d_spec.view(num_spec_decodes, tokens_per_seq, n_groups, -1),
-                        C_d_spec.view(num_spec_decodes, tokens_per_seq, n_groups, -1),
+                        B_d_spec,
+                        C_d_spec,
                         D_d,
                         z=None,
                         dt_bias=dt_bias_expanded,
                         dt_softplus=True,
                         state_batch_indices=spec_state_indices_tensor[
-                            :num_spec_decodes, :tokens_per_seq
+                            :num_spec_decodes, :max_spec_len
                         ],
                         out=preallocated_ssm_out_d_spec.view(
-                            num_spec_decodes,
-                            -1,
-                            self.num_heads // self.tp_size,
-                            self.head_dim,
+                            num_spec_decode_tokens, -1, self.head_dim
                         ),
                         inplace_final_state=True,
                         num_accepted_tokens=num_accepted_tokens,
+                        cu_seqlens=spec_query_start_loc,
                     )
 
             if num_non_spec_decode_tokens > 0:
