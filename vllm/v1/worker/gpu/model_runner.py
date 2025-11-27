@@ -270,10 +270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
-        num_tokens_across_dp = make_num_tokens_across_dp(
-            self.dp_size,
-            num_tokens,
-        )
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(

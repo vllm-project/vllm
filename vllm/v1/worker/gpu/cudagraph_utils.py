@@ -89,10 +89,7 @@ class CudaGraphManager:
             self.max_model_len,
             kv_cache_config,
         )
-        num_tokens_across_dp = make_num_tokens_across_dp(
-            self.dp_size,
-            num_tokens,
-        )
+        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
         # Warm up.
         with set_forward_context(
