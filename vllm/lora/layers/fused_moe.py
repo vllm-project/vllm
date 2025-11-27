@@ -30,6 +30,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
 
+from .utils import _get_lora_device
+
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: FusedMoE) -> None:
@@ -41,7 +43,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.device = base_layer.w2_weight.device
+        self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
 
