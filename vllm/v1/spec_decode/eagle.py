@@ -1020,7 +1020,7 @@ class EagleProposer:
             # handle multimodality
             if (
                 self.get_model_name(target_model)
-                == "Qwen2_5_VLForConditionalGeneration"
+                in ["Qwen2_5_VLForConditionalGeneration","Qwen3VLForConditionalGeneration"]
             ):
                 self.model.config.image_token_index = target_model.config.image_token_id
             else:
