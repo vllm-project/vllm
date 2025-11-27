@@ -39,10 +39,11 @@ else:
 @triton.heuristics(
     {"IS_SPEC_DECODING": lambda args: args["num_accepted_tokens_ptr"] is not None}
 )
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens_ptr"] is not None})
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["N", "T"])
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
@@ -59,8 +60,9 @@ def _selective_scan_update_kernel(
     dst_state_batch_indices_ptr,
     pad_slot_id,
     num_accepted_tokens_ptr,
+    cu_seqlens_ptr,
     # Matrix dimensions
-    batch,
+    N,
     T,
     nheads,
     dim,
@@ -72,11 +74,9 @@ def _selective_scan_update_kernel(
     stride_state_dim,
     stride_state_dstate,
     stride_x_batch,
-    stride_x_T,
     stride_x_head,
     stride_x_dim,
     stride_dt_batch,
-    stride_dt_T,
     stride_dt_head,
     stride_dt_dim,
     stride_dt_bias_head,
@@ -85,21 +85,17 @@ def _selective_scan_update_kernel(
     stride_A_dim,
     stride_A_dstate,
     stride_B_batch,
-    stride_B_T,
     stride_B_group,
     stride_B_dstate,
     stride_C_batch,
-    stride_C_T,
     stride_C_group,
     stride_C_dstate,
     stride_D_head,
     stride_D_dim,
     stride_z_batch,
-    stride_z_T,
     stride_z_head,
     stride_z_dim,
     stride_out_batch,
-    stride_out_T,
     stride_out_head,
     stride_out_dim,
     stride_state_indices_batch,
@@ -116,11 +112,24 @@ def _selective_scan_update_kernel(
     HAS_STATE_BATCH_INDICES: tl.constexpr,
     INPLACE_FINAL_STATE: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
+
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens_ptr + pid_b).to(tl.int64)
+        eos = tl.load(cu_seqlens_ptr + pid_b + 1).to(tl.int64)
+        seq_len = eos - bos
+
+        if seq_len == 0:
+            return
+    else:
+        bos = pid_b * T
+        eos = bos + T
+        seq_len = T
 
     state_ptr_base = state_ptr
 
@@ -155,16 +164,16 @@ def _selective_scan_update_kernel(
         )
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
-    x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
-    dt_ptr += pid_b * stride_dt_batch + pid_h * stride_dt_head
+    x_ptr += bos * stride_x_batch + pid_h * stride_x_head
+    dt_ptr += bos * stride_dt_batch + pid_h * stride_dt_head
     if HAS_DT_BIAS:
         dt_bias_ptr += pid_h * stride_dt_bias_head
     A_ptr += pid_h * stride_A_head
-    B_ptr += pid_b * stride_B_batch + (pid_h // nheads_ngroups_ratio) * stride_B_group
-    C_ptr += pid_b * stride_C_batch + (pid_h // nheads_ngroups_ratio) * stride_C_group
+    B_ptr += bos * stride_B_batch + (pid_h // nheads_ngroups_ratio) * stride_B_group
+    C_ptr += bos * stride_C_batch + (pid_h // nheads_ngroups_ratio) * stride_C_group
     if HAS_Z:
-        z_ptr += pid_b * stride_z_batch + pid_h * stride_z_head
-    out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
+        z_ptr += bos * stride_z_batch + pid_h * stride_z_head
+    out_ptr += bos * stride_out_batch + pid_h * stride_out_head
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
@@ -188,7 +197,7 @@ def _selective_scan_update_kernel(
         D_ptrs = D_ptr + offs_m * stride_D_dim
     A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
-    for i_t in range(T):
+    for i_t in range(seq_len):
         x_ptrs = x_ptr + offs_m * stride_x_dim
         dt_ptrs = dt_ptr + offs_m * stride_dt_dim
         B_ptrs = B_ptr + offs_n * stride_B_dstate
@@ -251,13 +260,13 @@ def _selective_scan_update_kernel(
             out *= z * tl.sigmoid(z)
         tl.store(out_ptrs, out, mask=offs_m < dim)
 
-        x_ptr += stride_x_T
-        dt_ptr += stride_dt_T
-        B_ptr += stride_B_T
-        C_ptr += stride_C_T
-        out_ptr += stride_out_T
+        x_ptr += stride_x_batch
+        dt_ptr += stride_dt_batch
+        B_ptr += stride_B_batch
+        C_ptr += stride_C_batch
+        out_ptr += stride_out_batch
         if HAS_Z:
-            z_ptr += stride_z_T
+            z_ptr += stride_z_batch
 
     if not INPLACE_FINAL_STATE:
         tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
@@ -280,16 +289,15 @@ def selective_state_update(
     out=None,
     inplace_final_state=False,
     num_accepted_tokens=None,
+    cu_seqlens=None,
 ):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim) for single-token
-           or (batch, T, nheads, dim) for multi-token
+        x: (batch, dim) or (batch, nheads, dim)
         dt: (batch, dim) or (batch, nheads, dim)
         A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate) for single-token
-           or (batch, T, ngroups, dstate) for multi-token
+        B: (batch, dstate) or (batch, ngroups, dstate)
         C: (batch, dstate) or (batch, ngroups, dstate)
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
@@ -307,34 +315,21 @@ def selective_state_update(
         state = state.unsqueeze(1)
     if x.dim() == 2:
         x = x.unsqueeze(1)
-    if x.dim() == 3:
-        x = x.unsqueeze(1)
     if dt.dim() == 2:
-        dt = dt.unsqueeze(1)
-    if dt.dim() == 3:
         dt = dt.unsqueeze(1)
     if A.dim() == 2:
         A = A.unsqueeze(0)
     if B.dim() == 2:
         B = B.unsqueeze(1)
-    if B.dim() == 3:
-        B = B.unsqueeze(1)
     if C.dim() == 2:
-        C = C.unsqueeze(1)
-    if C.dim() == 3:
         C = C.unsqueeze(1)
     if D is not None and D.dim() == 1:
         D = D.unsqueeze(0)
-    if z is not None:
-        if z.dim() == 2:
-            z = z.unsqueeze(1)
-        if z.dim() == 3:
-            z = z.unsqueeze(1)
+    if z is not None and z.dim() == 2:
+        z = z.unsqueeze(1)
     if dt_bias is not None and dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
-        out = out.unsqueeze(1)
-    if out.dim() == 3:
         out = out.unsqueeze(1)
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
@@ -342,14 +337,20 @@ def selective_state_update(
         dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
 
     _, nheads, dim, dstate = state.shape
-    batch, T, _, _ = x.shape
+    batch = x.shape[0]
+    if cu_seqlens is not None:
+        N = len(cu_seqlens) - 1
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+    else:
+        N = batch
+        max_seqlen = 1
 
-    assert x.shape == (batch, T, nheads, dim)
+    assert x.shape == (batch, nheads, dim)
     assert dt.shape == x.shape
     assert A.shape == (nheads, dim, dstate)
-    ngroups = B.shape[2]
+    ngroups = B.shape[1]
     assert nheads % ngroups == 0, "nheads must be divisible by ngroups"
-    assert B.shape == (batch, T, ngroups, dstate)
+    assert B.shape == (batch, ngroups, dstate)
     assert C.shape == B.shape
     if D is not None:
         assert D.shape == (nheads, dim)
@@ -358,22 +359,18 @@ def selective_state_update(
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
-        assert state_batch_indices.shape == (batch, T)
+        assert state_batch_indices.shape == (N, max_seqlen)
     if dst_state_batch_indices is not None:
-        assert dst_state_batch_indices.shape == (batch, T)
+        assert dst_state_batch_indices.shape == (N, max_seqlen)
     else:
         # revert to the default behavior of in-place state updates
         dst_state_batch_indices = state_batch_indices
     assert out.shape == x.shape
     if num_accepted_tokens is not None:
-        assert num_accepted_tokens.shape == (batch,)
+        assert num_accepted_tokens.shape == (N,)
 
-    grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
-    z_strides = (
-        (z.stride(0), z.stride(1), z.stride(2), z.stride(3))
-        if z is not None
-        else (0, 0, 0, 0)
-    )
+    grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), N, nheads)
+    z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
     state_batch_indices_strides = (
         (state_batch_indices.stride(0), state_batch_indices.stride(1))
         if state_batch_indices is not None
@@ -417,8 +414,9 @@ def selective_state_update(
             dst_state_batch_indices,
             pad_slot_id,
             num_accepted_tokens,
-            batch,
-            T,
+            cu_seqlens,
+            N,
+            max_seqlen,
             nheads,
             dim,
             dstate,
@@ -430,11 +428,9 @@ def selective_state_update(
             x.stride(0),
             x.stride(1),
             x.stride(2),
-            x.stride(3),
             dt.stride(0),
             dt.stride(1),
             dt.stride(2),
-            dt.stride(3),
             *(dt_bias.stride(0), dt_bias.stride(1)) if dt_bias is not None else 0,
             A.stride(0),
             A.stride(1),
@@ -442,20 +438,16 @@ def selective_state_update(
             B.stride(0),
             B.stride(1),
             B.stride(2),
-            B.stride(3),
             C.stride(0),
             C.stride(1),
             C.stride(2),
-            C.stride(3),
             *(D.stride(0), D.stride(1)) if D is not None else 0,
             z_strides[0],
             z_strides[1],
             z_strides[2],
-            z_strides[3],
             out.stride(0),
             out.stride(1),
             out.stride(2),
-            out.stride(3),
             state_batch_indices_strides[0],
             state_batch_indices_strides[1],
             dst_state_batch_indices_strides[0],
