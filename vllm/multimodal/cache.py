@@ -339,7 +339,24 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
     @override
     def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
-        return not any(mm_hash == k for k in islice(self._cache.order, n))
+        cache = self._cache
+
+        return mm_hash in cache and not any(
+            mm_hash == k for k in islice(cache.order, n)
+        )
+
+    @override
+    def is_cached(self, mm_hashes: list[str], *, n: int = 0) -> list[bool]:
+        if len(mm_hashes) <= 1:
+            return super().is_cached(mm_hashes, n=n)
+
+        # Avoid iterating over cache.order multiple times
+        cache = self._cache
+        hashes_to_evict = set(islice(cache.order, n))
+
+        return [
+            mm_hash in cache and mm_hash not in hashes_to_evict for mm_hash in mm_hashes
+        ]
 
     @override
     def get_and_update_item(
@@ -393,7 +410,24 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
-        return not any(mm_hash == k for k in islice(self._cache.order, n))
+        cache = self._cache
+
+        return mm_hash in cache and not any(
+            mm_hash == k for k in islice(cache.order, n)
+        )
+
+    @override
+    def is_cached(self, mm_hashes: list[str], *, n: int = 0) -> list[bool]:
+        if len(mm_hashes) <= 1:
+            return super().is_cached(mm_hashes, n=n)
+
+        # Avoid iterating over cache.order multiple times
+        cache = self._cache
+        hashes_to_evict = set(islice(cache.order, n))
+
+        return [
+            mm_hash in cache and mm_hash not in hashes_to_evict for mm_hash in mm_hashes
+        ]
 
     @override
     def get_and_update_item(
