@@ -610,13 +610,25 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn support chunked prefill.",
+            "Pooling models with causal attn and last pooling support chunked prefill.",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn support chunked prefill.",
+            "Pooling models with causal attn and last pooling support chunked prefill.",
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with step pooling does not support chunked prefill.",
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            False,
+            "Pooling models with all pooling does not support chunked prefill.",
         ),
         (
             "BAAI/bge-base-en",
@@ -653,7 +665,7 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn support chunked prefill.",
+            "Pooling models with causal attn and last pooling support chunked prefill.",
         ),
         (
             "google/siglip-base-patch16-224",
@@ -702,7 +714,7 @@ def test_is_chunked_prefill_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id)
+    model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG):
         assert model_config.is_chunked_prefill_supported == expected_result
@@ -717,13 +729,25 @@ def test_is_chunked_prefill_supported(
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn support prefix caching.",
+            "Pooling models with causal attn and last pooling support prefix caching.",
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn support prefix caching.",
+            "Pooling models with causal attn and last pooling support prefix caching.",
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with step pooling does not support prefix caching.",
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            False,
+            "Pooling models with all pooling does not support prefix caching.",
         ),
         (
             "BAAI/bge-base-en",
@@ -760,7 +784,7 @@ def test_is_chunked_prefill_supported(
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn support prefix caching.",
+            "Pooling models with causal attn and last pooling support prefix caching.",
         ),
         (
             "google/siglip-base-patch16-224",
@@ -809,7 +833,7 @@ def test_is_prefix_caching_supported(
     reason: str,
     caplog_vllm,
 ):
-    model_config = ModelConfig(model_id)
+    model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
     with caplog_vllm.at_level(level=logging.DEBUG):
         assert model_config.is_prefix_caching_supported == expected_result

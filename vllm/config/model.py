@@ -1786,26 +1786,45 @@ class ModelConfig:
                     "chunked prefill."
                 )
                 return False
-            else:
-                # for decoder models (causal attn)
+            elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
-                    logger.debug(
-                        "Pooling models with mean pooling does not support "
-                        "chunked prefill."
-                    )
-                    return False
-                elif pooling_type == "mean":
                     logger.debug(
                         "Pooling models with all pooling does not support "
                         "chunked prefill."
                     )
                     return False
-                else:  # pooling_type == "last"
+                elif pooling_type == "mean":
                     logger.debug(
-                        "Pooling models with causal attn support chunked prefill."
+                        "Pooling models with mean pooling does not support "
+                        "chunked prefill."
+                    )
+                    return False
+                elif pooling_type == "step":
+                    logger.debug(
+                        "Pooling models with step pooling does not support "
+                        "chunked prefill."
+                    )
+                    return False
+                elif pooling_type == "cls":
+                    logger.debug(
+                        "Pooling models with cls pooling does not support "
+                        "chunked prefill."
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "chunked prefill."
                     )
                     return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free, or encoder_decoder attn types.
+            if attn_type == "encoder_decoder":
+                return False
+            else:
+                return True
         else:
             if attn_type == "encoder_decoder":
                 logger.debug("Encoder decoder models does not support chunked prefill.")
@@ -1819,14 +1838,12 @@ class ModelConfig:
         if self.pooler_config is not None:
             # for pooling models
             if attn_type == "encoder_only":
-                # for encoder_only models (bidirectional attn)
                 logger.debug(
                     "Pooling models with bidirectional attn does not "
                     "support prefix caching."
                 )
                 return False
-            else:
-                # for decoder models (causal attn)
+            elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
                 if pooling_type == "all":
                     logger.debug(
@@ -1840,11 +1857,28 @@ class ModelConfig:
                         "prefix caching."
                     )
                     return False
-                else:  # pooling_type == "last"
+                elif pooling_type == "step":
                     logger.debug(
-                        "Pooling models with causal attn support prefix caching."
+                        "Pooling models with step pooling does not support "
+                        "prefix caching."
+                    )
+                    return False
+                elif pooling_type == "cls":
+                    logger.debug(
+                        "Pooling models with cls pooling does not support "
+                        "prefix caching."
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "prefix caching."
                     )
                     return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free, or encoder_decoder attn types.
+            return False
         else:
             if attn_type == "hybrid":
                 logger.debug(
