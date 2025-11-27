@@ -255,6 +255,9 @@ def _plot_fig(
     scale_y: str | None,
     dry_run: bool,
     fig_name: str,
+    error_bars: bool,
+    fig_width: float,
+    fig_dpi: int,
 ):
     fig_group, fig_data = fig_group_data
 
@@ -333,7 +336,7 @@ def _plot_fig(
         else "(All)"
     )
 
-    g = sns.FacetGrid(df, row="row_group", col="col_group")
+    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_width)
 
     if row_by and col_by:
         g.set_titles("{row_name}\n{col_name}")
@@ -360,6 +363,7 @@ def _plot_fig(
             style=style,
             size=size,
             markers=True,
+            errorbar="sd" if error_bars else None,
         )
 
         g.add_legend(title=hue)
@@ -379,11 +383,12 @@ def _plot_fig(
             y=var_y,
             hue="curve_group",
             markers=True,
+            errorbar="sd" if error_bars else None,
         )
 
         g.add_legend()
 
-    g.savefig(fig_path)
+    g.savefig(fig_path, dpi=fig_dpi)
     plt.close(g.figure)
 
     print("[END FIGURE]")
@@ -405,6 +410,9 @@ def plot(
     scale_y: str | None,
     dry_run: bool,
     fig_name: str = "FIGURE",
+    error_bars: bool = True,
+    fig_width: float = 6.4,
+    fig_dpi: int = 150,
 ):
     all_data = [
         run_data
@@ -440,6 +448,9 @@ def plot(
                     scale_y=scale_y,
                     dry_run=dry_run,
                     fig_name=fig_name,
+                    error_bars=error_bars,
+                    fig_width=fig_width,
+                    fig_dpi=fig_dpi,
                 ),
                 fig_groups,
             )
@@ -462,6 +473,9 @@ class SweepPlotArgs:
     scale_y: str | None
     dry_run: bool
     fig_name: str = "FIGURE"
+    error_bars: bool = True
+    fig_width: float = 6.4
+    fig_dpi: int = 150
 
     parser_name: ClassVar[str] = "plot"
     parser_help: ClassVar[str] = "Plot performance curves from parameter sweep results."
@@ -492,6 +506,9 @@ class SweepPlotArgs:
             scale_y=args.scale_y,
             dry_run=args.dry_run,
             fig_name=args.fig_name,
+            error_bars=not args.no_error_bars,
+            fig_width=args.fig_width,
+            fig_dpi=args.fig_dpi,
         )
 
     @classmethod
@@ -594,6 +611,24 @@ class SweepPlotArgs:
             "Default: 'FIGURE'. Example: --fig-name my_performance_plot",
         )
         parser.add_argument(
+            "--no-error-bars",
+            action="store_true",
+            help="If set, disables error bars on the plot. "
+            "By default, error bars are shown.",
+        )
+        parser.add_argument(
+            "--fig-width",
+            type=float,
+            default=6.4,
+            help="Width of each subplot in inches. Default: 6.4",
+        )
+        parser.add_argument(
+            "--fig-dpi",
+            type=int,
+            default=150,
+            help="Resolution of the output figure in dots per inch. Default: 150",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the information about each figure to plot, "
@@ -619,6 +654,9 @@ def run_main(args: SweepPlotArgs):
         scale_y=args.scale_y,
         dry_run=args.dry_run,
         fig_name=args.fig_name,
+        error_bars=args.error_bars,
+        fig_width=args.fig_width,
+        fig_dpi=args.fig_dpi,
     )
 
 
