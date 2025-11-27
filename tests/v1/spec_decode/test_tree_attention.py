@@ -69,7 +69,9 @@ def forward_attention(
     layer = MockAttentionLayer()
 
     # Build common metadata.
-    model_name = "meta-llama/Meta-Llama-3-8B"
+    # Use a public, ungated model here to avoid requiring access to
+    # gated Hugging Face repos when running tests.
+    model_name = "Qwen/Qwen3-0.6B"
     builder_cls, impl_cls = try_get_attention_backend(backend)
     vllm_config = create_vllm_config(model_name=model_name, max_model_len=max(seq_lens))
     if spec_token_tree is not None:
