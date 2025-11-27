@@ -43,6 +43,15 @@ if find_spec("flashinfer"):
 else:
     flashinfer_comm = None
 
+# Try to import Helion AllReduce + Add + RMSNorm CustomOp
+try:
+    from vllm.compilation.helion.allreduce_add_rmsnorm import AllReduceAddRMSNormHelion
+
+    HELION_IMPORT_AVAILABLE = True
+except ImportError:
+    HELION_IMPORT_AVAILABLE = False
+    AllReduceAddRMSNormHelion = None
+
 logger = init_logger(__name__)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
@@ -700,6 +709,11 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         self.allreduce_params = allreduce_params
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
+        # Create Helion op instance if available
+        self.helion_op = None
+        if HELION_IMPORT_AVAILABLE:
+            self.helion_op = AllReduceAddRMSNormHelion(splits_per_rank=4)
+
     def get_inputs(self):
         input, residual, weight = self.rmsnorm_matcher.inputs()
 
@@ -715,20 +729,37 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         def replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ):
-            allreduce = auto_functionalized(
-                flashinfer_trtllm_fused_allreduce_norm,
-                allreduce_in=input,
-                residual=residual,
-                norm_out=None,
-                quant_out=None,
-                scale_out=None,
-                rms_gamma=weight,
-                rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
-                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
-            )
-            # allreduce_in, residual
-            return allreduce[1], allreduce[2]
+            # Check if Helion is enabled
+            if self.helion_op is not None and self.helion_op.enabled():
+                # Call Helion implementation - returns (norm_out, residual_out)
+                from vllm.compilation.helion.allreduce_add_rmsnorm import (
+                    helion_allreduce_add_rmsnorm,
+                )
+
+                norm_out, residual_out = helion_allreduce_add_rmsnorm(
+                    input_shared=input,
+                    residual=residual,
+                    rms_gamma=weight,
+                    rms_eps=self.epsilon,
+                    splits_per_rank=self.helion_op.splits_per_rank,
+                )
+                return norm_out, residual_out
+            else:
+                # Use FlashInfer implementation
+                allreduce = auto_functionalized(
+                    flashinfer_trtllm_fused_allreduce_norm,
+                    allreduce_in=input,
+                    residual=residual,
+                    norm_out=None,
+                    quant_out=None,
+                    scale_out=None,
+                    rms_gamma=weight,
+                    rms_eps=self.epsilon,
+                    pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                    **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+                )
+                # allreduce_in, residual
+                return allreduce[1], allreduce[2]
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass

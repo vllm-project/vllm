@@ -4,122 +4,133 @@
 Helion custom op for RMSNorm with FP8 quantization.
 """
 
-import helion
-import helion.language as hl
 import torch
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
 from vllm.model_executor.custom_op import CustomOp
 
+# Try to import Helion - it's an optional dependency
+try:
+    import helion
+    import helion.language as hl
 
-@torch.library.custom_op(
-    "my_helion_lib::rms_norm_fp8",
-    mutates_args=(),
-    device_types="cuda",
-)
-@helion.kernel(
-    config=helion.Config(
-        block_sizes=[1],
-        indexing=[
-            "tensor_descriptor",
-            "pointer",
-            "pointer",
-            "pointer",
-            "pointer",
-            "tensor_descriptor",
-            "pointer",
-            "pointer",
-        ],
-        load_eviction_policies=["", "first", "", "", "first", "last"],
-        num_stages=7,
-        num_warps=8,
-        pid_type="flat",
-        range_flattens=[None],
-        range_multi_buffers=[None],
-        range_num_stages=[0],
-        range_unroll_factors=[0],
-        range_warp_specializes=[],
-        reduction_loops=[None],
-    ),
-    static_shapes=False,
-)
-def _rms_norm_fp8_helion_kernel(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    epsilon: float,
-) -> torch.Tensor:
-    """
-    Helion kernel for RMSNorm with FP8 quantization.
-
-    Operation: quantize_fp8(RMSNorm(input, weight, epsilon))
-
-    Algorithm (matching CUDA reference exactly):
-    1. variance = sum(x^2) / hidden_size  (per token/row)
-    2. norm_factor = rsqrt(variance + epsilon)
-    3. normalized = (input * norm_factor).to(input.dtype) * weight
-    4. quantized = normalized * (1 / scale)
-
-    Args:
-        input (Tensor): Input tensor with shape [batch, hidden_size]
-        weight (Tensor): Weight tensor with shape [hidden_size]
-        scale (Tensor): Scalar scale factor for FP8 quantization
-        epsilon (float): Epsilon value for numerical stability
-
-    Returns:
-        Tensor: Output tensor with same shape as input and dtype float8_e4m3fn
-    """
-    m, n = input.size()
-    assert weight.size(0) == n, f"weight size mismatch {weight.size(0)} != {n}"
-    assert scale.numel() == 1, "Scale must be a scalar Tensor"
-
-    out = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-
-    # Tile over batch dimension only (following Helion rms_norm example)
-    for tile_m in hl.tile(m):
-        scale_val = hl.load(scale, [0])
-        inv_scale = 1.0 / scale_val
-
-        input_row = input[tile_m, :].to(torch.float32)
-
-        # variance = sum(x^2) / hidden_size in fp32
-        x_squared = input_row * input_row
-        variance = torch.mean(x_squared, dim=-1)
-
-        # normalization factor
-        inv_rms = torch.rsqrt(variance + epsilon)
-
-        # out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
-        normalized = (input_row * inv_rms[:, None]).to(input.dtype)  # fp32 → bf16
-        weighted = (normalized * weight[:]).to(torch.float32)  # bf16*bf16 → fp32
-
-        # Quantize to FP8
-        result_scaled = weighted * inv_scale
-        out[tile_m, :] = result_scaled.to(out.dtype)
-
-    return out
+    HELION_AVAILABLE = True
+except ImportError:
+    HELION_AVAILABLE = False
 
 
-@_rms_norm_fp8_helion_kernel.register_fake
-def _rms_norm_fp8_helion_kernel_fake(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    epsilon: float,
-) -> torch.Tensor:
-    """
-    Fake/meta implementation for rms_norm_fp8 Helion kernel.
-    Defines the input/output shape relationship without actual computation.
+# Only define the kernel if Helion is available
+if HELION_AVAILABLE:
 
-    Shape contract:
-    - input: [..., hidden_size]
-    - weight: [hidden_size]
-    - scale: scalar (numel == 1)
-    - epsilon: float
-    - returns: [..., hidden_size] with dtype float8_e4m3fn
-    """
-    return torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    @torch.library.custom_op(
+        "my_helion_lib::rms_norm_fp8",
+        mutates_args=(),
+        device_types="cuda",
+    )
+    @helion.kernel(
+        config=helion.Config(
+            block_sizes=[1],
+            indexing=[
+                "tensor_descriptor",
+                "pointer",
+                "pointer",
+                "pointer",
+                "pointer",
+                "tensor_descriptor",
+                "pointer",
+                "pointer",
+            ],
+            load_eviction_policies=["", "first", "", "", "first", "last"],
+            num_stages=7,
+            num_warps=8,
+            pid_type="flat",
+            range_flattens=[None],
+            range_multi_buffers=[None],
+            range_num_stages=[0],
+            range_unroll_factors=[0],
+            range_warp_specializes=[],
+            reduction_loops=[None],
+        ),
+        static_shapes=False,
+    )
+    def _rms_norm_fp8_helion_kernel(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """
+        Helion kernel for RMSNorm with FP8 quantization.
+
+        Operation: quantize_fp8(RMSNorm(input, weight, epsilon))
+
+        Algorithm (matching CUDA reference exactly):
+        1. variance = sum(x^2) / hidden_size  (per token/row)
+        2. norm_factor = rsqrt(variance + epsilon)
+        3. normalized = (input * norm_factor).to(input.dtype) * weight
+        4. quantized = normalized * (1 / scale)
+
+        Args:
+            input (Tensor): Input tensor with shape [batch, hidden_size]
+            weight (Tensor): Weight tensor with shape [hidden_size]
+            scale (Tensor): Scalar scale factor for FP8 quantization
+            epsilon (float): Epsilon value for numerical stability
+
+        Returns:
+            Tensor: Output tensor with same shape as input and dtype float8_e4m3fn
+        """
+        m, n = input.size()
+        assert weight.size(0) == n, f"weight size mismatch {weight.size(0)} != {n}"
+        assert scale.numel() == 1, "Scale must be a scalar Tensor"
+
+        out = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+
+        # Tile over batch dimension only (following Helion rms_norm example)
+        for tile_m in hl.tile(m):
+            scale_val = hl.load(scale, [0])
+            inv_scale = 1.0 / scale_val
+
+            input_row = input[tile_m, :].to(torch.float32)
+
+            # variance = sum(x^2) / hidden_size in fp32
+            x_squared = input_row * input_row
+            variance = torch.mean(x_squared, dim=-1)
+
+            # normalization factor
+            inv_rms = torch.rsqrt(variance + epsilon)
+
+            # out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
+            normalized = (input_row * inv_rms[:, None]).to(input.dtype)  # fp32 → bf16
+            weighted = (normalized * weight[:]).to(torch.float32)  # bf16*bf16 → fp32
+
+            # Quantize to FP8
+            result_scaled = weighted * inv_scale
+            out[tile_m, :] = result_scaled.to(out.dtype)
+
+        return out
+
+    @_rms_norm_fp8_helion_kernel.register_fake
+    def _rms_norm_fp8_helion_kernel_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """
+        Fake/meta implementation for rms_norm_fp8 Helion kernel.
+        Defines the input/output shape relationship without actual computation.
+
+        Shape contract:
+        - input: [..., hidden_size]
+        - weight: [hidden_size]
+        - scale: scalar (numel == 1)
+        - epsilon: float
+        - returns: [..., hidden_size] with dtype float8_e4m3fn
+        """
+        # TODO(gmagogsfm): Support other float8 types by changing this
+        # op into an out variant so caller can decide dtype
+        return torch.empty_like(input, dtype=torch.float8_e4m3fn)
 
 
 # Now define the vLLM CustomOp wrapper
@@ -164,6 +175,11 @@ class RMSNormFp8Helion(HelionCustomOp):
             Output tensor with shape (num_tokens, hidden_size) and dtype
             float8_e4m3fn
         """
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not installed. Please install Helion to use RMSNormFp8Helion. "
+                "Alternatively, use the CUDA baseline implementation."
+            )
         return torch.ops.my_helion_lib.rms_norm_fp8(input, weight, scale, epsilon)
 
 
