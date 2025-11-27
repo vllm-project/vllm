@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -8,8 +11,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sampler import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.states import SamplingMetadata
 
 
@@ -27,12 +33,50 @@ class EagleSpeculator:
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_model_len = vllm_config.model_config.max_model_len
+        # We need to get the hidden size from the draft model config because
+        # the draft model's hidden size can be different from the target model's
+        # hidden size (e.g., Llama 3.3 70B).
+        self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.vocab_size = self.draft_model_config.get_vocab_size()
+        self.pin_memory = is_pin_memory_available()
+        self.dtype = vllm_config.model_config.dtype
 
-        self.input_ids = torch.zeros(
-            self.max_num_tokens, dtype=torch.int32, device=device
+        self.input_buffers = InputBuffers(
+            max_num_reqs=self.max_num_reqs,
+            max_num_tokens=self.max_num_tokens,
+            hidden_size=self.hidden_size,
+            vocab_size=self.vocab_size,
+            dtype=self.dtype,
+            device=device,
+            pin_memory=self.pin_memory,
         )
-        self.positions = torch.zeros(
-            self.max_num_tokens, dtype=torch.int64, device=device
+        self.hidden_states = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=device,
+        )
+        self.temperature = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.float32,
+            device=device,
+        )
+        self.seeds = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.draft_tokens = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            dtype=torch.int64,
+            device=device,
+        )
+
+        self.cudagraph_manager = EagleCudaGraphManager(
+            vllm_config=vllm_config,
+            device=device,
         )
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -48,6 +92,96 @@ class EagleSpeculator:
             if hasattr(self.model, "lm_head"):
                 del self.model.lm_head
             self.model.lm_head = target_model.lm_head
+
+    def set_attn(
+        self,
+        kv_cache_config,
+        attn_metadata_builders,
+        block_tables,
+    ) -> None:
+        self.kv_cache_config = kv_cache_config
+        self.attn_metadata_builders = attn_metadata_builders
+        self.block_tables = block_tables
+
+    @torch.inference_mode()
+    def run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any],
+        num_tokens_across_dp: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        with set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            ret_hidden_states = self.model(
+                input_ids=self.input_buffers.input_ids.gpu[:num_tokens],
+                positions=self.input_buffers.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+            )
+        if self.method == "mtp":
+            last_hidden_states = ret_hidden_states
+            hidden_states = ret_hidden_states
+        else:
+            last_hidden_states, hidden_states = ret_hidden_states
+        return last_hidden_states, hidden_states
+
+    def generate_draft(
+        self,
+        num_reqs: int,
+        attn_metadata: dict[str, Any],
+        num_tokens_across_dp: torch.Tensor | None = None,
+    ) -> None:
+        pos = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        for step in range(1, self.num_speculative_steps):
+            # Run the eagle model.
+            last_hidden_states, hidden_states = self.run_model(
+                num_reqs, attn_metadata, num_tokens_across_dp
+            )
+            logits = self.model.compute_logits(last_hidden_states)
+
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+            # used for draft and target sampling.
+            draft_tokens = gumbel_sample(
+                logits,
+                self.temperature[:num_reqs],
+                self.seeds[:num_reqs],
+                pos + 1,
+                apply_temperature=True,
+            )
+            self.draft_tokens[:num_reqs, step] = draft_tokens
+
+            if step < self.num_speculative_steps - 1:
+                # Update the inputs for the next step.
+                _update_eagle_inputs_kernel[(num_reqs,)](
+                    self.input_buffers.input_ids.gpu,
+                    pos,
+                    self.hidden_states,
+                    self.hidden_states.stride(0),
+                    self.input_buffers.seq_lens,
+                    self.max_model_len,
+                    draft_tokens,
+                    hidden_states,
+                    hidden_states.stride(0),
+                    self.hidden_size,
+                    BLOCK_SIZE=1024,
+                )
+                self.block_tables.compute_slot_mappings(query_start_loc, pos)
+
+    def capture_model(self) -> None:
+        if self.num_speculative_steps == 1:
+            return
+        self.cudagraph_manager.capture(
+            self.generate_draft,
+            self.input_buffers,
+            self.block_tables,
+            self.attn_metadata_builders,
+            self.kv_cache_config,
+        )
 
     @torch.inference_mode()
     def propose(
@@ -80,57 +214,105 @@ class EagleSpeculator:
             )
         else:
             hidden_states = last_hidden_states
+        num_tokens = input_batch.num_tokens_after_padding
+        self.hidden_states[:num_tokens] = hidden_states
+        self.input_buffers.positions[:num_tokens] = input_batch.positions
 
         # Get the input ids and last token indices for the speculator.
         last_token_indices = prepare_eagle_inputs(
-            self.input_ids,
+            self.input_buffers.input_ids.gpu,
             input_batch,
             num_sampled,
             num_rejected,
             last_sampled,
             next_prefill_tokens,
         )
-        input_ids = self.input_ids[: input_batch.num_tokens_after_padding]
 
         # Prefill: Run the eagle speculator with eager mode.
-        with set_forward_context(
+        last_hidden_states, hidden_states = self.run_model(
+            num_tokens,
             input_batch.attn_metadata,
-            self.vllm_config,
-            num_tokens=input_batch.num_tokens_after_padding,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        ):
-            ret_hidden_states = self.model(
-                input_ids=input_ids,
-                positions=input_batch.positions,
-                hidden_states=hidden_states,
-            )
-        if self.method == "mtp":
-            last_hidden_states = ret_hidden_states
-            hidden_states = ret_hidden_states
-        else:
-            last_hidden_states, hidden_states = ret_hidden_states
+        )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
         cu_num_logits = input_batch.cu_num_logits[:num_reqs]
-        temperature = sampling_metadata.temperature[cu_num_logits]
-        seed = sampling_metadata.seeds[cu_num_logits]
-        # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-        # used for draft and target sampling.
-        pos = input_batch.positions[last_token_indices] + 1
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
+        temperature = self.temperature[:num_reqs]
+        seeds = self.seeds[:num_reqs]
+        pos = self.input_buffers.positions[:num_reqs]
+        # Gather the values and copy them to the pre-allocated buffers.
+        torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
+        torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
+        torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
+        # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+        # used for draft and target sampling.
         draft_tokens = gumbel_sample(
-            logits, temperature, seed, pos, apply_temperature=True
+            logits, temperature, seeds, pos + 1, apply_temperature=True
         )
         if self.num_speculative_steps == 1:
             # Early exit.
             return draft_tokens.view(-1, 1)
-        raise NotImplementedError("num_speculative_steps > 1 is not supported yet.")
+
+        # Store the draft tokens for the first step.
+        self.draft_tokens[:num_reqs, 0] = draft_tokens
+
+        query_start_loc = self.input_buffers.query_start_loc
+        _prepare_eagle_docode_kernel[(num_reqs + 1,)](
+            draft_tokens,
+            hidden_states,
+            hidden_states.stride(0),
+            last_token_indices,
+            input_batch.seq_lens,
+            num_rejected,
+            self.input_buffers.input_ids.gpu,
+            self.input_buffers.positions,
+            self.hidden_states,
+            self.hidden_states.stride(0),
+            query_start_loc.gpu,
+            self.input_buffers.seq_lens,
+            self.hidden_size,
+            self.max_model_len,
+            self.max_num_reqs,
+            BLOCK_SIZE=1024,
+        )
+        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            query_start_loc_gpu, pos
+        )
+
+        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
+        if cudagraph_size is not None:
+            self.cudagraph_manager.run(cudagraph_size)
+            return self.draft_tokens[:num_reqs]
+
+        query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
+        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
+        # HACK(woosuk)
+        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
+        block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
+
+        # FIXME(woosuk): This is UNSAFE!!
+        attn_metadata = build_attn_metadata(
+            attn_metadata_builders=self.attn_metadata_builders,
+            num_reqs=num_reqs,
+            num_tokens=num_reqs,
+            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=self.input_buffers.seq_lens[:num_reqs],
+            seq_lens_np=seq_lens_np,
+            num_computed_tokens_cpu=None,  # FIXME
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+        )
+        self.generate_draft(num_reqs, attn_metadata)
+        return self.draft_tokens[:num_reqs]
 
 
 @triton.jit
@@ -207,3 +389,128 @@ def prepare_eagle_inputs(
         BLOCK_SIZE=1024,
     )
     return last_token_indices
+
+
+@triton.jit
+def _prepare_eagle_docode_kernel(
+    draft_tokens_ptr,
+    output_hidden_states_ptr,
+    output_hidden_states_stride,
+    last_token_indices_ptr,
+    target_seq_lens_ptr,
+    num_rejected_ptr,
+    input_ids_ptr,
+    positions_ptr,
+    input_hidden_states_ptr,
+    input_hidden_states_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    hidden_size,
+    max_model_len,
+    max_num_reqs,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    num_reqs = tl.num_programs(0) - 1
+    if req_idx == num_reqs:
+        # Compute query_start_loc. Pad it with the last query_start_loc
+        # for CUDA graphs.
+        for i in range(0, max_num_reqs + 1, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            q = tl.where(block < num_reqs, block, num_reqs)
+            mask = block < max_num_reqs + 1
+            tl.store(query_start_loc_ptr + block, q, mask=mask)
+        # Pad seq_lens for CUDA graphs.
+        for i in range(req_idx, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(seq_lens_ptr + block, 0, mask=mask)
+        return
+
+    # draft token -> input id.
+    draft_token = tl.load(draft_tokens_ptr + req_idx)
+    tl.store(input_ids_ptr + req_idx, draft_token)
+
+    # output hidden states -> input hidden states.
+    src_idx = tl.load(last_token_indices_ptr + req_idx)
+    for i in range(0, hidden_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < hidden_size
+        output_hidden_states = tl.load(
+            output_hidden_states_ptr + src_idx * output_hidden_states_stride + block,
+            mask=mask,
+        )
+        tl.store(
+            input_hidden_states_ptr + req_idx * input_hidden_states_stride + block,
+            output_hidden_states,
+            mask=mask,
+        )
+
+    # Compute position and seq_lens.
+    # NOTE(woosuk): To prevent out-of-range access, we clamp these values
+    # if they reach the max model length.
+    position = tl.load(positions_ptr + req_idx)
+    position = _increment_pos(position, max_model_len)
+    tl.store(positions_ptr + req_idx, position)
+
+    target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
+    num_rejected = tl.load(num_rejected_ptr + req_idx)
+    seq_len = target_seq_len - num_rejected
+    seq_len = _increment_seq_len(seq_len, max_model_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
+@triton.jit
+def _update_eagle_inputs_kernel(
+    input_ids_ptr,
+    positions_ptr,
+    input_hidden_states_ptr,
+    input_hidden_states_stride,
+    seq_lens_ptr,
+    max_model_len,
+    draft_tokens_ptr,
+    output_hidden_states_ptr,
+    output_hidden_states_stride,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+
+    # Draft token -> Input ID.
+    draft_token = tl.load(draft_tokens_ptr + req_idx)
+    tl.store(input_ids_ptr + req_idx, draft_token)
+
+    # Output hidden states -> Input hidden states.
+    for i in range(0, hidden_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < hidden_size
+        output_hidden_states = tl.load(
+            output_hidden_states_ptr + req_idx * output_hidden_states_stride + block,
+            mask=mask,
+        )
+        tl.store(
+            input_hidden_states_ptr + req_idx * input_hidden_states_stride + block,
+            output_hidden_states,
+            mask=mask,
+        )
+
+    # Increment position and seq_lens.
+    # NOTE(woosuk): To prevent out-of-range access, we clamp these values
+    # if they reach the max model length.
+    position = tl.load(positions_ptr + req_idx)
+    position = _increment_pos(position, max_model_len)
+    tl.store(positions_ptr + req_idx, position)
+
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    seq_len = _increment_seq_len(seq_len, max_model_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
+@triton.jit
+def _increment_pos(pos, max_model_len):
+    return tl.where(pos < max_model_len, pos + 1, 0)
+
+
+@triton.jit
+def _increment_seq_len(seq_len, max_model_len):
+    return tl.where(seq_len < max_model_len, seq_len + 1, 1)
