@@ -168,20 +168,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
 
-<<<<<<< HEAD
-        tp_rank = get_tensor_model_parallel_rank()
-        param_data = param_data.narrow(self.output_dim, shard_offset,
-                                       shard_size)
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
-        assert param_data.shape == loaded_weight.shape, f"param shape: {param_data.shape} but got loaded weight shape: {loaded_weight.shape}"
-=======
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.narrow(
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert param_data.shape == loaded_weight.shape
->>>>>>> upstream/main
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):

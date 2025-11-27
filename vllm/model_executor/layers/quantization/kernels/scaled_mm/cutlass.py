@@ -43,13 +43,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, self.w_s_name)
         if is_fused_module and not self.config.is_channelwise:
-<<<<<<< HEAD
-            # print("going into the channelwise convert")
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
-=======
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
->>>>>>> upstream/main
         replace_parameter(
             layer,
             self.w_s_name,

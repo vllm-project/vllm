@@ -10,6 +10,7 @@ from types import NoneType
 from typing import TYPE_CHECKING, Any, cast, Optional
 
 import ray
+import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -169,7 +170,6 @@ class Worker(WorkerBase):
         if isinstance(device, torch.device) and device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-<<<<<<< HEAD
             self.device = torch.device(f"cuda:{self.local_rank}")
             logger.info(f"{self.local_rank} came here in my code")
             logger.info(f"{self.local_rank} torch device count: {torch.cuda.device_count()}")
@@ -177,7 +177,6 @@ class Worker(WorkerBase):
             logger.info(f"GPU ids available: {ray.get_gpu_ids()}")
             logger.info(f"{self.local_rank} using device: {self.device}")
             torch.cuda.set_device(self.device)
-=======
             if (
                 self.parallel_config.data_parallel_size > 1
                 and self.parallel_config.data_parallel_size_local > 0
@@ -190,7 +189,6 @@ class Worker(WorkerBase):
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_rank
->>>>>>> upstream/main
 
                 tp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
@@ -274,7 +272,6 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
-<<<<<<< HEAD
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, (
@@ -322,7 +319,6 @@ class Worker(WorkerBase):
         # )
         # e = time.time()
         # print("Total e2e time: ", e - s )
-=======
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
@@ -332,7 +328,6 @@ class Worker(WorkerBase):
 
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
->>>>>>> upstream/main
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
