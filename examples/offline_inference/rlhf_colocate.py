@@ -39,7 +39,9 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm import LLM
+from vllm.platforms import current_platform
 
+DEVICE = current_platform.device_type
 
 class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution.
@@ -79,14 +81,17 @@ class RayTrainingActor:
         from transformers import AutoModelForCausalLM
 
         self.model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
-        self.model.to("cuda:0")
+        self.model.to(f"{DEVICE}:0")
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
             p.data.zero_()
-        torch.cuda.synchronize()
+        if current_platform.is_xpu():
+            torch.xpu.synchronize()
+        else:
+            torch.cuda.synchronize()
         # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
-        from vllm.platforms import current_platform
+        #from vllm.platforms import current_platform
 
         self.device_uuid = current_platform.get_device_uuid(0)
         self.zmq_context = zmq.Context()
@@ -114,7 +119,7 @@ class RayTrainingActor:
         )
         max_tensor_size = max(get_size(p) for p in named_parameters.values())
         # use max_tensor_size * 2 as buffer size
-        buffer = torch.empty(max_tensor_size * 2, dtype=torch.uint8, device="cuda:0")
+        buffer = torch.empty(max_tensor_size * 2, dtype=torch.uint8, device=f"{DEVICE}:0")
         s = self.zmq_context.socket(zmq.REQ)
         s.bind(self.zmq_handle)
         handle = reduce_tensor(buffer)
@@ -146,7 +151,10 @@ class RayTrainingActor:
                     p.data.view(-1).view(dtype=torch.uint8), non_blocking=True
                 )
                 offset += get_size(p)
-            torch.cuda.synchronize()
+            if current_platform.is_xpu():
+                torch.xpu.synchronize()
+            else:
+                torch.cuda.synchronize()
             s.send_pyobj(named_tensors)
             s.recv()
         s.send_pyobj(None)
@@ -154,7 +162,10 @@ class RayTrainingActor:
         s.close()
         del buffer
         gc.collect()
-        torch.cuda.empty_cache()
+        if current_platform.is_xpu():
+            torch.xpu.empty_cache()
+        else:
+            torch.cuda.empty_cache()
 
 
 # Ray manages four GPUs.
