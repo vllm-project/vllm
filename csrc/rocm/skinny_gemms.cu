@@ -1378,14 +1378,15 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
 		     int* cntr,
                      scalar_t* C,
                      const int CuCount) {
+
   constexpr int GrpsShrB = 2;
   constexpr int NTILE = 16;
-  constexpr int WVLDS_ = (512*4);
+  constexpr int WVLDS_ = (NTILE*THRDS*A_CHUNK);
   constexpr int APAD = 2;
   constexpr int ASTRD = 64;
   constexpr int BPAD = 2;
   constexpr int BSTRD = 64;
-  constexpr int WVLDS = ((WVLDS_+(WVLDS_/BSTRD)*BPAD)*4);
+  constexpr int WVLDS = ((WVLDS_+(WVLDS_/BSTRD)*BPAD));
 
   constexpr int max_lds_len = LDS_SIZE / 2;
   //constexpr bool use_mfma = true;//(std::is_same_v<scalar_t, __hip_bfloat16>);
@@ -1416,8 +1417,8 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
   constexpr uint32_t kFit__ = (max_lds_len-WvPrGrp*WVLDS/GrpsShrB) / N;
-  //constexpr uint32_t kFit_ = (kFit__*ASTRD)/(APAD + ASTRD);
-  uint32_t kFit = kFit__ - (kFit__ % TUC_); // round down
+  constexpr uint32_t kFit_ = (kFit__*ASTRD)/(APAD + ASTRD);
+  uint32_t kFit = kFit_ - (kFit_ % TUC_); // round down
   uint32_t kfitsPerRdc = (K+kFit-1)/kFit;
   uint32_t numCuwithFullK = ((M + (WvPrGrp*YTILE/GrpsShrB)-1)/(WvPrGrp*YTILE/GrpsShrB));
   uint32_t Mmod = numCuwithFullK*(WvPrGrp*YTILE/GrpsShrB);
@@ -1530,9 +1531,10 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
         for (uint32_t d=0; d<2; d++)
           for (uint32_t j=0; j<2; j++)
             for (uint32_t y=0; y<YTILE/2; y++) {
-              uint32_t idx = threadIdx.x*YTILE+y*2+bLoader;
+              uint32_t idx = (threadIdx.x*YTILE+y*2+bLoader)*8+(d*2+j)*2;
               idx += ((uint32_t)(idx/BSTRD))*BPAD;
-              myStg[idx+(WVLDS/8)*(d*2+j)] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
+              //myStg[idx+(WVLDS/8)*(d*2+j)] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
+              myStg[idx/2] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
             }
       }
 
@@ -1559,9 +1561,9 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
         for (uint32_t d=0; d<2; d++)
           for (uint32_t j=0; j<2; j++)
             for (uint32_t y=0; y<YTILE; y++) {
-              uint32_t idx = threadIdx.x+64*y;
+              uint32_t idx = (threadIdx.x+64*y)*8+(d*2+j)*2;
               idx += ((uint32_t)(idx/BSTRD))*BPAD;
-              bigB[y][k2].i[d*2+j] = myStg[idx+(WVLDS/8)*(d*2+j)];
+              bigB[y][k2].i[d*2+j] = myStg[idx/2];//+(WVLDS/4)*(d*2+j)];
             }
       }
 
@@ -1768,6 +1770,9 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
         break;
       case 64:
         WVSPLITKrc(4, 16, 1, 64)
+        break;
+      case 128:
+        WVSPLITKrc(4, 16, 1, 128)
         break;
       default:
         throw std::runtime_error(
