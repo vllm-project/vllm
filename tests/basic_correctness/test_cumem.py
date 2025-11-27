@@ -14,6 +14,8 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 
+DEVICE = current_platform.device_type
+
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_python_error():
     """
@@ -21,18 +23,21 @@ def test_python_error():
     error happening from the C++ side.
     """
     allocator = CuMemAllocator.get_instance()
-    total_bytes = torch.cuda.mem_get_info()[1]
+    if current_platform.is_xpu():
+        total_bytes = torch.xpu.mem_get_info()[1]
+    else:
+        total_bytes = torch.cuda.mem_get_info()[1]
     alloc_bytes = int(total_bytes * 0.7)
     tensors = []
     with allocator.use_memory_pool():
         # allocate 70% of the total memory
-        x = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+        x = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE)
         tensors.append(x)
     # release the memory
     allocator.sleep()
 
     # allocate more memory than the total memory
-    y = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+    y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE)
     tensors.append(y)
     with pytest.raises(RuntimeError):
         # when the allocator is woken up, it should raise an error
@@ -44,27 +49,31 @@ def test_python_error():
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
-    x = torch.empty(shape, device="cuda")
+    x = torch.empty(shape, device=DEVICE)
     x.zero_()
 
     # some tensors from custom memory pool
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
         # custom memory pool
-        y = torch.empty(shape, device="cuda")
+        y = torch.empty(shape, device=DEVICE)
         y.zero_()
         y += 1
-        z = torch.empty(shape, device="cuda")
+        z = torch.empty(shape, device=DEVICE)
         z.zero_()
         z += 2
 
     # they can be used together
     output = x + y + z
     assert torch.allclose(output, torch.ones_like(output) * 3)
-
-    free_bytes = torch.cuda.mem_get_info()[0]
-    allocator.sleep()
-    free_bytes_after_sleep = torch.cuda.mem_get_info()[0]
+    if current_platform.is_xpu():
+        free_bytes = torch.xpu.mem_get_info()[0]
+        allocator.sleep()
+        free_bytes_after_sleep = torch.xpu.mem_get_info()[0]
+    else:
+        free_bytes = torch.cuda.mem_get_info()[0]
+        allocator.sleep()
+        free_bytes_after_sleep = torch.cuda.mem_get_info()[0]
     assert free_bytes_after_sleep > free_bytes
     allocator.wake_up()
 
@@ -77,9 +86,9 @@ def test_basic_cumem():
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
-        weight = torch.eye(1024, device="cuda")
+        weight = torch.eye(1024, device=DEVICE)
     with allocator.use_memory_pool(tag="discard"):
-        cache = torch.empty(1024, 1024, device="cuda")
+        cache = torch.empty(1024, 1024, device=DEVICE)
 
     def model(x):
         out = x @ weight
@@ -129,7 +138,10 @@ def test_cumem_with_cudagraph():
     ],
 )
 def test_end_to_end(model: str):
-    free, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free, total = torch.xpu.mem_get_info()
+    else:
+        free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
@@ -140,8 +152,10 @@ def test_end_to_end(model: str):
     # which is difficult to measure in the test. therefore, we only
     # test sleep level 1 here.
     llm.sleep(level=1)
-
-    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free_gpu_bytes_after_sleep, total = torch.xpu.mem_get_info()
+    else:
+        free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage is mostly cudagraph memory pool,
     # and it should be less than the model weights (1B model, 2GiB weights)
@@ -161,7 +175,10 @@ def test_end_to_end(model: str):
     llm.sleep(level=1)
     llm.wake_up(tags=["weights"])
 
-    free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free_gpu_bytes_wake_up_w, total = torch.xpu.mem_get_info()
+    else:
+        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
 
     # should just reallocate memory for weights (1B model, ~2GiB weights)
@@ -178,7 +195,10 @@ def test_end_to_end(model: str):
 @create_new_process_for_each_test()
 def test_deep_sleep():
     model = "hmellor/tiny-random-LlamaForCausalLM"
-    free, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free, total = torch.xpu.mem_get_info()
+    else:
+        free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
@@ -188,13 +208,19 @@ def test_deep_sleep():
     # Put the engine to deep sleep
     llm.sleep(level=2)
 
-    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free_gpu_bytes_after_sleep, total = torch.xpu.mem_get_info()
+    else:
+        free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
     assert used_bytes < 3 * GiB_bytes
 
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
-    free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+    if current_platform.is_xpu():
+        free_gpu_bytes_wake_up_w, total = torch.xpu.mem_get_info()
+    else:
+        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
     used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
     assert used_bytes < 4 * GiB_bytes
 
@@ -210,7 +236,10 @@ def test_deep_sleep():
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
-        free, total = torch.cuda.mem_get_info()
+        if current_platform.is_xpu():
+            free, total = torch.xpu.mem_get_info()
+        else:
+            free, total = torch.cuda.mem_get_info()
         used_bytes_baseline = total - free  # in case other process is running
         engine_args = AsyncEngineArgs(
             model=model,
@@ -229,7 +258,10 @@ def test_deep_sleep_async():
 
         await llm.wake_up(tags=["weights"])
         await llm.collective_rpc("reload_weights")
-        free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
+        if current_platform.is_xpu():
+            free_gpu_bytes_wake_up_w, total = torch.xpu.mem_get_info()
+        else:
+            free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
         used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
         assert used_bytes < 4 * GiB_bytes
 

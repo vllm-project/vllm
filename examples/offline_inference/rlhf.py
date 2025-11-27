@@ -40,6 +40,9 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.utils.network_utils import get_ip, get_open_port
 
+from vllm.platforms import current_platform
+
+DEVICE = current_platform.device_type
 
 class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
@@ -47,17 +50,23 @@ class MyLLM(LLM):
     def __init__(self, *args, **kwargs):
         # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray
         # so that vLLM can manage its own device placement within the worker.
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        if current_platform.is_xpu():
+            os.environ.pop("ZE_AFFINITY_MASK", None)
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         super().__init__(*args, **kwargs)
 
 
 # Load the OPT-125M model onto GPU 0 for the training workload.
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
-train_model.to("cuda:0")
+train_model.to(f"{DEVICE}:0")
 
 # Initialize Ray and set the visible devices. The vLLM engine will
 # be placed on GPUs 1 and 2.
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+if current_platform.is_xpu():
+    os.environ["ZE_AFFINITY_MASK"] = "1,2"
+else:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
 
 # Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
@@ -114,7 +123,7 @@ handle = llm.collective_rpc.remote(
 )
 
 model_update_group = stateless_init_process_group(
-    master_address, master_port, 0, 3, torch.device("cuda:0")
+    master_address, master_port, 0, 3, torch.device(f"{DEVICE}:0")
 )
 ray.get(handle)
 
@@ -130,7 +139,10 @@ for name, p in train_model.named_parameters():
     handle = llm.collective_rpc.remote(
         "update_weight", args=(name, dtype_name, p.shape)
     )
-    model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
+    if current_platform.is_xpu():
+        model_update_group.broadcast(p, src=0, stream=torch.xpu.current_stream())
+    else:
+        model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 
 # Verify that the inference weights have been updated.
