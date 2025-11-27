@@ -336,10 +336,8 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-    # The `embedding_module` and `embedding_padding_modules`
-    # are empty by default.
+    # The `embedding_module` is empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: dict[str, list[str]] = {}
 
 
@@ -351,7 +349,6 @@ class _SupportsLoRAType(Protocol):
 
     packed_modules_mapping: dict[str, list[str]]
     embedding_modules: dict[str, str]
-    embedding_padding_modules: list[str]
 
 
 @overload
@@ -371,7 +368,6 @@ def supports_lora(
         lora_attrs = (
             "packed_modules_mapping",
             "embedding_modules",
-            "embedding_padding_modules",
         )
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 

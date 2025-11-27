@@ -161,14 +161,8 @@ def llama_2_7b_base_huggingface_id():
 
 
 @pytest.fixture(scope="session")
-def sql_lora_huggingface_id():
-    # huggingface repo id is used to test lora runtime downloading.
-    return "yard1/llama-2-7b-sql-lora-test"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
+def sql_lora_files():
+    return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
 @pytest.fixture(scope="session")
@@ -253,6 +247,12 @@ def olmoe_lora_files():
 @pytest.fixture(scope="session")
 def qwen3_lora_files():
     return snapshot_download(repo_id="charent/self_cognition_Alice")
+
+
+@pytest.fixture(scope="session")
+def qwen3_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "charent/self_cognition_Alice"
 
 
 @pytest.fixture(scope="session")
