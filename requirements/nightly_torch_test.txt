@@ -29,7 +29,7 @@ opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d # required for model evaluation test
 mteb>=1.38.11, <2 # required for mteb test
-transformers==4.57.1
+transformers==4.57.3
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization

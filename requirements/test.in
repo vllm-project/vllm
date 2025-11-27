@@ -37,7 +37,7 @@ datamodel_code_generator # required for minicpm3 test
 # TODO: Use lm-eval[api]==0.4.10 once released
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==4.57.1
+transformers==4.57.3
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
