@@ -198,11 +198,6 @@ def get_tokenizer(
                 quant_type,
                 revision=revision,
             )
-            if gguf_file is None:
-                raise ValueError(
-                    f"Could not find GGUF file for repo {tokenizer_name} "
-                    f"with quantization {quant_type}."
-                )
             kwargs["gguf_file"] = gguf_file
 
     # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format

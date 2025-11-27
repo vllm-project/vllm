@@ -7,15 +7,9 @@ from pathlib import Path
 
 import gguf
 from gguf.constants import Keys, VisionProjectorType
-from huggingface_hub import HfFileSystem
-from huggingface_hub.errors import (
-    HfHubHTTPError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
-
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -177,7 +171,7 @@ def get_gguf_file_path_from_hf(
     repo_id: str | Path,
     quant_type: str,
     revision: str | None = None,
-) -> str | None:
+) -> str:
     """Get the GGUF file path from HuggingFace Hub based on repo_id and quant_type.
 
     Args:
@@ -187,45 +181,30 @@ def get_gguf_file_path_from_hf(
 
     Returns:
         The path to the GGUF file on HuggingFace Hub (e.g., "filename.gguf"),
-        or None if not found
     """
     repo_id = str(repo_id)
-    try:
-        fs = HfFileSystem()
-        # List all files in the repository
-        file_list = fs.ls(repo_id, detail=False, revision=revision)
-
-        # Patterns to match GGUF files with the quant_type
-        patterns = [
-            f"*-{quant_type}.gguf",
-            f"*-{quant_type}-*.gguf",
-            f"*/*-{quant_type}.gguf",
-            f"*/*-{quant_type}-*.gguf",
-        ]
-
-        # Find matching files
-        matching_files = []
-        for pattern in patterns:
-            matches = fnmatch.filter(file_list, pattern)
-            matching_files.extend(matches)
-
-        if not matching_files:
-            logger.warning(
-                "No GGUF file found in %s with quant_type %s", repo_id, quant_type
-            )
-            return None
-
-        # Sort to ensure consistent ordering (prefer non-sharded files)
-        matching_files.sort(key=lambda x: (x.count("-"), x))
-        gguf_filename = matching_files[0]
-
-        return gguf_filename.replace(repo_id + "/", "", 1)
-    except (RepositoryNotFoundError, RevisionNotFoundError, HfHubHTTPError) as e:
-        logger.warning(
-            "Failed to get GGUF file path from HuggingFace Hub for %s "
-            "with quant_type %s: %s",
+    gguf_patterns = [
+        f"*-{quant_type}.gguf",
+        f"*-{quant_type}-*.gguf",
+        f"*/*-{quant_type}.gguf",
+        f"*/*-{quant_type}-*.gguf",
+    ]
+    matching_files = list_filtered_repo_files(
+        repo_id,
+        allow_patterns=gguf_patterns,
+        revision=revision,
+    )
+    
+    if len(matching_files) == 0:
+        raise ValueError(
+            "Could not find GGUF file for repo %s "
+            "with quantization %s.",
             repo_id,
             quant_type,
-            e,
         )
-        return None
+
+    # Sort to ensure consistent ordering (prefer non-sharded files)
+    matching_files.sort(key=lambda x: (x.count("-"), x))
+    gguf_filename = matching_files[0]
+    return gguf_filename
+
