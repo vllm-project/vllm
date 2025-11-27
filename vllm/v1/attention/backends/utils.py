@@ -741,7 +741,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     logits_indices = logits_indices_padded[:num_logits_indices]
     num_reqs = common_attn_metadata.num_reqs
     query_start_loc = common_attn_metadata.query_start_loc
-    seq_lens = common_attn_metadata.seq_lens
     # Example inputs
     # num_reqs: 3
     # generation_indices:  [14, 18, 19, 27]
@@ -770,7 +769,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
         query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
-        seq_lens=seq_lens,
+        seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
         max_query_len=decode_max_query_len,
@@ -778,6 +777,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
