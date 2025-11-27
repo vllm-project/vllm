@@ -113,13 +113,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
-        layer_name: str | None = None,
+        layer_name: str,
     ) -> "CompressedTensorsMoEMethod":
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
-            prefix + proj_name
+            layer_name + proj_name
             for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
         ]
         # TODO: refactor this to use expert_mapping and check all layer numbers
