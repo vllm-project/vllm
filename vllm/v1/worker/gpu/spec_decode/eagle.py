@@ -74,10 +74,7 @@ class EagleSpeculator:
             device=device,
         )
 
-        self.cudagraph_manager = EagleCudaGraphManager(
-            vllm_config=vllm_config,
-            device=device,
-        )
+        self.cudagraph_manager = EagleCudaGraphManager(vllm_config, device)
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
