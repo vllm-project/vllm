@@ -219,6 +219,7 @@ class PoolingParams(
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
+            f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 
