@@ -112,16 +112,18 @@ def _allocate_kv_cache(
     device: torch.device,
 ):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+    active_layer_names = {
+        layer_name
+        for group in kv_cache_config.kv_cache_groups
+        for layer_name in group.layer_names
+    }
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
         for layer_name in kv_cache_tensor.shared_by:
-            kv_cache_raw_tensors[layer_name] = tensor
+            if layer_name in active_layer_names:
+                kv_cache_raw_tensors[layer_name] = tensor
 
-    layer_names = set()
-    for group in kv_cache_config.kv_cache_groups:
-        for layer_name in group.layer_names:
-            layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), (
+    assert active_layer_names == set(kv_cache_raw_tensors.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
