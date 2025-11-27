@@ -140,10 +140,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         # CUDA graphs.
-        self.cudagraph_manager = CudaGraphManager(
-            vllm_config=self.vllm_config,
-            device=self.device,
-        )
+        self.cudagraph_manager = CudaGraphManager(self.vllm_config, self.device)
 
     def get_supported_tasks(self) -> tuple[str]:
         return ("generate",)
