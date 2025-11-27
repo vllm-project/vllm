@@ -285,7 +285,7 @@ class BaseMultiModalProcessorCache(
             n: The number of new items to look ahead.
 
         Returns:
-            `True` if the item will be evicted, otherwise `False`.
+            `True` if the item will remain cached, otherwise `False`.
         """
         raise NotImplementedError
 
@@ -301,7 +301,7 @@ class BaseMultiModalProcessorCache(
             n: The number of new items to look ahead.
 
         Returns:
-            For each item, `True` if the item is cached, otherwise `False`.
+            For each item, `True` if the item will remain cached, otherwise `False`.
         """
         return [self.is_cached_item(mm_hash, n=n) for mm_hash in mm_hashes]
 
