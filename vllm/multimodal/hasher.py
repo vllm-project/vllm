@@ -33,7 +33,10 @@ class MultiModalHasher:
             ):
                 # If the image has exif ImageID tag, use that
                 return (exif[Image.ExifTags.Base.ImageID].bytes,)
-            data = {"mode": obj.mode, "data": np.asarray(obj)}
+            if hasattr(obj, '_image_bytes'):
+                data = {"mode": obj.mode, "data": obj._image_bytes}
+            else:
+                data = {"mode": obj.mode, "data": np.asarray(obj)}
             if obj.palette is not None:
                 data["palette"] = obj.palette.palette
                 if obj.palette.rawmode is not None:
