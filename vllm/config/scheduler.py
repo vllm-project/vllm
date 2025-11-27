@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
