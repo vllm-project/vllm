@@ -28,7 +28,8 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once("Using CPU all reduce to synchronize DP padding between ranks.")
+        logger.info_once("Using CPU all reduce "
+                         "to synchronize DP padding between ranks.")
         device = "cpu"
         group = get_dp_group().cpu_group
     return device, group
