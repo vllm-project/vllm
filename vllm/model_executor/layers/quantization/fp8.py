@@ -474,6 +474,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     input_size_per_partition,
                     [1, 32],
                     weight_loader,
+                    dtype=torch.uint8,
                 )
                 set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 layer.register_parameter("weight_scale", scale)
@@ -636,6 +637,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 input=x,
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
+                out_dtype=self.out_dtype,
                 bias=bias,
             )
         return self.fp8_linear.apply(

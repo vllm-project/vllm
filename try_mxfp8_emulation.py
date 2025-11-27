@@ -60,11 +60,14 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
     rep_n = BLOCK_N // 128
     rep_k = BLOCK_K // VEC_SIZE // 4
 
+    def _round_up(x: int, m: int) -> int:
+        return (x + m - 1) // m
+    
     # Use 5D TMA descriptor [1, rep_m, rep_k, 2, 256] with uint8 elements.
     # With 256 elements we better utilize the L2 and don't require the TMA
     # engine to emit many small messages (16B) messages as with 32x16xu8.
-    a_scale_shape = [1, M//128, K//VEC_SIZE//4, 2, 256]
-    b_scale_shape = [1, N//128, K//VEC_SIZE//4, 2, 256]
+    a_scale_shape = [1,_round_up(M,128), _round_up(K // VEC_SIZE, 4), 2, 256]
+    b_scale_shape = [1, _round_up(N,128), _round_up(K // VEC_SIZE, 4), 2, 256]
     a_scale_block_shape = [1, rep_m, rep_k, 2, 256]
     b_scale_block_shape = [1, rep_n, rep_k, 2, 256]
 
@@ -119,10 +122,13 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
 
 
 def games():
-    M = 1024
-    N = 2048
-    K = 512
+    M = 16384
+    N = 10304
+    K = 2688
 
+    # M = 1024
+    # N = 2048
+    # K = 512
     A = torch.cat([torch.rand(1).item()*torch.rand(1,32, dtype=torch.bfloat16, device="cuda") for _ in range(M*K//32)]).reshape(M,K)
     B = torch.cat([torch.rand(1).item()*torch.rand(1,32, dtype=torch.bfloat16, device="cuda") for _ in range(N*K//32)]).reshape(N,K)
 
@@ -138,7 +144,7 @@ def games():
 
     print(f"{A_scales.shape=}")
     print(f"{B_scales.shape=}")
-
+    print(f"{B_q.shape=}")
     A_scales_bf16 = _cast_mxfp8_scales_to_bf16(A_scales)
     B_scales_bf16 = _cast_mxfp8_scales_to_bf16(B_scales)
     # print(f"{A_scales_bf16=}")
@@ -268,5 +274,5 @@ def moe():
 
 
 if __name__ == "__main__":
-    # games()
-    moe()
+    games()
+    # moe()
