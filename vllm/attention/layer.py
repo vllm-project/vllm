@@ -3,7 +3,7 @@
 """Attention layer."""
 
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,6 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionType,
-    MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.common import cp_lse_ag_out_rs
@@ -45,7 +44,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backends.mla.common import reorg_kvcache
+from vllm.v1.attention.backends.mla.common import MLACommonImpl, reorg_kvcache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -687,8 +686,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             use_mla=True,
             use_sparse=use_sparse,
         )
-        impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(
+        impl_cls = cast(type[MLACommonImpl[Any]], self.attn_backend.get_impl_cls())
+        self.impl: MLACommonImpl[Any] = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
