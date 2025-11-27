@@ -227,4 +227,3 @@ ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
-examples/online_serving/disaggregated_serving_p2p_moriio_xpyd/
