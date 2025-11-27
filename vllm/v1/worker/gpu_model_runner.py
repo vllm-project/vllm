@@ -4558,7 +4558,12 @@ class GPUModelRunner(
             layers = get_layers_from_vllm_config(
                 self.vllm_config, layer_type, kv_cache_group_spec.layer_names
             )
-            if not layers:
+            primary_layer = next(iter(layers.values()), None)
+            if primary_layer is None:
+                logger.debug(
+                    "No attention layers found for KV cache group %s on this rank.",
+                    kv_cache_group_spec.layer_names,
+                )
                 return ({}, set())
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
@@ -4567,7 +4572,8 @@ class GPUModelRunner(
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name, layer in layers.items():
+            for layer_name in kv_cache_group_spec.layer_names:
+                layer = layers.get(layer_name, primary_layer)
                 attn_backend = layer.get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
