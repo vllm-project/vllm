@@ -27,6 +27,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.hybrid_attn_layer import HybridAttentionLayer
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -152,6 +153,7 @@ class Step3TextAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_hybrid_attention: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -201,14 +203,31 @@ class Step3TextAttention(nn.Module):
             rope_parameters=rope_parameters,
         )
         scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scaling,
-            self.num_kv_heads,
-            cache_config=cache_config,
-            prefix=f"{prefix}.attn",
-        )
+        if use_hybrid_attention:
+            # Use the hybrid attention layer that combines sliding-window KV
+            # with an SSM history branch. The SSM hyperparameters are kept
+            # simple and proportional to the attention dimensions so that the
+            # adapter can reuse the existing Mamba state pool.
+            self.attn = HybridAttentionLayer(
+                num_heads=self.num_heads,
+                head_size=self.head_dim,
+                scale=scaling,
+                num_kv_heads=self.num_kv_heads,
+                ssm_state_size=self.head_dim,
+                ssm_conv_kernel_size=3,
+                ssm_intermediate_size=self.q_size,
+                cache_config=cache_config,
+                prefix=f"{prefix}.attn",
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                scaling,
+                self.num_kv_heads,
+                cache_config=cache_config,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
@@ -234,6 +253,8 @@ class Step3TextDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
+        use_hybrid_attention = getattr(config, "use_hybrid_step3_attn", False)
+
         self.self_attn = Step3TextAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -246,6 +267,7 @@ class Step3TextDecoderLayer(nn.Module):
             share_q_dim=config.share_q_dim,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
+            use_hybrid_attention=use_hybrid_attention,
         )
 
         layer_idx = int(prefix.split("layers.")[1].split(".")[0])
