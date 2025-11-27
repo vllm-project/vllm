@@ -814,6 +814,9 @@ def test_is_prefix_caching_supported(
     with caplog_vllm.at_level(level=logging.DEBUG):
         assert model_config.is_prefix_caching_supported == expected_result
     assert reason in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
     ("backend", "custom_ops", "expected"),
     [
         ("eager", [], True),

@@ -1864,6 +1864,7 @@ class ModelConfig:
             else:  # attn_type == "decoder"
                 logger.debug("Generative models support prefix caching.")
                 return True
+
     def is_model_moe(
         self,
     ) -> bool:
