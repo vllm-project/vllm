@@ -228,9 +228,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: input_batch.num_reqs + 1]
-        query_start_loc_cpu = query_start_loc.cpu[: input_batch.num_reqs + 1]
         num_computed_tokens = torch.zeros(
             input_batch.num_reqs, dtype=torch.int32, device=self.device
         )
