@@ -1840,7 +1840,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if task_type == "transcribe":
             # For transcription, specify the source language
             if language:
-                prompt_text = f"Transcribe the {cls.supported_languages.get(language, language)} audio into text."
+                prompt_text = (
+                    "Transcribe the "
+                    f"{cls.supported_languages.get(language, language)} "
+                    "audio into text."
+                )
             else:
                 prompt_text = "Transcribe the audio into text."
         elif task_type == "translate":
@@ -1849,7 +1853,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             target_lang_name = cls.supported_languages.get(target_lang, target_lang)
             if language:
                 source_lang_name = cls.supported_languages.get(language, language)
-                prompt_text = f"Listen to the provided {source_lang_name} speech and produce a translation in {target_lang_name} text."
+                prompt_text = (
+                    f"Listen to the provided {source_lang_name} speech and "
+                    f"produce a translation in {target_lang_name} text."
+                )
             else:
                 prompt_text = f"Translate the audio into {target_lang_name} text."
 
