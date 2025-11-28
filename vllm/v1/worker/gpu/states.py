@@ -112,11 +112,10 @@ class RequestState:
         self.extra_data: dict[str, ExtraData] = {}
 
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
-        # NOTE(woosuk): This NumPy array can be extremely large (e.g., several GBs)
+        # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
-        self.prefill_token_ids = np.zeros(
-            (self.max_num_reqs, self.max_model_len),
-            dtype=np.int32,
+        self.prefill_token_ids = UvaBuffer(
+            self.max_num_reqs, self.max_model_len, dtype=torch.int32
         )
         self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
 
@@ -161,14 +160,13 @@ class RequestState:
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
         # Statistics for penalties.
-        # NOTE(woosuk): Because these tensors are large but rarely used, we place them
-        # on CPU and use UVA (Unified Virtual Addressing) to enable GPU kernels to
-        # access them.
-        self.prompt_bin_counts = UvaBuffer(
-            self.max_num_reqs, self.vocab_size, dtype=torch.int32
+        # TODO(woosuk): These tensors are rarely used but can be extremely large.
+        # Optimize the memory usage.
+        self.prompt_bin_counts = torch.zeros(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
-        self.output_bin_counts = UvaBuffer(
-            self.max_num_reqs, self.vocab_size, dtype=torch.int32
+        self.output_bin_counts = torch.zeros(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
 
     def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
@@ -204,7 +202,7 @@ class RequestState:
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
+        self.prefill_token_ids.np[req_idx, :prefill_len] = prefill_token_ids
 
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         # FIXME(woosuk): This triggers a GPU operation whenever adding a new request.
@@ -228,22 +226,13 @@ class RequestState:
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
 
         if use_penalty(sampling_params):
-            # NOTE(woosuk): The synchronization is necessary to avoid race conditions
-            # when using async scheduling. Otherwise, the two tensors may be updated
-            # before/during the penalties kernel is executed in the previous step.
-            # While we can do a more fine-grained synchronization instead of
-            # torch.cuda.synchronize(), I think it's not worth the complexity because
-            # this is a rare feature and the expected performance gain is small.
-            torch.cuda.synchronize()
-            self.prompt_bin_counts.np[req_idx] = np.bincount(
-                prefill_token_ids[:prompt_len], minlength=self.vocab_size
+            bincount(
+                self.prefill_token_ids.gpu[req_idx],
+                prefill_len,
+                prompt_len,
+                self.prompt_bin_counts[req_idx],
+                self.output_bin_counts[req_idx],
             )
-            if prefill_len == prompt_len:
-                self.output_bin_counts.np[req_idx] = 0
-            else:
-                self.output_bin_counts.np[req_idx] = np.bincount(
-                    prefill_token_ids[prompt_len:], minlength=self.vocab_size
-                )
 
         if sampling_params.seed is not None:
             seed = sampling_params.seed
@@ -313,8 +302,8 @@ class RequestState:
             pos=pos,
             max_num_logprobs=max_num_logprobs,
             idx_mapping=idx_mapping,
-            prompt_bin_counts=self.prompt_bin_counts.gpu,
-            output_bin_counts=self.output_bin_counts.gpu,
+            prompt_bin_counts=self.prompt_bin_counts,
+            output_bin_counts=self.output_bin_counts,
         )
 
     def expand_sampling_metadata(
@@ -368,18 +357,18 @@ class Param:
         return self.buffer.copy_to_gpu(n)
 
 
+@dataclass
+class ExtraData:
+    lora_request: LoRARequest | None
+    in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
+
+
 class UvaBuffer:
     def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
         assert is_uva_available()
         self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
         self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
-
-
-@dataclass
-class ExtraData:
-    lora_request: LoRARequest | None
-    in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
 
 
 # NOTE(woosuk): Re-compilation can happen at runtime since top_p and top_k can be None.
@@ -490,4 +479,50 @@ def use_penalty(sampling_params: SamplingParams) -> bool:
         sampling_params.repetition_penalty != 1.0
         or sampling_params.frequency_penalty != 0.0
         or sampling_params.presence_penalty != 0.0
+    )
+
+
+@triton.jit(do_not_specialize=["prefill_len", "prompt_len"])
+def _bincount_kernel(
+    prefill_token_ids_ptr,
+    prefill_len,
+    prompt_len,
+    prompt_bin_counts_ptr,
+    output_bin_counts_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_idx = tl.program_id(0)
+    if block_idx * BLOCK_SIZE >= prefill_len:
+        return
+
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    if block_idx * BLOCK_SIZE < prompt_len:
+        mask = block < prompt_len
+        prefill_tokens = tl.load(prefill_token_ids_ptr + block, mask=mask)
+        tl.atomic_add(prompt_bin_counts_ptr + prefill_tokens, 1, mask=mask)
+    if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
+        mask = block < prefill_len
+        mask &= block >= prompt_len
+        prefill_tokens = tl.load(prefill_token_ids_ptr + block, mask=mask)
+        tl.atomic_add(output_bin_counts_ptr + prefill_tokens, 1, mask=mask)
+
+
+def bincount(
+    prefill_token_ids: torch.Tensor,
+    prefill_len: int,
+    prompt_len: int,
+    prompt_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    prompt_bin_counts.zero_()
+    output_bin_counts.zero_()
+    BLOCK_SIZE = 1024
+    num_blocks = triton.cdiv(prefill_len, BLOCK_SIZE)
+    _bincount_kernel[(num_blocks,)](
+        prefill_token_ids,
+        prefill_len,
+        prompt_len,
+        prompt_bin_counts,
+        output_bin_counts,
+        BLOCK_SIZE=BLOCK_SIZE,
     )

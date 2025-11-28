@@ -359,8 +359,6 @@ def _post_update_kernel(
         )
         tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
 
-    # NOTE(woosuk): This causes CPU-GPU data transfer as output_bin_counts is
-    # a UVA-mapped tensor.
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
         token_ptr = (
