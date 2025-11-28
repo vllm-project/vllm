@@ -15,11 +15,9 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import (
-    get_sentence_transformer_tokenizer_config,
-    list_filtered_repo_files,
-)
+from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import (
     check_gguf_file,
