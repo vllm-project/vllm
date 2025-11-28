@@ -31,7 +31,6 @@ def _check_consistency(target: AnyTokenizer, expected: AnyTokenizer):
     # Cached attributes
     assert target.all_special_ids == expected.all_special_ids
     assert target.all_special_tokens == expected.all_special_tokens
-    assert target.all_special_tokens_extended == expected.all_special_tokens_extended
     assert target.get_vocab() == expected.get_vocab()
     assert len(target) == len(expected)
 

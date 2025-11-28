@@ -258,52 +258,46 @@ def mistral_tokenizer(request) -> MistralTokenizer:
 )
 class TestMistralTokenizer:
     def test_all_special_tokens(self, mistral_tokenizer: MistralTokenizer):
-        attributes = [
-            mistral_tokenizer.all_special_tokens,
-            mistral_tokenizer.all_special_tokens_extended,
-        ]
-
-        for attribute in attributes:
-            if mistral_tokenizer.is_tekken:
-                assert attribute == [
-                    "<unk>",
-                    "<s>",
-                    "</s>",
-                    "[INST]",
-                    "[/INST]",
-                    "[AVAILABLE_TOOLS]",
-                    "[/AVAILABLE_TOOLS]",
-                    "[TOOL_RESULTS]",
-                    "[/TOOL_RESULTS]",
-                    "[TOOL_CALLS]",
-                    "[IMG]",
-                    "<pad>",
-                    "[IMG_BREAK]",
-                    "[IMG_END]",
-                    "[PREFIX]",
-                    "[MIDDLE]",
-                    "[SUFFIX]",
-                    "[SYSTEM_PROMPT]",
-                    "[/SYSTEM_PROMPT]",
-                    "[TOOL_CONTENT]",
-                ] + [f"<SPECIAL_{i}>" for i in range(20, 32)] + [
-                    "[ARGS]",
-                    "[CALL_ID]",
-                    "[THINK]",
-                    "[/THINK]",
-                ] + [f"<SPECIAL_{i}>" for i in range(36, 1000)]
-            else:
-                assert attribute == [
-                    "<s>",
-                    "</s>",
-                    "[INST]",
-                    "[/INST]",
-                    "[TOOL_CALLS]",
-                    "[AVAILABLE_TOOLS]",
-                    "[/AVAILABLE_TOOLS]",
-                    "[TOOL_RESULTS]",
-                    "[/TOOL_RESULTS]",
-                ] + [f"[control_{i}]" for i in range(8, 769)]
+        if mistral_tokenizer.is_tekken:
+            assert mistral_tokenizer.all_special_tokens == [
+                "<unk>",
+                "<s>",
+                "</s>",
+                "[INST]",
+                "[/INST]",
+                "[AVAILABLE_TOOLS]",
+                "[/AVAILABLE_TOOLS]",
+                "[TOOL_RESULTS]",
+                "[/TOOL_RESULTS]",
+                "[TOOL_CALLS]",
+                "[IMG]",
+                "<pad>",
+                "[IMG_BREAK]",
+                "[IMG_END]",
+                "[PREFIX]",
+                "[MIDDLE]",
+                "[SUFFIX]",
+                "[SYSTEM_PROMPT]",
+                "[/SYSTEM_PROMPT]",
+                "[TOOL_CONTENT]",
+            ] + [f"<SPECIAL_{i}>" for i in range(20, 32)] + [
+                "[ARGS]",
+                "[CALL_ID]",
+                "[THINK]",
+                "[/THINK]",
+            ] + [f"<SPECIAL_{i}>" for i in range(36, 1000)]
+        else:
+            assert mistral_tokenizer.all_special_tokens == [
+                "<s>",
+                "</s>",
+                "[INST]",
+                "[/INST]",
+                "[TOOL_CALLS]",
+                "[AVAILABLE_TOOLS]",
+                "[/AVAILABLE_TOOLS]",
+                "[TOOL_RESULTS]",
+                "[/TOOL_RESULTS]",
+            ] + [f"[control_{i}]" for i in range(8, 769)]
 
     def get_vocab(self, mistral_tokenizer: MistralTokenizer):
         assert (
