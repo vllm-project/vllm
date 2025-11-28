@@ -33,7 +33,6 @@ from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.attention.ops.vit_attn_wrappers import (

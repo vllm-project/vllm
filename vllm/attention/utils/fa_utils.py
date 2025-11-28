@@ -28,7 +28,6 @@ elif current_platform.is_rocm():
         ) from e
 
 
-
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform

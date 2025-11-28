@@ -56,7 +56,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 
 
-
 def maybe_get_vit_flash_attn_backend(
     attn_backend: AttentionBackendEnum,
     attn_backend_override: AttentionBackendEnum | None = None,
@@ -64,8 +63,11 @@ def maybe_get_vit_flash_attn_backend(
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = AttentionBackendEnum.ROCM_AITER_FA
-        elif attn_backend_override is None and on_gfx9() \
-                and attn_backend == AttentionBackendEnum.FLASH_ATTN:
+        elif (
+            attn_backend_override is None
+            and on_gfx9()
+            and attn_backend == AttentionBackendEnum.FLASH_ATTN
+        ):
             pass
         else:
             return AttentionBackendEnum.TORCH_SDPA, None
@@ -471,7 +473,6 @@ class MultiHeadAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-
         self.attn_backend = (
             backend
             if backend
@@ -496,9 +497,8 @@ class MultiHeadAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-
         logger.info_once(
-            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
+            f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
 
     def forward(
