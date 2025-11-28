@@ -575,6 +575,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.cp_world_size = self.dcp_world_size * self.pcp_world_size
         self.cp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.cp_world_size
+        # TODO(yyj) Remove this once the PCP bug for decode_length > 1 is fixed.
+        supports_cp_with_varlen = supports_cp_with_varlen and self.pcp_world_size == 1
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
