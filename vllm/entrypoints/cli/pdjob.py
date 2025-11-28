@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import time
 import uuid
 
 import ray
@@ -64,14 +63,8 @@ class PDDisaggregatedJobCommand(CLISubcommand):
             raise ValueError(f"Unrecognized kv_connector: {config.kv_connector}. "
                              f"Supported connectors: {', '.join(supported_connectors)}")
 
+        # job.start() contains internal while loop and handles shutdown
         job.start()
-
-        try:
-            while True:
-                # Wait for 1 second
-                time.sleep(1)
-        except KeyboardInterrupt:
-            ray.shutdown()
 
     def validate(self, args: argparse.Namespace) -> None:
         return

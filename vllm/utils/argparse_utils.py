@@ -461,37 +461,58 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    # NOTE(Jacky): The following _pull_args_from_dict method is added for PDJob YAML adaptation.
-    # It is used to convert a dict of arguments (from YAML config) into a list of CLI-style
+    # NOTE(Jacky): The following methods are added for PDJob YAML adaptation.
+    # They convert a dict of arguments (from YAML config) into a list of CLI-style
     # arguments for argparse. This logic is specific for vLLM PDJob YAML scenarios.
-    def _pull_args_from_dict(self, args: dict[str, Any], extra_params: str) -> list[str]:
+
+    def _is_boolean_like(self, value: Any) -> bool:
+        """Check if value is a boolean or boolean-like string."""
+        if isinstance(value, bool):
+            return True
+        return isinstance(value, str) and value.lower() in ("true", "false")
+
+    def _is_truthy(self, value: Any) -> bool:
+        """Check if value represents a truthy boolean."""
+        if isinstance(value, bool):
+            return value
+        return isinstance(value, str) and value.lower() == "true"
+
+    def _format_boolean_arg(self, key: str, value: Any) -> list[str]:
+        """Format a boolean argument as CLI flag."""
+        flag = '--' + key if self._is_truthy(value) else '--no-' + key
+        return [flag]
+
+    def _format_regular_arg(self, key: str, value: Any) -> list[str]:
+        """Format a regular argument as CLI key-value pair."""
+        return ['--' + key, str(value)]
+
+    def _process_arg(self, key: str, value: Any,
+                     store_boolean_args: set[str]) -> list[str]:
+        """Process a single argument and return formatted CLI arguments."""
+        if key == "model":
+            return []
+        use_boolean_format = (self._is_boolean_like(value) and
+                              key not in store_boolean_args)
+        if use_boolean_format:
+            return self._format_boolean_arg(key, value)
+        return self._format_regular_arg(key, value)
+
+    def _pull_args_from_dict(self, args: dict[str, Any],
+                             extra_params: str) -> list[str]:
         """Pulls arguments from a dictionary and returns them as a list of strings.
         This is used to convert a dictionary of arguments into a format that can
         be passed to the ArgumentParser.
         """
-        store_boolean_arguments = [
+        store_boolean_args = {
             action.dest for action in self._actions
             if isinstance(action, StoreBoolean)
-        ]
-        logger.info(f"show the store_boolean_arguments: {store_boolean_arguments}")
+        }
+        logger.info(f"show the store_boolean_arguments: {store_boolean_args}")
+
         processed_args = ["serve", args["model"]]
         for key, value in args.items():
-            if key == "model":
-                continue
-            elif (isinstance(value, bool) or
-                (isinstance(value, str) and value.lower() in ("true", "false"))) and key not in store_boolean_arguments:
-                is_true = (isinstance(value, bool) and value) or \
-                        (isinstance(value, str) and value.lower() == "true")
-                is_false = (isinstance(value, bool) and not value) or \
-                        (isinstance(value, str) and value.lower() == "false")
-                if is_true:
-                    processed_args.append('--' + key)
-                elif is_false:
-                    processed_args.append('--no-' + key)  
-            else:
-                processed_args.append('--' + key)
-                processed_args.append(str(value))
-        # Handle extra_params string if provided
+            processed_args.extend(self._process_arg(key, value, store_boolean_args))
+
         extra_params_list = shlex.split(extra_params)
         processed_args.extend(extra_params_list)
         return processed_args
