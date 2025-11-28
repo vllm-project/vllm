@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -31,15 +32,14 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-    from aiter.ops.triton.utils.device_info import get_num_sms
 
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
-    def num_programs(head_dim):
-        return min(head_dim, get_num_sms())
+    def num_programs(total_tokens):
+        return min(total_tokens, get_cu_count())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
@@ -58,11 +58,11 @@ if current_platform.is_rocm():
         x,
         max_block_num,
         num_tokens,
+        num_programs,
         DEQUANT: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
-        NUM_PRGMS: tl.constexpr,
     ):
         bid = tl.program_id(0)
         col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -70,7 +70,7 @@ if current_platform.is_rocm():
             k_scale = tl.load(k_scale_ptr)
             v_scale = tl.load(v_scale_ptr)
 
-        for token_id in tl.range(bid, num_tokens, NUM_PRGMS):
+        for token_id in tl.range(bid, num_tokens, num_programs):
             key_ptr_offset = key_ptr + token_id * head_size * num_heads
             value_ptr_offset = value_ptr + token_id * head_size * num_heads
             batch_idx = tl.load(token_to_batch_ptr + token_id)
@@ -162,11 +162,11 @@ if current_platform.is_rocm():
             x,
             block_tables.size(1),
             total_tokens,
+            NUM_PRGMS,
             DEQUANT=dequant,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
             BLOCK_SIZE=BLOCK_SIZE,
-            NUM_PRGMS=NUM_PRGMS,
         )
 
 
@@ -447,7 +447,10 @@ class AiterFlashAttentionMetadataBuilder(
 class AiterFlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -514,12 +517,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "FlashAttentionImpl"
+                "Encoder self-attention is not implemented for FlashAttentionImpl"
             )
 
     def extend_forward(
@@ -675,7 +675,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(0)
-        if self.kv_sharing_target_layer_name is None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping
@@ -701,8 +708,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens]
-        value = value[:num_actual_tokens]
+        if key is not None:
+            key = key[:num_actual_tokens]
+        if value is not None:
+            value = value[:num_actual_tokens]
 
         output_actual_tokens = output[:num_actual_tokens]
 
@@ -729,7 +738,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.prefill_metadata.min_query_len,
+                    min_seqlen_q=1,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
                     causal=True,
@@ -759,7 +768,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.extend_metadata.min_query_len,
+                    min_seqlen_q=1,
                     block_table=attn_metadata.block_table[
                         num_decodes : num_decodes + num_extends
                     ],

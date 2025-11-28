@@ -15,6 +15,9 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
+# This import automatically registers `torch.ops.silly.attention`
+from . import silly_attention  # noqa: F401
+
 
 def test_version():
     # Test the version comparison logic using the private function
@@ -169,8 +172,8 @@ def test_splitting_ops_dynamic():
     config = VllmConfig()
     # Default V1 config leaves cudagraph mode unset; splitting ops are only
     # populated when the engine decides to use piecewise compilation.
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert not config.compilation_config.splitting_ops_contain_attention()
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
     config = VllmConfig(
@@ -256,15 +259,6 @@ def test_should_split():
     # supports OpOverload
     splitting_ops = ["aten::add.Tensor"]
     assert not should_split(node, splitting_ops)
-
-    @torch.library.custom_op(
-        "silly::attention",
-        mutates_args=["out"],
-    )
-    def attention(
-        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor
-    ) -> None:
-        out.copy_(q + k + v)
 
     q, k, v, out = [torch.randn(1)] * 4
 
