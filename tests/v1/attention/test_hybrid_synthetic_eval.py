@@ -101,6 +101,7 @@ def test_hybrid_attention_prefix_sum_synthetic_task():
     class _Meta:
         def __init__(self, num_actual_tokens: int):
             self.num_actual_tokens = num_actual_tokens
+            self.triton_metadata = None
 
     attn_metadata = _Meta(num_tokens)
 
