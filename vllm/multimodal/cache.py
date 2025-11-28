@@ -303,10 +303,7 @@ class BaseMultiModalProcessorCache(
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
     @abstractmethod
-    def touch_cache_sender(
-        self,
-        mm_hash: str,
-    ) -> None:
+    def touch_cache_sender(self, mm_hash: str) -> None:
         """
         Update the cache eviction order for a multi-modal item.
 
@@ -370,10 +367,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
-    def touch_cache_sender(
-        self,
-        mm_hash: str,
-    ) -> None:
+    def touch_cache_sender(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
 
     @override
@@ -431,10 +425,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
-    def touch_cache_sender(
-        self,
-        mm_hash: str,
-    ) -> None:
+    def touch_cache_sender(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
 
     @override
@@ -532,10 +523,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             return mm_item
 
     @override
-    def touch_cache_sender(
-        self,
-        mm_hash: str,
-    ) -> None:
+    def touch_cache_sender(self, mm_hash: str) -> None:
         """Touch the item in shared memory cache to prevent eviction.
         Increments writer_flag on sender side."""
         if self._shm_cache.is_cached(mm_hash):
