@@ -1341,16 +1341,23 @@ class OpenAIServing:
         return None
 
     @staticmethod
-    def _base_request_id(
-        raw_request: Request | None, default: str | None = None
-    ) -> str | None:
-        """Pulls the request id to use from a header, if provided"""
-        if raw_request is not None and (
-            (req_id := raw_request.headers.get("X-Request-Id")) is not None
-        ):
-            return req_id
+    def _internal_request_id(
+        raw_request: Request | None, prefix: str, client_request_id: str | None = None
+    ) -> str:
+        """Construct an internal request ID.
 
-        return random_uuid() if default is None else default
+        If the client provides a request ID - either via an explicit field
+        in the request (e.g. CompletionRequest.request_id) or via an
+        X-Request-Id header, we include this in the internal request ID
+        along with a per-endpoint prefix and 8 random characters to ensure
+        uniqueness.
+        """
+        if raw_request is not None and "X-Request-Id" in raw_request.headers:
+            client_request_id = raw_request.headers["X-Request-Id"]
+        if client_request_id:
+            return f"{prefix}-{random_uuid()[:8]}-{client_request_id}"
+        else:
+            return f"{prefix}-{random_uuid()}"
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
