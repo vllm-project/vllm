@@ -16,7 +16,6 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vllm.entrypoints.cli.pd.base import BasePDJob, _BaseVllmService, Service, PORT_PLACE_HOLDER, \
     KV_IP_PLACE_HOLDER, NODE_NAME_PLACE_HOLDER, ServiceType, RankIDGenerator
-from vllm.entrypoints.cli.pd.config import Config
 from vllm.logger import init_logger
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
@@ -97,10 +96,6 @@ class MultiplePrefillsPDJob(BasePDJob):
     services, handling their startup, configuration, and coordination.
     The first Prefill service acts as the KV store coordinator.
     """
-    def __init__(self,
-                 job_id: str,
-                 config: Config):
-        super().__init__(job_id, config)
 
     def _start_single_service(self,
                               rank_id: int,
