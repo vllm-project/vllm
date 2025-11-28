@@ -32,8 +32,8 @@ class NaiveAll2AllManager(All2AllManagerBase):
     debugging.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def naive_multicast(
         self,
@@ -105,8 +105,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def dispatch(
         self,
@@ -155,13 +155,16 @@ class PPLXAll2AllManager(All2AllManagerBase):
     All2All communication based on PPLX kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_pplx(), (
             "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install pplx_kernels."
         )
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
+        self.nvshmem_initialized = False
+        self.handle_cache = Cache()
 
+    def get_handle(self, kwargs):
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly
@@ -181,17 +184,18 @@ class PPLXAll2AllManager(All2AllManagerBase):
                 if self.rank == 0
                 else nvshmem_alloc_empty_unique_id()
             )
-            dist.broadcast(
-                uid,
-                src=dist.get_process_group_ranks(self.cpu_group)[0],
-                group=self.cpu_group,
-            )
+            if self.tcp_store_group is not None:
+                uid = self.tcp_store_group.broadcast_obj(uid, src=0)
+            else:
+                dist.broadcast(
+                    uid,
+                    src=dist.get_process_group_ranks(self.cpu_group)[0],
+                    group=self.cpu_group,
+                )
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
+            self.nvshmem_initialized = True
 
-        self.handle_cache = Cache()
-
-    def get_handle(self, kwargs):
         import pplx_kernels as pplx  # type: ignore[import-not-found]
 
         return self.handle_cache.get_or_create(
@@ -231,12 +235,12 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
             "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install DeepEP kernels."
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         self.handle_cache = Cache()
 
         # This is the DeepEP default. Stick to it till we can establish
@@ -268,8 +272,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -325,8 +329,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP Low-Latency kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(
         self,
@@ -396,11 +400,11 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     rank: int
     world_size: int
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_flashinfer_all2all(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         logger.debug(
             "Initialize for flashinfer All2All rank=%d, world size=%d",
             self.rank,

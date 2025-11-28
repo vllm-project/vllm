@@ -346,6 +346,8 @@ class GPUModelRunner(
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: EplbState | None = None
+        # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
+        self.eep_eplb_suppressed = False
         """
         State of the expert parallelism load balancer.
 
@@ -2312,7 +2314,7 @@ class GPUModelRunner(
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.parallel_config.enable_eplb:
+        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
 
         assert self.eplb_state is not None
@@ -2322,6 +2324,23 @@ class GPUModelRunner(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
+        )
+
+    def setup_eplb_from_mapping(
+        self,
+        expanded_physical_to_logical: torch.Tensor,
+        old_num_physical_experts: int,
+    ) -> None:
+        model = self.get_model()
+        assert is_mixture_of_experts(model)
+
+        self.eplb_state = EplbState.from_mapping(
+            model=model,
+            model_config=self.model_config,
+            device=self.device,
+            parallel_config=self.parallel_config,
+            expanded_physical_to_logical=expanded_physical_to_logical,
+            num_valid_physical_experts=old_num_physical_experts,
         )
 
     def _pool(
@@ -3414,20 +3433,15 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, dummy_weights: bool = False) -> None:
         """
         Args:
-            eep_scale_up: the model loading is for elastic EP scale up.
+            dummy_weights: load dummy weights instead of real weights.
         """
         logger.info_once(
             "Starting to load model %s...",
             self.model_config.model,
             scope="global",
-        )
-        global_expert_loads, old_global_expert_indices_per_model, rank_mapping = (
-            EplbState.get_eep_state(self.parallel_config)
-            if eep_scale_up
-            else (None, None, None)
         )
 
         if self.parallel_config.enable_eplb:
@@ -3435,6 +3449,8 @@ class GPUModelRunner(
             eplb_models = 0
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
+            if dummy_weights:
+                self.load_config.load_format = "dummy"
             model_loader = get_model_loader(self.load_config)
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config
@@ -3458,25 +3474,15 @@ class GPUModelRunner(
                         "EPLB is enabled for drafter model %s.",
                         spec_config.draft_model_config.model,
                     )
+                    assert not self.parallel_config.enable_elastic_ep, (
+                        "Elastic EP is not supported with draft model yet."
+                    )
 
-                    global_expert_load = (
-                        global_expert_loads[eplb_models]
-                        if global_expert_loads
-                        else None
-                    )
-                    old_global_expert_indices = (
-                        old_global_expert_indices_per_model[eplb_models]
-                        if old_global_expert_indices_per_model
-                        else None
-                    )
                     if self.eplb_state is None:
                         self.eplb_state = EplbState(self.parallel_config, self.device)
                     self.eplb_state.add_model(
                         self.drafter.model,
                         spec_config.draft_model_config,
-                        global_expert_load,
-                        old_global_expert_indices,
-                        rank_mapping,
                     )
                     eplb_models += 1
 
@@ -3507,11 +3513,12 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
-        prepare_communication_buffer_for_model(self.model)
-        if (drafter := getattr(self, "drafter", None)) and (
-            drafter_model := getattr(drafter, "model", None)
-        ):
-            prepare_communication_buffer_for_model(drafter_model)
+        if not dummy_weights:
+            prepare_communication_buffer_for_model(self.model)
+            if (drafter := getattr(self, "drafter", None)) and (
+                drafter_model := getattr(drafter, "model", None)
+            ):
+                prepare_communication_buffer_for_model(drafter_model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -3519,26 +3526,19 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
+        if (
+            is_mixture_of_experts(self.model)
+            and self.parallel_config.enable_eplb
+            and not dummy_weights
+        ):
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
-            global_expert_load = (
-                global_expert_loads[eplb_models] if global_expert_loads else None
-            )
-            old_global_expert_indices = (
-                old_global_expert_indices_per_model[eplb_models]
-                if old_global_expert_indices_per_model
-                else None
-            )
             assert self.eplb_state is not None
             self.eplb_state.add_model(
                 self.model,
                 self.model_config,
-                global_expert_load,
-                old_global_expert_indices,
-                rank_mapping,
             )
             if self.eplb_state.is_async:
-                self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
+                self.eplb_state.start_async_loop()
 
         if (
             self.vllm_config.compilation_config.mode
