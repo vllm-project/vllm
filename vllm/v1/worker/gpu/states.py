@@ -66,9 +66,10 @@ class SamplingMetadata:
 
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         # NOTE(woosuk): These are placeholder tensors to avoid None checks in the
-        # penalties kernel.
-        prompt_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
-        output_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
+        # penalties kernel. We use 2 instead of 1 as vocab_size to avoid Triton
+        # specialization and re-compilation at runtime.
+        prompt_bin_counts = torch.zeros(num_reqs, 2, dtype=torch.int32, device=device)
+        output_bin_counts = torch.zeros(num_reqs, 2, dtype=torch.int32, device=device)
 
         return cls(
             temperature=temperature,
@@ -160,6 +161,9 @@ class RequestState:
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
         # Statistics for penalties.
+        # NOTE(woosuk): Because these tensors are large but rarely used, we place them
+        # on CPU and use UVA (Unified Virtual Addressing) to enable GPU kernels to
+        # access them.
         self.prompt_bin_counts = UvaBuffer(
             self.max_num_reqs, self.vocab_size, dtype=torch.int32
         )
