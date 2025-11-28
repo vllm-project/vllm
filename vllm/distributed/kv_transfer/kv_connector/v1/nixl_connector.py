@@ -210,6 +210,7 @@ class ReqMeta:
     remote_host: str
     remote_port: int
     remote_engine_id: str
+    remote_request_id: str
     tp_size: int
 
 
@@ -236,6 +237,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_request_id=kv_transfer_params["remote_request_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
@@ -622,7 +624,12 @@ class NixlConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(
                     p in params
-                    for p in ("remote_engine_id", "remote_host", "remote_port")
+                    for p in (
+                        "remote_engine_id",
+                        "remote_request_id",
+                        "remote_host",
+                        "remote_port",
+                    )
                 ):
                     # If remote_blocks and num_external_tokens = 0, we have
                     # a full prefix cache hit on the D worker. We need to call
@@ -751,6 +758,7 @@ class NixlConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
+            remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
@@ -1970,6 +1978,7 @@ class NixlConnectorWorker:
         self._read_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
+            remote_request_id=meta.remote_request_id,
             local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=meta.remote_block_ids,
         )
@@ -1980,6 +1989,7 @@ class NixlConnectorWorker:
         remote_block_ids: list[int],
         dst_engine_id: str,
         request_id: str,
+        remote_request_id: str,
     ):
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
@@ -2012,7 +2022,7 @@ class NixlConnectorWorker:
         # Number of D TP workers that will read from dst P. Propagate tp_ratio
         # on notification so that dst worker can wait before freeing blocks.
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(dst_engine_id)
-        notif_id = f"{request_id}:{tp_ratio}".encode()
+        notif_id = f"{remote_request_id}:{tp_ratio}".encode()
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
