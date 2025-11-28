@@ -639,8 +639,8 @@ class SingleWriterShmObjectStorage:
 
         Args:
             key: String key of the object to touch
-            is_writer: If True, increment writer_flag (sender side).
-                      If False, increment reader_count (receiver side).
+            address: Address of the object (only for readers)
+            monotonic_id: Monotonic ID of the object (only for readers)
 
         """
 
