@@ -90,7 +90,7 @@ __global__ void moe_align_block_size_kernel(
     bool has_expert_map) {
   extern __shared__ int32_t shared_counts[];
 
-  // Use a separate thread block to populate sorted_token_ids.
+  // Use a separate threadblock to fill sorted_token_ids.
   // This is safe since the current kernel does not use sorted_token_ids.
   if (blockIdx.x == 1) {
     // Initialize sorted_token_ids with numel
@@ -352,6 +352,8 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               ((threads + 1) * num_experts + (num_experts + 1)) *
               sizeof(int32_t);
 
+          // threadIdx.x >= fill_threads: counting experts and aligning
+          // threadIdx.x < fill_threads: filling sorted_token_ids
           constexpr int32_t fill_threads = 256;
           auto small_batch_expert_kernel =
               vllm::moe::moe_align_block_size_small_batch_expert_kernel<
@@ -373,6 +375,9 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
           size_t shared_mem_size =
               num_warps * experts_per_warp * sizeof(int32_t);
 
+          // launch two threadblocks
+          // blockIdx.x == 0: counting experts and aligning
+          // blockIdx.x == 1: filling sorted_token_ids
           align_kernel<<<2, threads, shared_mem_size, stream>>>(
               topk_ids.data_ptr<scalar_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
