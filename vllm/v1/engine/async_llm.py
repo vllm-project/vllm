@@ -302,10 +302,6 @@ class AsyncLLM(EngineClient):
             request = prompt
         else:
             assert prompt_text is None
-            logger.warning_once(
-                "Processor has been moved under OpenAIServing and will "
-                "be removed from AsyncLLM in v0.13."
-            )
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
