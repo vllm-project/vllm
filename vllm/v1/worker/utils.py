@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import torch
@@ -363,3 +364,17 @@ def is_residual_scattered_for_sp(
     if compile_sizes is None:
         return False
     return num_input_tokens in compile_sizes
+
+
+@contextmanager
+def async_barrier(event: torch.Event | None):
+    # Ensure prior step has finished with reused CPU tensors.
+    # This is required in the async scheduling case because
+    # the CPU->GPU transfer happens async.
+    if event is not None:
+        event.synchronize()
+    try:
+        yield
+    finally:
+        if event is not None:
+            event.record()

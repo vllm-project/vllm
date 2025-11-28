@@ -3,6 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -43,6 +44,10 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.utils import async_barrier
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -54,7 +59,7 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner=None,
+        runner: "GPUModelRunner | None" = None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
@@ -156,6 +161,9 @@ class EagleProposer:
             device=device,
             with_numpy=True,
         )
+        self.backup_next_token_ids_event: torch.Event | None = None
+        if vllm_config.scheduler_config.async_scheduling:
+            self.backup_next_token_ids_event = torch.Event()
 
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
@@ -249,19 +257,20 @@ class EagleProposer:
         else:
             attn_metadata_builder = self.attn_metadata_builder
 
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0
-        )
-        # FIXME: support hybrid kv for draft model (remove separate indexer)
-        if self.draft_indexer_metadata_builder:
-            draft_indexer_metadata = (
-                self.draft_indexer_metadata_builder.build_for_drafting(
-                    common_attn_metadata=common_attn_metadata,
-                    draft_index=0,
-                )
+        with async_barrier(self.runner.prepare_inputs_event):
+            attn_metadata = attn_metadata_builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata, draft_index=0
             )
-        else:
-            draft_indexer_metadata = None
+            # FIXME: support hybrid kv for draft model (remove separate indexer)
+            if self.draft_indexer_metadata_builder:
+                draft_indexer_metadata = (
+                    self.draft_indexer_metadata_builder.build_for_drafting(
+                        common_attn_metadata=common_attn_metadata,
+                        draft_index=0,
+                    )
+                )
+            else:
+                draft_indexer_metadata = None
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
         per_layer_attn_metadata = {}
@@ -469,9 +478,11 @@ class EagleProposer:
             )
 
             # Rebuild attention metadata
-            attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
-                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
-            )
+            with async_barrier(self.runner.prepare_inputs_event):
+                attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=token_index + 1,
+                )
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -571,15 +582,17 @@ class EagleProposer:
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
+        backup_next_token_ids = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
+                requests[req_id].get_token_id(seq_len)
+                for req_id, seq_len in zip(
+                    gpu_input_batch.req_ids, common_attn_metadata.seq_lens_cpu.numpy()
                 )
-                for i in range(num_reqs)
             ]
         )
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        with async_barrier(self.backup_next_token_ids_event):
+            self.backup_next_token_ids.np[:num_reqs] = backup_next_token_ids
+            self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[
@@ -687,6 +700,7 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
+        assert self.runner is not None
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0
         ].get_metadata_builder()
@@ -1202,6 +1216,7 @@ class EagleProposer:
         builder = None
         chosen_layer = self.attn_layer_names[0]
 
+        assert self.runner is not None
         for kv_cache_group in self.runner.attn_groups:
             for attn_group in kv_cache_group:
                 if chosen_layer in attn_group.layer_names:

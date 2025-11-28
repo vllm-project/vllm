@@ -68,8 +68,8 @@ class CachedRequestState:
                     "provided via prompt_embeds, and its ID is unknown."
                 )
             return self.prompt_token_ids[idx]
-        if idx - self.num_prompt_tokens < len(self.output_token_ids):
-            return self.output_token_ids[idx - self.num_prompt_tokens]
+        if (out_idx := idx - self.num_prompt_tokens) < len(self.output_token_ids):
+            return self.output_token_ids[out_idx]
         return -1
 
 

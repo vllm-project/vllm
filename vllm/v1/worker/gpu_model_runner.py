@@ -154,7 +154,7 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import async_barrier, is_residual_scattered_for_sp
 
 from .utils import (
     AttentionGroup,
@@ -2657,21 +2657,6 @@ class GPUModelRunner(
             invalid_req_indices,
         )
 
-    @contextmanager
-    def synchronize_input_prep(self):
-        if self.prepare_inputs_event is None:
-            yield
-            return
-
-        # Ensure prior step has finished with reused CPU tensors.
-        # This is required in the async scheduling case because
-        # the CPU->GPU transfer happens async.
-        self.prepare_inputs_event.synchronize()
-        try:
-            yield
-        finally:
-            self.prepare_inputs_event.record()
-
     def _model_forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -2813,7 +2798,7 @@ class GPUModelRunner(
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("gpu_model_runner: preprocess"):
-            with self.synchronize_input_prep():
+            with async_barrier(self.prepare_inputs_event):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
