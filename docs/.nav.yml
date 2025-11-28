@@ -52,6 +52,7 @@ nav:
       - Plugins:
         - design/*plugin*.md
       - design/*
+  - Benchmarking: benchmarking
   - API Reference:
     - api/README.md
     - api/vllm
