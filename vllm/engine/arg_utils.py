@@ -83,10 +83,10 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import (
-    get_model_path,
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage, is_gguf
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
@@ -1954,7 +1954,9 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self,
+        usage_context: UsageContext | None,
+        model_config: ModelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
