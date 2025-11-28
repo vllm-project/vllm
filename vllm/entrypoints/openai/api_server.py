@@ -287,6 +287,7 @@ def mount_metrics(app: FastAPI):
             "/ping",
             "/version",
             "/server_info",
+            "/mm-processor-stats",
         ],
         registry=registry,
     ).add().instrument(app).expose(app, response_class=PrometheusResponse)
@@ -391,6 +392,39 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
+
+
+@router.get("/mm-processor-stats")
+async def get_mm_processor_stats(request: Request):
+    """
+    Get multimodal processor timing statistics.
+
+    This endpoint is used by benchmarks to collect MM processor timing stats
+    from multiple vLLM instances. Returns all available stats in the registry.
+
+    Returns:
+        JSON response with timing statistics for all requests.
+    """
+    import vllm.envs as envs
+
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return JSONResponse(
+            content={
+                "error": "MM processor stats collection is not enabled. "
+                "Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
+            },
+            status_code=400,
+        )
+
+    from vllm.multimodal.processing import (
+        _timing_stats_registry,
+        _timing_stats_registry_lock,
+    )
+    with _timing_stats_registry_lock:
+        all_stats = {
+            rid: stats.to_dict() for rid, stats in _timing_stats_registry.items()
+        }
+    return JSONResponse(content={"stats": all_stats})
 
 
 @router.post("/pause")
@@ -1160,6 +1194,33 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("Resetting multi-modal cache...")
         await engine_client(raw_request).reset_mm_cache()
         return Response(status_code=200)
+
+    @router.post("/clear_mm_processor_stats")
+    async def clear_mm_processor_stats(raw_request: Request):
+        """
+        Clear all multimodal processor timing stats from the registry.
+        """
+        import vllm.envs as envs
+
+        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+            return JSONResponse(
+                content={
+                    "error": "MM processor stats collection is not enabled. "
+                    "Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
+                },
+                status_code=400,
+            )
+
+        from vllm.multimodal.processing import (
+            clear_mm_processor_timing_stats_registry,
+        )
+
+        count = clear_mm_processor_timing_stats_registry()
+        logger.info(f"Cleared {count} MM processor timing stats from registry")
+        return JSONResponse(
+            content={"status": "cleared", "count": count},
+            status_code=200,
+        )
 
     @router.post("/sleep")
     async def sleep(raw_request: Request):

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
@@ -22,6 +24,7 @@ import regex as re
 import torch
 from typing_extensions import TypeVar, assert_never
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer, decode_tokens, encode_tokens
@@ -69,6 +72,134 @@ else:
 logger = init_logger(__name__)
 
 _S = TypeVar("_S", str, list[int])
+
+
+@dataclass
+class MultiModalProcessorTimingStats:
+    """Per-request timing statistics for multimodal processor stages."""
+
+    hf_processor_time: float = 0.0
+    """Time spent in HuggingFace processor calls (seconds)."""
+
+    hashing_time: float = 0.0
+    """Time spent computing multimodal item hashes (seconds)."""
+
+    cache_lookup_time: float = 0.0
+    """Time spent in cache lookups and merges (seconds)."""
+
+    prompt_update_time: float = 0.0
+    """Time spent applying prompt updates and finding placeholders (seconds)."""
+
+    total_time: float = 0.0
+    """Total processing time (seconds)."""
+
+    def to_dict(self) -> dict[str, float]:
+        """Convert stats to a dictionary for JSON serialization."""
+        return {
+            "hf_processor_time": self.hf_processor_time,
+            "hashing_time": self.hashing_time,
+            "cache_lookup_time": self.cache_lookup_time,
+            "prompt_update_time": self.prompt_update_time,
+            "total_time": self.total_time,
+        }
+
+_timing_stats_local = threading.local()
+
+_timing_stats_registry: dict[str, MultiModalProcessorTimingStats] = {}
+_timing_stats_registry_lock = threading.Lock()
+
+
+def _get_timing_stats() -> MultiModalProcessorTimingStats | None:
+    """Get the current thread's timing stats, if enabled."""
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return None
+    if not hasattr(_timing_stats_local, "stats"):
+        _timing_stats_local.stats = MultiModalProcessorTimingStats()
+    return _timing_stats_local.stats
+
+
+def _clear_timing_stats() -> MultiModalProcessorTimingStats | None:
+    """Clear and return the current thread's timing stats."""
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return None
+    stats = getattr(_timing_stats_local, "stats", None)
+    if hasattr(_timing_stats_local, "stats"):
+        delattr(_timing_stats_local, "stats")
+    return stats
+
+
+def get_mm_processor_timing_stats() -> MultiModalProcessorTimingStats | None:
+    """
+    Get the current thread's multimodal processor timing stats.
+
+    Returns None if timing is disabled or no stats are available.
+    This function is intended to be called by benchmarks to collect
+    per-request timing data.
+    """
+    return _get_timing_stats()
+
+
+def clear_mm_processor_timing_stats() -> MultiModalProcessorTimingStats | None:
+    """
+    Clear and return the current thread's multimodal processor timing stats.
+
+    Returns None if timing is disabled or no stats are available.
+    This function is intended to be called by benchmarks after processing
+    a request to retrieve and reset the stats.
+    """
+    return _clear_timing_stats()
+
+
+def store_mm_processor_timing_stats(
+    request_id: str, stats: MultiModalProcessorTimingStats
+) -> None:
+    """
+    Store timing stats in the global registry keyed by request_id.
+
+    This allows benchmarks to retrieve stats after request processing.
+    """
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return
+    with _timing_stats_registry_lock:
+        _timing_stats_registry[request_id] = stats
+
+
+def clear_mm_processor_timing_stats_registry() -> int:
+    """
+    Clear all stats from the global registry.
+
+    Returns the number of stats cleared.
+    """
+    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        return 0
+    with _timing_stats_registry_lock:
+        count = len(_timing_stats_registry)
+        _timing_stats_registry.clear()
+        return count
+
+
+@contextmanager
+def _timed_operation(stage_name: str):
+    """Context manager to time an operation and add it to the current stats."""
+    stats = _get_timing_stats()
+    if stats is None:
+        yield
+        return
+
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        if stage_name == "hf_processor":
+            stats.hf_processor_time += elapsed
+        elif stage_name == "hashing":
+            stats.hashing_time += elapsed
+        elif stage_name == "cache_lookup":
+            stats.cache_lookup_time += elapsed
+        elif stage_name == "prompt_update":
+            stats.prompt_update_time += elapsed
+
 
 PromptSeq: TypeAlias = str | list[int]
 """A token sequence (list of token IDs) or text."""
@@ -1466,11 +1597,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
+        with _timed_operation("hf_processor"):
+            return self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompt, **mm_data),
+                dict(**mm_kwargs, **tok_kwargs),
+            )
 
     def _hf_processor_applies_updates(
         self,
@@ -1818,12 +1950,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = self._hash_mm_items(
-            mm_data_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with _timed_operation("hashing"):
+            mm_hashes = self._hash_mm_items(
+                mm_data_items,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
@@ -1864,18 +1997,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_uuids=mm_uuids,
             )
 
-        mm_hashes = self._hash_mm_items(
-            mm_data_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        with _timed_operation("hashing"):
+            mm_hashes = self._hash_mm_items(
+                mm_data_items,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
 
-        mm_missing_data_items = self._get_cache_missing_items(
-            cache=cache,
-            mm_data_items=mm_data_items,
-            mm_hashes=mm_hashes,
-        )
+        with _timed_operation("cache_lookup"):
+            mm_missing_data_items = self._get_cache_missing_items(
+                cache=cache,
+                mm_data_items=mm_data_items,
+                mm_hashes=mm_hashes,
+            )
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1905,12 +2040,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs,
         )
 
-        mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
-            cache,
-            mm_hashes=mm_hashes,
-            mm_missing_kwargs=mm_missing_kwargs,
-            mm_missing_prompt_updates=mm_missing_prompt_updates,
-        )
+        with _timed_operation("cache_lookup"):
+            mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+                cache,
+                mm_hashes=mm_hashes,
+                mm_missing_kwargs=mm_missing_kwargs,
+                mm_missing_prompt_updates=mm_missing_prompt_updates,
+            )
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
@@ -2096,6 +2232,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
+        stats = _get_timing_stats()
+        total_start = time.perf_counter() if stats is not None else None
+
         mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
@@ -2114,18 +2253,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
-        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
-            mm_items=mm_items,
-            prompt_ids=prompt_ids,
-            mm_kwargs=mm_info.kwargs,
-            mm_prompt_updates=mm_info.prompt_updates,
-            is_update_applied=is_update_applied,
-        )
+        with _timed_operation("prompt_update"):
+            prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
+                mm_items=mm_items,
+                prompt_ids=prompt_ids,
+                mm_kwargs=mm_info.kwargs,
+                mm_prompt_updates=mm_info.prompt_updates,
+                is_update_applied=is_update_applied,
+            )
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
             for modality, placeholders in mm_placeholders.items()
         }
+
+        if stats is not None and total_start is not None:
+            stats.total_time = time.perf_counter() - total_start
 
         return MultiModalInputs(
             type="multimodal",
