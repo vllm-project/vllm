@@ -460,6 +460,16 @@ class HfRunner:
         return embeddings
 
     def classify(self, prompts: list[str]) -> list[list[float]]:
+        from sentence_transformers import SentenceTransformer, CrossEncoder
+
+        # Prevent misuse with incompatible model types
+        if isinstance(self.model, (SentenceTransformer, CrossEncoder)):
+            raise TypeError(
+                "classify() is only supported for standard Hugging Face classification models "
+                "(e.g., AutoModelForSequenceClassification). "
+                "SentenceTransformer and CrossEncoder are not supported."
+            )
+
         # output is final logits
         all_inputs = self.get_inputs(prompts)
         outputs: list[list[float]] = []
