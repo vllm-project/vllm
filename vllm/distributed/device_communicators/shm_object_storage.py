@@ -626,7 +626,10 @@ class SingleWriterShmObjectStorage:
         return obj
 
     def touch(
-        self, key: str, address: int = 0, monotonic_id: int = 0,
+        self,
+        key: str,
+        address: int = 0,
+        monotonic_id: int = 0,
     ) -> None:
         """
         Touch an existing cached item to update its eviction status.
