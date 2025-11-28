@@ -489,7 +489,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
                               fmaxf(fabsf(vals[6]), fabsf(vals[7]))));
 
   // Warp-level reduction to find the max absolute value in each half-warp
-#pragma unroll
+  #pragma unroll
   for (int offset = 8; offset > 0; offset /= 2) {
     max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 16));
   }
@@ -510,7 +510,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
   const int64_t dst_idx_base = dst_idx_start + (threadIdx.x * 8);
 
   uint8_t result[8];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     result[i] =
         fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
@@ -543,13 +543,13 @@ __global__ void concat_and_cache_ds_mla_kernel(
 
   // Warp-level reduction to find the max absolute value in the warp
   float max_abs = fabsf(src_val);
-#pragma unroll
+  #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
-#ifdef USE_ROCM
+  #ifdef USE_ROCM
     max_abs = fmaxf(max_abs, __shfl_down_sync(UINT64_MAX, max_abs, offset));
-#else
+  #else
     max_abs = fmaxf(max_abs, __shfl_down_sync(0xFFFFFFFF, max_abs, offset));
-#endif
+  #endif
   }
 
   // The first lane of each warp in each tile writes the max_abs of this part
@@ -633,14 +633,13 @@ __global__ void indexer_k_quant_and_cache_kernel(
 #ifndef USE_ROCM
   __syncwarp();
 #endif
-<<<<<<< HEAD
+  < < < < < < < HEAD
 #if defined(__gfx942__)
-  float scale = fmaxf(amax, 1e-4) / 224.0f;
+      float scale = fmaxf(amax, 1e-4) / 224.0f;
 #else
-  float scale = fmaxf(amax, 1e-4) / 448.0f;
+      float scale = fmaxf(amax, 1e-4) / 448.0f;
 #endif
-=======
-  float scale = fmaxf(amax, 1e-4) / 448.0f;
+  == == == = float scale = fmaxf(amax, 1e-4) / 448.0f;
 >>>>>>> upstream/releases/v0.11.0
   if (use_ue8m0) {
     scale = exp2f(ceilf(log2f(scale)));
@@ -698,9 +697,9 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     }
   }
 
-#ifndef USE_ROCM
+  #ifndef USE_ROCM
   __syncwarp();
-#endif
+  #endif
 
   if (head_idx >= head_dim || token_idx >= num_tokens) {
     return;
@@ -1340,19 +1339,19 @@ void indexer_k_quant_and_cache(
 }
 <<<<<<< HEAD
 
-// Macro to dispatch the kernel based on the data amount.
-#define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
-  vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
-      <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
-              (head_dim + 8 * vec_size - 1) / (8 * vec_size)),              \
-         dim3(8, BLOCK_Y_SIZE), 0, stream>>>(                               \
-          reinterpret_cast<char*>(kv_cache.data_ptr()),                     \
-          reinterpret_cast<char*>(dst_k.data_ptr()),                        \
-          reinterpret_cast<char*>(dst_scale.data_ptr()),                    \
-          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-          batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),   \
-          kv_cache.stride(1), kv_cache.size(1), block_table.size(1),        \
-          num_tokens, quant_block_size);
+  // Macro to dispatch the kernel based on the data amount.
+  #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
+    vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
+        <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
+                (head_dim + 8 * vec_size - 1) / (8 * vec_size)),              \
+           dim3(8, BLOCK_Y_SIZE), 0, stream>>>(                               \
+            reinterpret_cast<char*>(kv_cache.data_ptr()),                     \
+            reinterpret_cast<char*>(dst_k.data_ptr()),                        \
+            reinterpret_cast<char*>(dst_scale.data_ptr()),                    \
+            block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+            batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),   \
+            kv_cache.stride(1), kv_cache.size(1), block_table.size(1),        \
+            num_tokens, quant_block_size);
 
 void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]

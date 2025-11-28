@@ -7,17 +7,11 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-<<<<<<< HEAD
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
 )
-=======
-from vllm.utils import GiB_bytes
-from vllm.v1.core.kv_cache_utils import (generate_scheduler_kv_cache_config,
-                                         get_kv_cache_configs)
->>>>>>> upstream/releases/v0.11.0
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
@@ -89,12 +83,7 @@ def can_initialize(
             kv_cache_specs,
             [10 * GiB_bytes],
         )
-<<<<<<< HEAD
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-=======
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
-            kv_cache_configs)
->>>>>>> upstream/releases/v0.11.0
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config

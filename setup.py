@@ -628,10 +628,10 @@ if _is_cuda():
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
         ext_modules.append(
-            CMakeExtension(name="vllm._flashmla_C", optional=True))
-        ext_modules.append(
-            CMakeExtension(name="vllm._flashmla_extension_C", optional=True))
+            CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
+        )
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():

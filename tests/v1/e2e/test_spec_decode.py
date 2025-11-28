@@ -514,11 +514,14 @@ def test_mtp_correctness(
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize(["model_setup", "mm_enabled"], [
-    (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
-    (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
-],
-                         ids=["mimo", "deepseek"])
+@pytest.mark.parametrize(
+    ["model_setup", "mm_enabled"],
+    [
+        (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
+        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
+    ],
+    ids=["mimo", "deepseek"],
+)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -527,21 +530,23 @@ def test_mtp_correctness(
 ):
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using MTP speculative decoding.
     model_setup: (method, model_name, tp_size)
-    '''
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         method, model_name, tp_size = model_setup
 
-        ref_llm = LLM(model=model_name,
-                      max_model_len=2048,
-                      tensor_parallel_size=tp_size,
-                      trust_remote_code=True)
+        ref_llm = LLM(
+            model=model_name,
+            max_model_len=2048,
+            tensor_parallel_size=tp_size,
+            trust_remote_code=True,
+        )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()

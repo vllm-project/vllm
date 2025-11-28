@@ -449,15 +449,15 @@ def unpack_seq_triton(
 
 @triton.jit
 def _pack_seq_kernel(
-        x_ptr,  # [N, D]
-        out_ptr,  # [B, Lmax, D]
-        lengths_ptr,  # *i32, [B]
-        N: tl.constexpr,
-        D: tl.constexpr,
-        Lmax: tl.constexpr,
-        PAD_VALUE: tl.constexpr,
-        BLOCK_T: tl.constexpr,  # timesteps per program
-        BLOCK_D: tl.constexpr  # features per program
+    x_ptr,  # [N, D]
+    out_ptr,  # [B, Lmax, D]
+    lengths_ptr,  # *i32, [B]
+    N: tl.constexpr,
+    D: tl.constexpr,
+    Lmax: tl.constexpr,
+    PAD_VALUE: tl.constexpr,
+    BLOCK_T: tl.constexpr,  # timesteps per program
+    BLOCK_D: tl.constexpr,  # features per program
 ):
     pid_b = tl.program_id(0)  # batch id
     pid_t = tl.program_id(1)  # block over time dimension
@@ -483,8 +483,7 @@ def _pack_seq_kernel(
     x_row_ptr = x_ptr + in_row[:, None] * D + off_d[None, :]
 
     # out_ptr: row-major [B, Lmax, D]
-    out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:,
-                                                   None] * D + off_d[None, :]
+    out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
     # Initialize with PAD (cast will occur as needed based on out_ptr dtype)
     d_mask = off_d[None, :] < D
@@ -496,21 +495,23 @@ def _pack_seq_kernel(
     tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
 
 
-def pack_seq_triton(x: torch.Tensor,
-                    lengths: torch.Tensor,
-                    pad_value: float = -float('inf'),
-                    block_t: int = 64,
-                    block_d: int = 64) -> torch.Tensor:
+def pack_seq_triton(
+    x: torch.Tensor,
+    lengths: torch.Tensor,
+    pad_value: float = -float("inf"),
+    block_t: int = 64,
+    block_d: int = 64,
+) -> torch.Tensor:
     """
     Pack sequences of different lengths into a batched tensor.
-    
+
     Args:
         x: [N, ...] - input tensor where N is total number of tokens
         lengths: [B] - sequence lengths for each batch
         pad_value: value to use for padding
         block_t: block size for time dimension
         block_d: block size for feature dimension
-        
+
     Returns:
         packed: [B, Lmax, ...] - packed tensor
     """
@@ -533,17 +534,19 @@ def pack_seq_triton(x: torch.Tensor,
     out = torch.empty((B, Lmax, D), device=x.device, dtype=x.dtype)
 
     grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-    _pack_seq_kernel[grid](x_reshaped,
-                           out,
-                           lengths.int(),
-                           N,
-                           D,
-                           Lmax,
-                           PAD_VALUE=float(pad_value),
-                           BLOCK_T=block_t,
-                           BLOCK_D=block_d,
-                           num_warps=4,
-                           num_stages=2)
+    _pack_seq_kernel[grid](
+        x_reshaped,
+        out,
+        lengths.int(),
+        N,
+        D,
+        Lmax,
+        PAD_VALUE=float(pad_value),
+        BLOCK_T=block_t,
+        BLOCK_D=block_d,
+        num_warps=4,
+        num_stages=2,
+    )
 
     # Reshape output back to original dimensions (except first dimension)
     if len(original_shape) > 2:
@@ -555,14 +558,14 @@ def pack_seq_triton(x: torch.Tensor,
 
 @triton.jit
 def _unpack_seq_triton_kernel(
-        packed_ptr,  # [B, Lmax, D]
-        out_ptr,  # [N, D]
-        lengths_ptr,  # *i32, [B]
-        B: tl.constexpr,
-        Lmax: tl.constexpr,
-        D: tl.constexpr,
-        BLOCK_T: tl.constexpr,  # timesteps per program
-        BLOCK_D: tl.constexpr  # features per program
+    packed_ptr,  # [B, Lmax, D]
+    out_ptr,  # [N, D]
+    lengths_ptr,  # *i32, [B]
+    B: tl.constexpr,
+    Lmax: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_T: tl.constexpr,  # timesteps per program
+    BLOCK_D: tl.constexpr,  # features per program
 ):
     pid_b = tl.program_id(0)  # batch id
     pid_t = tl.program_id(1)  # block over time dimension
@@ -585,8 +588,7 @@ def _unpack_seq_triton_kernel(
 
     # Pointers
     # packed_ptr: row-major [B, Lmax, D]
-    packed_row_ptr = packed_ptr + (pid_b * Lmax +
-                                   off_t)[:, None] * D + off_d[None, :]
+    packed_row_ptr = packed_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
     # out_ptr: row-major [N, D]
     out_row_ptr = out_ptr + out_row[:, None] * D + off_d[None, :]
@@ -597,20 +599,22 @@ def _unpack_seq_triton_kernel(
     tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
 
 
-def unpack_seq_triton(packed_tensor: torch.Tensor,
-                      lengths: torch.Tensor,
-                      block_t: int = 64,
-                      block_d: int = 64) -> torch.Tensor:
+def unpack_seq_triton(
+    packed_tensor: torch.Tensor,
+    lengths: torch.Tensor,
+    block_t: int = 64,
+    block_d: int = 64,
+) -> torch.Tensor:
     """
     Unpack a packed decode query tensor back to the original format.
     Efficient Triton implementation.
-    
+
     Args:
         packed_tensor: [B, Lmax, ...] - packed tensor from pack_seq_triton
         lengths: [B] - sequence lengths for each batch
         block_t: block size for time dimension
         block_d: block size for feature dimension
-        
+
     Returns:
         unpacked_tensor: [N, ...] where N = sum(lengths)
     """
@@ -628,25 +632,25 @@ def unpack_seq_triton(packed_tensor: torch.Tensor,
     # Calculate total number of elements
     N = int(lengths.sum().item())
 
-    out = torch.empty((N, D),
-                      device=packed_tensor.device,
-                      dtype=packed_tensor.dtype)
+    out = torch.empty((N, D), device=packed_tensor.device, dtype=packed_tensor.dtype)
 
     grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-    _unpack_seq_triton_kernel[grid](packed_reshaped,
-                                    out,
-                                    lengths.int(),
-                                    B,
-                                    Lmax,
-                                    D,
-                                    BLOCK_T=block_t,
-                                    BLOCK_D=block_d,
-                                    num_warps=4,
-                                    num_stages=2)
+    _unpack_seq_triton_kernel[grid](
+        packed_reshaped,
+        out,
+        lengths.int(),
+        B,
+        Lmax,
+        D,
+        BLOCK_T=block_t,
+        BLOCK_D=block_d,
+        num_warps=4,
+        num_stages=2,
+    )
 
     # Reshape output back to original dimensions (except first dimension)
     if len(original_shape) > 3:
-        output_shape = (N, ) + original_shape[2:]
+        output_shape = (N,) + original_shape[2:]
         out = out.reshape(output_shape)
 
     return out
