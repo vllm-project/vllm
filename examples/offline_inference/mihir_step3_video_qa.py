@@ -136,7 +136,7 @@ def main(args):
         enforce_eager=args.enforce_eager,
     )
 
-    llm = LLM(**engine_args)
+    llm = LLM(**engine_args.__dict__)
 
     # 4. Run Inference
     sampling_params = SamplingParams(
