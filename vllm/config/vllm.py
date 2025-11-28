@@ -248,11 +248,7 @@ class VllmConfig:
             "speculative": _compile(self.speculative_config),
             "structured_outputs": _compile(self.structured_outputs_config),
             "observability": self.observability_config.compile_factors(),
-            "compilation": (
-                self.compilation_config.compile_factors()
-                if self.compilation_config
-                else {}
-            ),
+            "compilation": _compile(self.compilation_config),
             "kv_transfer": _compile(self.kv_transfer_config),
             "ec_transfer": _compile(self.ec_transfer_config),
         }
