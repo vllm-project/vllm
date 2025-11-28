@@ -36,8 +36,10 @@ FILES = [
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/utils",
     "vllm/v1/core",
     "vllm/v1/engine",
+    "vllm/v1/pool",
     "vllm/v1/worker",
 ]
 
@@ -59,7 +61,6 @@ SEPARATE_GROUPS = [
     "vllm/v1/executor",
     "vllm/v1/kv_offload",
     "vllm/v1/metrics",
-    "vllm/v1/pool",
     "vllm/v1/sample",
     "vllm/v1/spec_decode",
     "vllm/v1/structured_output",
