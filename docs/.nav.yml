@@ -52,6 +52,11 @@ nav:
       - Plugins:
         - design/*plugin*.md
       - design/*
+  - Benchmarking:
+      - benchmarking/README.md
+      - benchmarking/cli.md
+      - benchmarking/sweeps.md
+      - benchmarking/dashboard.md
   - API Reference:
     - api/README.md
     - api/vllm
