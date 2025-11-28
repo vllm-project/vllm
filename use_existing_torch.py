@@ -3,7 +3,7 @@
 
 import glob
 
-for file in glob.glob("requirements/*.txt") + ["pyproject.toml"]:
+for file in (*glob.glob("requirements/*.txt"), "pyproject.toml"):
     print(f">>> cleaning {file}")
     with open(file) as f:
         lines = f.readlines()
