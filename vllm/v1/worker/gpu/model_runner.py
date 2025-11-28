@@ -756,6 +756,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens,
             self.req_states.last_sampled_tokens,
+            self.req_states.output_bin_counts.gpu,
             sampled_tokens,
             num_sampled,
             num_rejected,
@@ -896,7 +897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # barrier to avoid race conditions.
                 pos = input_batch.positions[input_batch.logits_indices]
                 sampling_metadata = self.req_states.make_sampling_metadata(
-                    input_batch.idx_mapping_np, pos
+                    input_batch.idx_mapping, input_batch.idx_mapping_np, pos
                 )
                 if input_batch.num_draft_tokens > 0:
                     sampling_metadata = self.req_states.expand_sampling_metadata(

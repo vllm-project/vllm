@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.states import SamplingMetadata
 
 
 @triton.jit
@@ -64,29 +65,21 @@ def _penalties_kernel(
     tl.store(logits_ptr + batch_idx * logits_stride + block, logits, mask=mask)
 
 
-def apply_penalties(
-    logits: torch.Tensor,
-    repetition_penalty: torch.Tensor,
-    frequency_penalty: torch.Tensor,
-    presence_penalty: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    prompt_bin_counts: torch.Tensor,
-    output_bin_counts: torch.Tensor,
-) -> None:
+def apply_penalties(logits: torch.Tensor, sampling_metadata: SamplingMetadata) -> None:
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _penalties_kernel[(num_reqs, num_blocks)](
         logits,
         logits.stride(0),
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        idx_mapping,
-        prompt_bin_counts,
-        prompt_bin_counts.stride(0),
-        output_bin_counts,
-        output_bin_counts.stride(0),
+        sampling_metadata.repetition_penalty,
+        sampling_metadata.frequency_penalty,
+        sampling_metadata.presence_penalty,
+        sampling_metadata.idx_mapping,
+        sampling_metadata.prompt_bin_counts,
+        sampling_metadata.prompt_bin_counts.stride(0),
+        sampling_metadata.output_bin_counts,
+        sampling_metadata.output_bin_counts.stride(0),
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )

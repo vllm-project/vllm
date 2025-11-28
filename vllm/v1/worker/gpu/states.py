@@ -8,6 +8,8 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -33,6 +35,11 @@ class SamplingMetadata:
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: int | None
 
+    # For penalties
+    idx_mapping: torch.Tensor
+    prompt_bin_counts: torch.Tensor
+    output_bin_counts: torch.Tensor
+
     @classmethod
     def make_dummy(
         cls,
@@ -48,12 +55,18 @@ class SamplingMetadata:
         # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
         top_p = None
         top_k = None
+        # NOTE(woosuk): Make sure to set these to no-penalty values as we use
         repetition_penalty = torch.ones(num_reqs, dtype=torch.float32, device=device)
         frequency_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         presence_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         max_num_logprobs = 20
+
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        # NOTE(woosuk)
+        prompt_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
+        output_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
 
         return cls(
             temperature=temperature,
@@ -65,6 +78,9 @@ class SamplingMetadata:
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
+            idx_mapping=idx_mapping,
+            prompt_bin_counts=prompt_bin_counts,
+            output_bin_counts=output_bin_counts,
         )
 
 
@@ -93,6 +109,8 @@ class RequestState:
         self.extra_data: dict[str, ExtraData] = {}
 
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # NOTE(woosuk): This NumPy array can be extremely large (e.g., several GBs)
+        # depending on the configured max_num_reqs and max_model_len.
         self.prefill_token_ids = np.zeros(
             (self.max_num_reqs, self.max_model_len),
             dtype=np.int32,
@@ -138,6 +156,14 @@ class RequestState:
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(-1)
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
+
+        # Statistics for penalties.
+        self.prompt_bin_counts = UvaBuffer(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32
+        )
+        self.output_bin_counts = UvaBuffer(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32
+        )
 
     def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
         return Param(size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
@@ -195,6 +221,24 @@ class RequestState:
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
 
+        if use_penalty(sampling_params):
+            # NOTE(woosuk): The synchronization is necessary to avoid race conditions
+            # when using async scheduling. Otherwise, the two tensors may be updated
+            # before/during the penalties kernel is executed in the previous step.
+            # While we can do a more fine-grained synchronization instead of
+            # torch.cuda.synchronize(), I think it's not worth the complexity because
+            # this is a rare feature and the expected performance gain is small.
+            torch.cuda.synchronize()
+            self.prompt_bin_counts.np[req_idx] = np.bincount(
+                prefill_token_ids[:prompt_len], minlength=self.vocab_size
+            )
+            if prefill_len == prompt_len:
+                self.output_bin_counts.np[req_idx] = 0
+            else:
+                self.output_bin_counts.np[req_idx] = np.bincount(
+                    prefill_token_ids[prompt_len:], minlength=self.vocab_size
+                )
+
         if sampling_params.seed is not None:
             seed = sampling_params.seed
         else:
@@ -222,31 +266,32 @@ class RequestState:
 
     def make_sampling_metadata(
         self,
-        idx_mapping: np.ndarray,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> SamplingMetadata:
-        temperature = self.temperature.np[idx_mapping]
+        temperature = self.temperature.np[idx_mapping_np]
         temperature = self.temperature.copy_np_to_gpu(temperature)
 
-        top_p = self.top_p.np[idx_mapping]
+        top_p = self.top_p.np[idx_mapping_np]
         no_top_p = np.all(top_p == 1.0)
         top_p = self.top_p.copy_np_to_gpu(top_p) if not no_top_p else None
 
-        top_k = self.top_k.np[idx_mapping]
+        top_k = self.top_k.np[idx_mapping_np]
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
-        rep_penalty = self.repetition_penalty.np[idx_mapping]
+        rep_penalty = self.repetition_penalty.np[idx_mapping_np]
         rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
-        freq_penalty = self.frequency_penalty.np[idx_mapping]
+        freq_penalty = self.frequency_penalty.np[idx_mapping_np]
         freq_penalty = self.frequency_penalty.copy_np_to_gpu(freq_penalty)
-        pres_penalty = self.presence_penalty.np[idx_mapping]
+        pres_penalty = self.presence_penalty.np[idx_mapping_np]
         pres_penalty = self.presence_penalty.copy_np_to_gpu(pres_penalty)
 
-        seeds = self.seeds.np[idx_mapping]
+        seeds = self.seeds.np[idx_mapping_np]
         seeds = self.seeds.copy_np_to_gpu(seeds)
 
-        num_logprobs = self.num_logprobs[idx_mapping]
+        num_logprobs = self.num_logprobs[idx_mapping_np]
         max_num_logprobs: int | None = int(np.max(num_logprobs))
         if max_num_logprobs == -1:
             max_num_logprobs = None
@@ -261,6 +306,9 @@ class RequestState:
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
+            idx_mapping=idx_mapping,
+            prompt_bin_counts=self.prompt_bin_counts.gpu,
+            output_bin_counts=self.output_bin_counts.gpu,
         )
 
     def expand_sampling_metadata(
@@ -312,6 +360,14 @@ class Param:
         n = x.shape[0]
         self.buffer.np[:n] = x
         return self.buffer.copy_to_gpu(n)
+
+
+class UvaBuffer:
+    def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
+        assert is_uva_available()
+        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
+        self.np = self.cpu.numpy()
+        self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
 
 
 @dataclass
@@ -416,4 +472,16 @@ def expand_sampling_metadata(
         presence_penalty=expanded_presence_penalty,
         pos=sampling_metadata.pos,
         max_num_logprobs=sampling_metadata.max_num_logprobs,
+        # TODO(woosuk): Support penalties with spec decoding.
+        idx_mapping=sampling_metadata.idx_mapping,
+        prompt_bin_counts=sampling_metadata.prompt_bin_counts,
+        output_bin_counts=sampling_metadata.output_bin_counts,
+    )
+
+
+def use_penalty(sampling_params: SamplingParams) -> bool:
+    return (
+        sampling_params.repetition_penalty != 1.0
+        or sampling_params.frequency_penalty != 0.0
+        or sampling_params.presence_penalty != 0.0
     )
