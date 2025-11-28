@@ -7,7 +7,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch.nn as nn
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -28,9 +28,9 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.processor import Processor
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
@@ -88,7 +88,7 @@ class LLMEngine:
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -134,6 +134,14 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+    @property
+    @deprecated(
+        "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
+        "The old name will be removed in v0.13."
+    )
+    def processor(self):
+        return self.input_processor
 
     @classmethod
     def from_vllm_config(
@@ -231,11 +239,7 @@ class LLMEngine:
             request = prompt
         else:
             assert prompt_text is None
-            logger.warning_once(
-                "Processor has been moved under LLM and will "
-                "be removed from LLMEngine in v0.13."
-            )
-            request = self.processor.process_inputs(
+            request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -307,7 +311,7 @@ class LLMEngine:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.processor.stat_mm_cache(),
+                    mm_cache_stats=self.input_processor.stat_mm_cache(),
                 )
                 self.do_log_stats_with_interval()
 
@@ -320,7 +324,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self):
@@ -347,11 +351,11 @@ class LLMEngine:
 
     @property
     def tokenizer(self) -> AnyTokenizer | None:
-        return self.processor.tokenizer
+        return self.input_processor.tokenizer
 
     @tokenizer.setter
     def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
-        self.processor.tokenizer = tokenizer
+        self.input_processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:

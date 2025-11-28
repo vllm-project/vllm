@@ -284,7 +284,7 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-        self.processor = self.models.processor
+        self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
@@ -330,7 +330,7 @@ class OpenAIServing:
         return parser
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         await self.engine_client.reset_mm_cache()
 
     async def beam_search(
@@ -348,8 +348,8 @@ class OpenAIServing:
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        processor = self.processor
-        tokenizer = processor.tokenizer
+        input_processor = self.input_processor
+        tokenizer = input_processor.tokenizer
         if tokenizer is None:
             raise ValueError(
                 "You cannot use beam search when `skip_tokenizer_init` is True"
@@ -1214,7 +1214,7 @@ class OpenAIServing:
             self.max_model_len, params.truncate_prompt_tokens, tokenization_kwargs
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
