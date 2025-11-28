@@ -478,6 +478,9 @@ class HfRunner:
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
             # NOTE: In practice, HF models return ModelOutput with a `logits` attribute (torch.Tensor).
+            if not hasattr(output, "logits"):
+                raise TypeError("Model output does not have a 'logits' attribute.")
+
             if not isinstance(output.logits, torch.Tensor):
                 raise TypeError(
                     f"'logits' is {type(output.logits)}, expected torch.Tensor"
