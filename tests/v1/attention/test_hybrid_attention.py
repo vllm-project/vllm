@@ -195,6 +195,8 @@ def test_hybrid_attention_impl_fuses_ssm_output():
     class _StubMetadata:
         def __init__(self, num_actual_tokens: int):
             self.num_actual_tokens = num_actual_tokens
+            # Dummy triton metadata for testing fusion
+            self.triton_metadata = None
 
     attn_metadata = _StubMetadata(num_tokens)
 

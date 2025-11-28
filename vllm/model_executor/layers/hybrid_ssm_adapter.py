@@ -40,7 +40,10 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.attention.backends.hybrid_attn import HybridAttentionMetadata
-from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
+from vllm.v1.attention.backends.mamba1_attn import (
+    Mamba1AttentionBackend,
+    Mamba1AttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
@@ -94,18 +97,24 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         self.use_conv_bias = True
         self.use_bias = False
 
+        # Detect if we are running in a unit test without distributed env
+        is_tp_init = model_parallel_is_initialized()
+        disable_tp = not is_tp_init
+
         # Layers
         self.in_proj = MergedColumnParallelLinear(
             self.hidden_size,
             [self.intermediate_size] * 2,
             bias=self.use_bias,
             prefix=f"{prefix}.in_proj",
+            disable_tp=disable_tp,
         )
         self.conv1d = ColumnParallelLinear(
             self.conv_kernel_size,
             self.intermediate_size,
             bias=self.use_conv_bias,
             prefix=f"{prefix}.conv1d",
+            disable_tp=disable_tp,
         )
         # Unsqueeze conv1d weight to match Mamba expectations (intermediate_size, 1, kernel_size)
         # But ColumnParallelLinear weight is (output_size, input_size) -> (intermediate_size, kernel_size)
@@ -116,6 +125,7 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             self.time_step_rank + self.ssm_state_size * 2,
             bias=False,
             prefix=f"{prefix}.x_proj",
+            disable_tp=disable_tp,
         )
         self.dt_proj = ColumnParallelLinear(
             self.time_step_rank,
@@ -123,6 +133,7 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             bias=True,
             skip_bias_add=True,
             prefix=f"{prefix}.dt_proj",
+            disable_tp=disable_tp,
         )
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
@@ -130,10 +141,11 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             bias=self.use_bias,
             input_is_parallel=True,
             prefix=f"{prefix}.out_proj",
+            disable_tp=disable_tp,
         )
 
         # Parameters A and D
-        if model_parallel_is_initialized():
+        if is_tp_init:
             tp_size = get_tensor_model_parallel_world_size()
         else:
             tp_size = 1
