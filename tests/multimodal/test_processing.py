@@ -1084,27 +1084,25 @@ class TestApplyMatchesPerformance:
     def test_no_match_exits_quickly(self):
         """
         Test that _apply_matches exits quickly when no matches are found.
-        
+
         Previously, _apply_matches had O(n²) behavior when no match was found
         because it would increment start_idx by 1 each iteration while
         re-scanning the entire prompt from prev_end_idx=0.
-        
+
         With the fix, it should exit immediately when no match is found.
         """
         import time
-        
+
         mock_tokenizer = cast(AnyTokenizer, object())
-        
+
         # Create a long prompt with no placeholder
         long_prompt = "x" * 10000
-        
+
         # Create update looking for a placeholder that doesn't exist
         mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "REPLACED").resolve(0)]
-            ]
+            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
         }
-        
+
         start = time.perf_counter()
         result, match_result = _apply_matches(
             long_prompt,
@@ -1112,40 +1110,38 @@ class TestApplyMatchesPerformance:
             mock_tokenizer,
         )
         elapsed = time.perf_counter() - start
-        
+
         # Should complete in < 100ms (was taking seconds before the fix)
         assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
-        
+
         # Result should be the original prompt (no replacement made)
         assert "".join(result) == long_prompt
-        
+
         # No match should have been applied
         assert match_result["image"][0] is None
 
     def test_single_match_works(self):
         """Test that single placeholder replacement still works correctly."""
         mock_tokenizer = cast(AnyTokenizer, object())
-        
+
         prompt = "Hello <image> world"
         mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "REPLACED").resolve(0)]
-            ]
+            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
         }
-        
+
         result, match_result = _apply_matches(
             prompt,
             mm_prompt_updates,
             mock_tokenizer,
         )
-        
+
         assert "".join(result) == "Hello REPLACED world"
         assert match_result["image"][0] == 0
 
     def test_multiple_matches_work(self):
         """Test that multiple placeholder replacements still work correctly."""
         mock_tokenizer = cast(AnyTokenizer, object())
-        
+
         prompt = "First <image> and second <image> done"
         mm_prompt_updates = {
             "image": [
@@ -1153,13 +1149,13 @@ class TestApplyMatchesPerformance:
                 [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
             ]
         }
-        
+
         result, match_result = _apply_matches(
             prompt,
             mm_prompt_updates,
             mock_tokenizer,
         )
-        
+
         assert "".join(result) == "First IMG1 and second IMG2 done"
         assert match_result["image"][0] == 0
         assert match_result["image"][1] == 0
@@ -1170,18 +1166,16 @@ class TestApplyMatchesPerformance:
         This verifies we don't have O(n²) behavior even with matches.
         """
         import time
-        
+
         mock_tokenizer = cast(AnyTokenizer, object())
-        
+
         # Long prompt with placeholder at the end
         long_prompt = "x" * 10000 + "<image>"
-        
+
         mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "REPLACED").resolve(0)]
-            ]
+            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
         }
-        
+
         start = time.perf_counter()
         result, match_result = _apply_matches(
             long_prompt,
@@ -1189,10 +1183,10 @@ class TestApplyMatchesPerformance:
             mock_tokenizer,
         )
         elapsed = time.perf_counter() - start
-        
+
         # Should complete in < 100ms
         assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
-        
+
         # Replacement should have been made
         assert "".join(result) == "x" * 10000 + "REPLACED"
         assert match_result["image"][0] == 0
