@@ -1679,8 +1679,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
     ) -> tuple[MultiModalIsCached, MultiModalDataItems]:
         mm_is_cached = {
-            modality: cache.is_cached(hashes)
-            for modality, hashes in mm_hashes.items()
+            modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
         }
 
         mm_missing_idxs = {

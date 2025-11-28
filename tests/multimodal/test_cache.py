@@ -252,8 +252,7 @@ def _run_test_cache_eviction_shm(
     request2_hashes = ["image_G", "image_A"]
     request2_items = {
         h: MultiModalKwargsItem.dummy(
-            h,
-            nbytes=(2 if h in request1_hashes else 1) * base_item_size
+            h, nbytes=(2 if h in request1_hashes else 1) * base_item_size
         )
         for h in request2_hashes
     }
@@ -262,8 +261,7 @@ def _run_test_cache_eviction_shm(
     request3_hashes = ["image_G", "image_B"]
     request3_items = {
         h: MultiModalKwargsItem.dummy(
-            h,
-            nbytes=(2 if h in request1_hashes else 1) * base_item_size
+            h, nbytes=(2 if h in request1_hashes else 1) * base_item_size
         )
         for h in request3_hashes
     }
@@ -272,9 +270,7 @@ def _run_test_cache_eviction_shm(
     ##########################
     # STEP 1: Request 1 send
     ##########################
-    sender_is_cached_item_req1 = p0_cache.is_cached(
-        request1_hashes
-    )
+    sender_is_cached_item_req1 = p0_cache.is_cached(request1_hashes)
     # Cache is empty
     assert sender_is_cached_item_req1 == [False, False, False]
 
@@ -300,11 +296,11 @@ def _run_test_cache_eviction_shm(
     # Process request 1 for P1 Cache
     ###########################
     # Touch all mm hash for P1 Cache before process
-    for mm_hash, mm_item in zip(request1_hashes,request1_items_p0_result):
-        p1_cache.update_cache_item_eviction_order(mm_hash,mm_item)
+    for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
+        p1_cache.update_cache_item_eviction_order(mm_hash, mm_item)
 
-    for mm_hash, mm_item in zip(request1_hashes,request1_items_p0_result):
-        p1_cache.get_and_update_item(mm_item, h)
+    for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
 
     expected_hashes = ["image_A", "image_B", "image_C"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
@@ -312,9 +308,7 @@ def _run_test_cache_eviction_shm(
     ##########################
     # STEP 2: Request 2 send
     ##########################
-    sender_is_cached_item_req2 = p0_cache.is_cached(
-        request2_hashes
-    )
+    sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
     # Note that the result for image_A is False because it will be evicted,
     # but not image_C
     assert sender_is_cached_item_req2 == [False, True]
@@ -336,7 +330,8 @@ def _run_test_cache_eviction_shm(
         # Only get mm item, ignore prompt update result
         request2_items_p0_result.append(p0_result[0])
 
-    # image_A cannot be evict then  image_G will fail to allocate anyway and image_A still in cache
+    # image_A cannot be evict then
+    # image_G will fail to allocate anyway and image_A still in cache
     assert p0_cache.is_cached(request2_hashes) == [False, True]
 
     ###########################
@@ -344,22 +339,20 @@ def _run_test_cache_eviction_shm(
     ###########################
 
     # Touch all mm hash for P1 Cache before process
-    for mm_hash, mm_item in zip(request2_hashes,request2_items_p0_result):
-        p1_cache.update_cache_item_eviction_order(mm_hash,mm_item)
+    for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
+        p1_cache.update_cache_item_eviction_order(mm_hash, mm_item)
 
-    for mm_hash, mm_item in zip(request2_hashes,request2_items_p0_result):
-        p1_cache.get_and_update_item(mm_item, h)
+    for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
 
     expected_hashes = ["image_A", "image_B", "image_C"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
 
-     ##########################
+    ##########################
     # STEP 3: Request 3 send
     ##########################
     ##### Prove that cache eviction work normally
-    sender_is_cached_item_req3 = p0_cache.is_cached(
-        request3_hashes
-    )
+    sender_is_cached_item_req3 = p0_cache.is_cached(request3_hashes)
     # Note that the result for image_A is False because it will be evicted,
     # but not image_C
     assert sender_is_cached_item_req3 == [False, True]
@@ -388,21 +381,26 @@ def _run_test_cache_eviction_shm(
     ###########################
 
     # Touch all mm hash for P1 Cache before process
-    for mm_hash, mm_item in zip(request3_hashes,request3_items_p0_result):
-        p1_cache.update_cache_item_eviction_order(mm_hash,mm_item)
+    for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
+        p1_cache.update_cache_item_eviction_order(mm_hash, mm_item)
 
-    for mm_hash, mm_item in zip(request3_hashes,request3_items_p0_result):
-        p1_cache.get_and_update_item(mm_item, h)
+    for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
 
     expected_hashes = ["image_B", "image_C", "image_G"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
+
 
 def _run_test_cache_eviction_lru(
     p0_cache: BaseMultiModalProcessorCache,
     p1_cache: BaseMultiModalReceiverCache,
     base_item_size: int,
 ):
-    request1_hashes = ["image_A", "image_B", "image_C",]
+    request1_hashes = [
+        "image_A",
+        "image_B",
+        "image_C",
+    ]
     request1_items = {
         h: MultiModalKwargsItem.dummy(h, nbytes=2 * base_item_size)
         for h in request1_hashes
@@ -417,9 +415,7 @@ def _run_test_cache_eviction_lru(
     ##########################
     # STEP 1: Request 1 send
     ##########################
-    sender_is_cached_item_req1 = p0_cache.is_cached(
-        request1_hashes
-    )
+    sender_is_cached_item_req1 = p0_cache.is_cached(request1_hashes)
     # Cache is empty
     assert sender_is_cached_item_req1 == [False, False, False]
 
@@ -460,9 +456,7 @@ def _run_test_cache_eviction_lru(
     ##########################
     # STEP 2: Request 2 send
     ##########################
-    sender_is_cached_item_req2 = p0_cache.is_cached(
-        request2_hashes
-    )
+    sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
     # Note that the result for image_A is False because it will be evicted,
     # but not image_C
     assert sender_is_cached_item_req2 == [False, False, True, True]

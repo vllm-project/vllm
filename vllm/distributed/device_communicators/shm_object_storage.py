@@ -595,7 +595,6 @@ class SingleWriterShmObjectStorage:
             self.copy_to_buffer(
                 object_data, data_bytes, object_metadata, md_bytes, data_view
             )
-        # NOTE(Long) For shm cache, when put sucessful, will set writer flag to 2, as read will try to read twice
         self.increment_writer_flag(monotonic_id)
 
         # Update key index
@@ -626,33 +625,38 @@ class SingleWriterShmObjectStorage:
 
         return obj
 
-    def touch(self, key: str, address: int =0, monotonic_id: int = 0, is_writer: bool = True) -> None:
+    def touch(
+        self, key: str, address: int = 0, monotonic_id: int = 0, is_writer: bool = True
+    ) -> None:
         """
         Touch an existing cached item to update its eviction status.
-        
+
         For writers (ShmObjectStoreSenderCache): Increment writer_flag
         For readers (ShmObjectStoreReceiverCache): Increment reader_count
-        
+
         Args:
             key: String key of the object to touch
             is_writer: If True, increment writer_flag (sender side).
                       If False, increment reader_count (receiver side).
-            
+
         """
-        
-        
+
         if is_writer:
             address, monotonic_id = self.key_index[key]
             # Writer side: increment writer_flag to raise eviction threshold
             self.increment_writer_flag(monotonic_id)
         else:
-            # Reader side: increment reader_count to indicate active use
-            with self._reader_lock:
-                with self.ring_buffer.access_buf(address) as (data_view, _):
-                    reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
-                    # NOTE(LONG): Avoid touch item just add to cache because writer only touch 1 on first write
-                    if reader_count >= self.n_readers:
-                        self.increment_reader_flag(data_view[: self.flag_bytes])
+            if self._reader_lock is None:
+                raise RuntimeError("Reader lock must be provided for readers.")
+            with (
+                self._reader_lock,
+                self.ring_buffer.access_buf(address) as (data_view, _),
+            ):
+                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
+
+                # Avoid increasing flag on newly added item (same as original note)
+                if reader_count >= self.n_readers:
+                    self.increment_reader_flag(data_view[: self.flag_bytes])
 
     def handle(self):
         """Get handle for sharing across processes."""
