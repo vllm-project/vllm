@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -157,8 +158,6 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
@@ -1018,10 +1017,10 @@ class EagleProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
-            if (
-                self.get_model_name(target_model)
-                == "Qwen2_5_VLForConditionalGeneration"
-            ):
+            if self.get_model_name(target_model) in [
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
+            ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             else:
                 self.model.config.image_token_index = (

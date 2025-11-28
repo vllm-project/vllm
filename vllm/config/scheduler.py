@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -223,19 +223,6 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
-
-    @property
-    @deprecated(
-        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
-        "`SchedulerConfig.enable_chunked_prefill`. "
-        "The old name will be removed in v0.12."
-    )
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (

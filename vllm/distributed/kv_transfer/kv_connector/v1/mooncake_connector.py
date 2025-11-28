@@ -16,6 +16,7 @@ import zmq
 import zmq.asyncio
 
 from vllm import envs
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
@@ -46,7 +47,6 @@ except ImportError as e:
     ) from e
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -211,7 +211,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """MooncakeConnector does not save explicitly."""
