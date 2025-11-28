@@ -55,29 +55,16 @@ from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ClassificationRequest,
-    ClassificationResponse,
     CompletionRequest,
     CompletionResponse,
     DetokenizeRequest,
     DetokenizeResponse,
-    EmbeddingBytesResponse,
-    EmbeddingRequest,
-    EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
     GenerateRequest,
     GenerateResponse,
-    IOProcessorResponse,
-    PoolingBytesResponse,
-    PoolingRequest,
-    PoolingResponse,
-    RerankRequest,
-    RerankResponse,
     ResponsesRequest,
     ResponsesResponse,
-    ScoreRequest,
-    ScoreResponse,
     StreamingResponsesResponse,
     TokenizeRequest,
     TokenizeResponse,
@@ -87,17 +74,13 @@ from vllm.entrypoints.openai.protocol import (
     TranslationResponse,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
 from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
@@ -105,6 +88,31 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranslation,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.pooling.classify.protocol import (
+    ClassificationRequest,
+    ClassificationResponse,
+)
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
+)
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorResponse,
+    PoolingBytesResponse,
+    PoolingRequest,
+    PoolingResponse,
+)
+from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankRequest,
+    RerankResponse,
+    ScoreRequest,
+    ScoreResponse,
+)
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
     cli_env_setup,
