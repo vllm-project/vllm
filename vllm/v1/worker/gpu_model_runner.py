@@ -4971,6 +4971,18 @@ class GPUModelRunner(
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        # First, compute the set of valid layer names from kv_cache_groups.
+        # This set may have been pruned to only include local layers (e.g.,
+        # in pipeline parallelism scenarios).
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                layer_names.add(layer_name)
+
+        # Now allocate KV cache tensors, but only for layers that are
+        # in the valid layer_names set.
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
@@ -4980,16 +4992,14 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     # These layers reuse another layer's KV cache tensor.
                     continue
+                if layer_name not in layer_names:
+                    # This layer was pruned (e.g., not on this rank in PP).
+                    continue
                 kv_cache_raw_tensors[layer_name] = tensor
 
-        layer_names = set()
-        for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                layer_names.add(layer_name)
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
-            "Some layers are not correctly initialized"
+            f"Some layers are not correctly initialized. "
+            f"Expected: {layer_names}, got: {set(kv_cache_raw_tensors.keys())}"
         )
         return kv_cache_raw_tensors
 
