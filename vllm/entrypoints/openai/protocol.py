@@ -29,7 +29,6 @@ from openai.types.responses import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponsePrompt,
-    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -304,9 +303,7 @@ def get_logits_processors(
     return None
 
 
-ResponseInputOutputItem: TypeAlias = (
-    ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
-)
+ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -377,7 +374,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -559,13 +556,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ) = "none"
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     include_reasoning: bool = True
+    parallel_tool_calls: bool | None = True
 
-    # NOTE this will be ignored by vLLM -- the model determines the behavior
-    parallel_tool_calls: bool | None = False
+    # NOTE this will be ignored by vLLM
     user: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
-    best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
@@ -653,62 +649,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
-    guided_json: str | dict | BaseModel | None = Field(
-        default=None,
-        description=(
-            "`guided_json` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `json` to `structured_outputs` instead."
-        ),
-    )
-    guided_regex: str | None = Field(
-        default=None,
-        description=(
-            "`guided_regex` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `regex` to `structured_outputs` instead."
-        ),
-    )
-    guided_choice: list[str] | None = Field(
-        default=None,
-        description=(
-            "`guided_choice` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `choice` to `structured_outputs` instead."
-        ),
-    )
-    guided_grammar: str | None = Field(
-        default=None,
-        description=(
-            "`guided_grammar` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `grammar` to `structured_outputs` instead."
-        ),
-    )
-    structural_tag: str | None = Field(
-        default=None,
-        description=(
-            "`structural_tag` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `structural_tag` to `structured_outputs` instead."
-        ),
-    )
-    guided_decoding_backend: str | None = Field(
-        default=None,
-        description=(
-            "`guided_decoding_backend` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please remove it from your request."
-        ),
-    )
-    guided_whitespace_pattern: str | None = Field(
-        default=None,
-        description=(
-            "`guided_whitespace_pattern` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `whitespace_pattern` to `structured_outputs` instead."
-        ),
-    )
     priority: int = Field(
         default=0,
         description=(
@@ -718,7 +658,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -764,7 +704,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -842,20 +782,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        # Forward deprecated guided_* parameters to structured_outputs
-        if self.structured_outputs is None:
-            kwargs = dict[str, Any](
-                json=self.guided_json,
-                regex=self.guided_regex,
-                choice=self.guided_choice,
-                grammar=self.guided_grammar,
-                whitespace_pattern=self.guided_whitespace_pattern,
-                structural_tag=self.structural_tag,
-            )
-            kwargs = {k: v for k, v in kwargs.items() if v is not None}
-            if len(kwargs) > 0:
-                self.structured_outputs = StructuredOutputsParams(**kwargs)
-
         response_format = self.response_format
         if response_format is not None:
             # If structured outputs wasn't already enabled,
@@ -864,24 +790,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = StructuredOutputsParams()
 
             # Set structured output params for response format
-            if response_format is not None:
-                if response_format.type == "json_object":
-                    self.structured_outputs.json_object = True
-                elif response_format.type == "json_schema":
-                    json_schema = response_format.json_schema
-                    assert json_schema is not None
-                    self.structured_outputs.json = json_schema.json_schema
-                elif response_format.type == "structural_tag":
-                    structural_tag = response_format
-                    assert structural_tag is not None and isinstance(
-                        structural_tag,
-                        (
-                            LegacyStructuralTagResponseFormat,
-                            StructuralTagResponseFormat,
-                        ),
-                    )
-                    s_tag_obj = structural_tag.model_dump(by_alias=True)
-                    self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
+            if response_format.type == "json_object":
+                self.structured_outputs.json_object = True
+            elif response_format.type == "json_schema":
+                json_schema = response_format.json_schema
+                assert json_schema is not None
+                self.structured_outputs.json = json_schema.json_schema
+            elif response_format.type == "structural_tag":
+                structural_tag = response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag,
+                    (
+                        LegacyStructuralTagResponseFormat,
+                        StructuralTagResponseFormat,
+                    ),
+                )
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -889,7 +814,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1088,7 +1012,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
     prompt: list[int] | list[list[int]] | str | list[str] | None = None
-    best_of: int | None = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -1143,58 +1066,6 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
-    guided_json: str | dict | BaseModel | None = Field(
-        default=None,
-        description=(
-            "`guided_json` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `json` to `structured_outputs` instead."
-        ),
-    )
-    guided_regex: str | None = Field(
-        default=None,
-        description=(
-            "`guided_regex` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `regex` to `structured_outputs` instead."
-        ),
-    )
-    guided_choice: list[str] | None = Field(
-        default=None,
-        description=(
-            "`guided_choice` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `choice` to `structured_outputs` instead."
-        ),
-    )
-    guided_grammar: str | None = Field(
-        default=None,
-        description=(
-            "`guided_grammar` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `grammar` to `structured_outputs` instead."
-        ),
-    )
-    structural_tag: str | None = Field(
-        default=None,
-        description=("If specified, the output will follow the structural tag schema."),
-    )
-    guided_decoding_backend: str | None = Field(
-        default=None,
-        description=(
-            "`guided_decoding_backend` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please remove it from your request."
-        ),
-    )
-    guided_whitespace_pattern: str | None = Field(
-        default=None,
-        description=(
-            "`guided_whitespace_pattern` is deprecated. "
-            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
-            "Please pass `whitespace_pattern` to `structured_outputs` instead."
-        ),
-    )
     priority: int = Field(
         default=0,
         description=(
@@ -1204,7 +1075,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1252,7 +1123,7 @@ class CompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."
+            "to 256 bit)."
         ),
     )
 
@@ -1339,35 +1210,31 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        guided_json_object = None
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                guided_json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
+        response_format = self.response_format
+        if response_format is not None:
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if self.structured_outputs is None:
+                self.structured_outputs = StructuredOutputsParams()
+
+            # Set structured output params for response format
+            if response_format.type == "json_object":
+                self.structured_outputs.json_object = True
+            elif response_format.type == "json_schema":
+                json_schema = response_format.json_schema
                 assert json_schema is not None
-                self.guided_json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
+                self.structured_outputs.json = json_schema.json_schema
+            elif response_format.type == "structural_tag":
+                structural_tag = response_format
                 assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat
+                    structural_tag,
+                    (
+                        LegacyStructuralTagResponseFormat,
+                        StructuralTagResponseFormat,
+                    ),
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structural_tag = json.dumps(s_tag_obj)
-
-        # Forward deprecated guided_* parameters to structured_outputs
-        if self.structured_outputs is None:
-            kwargs = dict[str, Any](
-                json=self.guided_json,
-                json_object=guided_json_object,
-                regex=self.guided_regex,
-                choice=self.guided_choice,
-                grammar=self.guided_grammar,
-                whitespace_pattern=self.guided_whitespace_pattern,
-            )
-            kwargs = {k: v for k, v in kwargs.items() if v is not None}
-            if len(kwargs) > 0:
-                self.structured_outputs = StructuredOutputsParams(**kwargs)
+                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1375,7 +1242,6 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -1506,7 +1372,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1601,7 +1467,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -2023,7 +1889,7 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -2114,7 +1980,7 @@ class ClassificationChatRequest(OpenAIBaseModel):
     )
 
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3225,7 +3091,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 ####### Tokens IN <> Tokens OUT #######
 class GenerateRequest(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -3282,7 +3148,7 @@ class GenerateResponseChoice(BaseModel):
 
 class GenerateResponse(BaseModel):
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=random_uuid,
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
