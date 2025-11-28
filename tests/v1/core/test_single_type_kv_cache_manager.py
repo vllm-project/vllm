@@ -41,7 +41,9 @@ def test_chunked_local_attention_possible_cached_prefix():
         attention_chunk_size=4,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
     manager = get_chunked_local_attention_manager(
         chunked_local_attention_spec, block_pool
     )
@@ -70,6 +72,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
             use_eagle=False,
+            alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
 
@@ -111,7 +114,9 @@ def test_sliding_window_possible_cached_prefix():
         sliding_window=4,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
     def run_one_case(block_is_cached, expect_length):
@@ -138,6 +143,7 @@ def test_sliding_window_possible_cached_prefix():
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
             use_eagle=False,
+            alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
 
@@ -178,7 +184,7 @@ def test_chunked_local_attention_remove_skipped_blocks():
         attention_chunk_size=4,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
+    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True, hash_block_size=2)
 
     manager = get_chunked_local_attention_manager(attention_spec, block_pool)
 
@@ -239,7 +245,7 @@ def test_sliding_window_remove_skipped_blocks():
         sliding_window=4,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
+    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True, hash_block_size=2)
 
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
@@ -316,7 +322,9 @@ def test_get_num_blocks_to_allocate():
         sliding_window=4,  # Placeholder value, not related to test result
     )
 
-    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
     cached_blocks_1 = [KVCacheBlock(i + 1) for i in range(10)]
     cached_blocks_2 = [block_pool.null_block for _ in range(5)] + [
@@ -341,7 +349,9 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
         attention_chunk_size=4,  # Placeholder value, not related to test result
     )
 
-    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
     manager = get_chunked_local_attention_manager(attention_spec, block_pool)
     cached_blocks_1 = [KVCacheBlock(i + 1) for i in range(10)]
     cached_blocks_2 = [block_pool.null_block for _ in range(5)] + [
