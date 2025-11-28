@@ -8,9 +8,9 @@ TL;DR:
 | Online Flag | Offline Flag   |      Result |
 |----------|----------|-------------|
 | --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -O.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -O.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
-| -O.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
+| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
+| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
 
@@ -86,11 +86,11 @@ LLM(model, enforce_eager=True)
 ```
 
 To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-O` is short for `--compilation_config`):
+(`-cc` is short for `--compilation_config`; `-O.*` dotted syntax is deprecated):
 
 ```sh
 # Online
-vllm serve -O.mode=0
+vllm serve -cc.mode=0
 ```
 
 ```py
@@ -103,7 +103,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py
@@ -183,10 +183,10 @@ help debug the issue:
 
 ```sh
 # Online - using unbacked mode
-vllm serve meta-llama/Llama-3.2-1B -O.dynamic_shapes_config.type=unbacked
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
 
 # Online - using backed_size_oblivious mode
-vllm serve meta-llama/Llama-3.2-1B -O.dynamic_shapes_config.type=backed_size_oblivious
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=backed_size_oblivious
 ```
 
 ```py
@@ -233,7 +233,7 @@ to the compilation config:
 
 ```sh
 # online
-vllm serve -O.backend=eager
+vllm serve -cc.backend=eager
 ```
 
 ```py
@@ -252,7 +252,7 @@ You can also use `TORCH_LOGS=output_code <command>` to print the Inductor output
 ### Editable TorchInductor code
 
 You can edit the TorchInductor code that gets run by setting `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`
-or passing `-O.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
+or passing `-cc.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
 
 This is a useful technique: you can put breakpoints (e.g. `torch.distributed.breakpoint()`)
 and print statements in the output code.
@@ -299,7 +299,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py
