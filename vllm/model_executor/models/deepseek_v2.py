@@ -309,8 +309,7 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
         used_inside_scaling = (
-            self.is_rocm_aiter_moe_enabled
-            or self.is_fusion_moe_shared_experts_enabled
+            self.is_rocm_aiter_moe_enabled or self.is_fusion_moe_shared_experts_enabled
         )
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
