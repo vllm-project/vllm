@@ -89,6 +89,7 @@ from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1122,9 +1123,14 @@ class Qwen3LLMModel(Qwen3Model):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        
+        aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+            
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -1144,6 +1150,9 @@ class Qwen3LLMModel(Qwen3Model):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1186,7 +1195,12 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsMRoPE,
+    SupportsEagle3,
 ):
     merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
@@ -1278,6 +1292,13 @@ class Qwen3VLForConditionalGeneration(
             self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def _get_deepstack_input_embeds(self, num_tokens: int) -> IntermediateTensors:
         # get deepstack_input_embeds from buffer, and clear the buffer
