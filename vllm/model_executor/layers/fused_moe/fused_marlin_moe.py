@@ -29,19 +29,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.scalar_type import ScalarType, scalar_types
 
 
-# print utilities
-def print_args_info(*args, **kwargs):
-    print("=== positional args ===")
-    for i, a in enumerate(args):
-        print(f"\narg[{i}]:")
-        # print tensor info only
-        if isinstance(a, torch.Tensor):
-            print(f"  shape : {tuple(a.shape)}")
-            print(f"  stride: {tuple(a.stride())}")
-            print(f"  dtype : {a.dtype}")
-            print(f"  device: {a.device}")
-
-
 def default_activation_func(
     activation: str, output: torch.Tensor, input: torch.Tensor
 ) -> None:
@@ -124,13 +111,7 @@ def _fused_marlin_moe(
         hidden_states.dtype == torch.half
         or torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
     )
-    # print('printing stuff before moe 1')
-    # print_args_info(
-    #     hidden_states,
-    #     w1,
-    #     w1_scale,
-    #     intermediate_cache1
-    # )
+
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         hidden_states,
         intermediate_cache1,
