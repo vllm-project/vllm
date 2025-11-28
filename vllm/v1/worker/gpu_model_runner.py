@@ -521,7 +521,6 @@ class GPUModelRunner(
                 max_buffer_num_tokens, dtype=torch.bool
             )
 
-        self.pcp_manager = None
         # Manager for Prefill Context Parallism
         if self.pcp_world_size > 1:
             self.pcp_manager = PCPManager(
@@ -3067,7 +3066,7 @@ class GPUModelRunner(
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = get_pcp_group().all_gather(
-                    hidden_states[: num_tokens_unpadded],
+                    hidden_states[:num_tokens_unpadded],
                     0,
                 )
                 restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[

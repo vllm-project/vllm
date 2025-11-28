@@ -128,8 +128,8 @@ class CommonAttentionMetadata:
             num_logits_indices=self.num_logits_indices,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
-            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            cp_local_seq_lens=maybe_slice_reqs(self.cp_local_seq_lens),
+            cp_local_seq_lens_cpu=maybe_slice_reqs(self.cp_local_seq_lens_cpu),
         )
 
 

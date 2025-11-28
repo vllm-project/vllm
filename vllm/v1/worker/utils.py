@@ -142,15 +142,15 @@ class PCPManager:
     """
 
     def __init__(
-            self,
-            pcp_world_size: int,
-            pcp_rank: int,
-            max_buffer_num_tokens: int,
-            max_num_reqs: int,
-            device: torch.device,
-            pin_memory: bool = False,
-            arange_np: np.ndarray | None = None,
-        ) -> None:
+        self,
+        pcp_world_size: int,
+        pcp_rank: int,
+        max_buffer_num_tokens: int,
+        max_num_reqs: int,
+        device: torch.device,
+        pin_memory: bool = False,
+        arange_np: np.ndarray | None = None,
+    ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
         self.arange_np = arange_np
@@ -193,8 +193,7 @@ class PCPManager:
         total_num_tokens = cu_num_tokens[-1]
         # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
         cumsums_offsets = np.repeat(
-            cu_num_tokens - num_scheduled_tokens,
-            num_scheduled_tokens
+            cu_num_tokens - num_scheduled_tokens, num_scheduled_tokens
         )
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = arange_np[:total_num_tokens] - cumsums_offsets
@@ -206,7 +205,7 @@ class PCPManager:
         tokens: np.ndarray,
         arange_np: np.ndarray,
         num_reqs: int,
-        reorder_batch_threshold: int,
+        reorder_batch_threshold: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Update token counts and positions for Prefill Context Parallelism (PCP).

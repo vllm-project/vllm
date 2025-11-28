@@ -1005,11 +1005,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.pcp_world_size,
                 )
                 pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
-                    kv_head_indices = kv_head_idx.to(device, dtype=torch.int32),
-                    kv_tail_indices = kv_tail_idx.to(device, dtype=torch.int32),
-                    query_head_indices = q_head_idx.to(device, dtype=torch.int32),
-                    query_tail_indices = q_tail_idx.to(device, dtype=torch.int32),
-                    output_restore_idx = output_res_idx.to(device, dtype=torch.int32),
+                    kv_head_indices=kv_head_idx.to(device, dtype=torch.int32),
+                    kv_tail_indices=kv_tail_idx.to(device, dtype=torch.int32),
+                    query_head_indices=q_head_idx.to(device, dtype=torch.int32),
+                    query_tail_indices=q_tail_idx.to(device, dtype=torch.int32),
+                    output_restore_idx=output_res_idx.to(device, dtype=torch.int32),
                     pcp_allgather_restore_idx=pcp_allgather_restore_idx,
                 )
 
@@ -2082,6 +2082,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if self.pcp_world_size > 1:
             if attn_metadata.prefill is not None:
                 pcp_metadata = attn_metadata.prefill.pcp_metadata
+                assert pcp_metadata is not None
                 assert pcp_metadata.pcp_allgather_restore_idx is not None
                 k_c_normed, k_pe = pcp_kv_allgather_and_restore(
                     k_c_normed,
