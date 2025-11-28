@@ -32,11 +32,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
     MultiModalFeatureSpec = object
+    _ProcessorFactories = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -85,6 +87,11 @@ class SupportsMultiModal(Protocol):
     multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
     """
     A set indicating CPU-only multimodal fields.
+    """
+
+    _processor_factory: ClassVar[_ProcessorFactories]
+    """
+    Set internally by `MultiModalRegistry.register_processor`.
     """
 
     @classmethod
