@@ -663,7 +663,9 @@ class BaseMultiModalReceiverCache(
         return mm_features
 
     @abstractmethod
-    def touch_cache_receiver(self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None) -> None:
+    def touch_cache_receiver(
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None
+    ) -> None:
         """
         Update the cache eviction order for a multi-modal item.
 
