@@ -1146,6 +1146,24 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
+### Pareto visualization (tokens/s/user vs tokens/s/GPU)
+
+`vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
+
+Higher concurrency or batch size can raise GPU efficiency (per-GPU), but can add per user latency; lower concurrency improves per-user rate but underutilizes GPUs; The Pareto frontier shows the best achievable pairs across your runs.
+
+- x-axis: tokens/s/user = `output_throughput` ÷ concurrency (`--user-count-var`, default `max_concurrency`, fallback `max_concurrent_requests`).
+- y-axis: tokens/s/GPU = `output_throughput` ÷ GPU count (`--gpu-count-var` if set; else gpu_count is TP×PP*DP).
+- Output: a single figure at `OUTPUT_DIR/pareto/PARETO.png`.
+- Show the configuration used in each data point `--label-by` (default: `max_concurrency,gpu_count`).
+
+Example:
+
+```bash
+vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
+  --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
+```
+
 ## Performance Benchmarks
 
 The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the `perf-benchmarks` and `ready` labels, and when a PR is merged into vLLM.
