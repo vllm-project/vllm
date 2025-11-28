@@ -403,8 +403,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dcp_context_kv_lens = seq_lens - query_kv_lens
 
-            dcp_context_kv_lens_cpu = get_cp_local_seq_lens(
-                dcp_context_kv_lens_cpu,
+            dcp_context_kv_lens = get_cp_local_seq_lens(
+                dcp_context_kv_lens,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,

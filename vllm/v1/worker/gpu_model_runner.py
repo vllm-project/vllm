@@ -1481,7 +1481,7 @@ class GPUModelRunner(
 
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens)
-            max_num_scheduled_tokens = max(num_scheduled_tokens)
+            scheduler_output.total_num_scheduled_tokens = total_num_scheduled_tokens
 
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
@@ -1711,6 +1711,10 @@ class GPUModelRunner(
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
+        assert num_tokens_padded is None or self.pcp_world_size == 1, (
+            "PCP not support pad attn now"
+        )
+
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
 
@@ -1780,10 +1784,10 @@ class GPUModelRunner(
                 num_reqs_padded,
             )
 
-            slot_mapping_size = (
+            maybe_pcp_full_tokens = (
                 num_tokens_padded
                 if self.pcp_world_size == 1
-                else num_tokens_padded * self.pcp_world_size
+                else num_tokens * self.pcp_world_size
                 - sum(self.num_pcp_pads_cpu[:num_reqs])
             )
 
@@ -1801,22 +1805,24 @@ class GPUModelRunner(
                     device=self.device,
                 )
             else:
+                blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
-                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
+                slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-                slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
-                blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+                if self.pcp_world_size == 1:
+                    slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
+                    blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
 
             if self.pcp_world_size > 1:
                 # After pcp allgather and restore, there are padded tokens in
                 # kv, so we need pad slotmapping for alignment.
                 pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[
-                    : num_tokens_padded * self.pcp_world_size
+                    : num_tokens * self.pcp_world_size
                 ]
                 cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[
-                    : num_tokens_padded * self.pcp_world_size
+                    : num_tokens * self.pcp_world_size
                 ]
                 pcp_padded_slot_mapping.fill_(-1)
                 pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
@@ -1842,7 +1848,7 @@ class GPUModelRunner(
                 cp_local_seq_lens=cp_local_seq_lens,
                 cp_local_seq_lens_cpu=cp_local_seq_lens_cpu,
                 pcp_allgather_restore_idx=self.pcp_allgather_restore_idx.gpu[
-                    : total_num_scheduled_tokens * self.pcp_world_size
+                    : num_tokens * self.pcp_world_size
                 ]
                 if self.pcp_world_size > 1
                 else None,
@@ -3114,6 +3120,7 @@ class GPUModelRunner(
                 )
                 if self.pcp_world_size > 1:
                     max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                    num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
@@ -3157,9 +3164,7 @@ class GPUModelRunner(
 
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
-                        num_tokens=num_tokens_padded
-                        if self.pcp_world_size == 1
-                        else num_scheduled_tokens_np.sum(),
+                        num_tokens=num_tokens_unpadded,
                         num_tokens_padded=num_tokens_padded if pad_attn else None,
                         num_reqs=num_reqs,
                         num_reqs_padded=num_reqs_padded if pad_attn else None,
@@ -3227,7 +3232,7 @@ class GPUModelRunner(
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
                 hidden_states = get_pcp_group().all_gather(
-                    hidden_states[: num_scheduled_tokens_np.sum()],
+                    hidden_states[: num_tokens_unpadded],
                     0,
                 )
                 hidden_states = torch.index_select(
@@ -3235,7 +3240,8 @@ class GPUModelRunner(
                     0,
                     self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]],
                 )
-
+                # Restore total_num_scheduled_tokens.
+                scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
