@@ -25,6 +25,9 @@ import numpy as np
 import os
 import sys
 import time
+import tempfile
+import json
+import shutil
 from typing import List, Optional
 from PIL import Image
 
@@ -154,74 +157,156 @@ def main(args):
     
     # If we are using the synthetic path, we set model to None so we can inject our own
     model_arg = args.model
-    
-    # Aggressive configuration
-    engine_args = EngineArgs(
-        model=model_arg,
-        max_num_batched_tokens=args.max_num_batched_tokens,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        limit_mm_per_prompt={"image": len(frames)},
-        reasoning_parser="step3", # Enable Step3 reasoning parser if applicable
-        trust_remote_code=True,
-        enforce_eager=args.enforce_eager,
-        cpu_offload_gb=args.cpu_offload_gb,
-        max_model_len=args.max_model_len,
-    )
+    tokenizer_arg = args.tokenizer
+    load_format_arg = args.load_format
 
-    # Inject prefix sum mode if requested
-    if os.environ.get("VLLM_HYBRID_SSM_MODE") == "prefix_sum":
-        print("WARNING: Running in synthetic Prefix-Sum verification mode!")
-
-    llm = LLM(**engine_args.__dict__)
-
-    # 4. Run Inference
-    sampling_params = SamplingParams(
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        top_p=args.top_p,
-    )
-
-    print("Starting inference...")
-    start_time = time.perf_counter()
-    outputs = llm.generate(
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": frames},
-        },
-        sampling_params=sampling_params,
-    )
-    end_time = time.perf_counter()
-    duration = end_time - start_time
-
-    # 5. Print Results and Metrics
-    print("\n" + "=" * 50)
-    print("Generated Output (Step3 Video QA):")
-    print("=" * 50)
-    
-    total_input_tokens = 0
-    total_output_tokens = 0
-
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
-        print("-" * 50)
+    # Handle synthetic mode
+    temp_dir = None
+    if args.synthetic:
+        print("Running in SYNTHETIC mode. Creating dummy model config...")
+        temp_dir = tempfile.mkdtemp()
         
-        # Count tokens
-        total_input_tokens += len(o.prompt_token_ids)
-        total_output_tokens += len(o.outputs[0].token_ids)
-    
-    total_tokens = total_input_tokens + total_output_tokens
-    tokens_per_sec = total_tokens / duration if duration > 0 else 0
-    output_tokens_per_sec = total_output_tokens / duration if duration > 0 else 0
+        # Create a small synthetic config for Step3
+        # We mimic the structure of Step3VLConfig, Step3VisionEncoderConfig, Step3TextConfig
+        
+        # Vision Config
+        vision_config = {
+            "model_type": "step3_vision_encoder",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "output_hidden_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_channels": 3,
+            "image_size": 728,
+            "patch_size": 14,
+            "hidden_act": "quick_gelu",
+            "layer_norm_eps": 1e-5,
+        }
+        
+        # Text Config
+        text_config = {
+            "model_type": "step3_text",
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_attention_heads": 4,
+            "num_attention_groups": 1,
+            "num_hidden_layers": 2,
+            "max_seq_len": 2048,
+            "vocab_size": 128815, # Match real Step3 vocab size to support real tokenizer
+            "rms_norm_eps": 1e-5,
+            "moe_intermediate_size": 128,
+            "moe_num_experts": 2,
+            "moe_top_k": 1,
+            "head_dim": 32,
+            "moe_layers_enum": [1], # Make sure this is within num_hidden_layers range
+            "rope_parameters": {"rope_type": "default"},
+            "max_position_embedding": 2048,
+            "share_expert_dim": 128,
+            "share_q_dim": 64,
+        }
+        
+        # VL Config
+        vl_config = {
+            "model_type": "step3_vl",
+            "vision_config": vision_config,
+            "text_config": text_config,
+            "understand_projector_stride": 1,
+            "projector_bias": True,
+            "image_token_id": 128001, # Match real Step3 image token ID
+            "architectures": ["Step3VLForConditionalGeneration"],
+        }
+        
+        with open(os.path.join(temp_dir, "config.json"), "w") as f:
+            json.dump(vl_config, f)
+            
+        model_arg = temp_dir
+        load_format_arg = "dummy"
+        
+        # For synthetic runs, we usually need a tokenizer. 
+        # If the user didn't specify one, we default to the original model name 
+        # so VLLM can download just the tokenizer (small).
+        if not tokenizer_arg:
+            tokenizer_arg = args.model # Default to the passed model name (e.g. stepfun-ai/step3-fp8)
+            
+        print(f"Synthetic config created at {temp_dir}")
+        print(f"Using tokenizer: {tokenizer_arg}")
 
-    print("\nBenchmark Metrics:")
-    print(f"Time taken: {duration:.2f} s")
-    print(f"Total Input Tokens: {total_input_tokens}")
-    print(f"Total Output Tokens: {total_output_tokens}")
-    print(f"Throughput (Total): {tokens_per_sec:.2f} tokens/sec")
-    print(f"Throughput (Generation): {output_tokens_per_sec:.2f} tokens/sec")
-    print("=" * 50)
+    try:
+        # Aggressive configuration
+        engine_args = EngineArgs(
+            model=model_arg,
+            tokenizer=tokenizer_arg,
+            load_format=load_format_arg,
+            max_num_batched_tokens=args.max_num_batched_tokens,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            tensor_parallel_size=args.tensor_parallel_size,
+            limit_mm_per_prompt={"image": len(frames)},
+            reasoning_parser="step3", # Enable Step3 reasoning parser if applicable
+            trust_remote_code=True,
+            enforce_eager=args.enforce_eager,
+            cpu_offload_gb=args.cpu_offload_gb,
+            max_model_len=args.max_model_len,
+        )
+
+        # Inject prefix sum mode if requested
+        if os.environ.get("VLLM_HYBRID_SSM_MODE") == "prefix_sum":
+            print("WARNING: Running in synthetic Prefix-Sum verification mode!")
+    
+        llm = LLM(**engine_args.__dict__)
+    
+        # 4. Run Inference
+        sampling_params = SamplingParams(
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+        )
+    
+        print("Starting inference...")
+        start_time = time.perf_counter()
+        outputs = llm.generate(
+            {
+                "prompt": prompt,
+                "multi_modal_data": {"image": frames},
+            },
+            sampling_params=sampling_params,
+        )
+        end_time = time.perf_counter()
+        duration = end_time - start_time
+    
+        # 5. Print Results and Metrics
+        print("\n" + "=" * 50)
+        print("Generated Output (Step3 Video QA):")
+        print("=" * 50)
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+    
+        for o in outputs:
+            generated_text = o.outputs[0].text
+            print(generated_text)
+            print("-" * 50)
+            
+            # Count tokens
+            total_input_tokens += len(o.prompt_token_ids)
+            total_output_tokens += len(o.outputs[0].token_ids)
+        
+        total_tokens = total_input_tokens + total_output_tokens
+        tokens_per_sec = total_tokens / duration if duration > 0 else 0
+        output_tokens_per_sec = total_output_tokens / duration if duration > 0 else 0
+    
+        print("\nBenchmark Metrics:")
+        print(f"Time taken: {duration:.2f} s")
+        print(f"Total Input Tokens: {total_input_tokens}")
+        print(f"Total Output Tokens: {total_output_tokens}")
+        print(f"Throughput (Total): {tokens_per_sec:.2f} tokens/sec")
+        print(f"Throughput (Generation): {output_tokens_per_sec:.2f} tokens/sec")
+        print("=" * 50)
+    
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            print(f"Cleaned up synthetic config at {temp_dir}")
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
@@ -316,6 +401,24 @@ if __name__ == "__main__":
         help="Top-p sampling.",
     )
 
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        default=None,
+        help="Tokenizer name or path. Defaults to model name if not specified.",
+    )
+    parser.add_argument(
+        "--load-format",
+        type=str,
+        default="auto",
+        help="Model loading format (auto, pt, safetensors, dummy, etc).",
+    )
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Run with a synthetic (dummy) small Step3 model config.",
+    )
+    
     args = parser.parse_args()
     main(args)
 
