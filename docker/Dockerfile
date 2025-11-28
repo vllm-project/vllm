@@ -473,8 +473,14 @@ ENV UV_LINK_MODE=copy
 
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') \
     && apt-get update -y \
-    && apt-get install -y git
+    && apt-get install -y git \
+    cuda-nvrtc-dev-${CUDA_VERSION_DASH} \
+    libcublas-dev-${CUDA_VERSION_DASH} \
+    libcusolver-dev-${CUDA_VERSION_DASH} \
+    libcusparse-dev-${CUDA_VERSION_DASH} && \
+    rm -rf /var/lib/apt/lists/*
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
