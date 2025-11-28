@@ -1196,10 +1196,10 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
 )
 class Qwen3VLForConditionalGeneration(
     nn.Module,
-    SupportsMultiModal, 
-    SupportsLoRA, 
-    SupportsPP, 
-    SupportsMRoPE, 
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsMRoPE,
     SupportsEagle3,
 ):
     merge_by_field_config = True
