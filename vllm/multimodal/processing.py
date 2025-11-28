@@ -1727,11 +1727,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
-        updated_mm_hashes = [
-            item_hash for hashes in mm_hashes.values() for item_hash in hashes
-        ]
-        for mm_hash in updated_mm_hashes:
-            cache.touch_cache_sender(mm_hash)
+        for hashes in mm_hashes.values():
+            for item_hash in hashes:
+                cache.touch_cache_sender(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
