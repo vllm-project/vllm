@@ -22,7 +22,6 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
-from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
 from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLConfig,
     HunYuanVLTextConfig,
@@ -38,7 +37,6 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
-from vllm.transformers_utils.configs.olmo3 import Olmo3Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.transformers_utils.configs.radio import RadioConfig
