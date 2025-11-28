@@ -30,7 +30,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import Olmo2Config
+from transformers import Olmo2Config, Olmo3Config
 
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -63,7 +63,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Olmo3Config
 
 
 class Olmo2Attention(nn.Module):
