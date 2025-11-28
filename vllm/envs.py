@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
+    VLLM_USE_V1: bool = False
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -535,6 +536,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
     ),
+    # Enable V1 engine when set to 1, disable when set to 0.
+    # When unset, vLLM will use V1 for supported features and fall back to V0 for experimental features.
+    "VLLM_USE_V1": lambda: os.getenv("VLLM_USE_V1", "").strip().lower() in ("true", "1"),
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": lambda: (
@@ -1571,6 +1575,16 @@ def is_set(name: str):
     if name in environment_variables:
         return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def set_vllm_use_v1(use_v1: bool):
+    if is_set("VLLM_USE_V1"):
+        raise ValueError(
+            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
+            "explicitly by the user. Please raise this as a Github "
+            "Issue and explicitly set VLLM_USE_V1=0 or 1."
+        )
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
 
 
 def compile_factors() -> dict[str, object]:

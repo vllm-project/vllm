@@ -25,6 +25,88 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
+def _paged_attention_v1_fallback(
+    out: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    alibi_slopes: torch.Tensor | None,
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
+) -> None:
+    """Optimized vectorized PyTorch fallback for paged_attention_v1."""
+    # query: [batch_size, num_heads, head_size]
+    # key_cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
+    # value_cache: [num_blocks, num_kv_heads, head_size, block_size]
+    # block_tables: [batch_size, max_num_blocks_per_seq]
+    # seq_lens: [batch_size]
+    # out: [batch_size, num_heads, head_size]
+
+    batch_size, num_heads, head_size = query.shape
+    max_num_blocks = block_tables.shape[1]
+    x = key_cache.shape[4]
+
+    # Use SDPA (scaled dot product attention) for each sequence
+    # This is more optimized than manual matmul + softmax
+    for i in range(batch_size):
+        seq_len = seq_lens[i].item()
+        if seq_len == 0:
+            continue
+
+        num_blocks_needed = (seq_len + block_size - 1) // block_size
+        blocks = block_tables[i, :num_blocks_needed]
+
+        # Reconstruct K and V from paged cache
+        # Key: [num_blocks, num_kv_heads, head_size // x, block_size, x]
+        key_blocks = key_cache[blocks]
+        key = key_blocks.permute(0, 3, 1, 2, 4).reshape(-1, num_kv_heads, head_size)[:seq_len]
+
+        # Value: [num_blocks, num_kv_heads, head_size, block_size]
+        value_blocks = value_cache[blocks]
+        value = value_blocks.permute(0, 3, 1, 2).reshape(-1, num_kv_heads, head_size)[:seq_len]
+
+        # Expand KV for grouped-query attention
+        num_queries_per_kv = num_heads // num_kv_heads
+        if num_queries_per_kv > 1:
+            key = key.repeat_interleave(num_queries_per_kv, dim=1)
+            value = value.repeat_interleave(num_queries_per_kv, dim=1)
+
+        # Reshape: [seq_len, num_heads, head_size] -> [1, num_heads, 1, head_size] and [1, num_heads, seq_len, head_size]
+        q = query[i].unsqueeze(0).unsqueeze(2)  # [1, num_heads, 1, head_size]
+        k = key.transpose(0, 1).unsqueeze(0)     # [1, num_heads, seq_len, head_size]
+        v = value.transpose(0, 1).unsqueeze(0)   # [1, num_heads, seq_len, head_size]
+
+        # Use PyTorch's optimized SDPA if available (faster than manual matmul)
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            # SDPA handles the scale internally
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+            )
+            out[i] = attn_output.squeeze(2).squeeze(0)
+        else:
+            # Fallback to manual attention computation
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if alibi_slopes is not None:
+                positions = torch.arange(seq_len, device=q.device, dtype=q.dtype)
+                alibi_bias = alibi_slopes.unsqueeze(-1) * positions.unsqueeze(0)
+                attn_scores = attn_scores + alibi_bias.unsqueeze(0).unsqueeze(2)
+            attn_weights = torch.softmax(attn_scores, dim=-1)
+            attn_output = torch.matmul(attn_weights, v)
+            out[i] = attn_output.squeeze(2).squeeze(0)
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -47,27 +129,53 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    torch.ops._C.paged_attention_v1(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
-    )
+    # Try to use the compiled C++ implementation if available
+    if hasattr(torch.ops, '_C') and hasattr(torch.ops._C, 'paged_attention_v1'):
+        torch.ops._C.paged_attention_v1(
+            out,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            seq_lens,
+            block_size,
+            max_seq_len,
+            alibi_slopes,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+            tp_rank,
+            blocksparse_local_blocks,
+            blocksparse_vert_stride,
+            blocksparse_block_size,
+            blocksparse_head_sliding_step,
+        )
+    else:
+        # Pure PyTorch fallback implementation for MPS and other platforms
+        # without compiled extensions
+        _paged_attention_v1_fallback(
+            out,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            seq_lens,
+            block_size,
+            max_seq_len,
+            alibi_slopes,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+            tp_rank,
+            blocksparse_local_blocks,
+            blocksparse_vert_stride,
+            blocksparse_block_size,
+            blocksparse_head_sliding_step,
+        )
 
 
 def paged_attention_v2(
@@ -2125,16 +2233,82 @@ def reshape_and_cache(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        slot_mapping,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-    )
+    # Try to use the compiled C++ implementation if available
+    if hasattr(torch.ops, '_C_cache_ops') and hasattr(torch.ops._C_cache_ops, 'reshape_and_cache'):
+        torch.ops._C_cache_ops.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+    else:
+        # Pure PyTorch fallback implementation for MPS and other platforms
+        # without compiled extensions
+        _reshape_and_cache_fallback(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
+
+def _reshape_and_cache_fallback(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> None:
+    """
+    Pure PyTorch fallback implementation of reshape_and_cache.
+
+    Shapes:
+        key: [num_tokens, num_kv_heads, head_size]
+        value: [num_tokens, num_kv_heads, head_size]
+        key_cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
+        value_cache: [num_blocks, num_kv_heads, head_size, block_size]
+        slot_mapping: [num_tokens]
+    """
+    num_tokens = key.shape[0]
+    num_kv_heads = key.shape[1]
+    head_size = key.shape[2]
+    block_size = key_cache.shape[3]
+    x = key_cache.shape[4]
+
+    # Process each token
+    for token_idx in range(num_tokens):
+        slot_idx = slot_mapping[token_idx].item()
+        if slot_idx < 0:
+            # Padding token, skip
+            continue
+
+        # Calculate block and offset within block
+        block_idx = slot_idx // block_size
+        block_offset = slot_idx % block_size
+
+        # Handle key: reshape to match the x-major layout
+        # key[token_idx] is [num_kv_heads, head_size]
+        # Reshape to [num_kv_heads, head_size // x, x]
+        key_token = key[token_idx].view(num_kv_heads, head_size // x, x)
+
+        # Write to key_cache at [block_idx, :, :, block_offset, :]
+        key_cache[block_idx, :, :, block_offset, :] = key_token
+
+        # Handle value: no special reshaping needed
+        # value[token_idx] is [num_kv_heads, head_size]
+        # Write to value_cache at [block_idx, :, :, block_offset]
+        value_cache[block_idx, :, :, block_offset] = value[token_idx]
 
 
 def reshape_and_cache_flash(

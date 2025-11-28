@@ -19,7 +19,13 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
-import model_hosting_container_standards.sagemaker as sagemaker_standards
+try:
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+    _SAGEMAKER_AVAILABLE = True
+except ImportError:
+    _SAGEMAKER_AVAILABLE = False
+    sagemaker_standards = None  # type: ignore
+
 import prometheus_client
 import pydantic
 import regex as re
@@ -1650,9 +1656,11 @@ def build_app(args: Namespace) -> FastAPI:
 
         register_dynamic_lora_routes(router)
 
-    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
-
-    register_sagemaker_routes(router)
+    try:
+        from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
+        register_sagemaker_routes(router)
+    except ImportError:
+        logger.info("SageMaker routes not available (model_hosting_container_standards not installed)")
 
     app.include_router(router)
     app.root_path = args.root_path
@@ -1744,7 +1752,8 @@ def build_app(args: Namespace) -> FastAPI:
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
-    app = sagemaker_standards.bootstrap(app)
+    if _SAGEMAKER_AVAILABLE:
+        app = sagemaker_standards.bootstrap(app)
     # Optional endpoints
     if args.tokens_only:
 

@@ -38,9 +38,13 @@ envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
-    VLLM_TARGET_DEVICE = "cpu"
+# On macOS, detect MPS if available, otherwise use CPU
+if sys.platform.startswith("darwin") and os.getenv("VLLM_TARGET_DEVICE") is None:
+    # Check if MPS is available
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        VLLM_TARGET_DEVICE = "mps"
+    else:
+        VLLM_TARGET_DEVICE = "cpu"
 elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
@@ -75,8 +79,8 @@ def is_ninja_available() -> bool:
 
 
 class CMakeExtension(Extension):
-    def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+    def __init__(self, name: str, cmake_lists_dir: str = ".", py_limited_api: bool = True, **kwa) -> None:
+        super().__init__(name, sources=[], py_limited_api=py_limited_api, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -470,8 +474,12 @@ def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
 
+def _is_mps() -> bool:
+    return VLLM_TARGET_DEVICE == "mps"
+
+
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip() or _is_cpu() or _is_mps()
 
 
 def get_rocm_version():
@@ -557,6 +565,8 @@ def get_vllm_version() -> str:
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
+    elif _is_mps():
+        version += f"{sep}mps"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -603,8 +613,10 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
+    elif _is_mps():
+        requirements = _read_requirements("cpu.txt")
     else:
-        raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
+        raise ValueError("Unsupported platform, please use CUDA, ROCm, CPU, or MPS.")
     return requirements
 
 
@@ -633,7 +645,10 @@ if _is_cuda():
         )
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+    if _is_mps():
+        ext_modules.append(CMakeExtension(name="vllm._metal_C", py_limited_api=False))
+    else:
+        ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
     "vllm": [
@@ -642,6 +657,10 @@ package_data = {
         "model_executor/layers/quantization/utils/configs/*.json",
     ]
 }
+
+# Add Metal library for MPS builds
+if _is_mps():
+    package_data["vllm"].append("*.metallib")
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:

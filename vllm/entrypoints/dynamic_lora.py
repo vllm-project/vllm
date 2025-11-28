@@ -1,6 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import model_hosting_container_standards.sagemaker as sagemaker_standards
+from typing import Any, Callable
+
+try:
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+    _SAGEMAKER_AVAILABLE = True
+except ImportError:
+    _SAGEMAKER_AVAILABLE = False
+    # Provide no-op decorators when sagemaker_standards is not available
+    class _NoOpDecorator:
+        @staticmethod
+        def register_load_adapter_handler(**kwargs: Any) -> Callable:
+            def decorator(func: Callable) -> Callable:
+                return func
+            return decorator
+
+        @staticmethod
+        def register_unload_adapter_handler(**kwargs: Any) -> Callable:
+            def decorator(func: Callable) -> Callable:
+                return func
+            return decorator
+
+    sagemaker_standards = _NoOpDecorator()  # type: ignore
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 

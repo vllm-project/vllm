@@ -1270,6 +1270,18 @@ class GPUModelRunner(
             out=positions_np,
         )
 
+        # DEBUG: Log position values
+        import logging
+        logger = logging.getLogger(__name__)
+        is_prefill = np.any(num_scheduled_tokens > 1)
+        phase = "PREFILL" if is_prefill else "DECODE"
+        logger.info(f"[MPS_POS_DEBUG] {phase}: num_reqs={num_reqs}, total_tokens={total_num_scheduled_tokens}")
+        logger.info(f"[MPS_POS_DEBUG] num_scheduled_tokens={num_scheduled_tokens[:min(5, num_reqs)]}")
+        logger.info(f"[MPS_POS_DEBUG] num_computed_tokens={self.input_batch.num_computed_tokens_cpu[:min(5, num_reqs)]}")
+        logger.info(f"[MPS_POS_DEBUG] positions_np={positions_np[:min(10, total_num_scheduled_tokens)]}")
+        logger.info(f"[MPS_POS_DEBUG] req_indices={req_indices[:min(10, total_num_scheduled_tokens)]}")
+        logger.info(f"[MPS_POS_DEBUG] arange={arange[:min(10, total_num_scheduled_tokens)]}")
+
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1364,6 +1376,9 @@ class GPUModelRunner(
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
 
+        # DEBUG: Log seq_lens
+        logger.info(f"[MPS_POS_DEBUG] seq_lens={self.seq_lens.np[:min(5, num_reqs)]}")
+
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1396,6 +1411,12 @@ class GPUModelRunner(
         else:
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
+
+            # DEBUG: Verify positions after GPU copy
+            torch.mps.synchronize()  # Ensure copy completes
+            positions_gpu = self.positions.gpu[:total_num_scheduled_tokens]
+            logger.info(f"[MPS_POS_DEBUG] After GPU copy: positions_gpu={positions_gpu[:min(10, total_num_scheduled_tokens)]}")
+            logger.info(f"[MPS_POS_DEBUG] GPU tensor device={positions_gpu.device}, dtype={positions_gpu.dtype}")
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1558,6 +1579,12 @@ class GPUModelRunner(
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
                 slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
+
+                # DEBUG: Log block_table values
+                logger.info(f"[MPS_ATTN_DEBUG] kv_cache_gid={kv_cache_gid}, num_reqs={num_reqs}, num_tokens={num_tokens}")
+                logger.info(f"[MPS_ATTN_DEBUG] blk_table_tensor shape={blk_table_tensor.shape}, first row={blk_table_tensor[0] if num_reqs > 0 else 'N/A'}")
+                logger.info(f"[MPS_ATTN_DEBUG] seq_lens={seq_lens[:min(5, num_reqs)]}")
+                logger.info(f"[MPS_ATTN_DEBUG] slot_mapping first 10={slot_mapping[:min(10, num_tokens)]}")
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
