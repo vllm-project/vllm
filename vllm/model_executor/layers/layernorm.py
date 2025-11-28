@@ -594,6 +594,20 @@ class RMSNormGated(CustomOp):
             norm_before_gate=self.norm_before_gate,
         )
 
+    def forward_xpu(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
 
 class LayerNorm(nn.Module):
     """
