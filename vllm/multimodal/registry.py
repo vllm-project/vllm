@@ -210,7 +210,7 @@ class MultiModalRegistry:
                     self,
                 )
 
-            model_cls._processor_factory = _ProcessorFactories(  # type: ignore
+            model_cls._processor_factory = _ProcessorFactories(
                 info=info,
                 dummy_inputs=dummy_inputs,
                 processor=processor,
