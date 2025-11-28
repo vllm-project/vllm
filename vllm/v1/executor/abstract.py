@@ -207,21 +207,21 @@ class Executor(ABC):
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: Literal[False] = False
     ) -> ModelRunnerOutput:
         pass
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: Literal[True] = True
     ) -> Future[ModelRunnerOutput]:
         pass
 
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
-            "sample_tokens", args=(grammar_output,), non_block=non_block
+            "sample_tokens", args=(grammar_output, num_reject_spec_tokens), non_block=non_block
         )
         return output[0]
 

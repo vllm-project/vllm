@@ -412,6 +412,7 @@ class RayDistributedExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self,
         grammar_output: "GrammarOutput | None",
+        num_reject_spec_tokens: dict[str, int] | None = None,
         non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
@@ -432,7 +433,7 @@ class RayDistributedExecutor(Executor):
 
         self.scheduler_output = None
 
-        return self._execute_dag(scheduler_output, grammar_output, non_block)
+        return self._execute_dag(scheduler_output, grammar_output, num_reject_spec_tokens, non_block)
 
     def _execute_dag(
         self,

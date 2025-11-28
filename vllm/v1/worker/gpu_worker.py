@@ -525,9 +525,9 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_output: "GrammarOutput | None", num_reject_spec_tokens: dict[str, int] | None = None
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        return self.model_runner.sample_tokens(grammar_output, num_reject_spec_tokens)
 
     @torch.inference_mode()
     def execute_model(

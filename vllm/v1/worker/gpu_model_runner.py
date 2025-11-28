@@ -1180,6 +1180,7 @@ class GPUModelRunner(
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
+        self._prev_draft_token_ids = self._draft_token_ids
         if self._draft_token_ids is None or not spec_flattened_indices:
             return
 
@@ -1194,7 +1195,7 @@ class GPUModelRunner(
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
-        self._draft_token_ids = None
+        # self._draft_token_ids = None
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -3036,10 +3037,12 @@ class GPUModelRunner(
 
     @torch.inference_mode
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_output: "GrammarOutput | None", num_reject_spec_tokens: dict[str, int] | None = None
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+        logger.info(f"GPU MR RUNNING SAMPLE WITH INCOMING DRAFT TOKEN IDS {self._draft_token_ids}")
+        self._draft_token_ids = None
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
@@ -3077,6 +3080,17 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        if num_reject_spec_tokens is not None:
+            for req_id, batch_index in self.input_batch.req_id_to_index.items():
+                if req_id in num_reject_spec_tokens:
+                    num_reject = num_reject_spec_tokens[req_id]
+                    if num_reject > 0:
+                        num_total = sampler_output.sampled_token_ids.shape[1]
+                        num_maybe_accepted = num_total - num_reject
+                        sampler_output.sampled_token_ids[
+                            batch_index, num_maybe_accepted:
+                        ] = -1  # Invalidate rejected tokens
 
         self.input_batch.prev_sampled_token_ids = None
 
@@ -3209,6 +3223,8 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
+        logger.info("TAKE DRAFT TOKEN IDS CALLED ON GPU MODEL RUNNER")
+        logger.info(f"MR HAS DRAFT TOKEN IDS: {self._draft_token_ids}")
         if self._draft_token_ids is None:
             return None
         req_ids = self.input_batch.req_ids

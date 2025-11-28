@@ -102,17 +102,19 @@ class UniProcExecutor(Executor):
         )
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(
             "sample_tokens",
-            args=(grammar_output,),
+            args=(grammar_output, num_reject_spec_tokens),
             non_block=non_block,
             single_value=True,
         )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.collective_rpc("take_draft_token_ids", single_value=True)
+        values = self.collective_rpc("take_draft_token_ids", single_value=True)
+        logger.info(f"EXECUTOR TAKE DRAFT TOKEN IDS RETURNED VALUES: {values}")
+        return values
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as

@@ -254,6 +254,8 @@ class StructuredOutputManager:
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, [])
                 for i, token in enumerate(req_tokens + [None]):
+                    if token == -2:
+                        apply_bitmask = False
                     self._fill_bitmasks(
                         [
                             (
@@ -263,7 +265,6 @@ class StructuredOutputManager:
                             )
                         ]
                     )
-
                     if (
                         apply_bitmask
                         and token is not None

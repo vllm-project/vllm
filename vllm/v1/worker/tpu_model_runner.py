@@ -1131,11 +1131,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     @torch.no_grad()
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_output: "GrammarOutput | None", num_reject_spec_tokens: dict[str, int] | None = None
     ) -> ModelRunnerOutput:
         if self.scheduler_output is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # type: ignore[return-value]
+        assert num_reject_spec_tokens is None
         scheduler_output = self.scheduler_output
         mm_embed_inputs = self.mm_embed_inputs
         self.scheduler_output = None

@@ -266,11 +266,11 @@ class MultiprocExecutor(Executor):
         )
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         return self.collective_rpc(
             "sample_tokens",
-            args=(grammar_output,),
+            args=(grammar_output, num_reject_spec_tokens),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,

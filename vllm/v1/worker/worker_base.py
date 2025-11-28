@@ -134,7 +134,7 @@ class WorkerBase:
         raise NotImplementedError
 
     def sample_tokens(
-        self, grammar_output: GrammarOutput
+        self, grammar_output: GrammarOutput, num_reject_spec_tokens: dict[str, int] | None = None
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
         raise NotImplementedError
