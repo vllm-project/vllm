@@ -1,22 +1,10 @@
----
-toc_depth: 4
----
+# Benchmark CLI
 
-# Benchmark Suites
+This section guides you through running benchmark tests with the extensive datasets supported on vLLM.
 
-vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
+It's a living document, updated as new features and datasets become available.
 
-- **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
-- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
-
-## Benchmark CLI
-
-This section guides you through running benchmark tests with the extensive
-datasets supported on vLLM. It's a living document, updated as new features and datasets
-become available.
-
-### Dataset Overview
+## Dataset Overview
 
 <style>
 th {
@@ -59,9 +47,9 @@ Legend:
     --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
     ```
 
-### Examples
+## Examples
 
-#### 🚀 Online Benchmark
+### 🚀 Online Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
@@ -112,7 +100,7 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
-##### Custom Dataset
+#### Custom Dataset
 
 If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
@@ -145,7 +133,7 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-##### VisionArena Benchmark for Vision Language Models
+#### VisionArena Benchmark for Vision Language Models
 
 ```bash
 # need a model with vision capability here
@@ -163,7 +151,7 @@ vllm bench serve \
   --num-prompts 1000
 ```
 
-##### InstructCoder Benchmark with Speculative Decoding
+#### InstructCoder Benchmark with Speculative Decoding
 
 ``` bash
 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
@@ -180,7 +168,7 @@ vllm bench serve \
     --num-prompts 2048
 ```
 
-##### Spec Bench Benchmark with Speculative Decoding
+#### Spec Bench Benchmark with Speculative Decoding
 
 ``` bash
 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
@@ -217,7 +205,7 @@ vllm bench serve \
     --spec-bench-category "summarization"
 ```
 
-##### Other HuggingFaceDataset Examples
+#### Other HuggingFaceDataset Examples
 
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct
@@ -283,7 +271,7 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
-##### Running With Sampling Parameters
+#### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
 parameters can be specified. Example client command:
@@ -301,7 +289,7 @@ vllm bench serve \
   --num-prompts 10
 ```
 
-##### Running With Ramp-Up Request Rate
+#### Running With Ramp-Up Request Rate
 
 The benchmark tool also supports ramping up the request rate over the
 duration of the benchmark run. This can be useful for stress testing the
@@ -318,11 +306,11 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
 
-##### Load Pattern Configuration
+#### Load Pattern Configuration
 
 vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
 
-###### Load Pattern Control Parameters
+##### Load Pattern Control Parameters
 
 - `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
 - `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
@@ -387,7 +375,7 @@ Using KV cache metrics for load pattern configuration:
 
 </details>
 
-#### 📈 Offline Throughput Benchmark
+### 📈 Offline Throughput Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
@@ -408,7 +396,7 @@ Total num prompt tokens:  5014
 Total num output tokens:  1500
 ```
 
-##### VisionArena Benchmark for Vision Language Models
+#### VisionArena Benchmark for Vision Language Models
 
 ```bash
 vllm bench throughput \
@@ -428,7 +416,7 @@ Total num prompt tokens:  14527
 Total num output tokens:  1280
 ```
 
-##### InstructCoder Benchmark with Speculative Decoding
+#### InstructCoder Benchmark with Speculative Decoding
 
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -451,7 +439,7 @@ Total num prompt tokens:  261136
 Total num output tokens:  204800
 ```
 
-##### Other HuggingFaceDataset Examples
+#### Other HuggingFaceDataset Examples
 
 `lmms-lab/LLaVA-OneVision-Data`:
 
@@ -509,20 +497,20 @@ vllm bench throughput \
 
 </details>
 
-#### 🛠️ Structured Output Benchmark
+### 🛠️ Structured Output Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
 Benchmark the performance of structured output generation (JSON, grammar, regex).
 
-##### Server Setup
+#### Server Setup
 
 ```bash
 vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
-##### JSON Schema Benchmark
+#### JSON Schema Benchmark
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -534,7 +522,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-##### Grammar-based Generation Benchmark
+#### Grammar-based Generation Benchmark
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -546,7 +534,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-##### Regex-based Generation Benchmark
+#### Regex-based Generation Benchmark
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -557,7 +545,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-##### Choice-based Generation Benchmark
+#### Choice-based Generation Benchmark
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -568,7 +556,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-##### XGrammar Benchmark Dataset
+#### XGrammar Benchmark Dataset
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -581,14 +569,14 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 </details>
 
-#### 📚 Long Document QA Benchmark
+### 📚 Long Document QA Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
 Benchmark the performance of long document question-answering with prefix caching.
 
-##### Basic Long Document QA Test
+#### Basic Long Document QA Test
 
 ```bash
 python3 benchmarks/benchmark_long_document_qa_throughput.py \
@@ -600,7 +588,7 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
   --repeat-count 5
 ```
 
-##### Different Repeat Modes
+#### Different Repeat Modes
 
 ```bash
 # Random mode (default) - shuffle prompts randomly
@@ -633,14 +621,14 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
 
 </details>
 
-#### 🗂️ Prefix Caching Benchmark
+### 🗂️ Prefix Caching Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
 Benchmark the efficiency of automatic prefix caching.
 
-##### Fixed Prompt with Prefix Caching
+#### Fixed Prompt with Prefix Caching
 
 ```bash
 python3 benchmarks/benchmark_prefix_caching.py \
@@ -651,7 +639,7 @@ python3 benchmarks/benchmark_prefix_caching.py \
   --input-length-range 128:256
 ```
 
-##### ShareGPT Dataset with Prefix Caching
+#### ShareGPT Dataset with Prefix Caching
 
 ```bash
 # download dataset
@@ -682,14 +670,14 @@ vllm bench serve \
 
 </details>
 
-#### ⚡ Request Prioritization Benchmark
+### ⚡ Request Prioritization Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
 Benchmark the performance of request prioritization in vLLM.
 
-##### Basic Prioritization Test
+#### Basic Prioritization Test
 
 ```bash
 python3 benchmarks/benchmark_prioritization.py \
@@ -700,7 +688,7 @@ python3 benchmarks/benchmark_prioritization.py \
   --scheduling-policy priority
 ```
 
-##### Multiple Sequences per Prompt
+#### Multiple Sequences per Prompt
 
 ```bash
 python3 benchmarks/benchmark_prioritization.py \
@@ -714,14 +702,14 @@ python3 benchmarks/benchmark_prioritization.py \
 
 </details>
 
-#### 👁️ Multi-Modal Benchmark
+### 👁️ Multi-Modal Benchmark
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
 Benchmark the performance of multi-modal requests in vLLM.
 
-##### Images (ShareGPT4V)
+#### Images (ShareGPT4V)
 
 Start vLLM:
 
@@ -747,7 +735,7 @@ vllm bench serve \
   --endpoint /v1/chat/completions
 ```
 
-##### Videos (ShareGPT4Video)
+#### Videos (ShareGPT4Video)
 
 Start vLLM:
 
@@ -773,7 +761,7 @@ vllm bench serve \
   --endpoint /v1/chat/completions
 ```
 
-##### Synthetic Random Images (random-mm)
+#### Synthetic Random Images (random-mm)
 
 Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
 
@@ -846,14 +834,14 @@ This should be seen as an edge case, and if this behavior can be avoided by sett
 
 </details>
 
-#### Embedding Benchmark
+### Embedding Benchmark
 
 Benchmark the performance of embedding requests in vLLM.
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-##### Text Embeddings
+#### Text Embeddings
 
 Unlike generative models which use Completions API or Chat Completions API,
 you should set `--backend openai-embeddings` and `--endpoint /v1/embeddings` to use the Embeddings API.
@@ -879,7 +867,7 @@ vllm bench serve \
   --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 
-##### Multi-modal Embeddings
+#### Multi-modal Embeddings
 
 Unlike generative models which use Completions API or Chat Completions API,
 you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backend to use depends on the model:
@@ -944,7 +932,7 @@ vllm bench serve \
 
 </details>
 
-#### Reranker Benchmark
+### Reranker Benchmark
 
 Benchmark the performance of rerank requests in vLLM.
 
@@ -988,240 +976,3 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
-
-## Parameter Sweeps
-
-### Online Benchmark
-
-[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
-
-Follow these steps to run the script:
-
-1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
-2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
-3. (Optional) If you would like to vary the settings of `vllm serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--serve-params`.
-
-    - Example: Tuning `--max-num-seqs` and `--max-num-batched-tokens`:
-
-    ```json
-    [
-        {
-            "max_num_seqs": 32,
-            "max_num_batched_tokens": 1024
-        },
-        {
-            "max_num_seqs": 64,
-            "max_num_batched_tokens": 1024
-        },
-        {
-            "max_num_seqs": 64,
-            "max_num_batched_tokens": 2048
-        },
-        {
-            "max_num_seqs": 128,
-            "max_num_batched_tokens": 2048
-        },
-        {
-            "max_num_seqs": 128,
-            "max_num_batched_tokens": 4096
-        },
-        {
-            "max_num_seqs": 256,
-            "max_num_batched_tokens": 4096
-        }
-    ]
-    ```
-
-4. (Optional) If you would like to vary the settings of `vllm bench serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--bench-params`.
-
-    - Example: Using different input/output lengths for random dataset:
-
-    ```json
-    [
-        {
-            "random_input_len": 128,
-            "random_output_len": 32
-        },
-        {
-            "random_input_len": 256,
-            "random_output_len": 64
-        },
-        {
-            "random_input_len": 512,
-            "random_output_len": 128
-        }
-    ]
-    ```
-
-5. Determine where you want to save the results, and pass that to `--output-dir`.
-
-Example command:
-
-```bash
-vllm bench sweep serve \
-    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
-    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
-    --serve-params benchmarks/serve_hparams.json \
-    --bench-params benchmarks/bench_hparams.json \
-    -o benchmarks/results
-```
-
-!!! important
-    If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
-    You can use `--dry-run` to preview the commands to be run.
-
-    We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
-    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
-    In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
-
-!!! note
-    By default, each parameter combination is run 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
-
-!!! tip
-    You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
-  
-### SLA Auto-Tuner
-
-[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
-
-For example, to ensure E2E latency within different target values for 99% of requests:
-
-```json
-[
-    {
-        "p99_e2el_ms": "<=200"
-    },
-    {
-        "p99_e2el_ms": "<=500"
-    },
-    {
-        "p99_e2el_ms": "<=1000"
-    },
-    {
-        "p99_e2el_ms": "<=2000"
-    }
-]
-```
-
-Example command:
-
-```bash
-vllm bench sweep serve_sla \
-    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
-    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
-    --serve-params benchmarks/serve_hparams.json \
-    --bench-params benchmarks/bench_hparams.json \
-    --sla-params benchmarks/sla_hparams.json \
-    --sla-variable max_concurrency \
-    -o benchmarks/results
-```
-
-The algorithm for adjusting the SLA variable is as follows:
-
-1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
-    - For example, the initial request rate is set to the concurrency under infinite QPS.
-2. If the SLA is still satisfied, keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window that contains the point where the SLA is barely satisfied.
-3. Apply binary search over the window to find the maximum value that still satisfies the SLA.
-
-!!! important
-    SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
-
-    For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
-
-### Visualizer
-
-[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
-
-Example command:
-
-```bash
-vllm bench sweep plot benchmarks/results/<timestamp> \
-    --var-x max_concurrency \
-    --row-by random_input_len \
-    --col-by random_output_len \
-    --curve-by api_server_count,max_num_batched_tokens \
-    --filter-by 'max_concurrency<=1024'
-```
-
-!!! tip
-    You can use `--dry-run` to preview the figures to be plotted.
-
-### Pareto visualization (tokens/s/user vs tokens/s/GPU)
-
-`vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
-
-Higher concurrency or batch size can raise GPU efficiency (per-GPU), but can add per user latency; lower concurrency improves per-user rate but underutilizes GPUs; The Pareto frontier shows the best achievable pairs across your runs.
-
-- x-axis: tokens/s/user = `output_throughput` ÷ concurrency (`--user-count-var`, default `max_concurrency`, fallback `max_concurrent_requests`).
-- y-axis: tokens/s/GPU = `output_throughput` ÷ GPU count (`--gpu-count-var` if set; else gpu_count is TP×PP*DP).
-- Output: a single figure at `OUTPUT_DIR/pareto/PARETO.png`.
-- Show the configuration used in each data point `--label-by` (default: `max_concurrency,gpu_count`).
-
-Example:
-
-```bash
-vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
-  --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
-```
-
-## Performance Benchmarks
-
-The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the `perf-benchmarks` and `ready` labels, and when a PR is merged into vLLM.
-
-### Manually Trigger the benchmark
-
-Use [vllm-ci-test-repo images](https://gallery.ecr.aws/q9t5s3a7/vllm-ci-test-repo) with vLLM benchmark suite.
-For CPU environment, please use the image with "-cpu" postfix.
-
-Here is an example for docker run command for CPU.
-
-```bash
-docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface  -e HF_TOKEN=''  --shm-size=16g --name vllm-cpu-ci  public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:1da94e673c257373280026f75ceb4effac80e892-cpu
-```
-
-Then, run below command inside the docker instance.
-
-```bash
-bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
-```
-
-When run, benchmark script generates results under **benchmark/results** folder, along with the benchmark_results.md and benchmark_results.json.
-
-#### Runtime environment variables
-
-- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
-- `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
-- `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
-- `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
-- `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
-- `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
-
-For more results visualization, check the [visualizing the results](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md#visualizing-the-results).
-
-The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
-
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
-
-### Continuous Benchmarking
-
-The continuous benchmarking provides automated performance monitoring for vLLM across different models and GPU devices. This helps track vLLM's performance characteristics over time and identify any performance regressions or improvements.
-
-#### How It Works
-
-The continuous benchmarking is triggered via a [GitHub workflow CI](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) in the PyTorch infrastructure repository, which runs automatically every 4 hours. The workflow executes three types of performance tests:
-
-- **Serving tests**: Measure request handling and API performance
-- **Throughput tests**: Evaluate token generation rates
-- **Latency tests**: Assess response time characteristics
-
-#### Benchmark Configuration
-
-The benchmarking currently runs on a predefined set of models configured in the [vllm-benchmarks directory](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks). To add new models for benchmarking:
-
-1. Navigate to the appropriate GPU directory in the benchmarks configuration
-2. Add your model specifications to the corresponding configuration files
-3. The new models will be included in the next scheduled benchmark run
-
-#### Viewing Results
-
-All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
