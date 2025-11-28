@@ -294,7 +294,7 @@ def fused_marlin_moe(
         block_size_m,
         global_num_experts,
         expert_map,
-        filter_invalid_experts=True,
+        ignore_invalid_experts=True,
     )
 
     assert activation is not None

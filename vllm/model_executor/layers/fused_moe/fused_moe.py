@@ -1891,7 +1891,7 @@ def fused_experts_impl(
             config["BLOCK_SIZE_M"],
             global_num_experts,
             expert_map,
-            filter_invalid_experts=True,
+            ignore_invalid_experts=True,
         )
 
         invoke_fused_moe_kernel(

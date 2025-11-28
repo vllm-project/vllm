@@ -264,7 +264,7 @@ def test_moe_align_block_size_with_expert_map(
         block_size=block_size,
         num_experts=num_experts,
         expert_map=expert_map,
-        filter_invalid_experts=True,
+        ignore_invalid_experts=True,
     )
     golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
         torch_moe_align_block_size(

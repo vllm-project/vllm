@@ -59,7 +59,7 @@ def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     if provider == "vllm":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: moe_align_block_size(
-                topk_ids, block_size, num_experts, e_map, filter_invalid_experts=True
+                topk_ids, block_size, num_experts, e_map, ignore_invalid_experts=True
             ),
             quantiles=quantiles,
         )
