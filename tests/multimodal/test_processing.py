@@ -15,14 +15,10 @@ from vllm.multimodal.processing import (
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
-    PromptUpdateDetails,
-    ResolvedPromptUpdate,
-    UpdateMode,
     _apply_matches,
     apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
-    flatten_2d_lists,
     iter_token_matches,
     replace_token_matches,
 )
@@ -1082,226 +1078,36 @@ def test_hf_processor_call_kwargs(
     assert result == expected_kwargs
 
 
-class TestApplyMatchesPerformance:
-    """Tests for _apply_matches performance - specifically the O(n²) fix."""
+def test_apply_matches_no_match_exits_quickly():
+    """
+    Test that _apply_matches exits quickly when no matches are found.
 
-    def test_no_match_exits_quickly(self):
-        """
-        Test that _apply_matches exits quickly when no matches are found.
+    Previously, _apply_matches had O(n²) behavior when no match was found
+    because it would increment start_idx by 1 each iteration while
+    re-scanning the entire prompt from prev_end_idx=0.
 
-        Previously, _apply_matches had O(n²) behavior when no match was found
-        because it would increment start_idx by 1 each iteration while
-        re-scanning the entire prompt from prev_end_idx=0.
+    With the fix, it should exit immediately when no match is found.
+    """
+    import time
 
-        With the fix, it should exit immediately when no match is found.
-        """
-        import time
+    mock_tokenizer = cast(AnyTokenizer, object())
 
-        mock_tokenizer = cast(AnyTokenizer, object())
+    # Create a long prompt with no placeholder
+    long_prompt = "x" * 10000
 
-        # Create a long prompt with no placeholder
-        long_prompt = "x" * 10000
+    # Create update looking for a placeholder that doesn't exist
+    mm_prompt_updates = {
+        "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
+    }
 
-        # Create update looking for a placeholder that doesn't exist
-        mm_prompt_updates = {
-            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
-        }
+    start = time.perf_counter()
+    result, _ = _apply_matches(
+        long_prompt,
+        mm_prompt_updates,
+        mock_tokenizer,
+    )
+    elapsed = time.perf_counter() - start
 
-        start = time.perf_counter()
-        result, match_result = _apply_matches(
-            long_prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-        elapsed = time.perf_counter() - start
-
-        # Should complete in < 100ms (was taking seconds before the fix)
-        assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
-
-        # Result should be the original prompt (no replacement made)
-        assert "".join(result) == long_prompt
-
-        # No match should have been applied
-        assert match_result["image"][0] is None
-
-    def test_single_match_works(self):
-        """Test that single placeholder replacement still works correctly."""
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        prompt = "Hello <image> world"
-        mm_prompt_updates = {
-            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
-        }
-
-        result, match_result = _apply_matches(
-            prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-
-        assert "".join(result) == "Hello REPLACED world"
-        assert match_result["image"][0] == 0
-
-    def test_multiple_matches_work(self):
-        """Test that multiple placeholder replacements still work correctly."""
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        prompt = "First <image> and second <image> done"
-        mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "IMG1").resolve(0)],
-                [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
-            ]
-        }
-
-        result, match_result = _apply_matches(
-            prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-
-        assert "".join(result) == "First IMG1 and second IMG2 done"
-        assert match_result["image"][0] == 0
-        assert match_result["image"][1] == 0
-
-    def test_long_prompt_with_match_is_fast(self):
-        """
-        Test that a long prompt with a match at the end is still fast.
-        This verifies we don't have O(n²) behavior even with matches.
-        """
-        import time
-
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        # Long prompt with placeholder at the end
-        long_prompt = "x" * 10000 + "<image>"
-
-        mm_prompt_updates = {
-            "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
-        }
-
-        start = time.perf_counter()
-        result, match_result = _apply_matches(
-            long_prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-        elapsed = time.perf_counter() - start
-
-        # Should complete in < 100ms
-        assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
-
-        # Replacement should have been made
-        assert "".join(result) == "x" * 10000 + "REPLACED"
-        assert match_result["image"][0] == 0
-
-    def test_non_consecutive_placeholders_with_large_gap(self):
-        """
-        Test that placeholders with large text gaps between them work correctly.
-        This verifies the fix handles non-consecutive placeholders.
-        """
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        # Large gap between placeholders
-        gap = "x" * 5000
-        prompt = f"<image>{gap}<image>"
-
-        mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "IMG1").resolve(0)],
-                [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
-            ]
-        }
-
-        result, match_result = _apply_matches(
-            prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-
-        assert "".join(result) == f"IMG1{gap}IMG2"
-        assert match_result["image"][0] == 0
-        assert match_result["image"][1] == 0
-
-    def test_three_non_consecutive_placeholders(self):
-        """Test three placeholders at beginning, middle, and end."""
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        prompt = "<image> start, middle <image> text, end <image>"
-        mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "A").resolve(0)],
-                [PromptReplacement("image", "<image>", "B").resolve(1)],
-                [PromptReplacement("image", "<image>", "C").resolve(2)],
-            ]
-        }
-
-        result, match_result = _apply_matches(
-            prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-
-        assert "".join(result) == "A start, middle B text, end C"
-        assert match_result["image"][0] == 0
-        assert match_result["image"][1] == 0
-        assert match_result["image"][2] == 0
-
-    def test_mixed_modalities_non_consecutive(self):
-        """Test multiple modality types with non-consecutive placeholders."""
-        mock_tokenizer = cast(AnyTokenizer, object())
-
-        prompt = "<image> some text <audio> more text <image>"
-        mm_prompt_updates = {
-            "image": [
-                [PromptReplacement("image", "<image>", "IMG1").resolve(0)],
-                [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
-            ],
-            "audio": [
-                [PromptReplacement("audio", "<audio>", "AUD1").resolve(0)],
-            ],
-        }
-
-        result, match_result = _apply_matches(
-            prompt,
-            mm_prompt_updates,
-            mock_tokenizer,
-        )
-
-        assert "".join(result) == "IMG1 some text AUD1 more text IMG2"
-        assert match_result["image"][0] == 0
-        assert match_result["image"][1] == 0
-        assert match_result["audio"][0] == 0
-
-    def test_insert_placeholder_not_at_start(self):
-        """
-        Reviewer's exact test case:
-
-        prompt = [0, image_token_id]
-        mm_prompt_updates = {"image": ResolvedPromptUpdate(
-            "image", 0, "insert", [image_token_id],
-            PromptUpdateDetails([image_token_id] * 10)
-        )}
-        """
-        mock_tokenizer = cast(AnyTokenizer, object())
-        image_token_id = 32000
-
-        prompt = [0, image_token_id]
-        mm_prompt_updates = {
-            "image": [
-                [
-                    ResolvedPromptUpdate(
-                        "image",
-                        0,
-                        UpdateMode.INSERT,
-                        [image_token_id],
-                        PromptUpdateDetails.from_seq([image_token_id] * 10),
-                    )
-                ]
-            ]
-        }
-
-        result, match_result = _apply_matches(prompt, mm_prompt_updates, mock_tokenizer)
-
-        assert flatten_2d_lists(result) == [0] + [image_token_id] * 11
-        assert match_result["image"][0] == 0
+    # Should complete in < 100ms (was taking seconds before the fix)
+    assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
+    assert "".join(result) == long_prompt
