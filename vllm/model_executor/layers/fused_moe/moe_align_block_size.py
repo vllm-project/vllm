@@ -14,7 +14,7 @@ def moe_align_block_size(
     num_experts: int,
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
-    filter_invalid_experts: bool = False
+    filter_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -38,10 +38,10 @@ def moe_align_block_size(
     - pad_sorted_ids: A flag indicating whether the sorted_token_ids length
         should be padded to a multiple of block_size,
     - filter_invalid_experts: A flag indicating whether to ignore invalid
-        experts. When False, all expert_ids in topk_ids will participate in 
+        experts. When False, all expert_ids in topk_ids will participate in
         counting and ranking, but invalid experts in expert_ids will be marked
         as -1. When True, all invalid expert_ids in topk_ids will be ignored
-        and will not participate in counting or ranking, and there will be no 
+        and will not participate in counting or ranking, and there will be no
         -1 in expert_ids.
 
     Returns:
@@ -75,7 +75,9 @@ def moe_align_block_size(
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
     if topk_ids.numel() < num_experts:
-        max_num_tokens_padded = topk_ids.numel() * block_size
+        max_num_tokens_padded = min(
+            topk_ids.numel() * block_size, topk_ids.numel() * block_size
+        )
     sorted_ids = torch.empty(
         (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
     )
