@@ -1275,8 +1275,9 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         processed_data = self.info.ctx.call_hf_processor(
             processor,  # type: ignore
             dict(tokens=tokens),
+            {"return_tensors": None},
         )
-        (prompt_ids,) = processed_data.pop("input_ids").tolist()
+        (prompt_ids,) = processed_data.pop("input_ids")
 
         return prompt_ids
 

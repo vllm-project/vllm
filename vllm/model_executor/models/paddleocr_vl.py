@@ -276,21 +276,19 @@ class PaddleOCRVLMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
         if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(text=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
             num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
             processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(
                 num_patches_per_image.tolist()
             )
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
+
         return processed_outputs
 
     def _get_mm_fields_config(

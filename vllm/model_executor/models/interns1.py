@@ -406,9 +406,25 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
         prompt = re.sub("<image_placeholder>", hf_processor.image_token, prompt)
         prompt = re.sub("<video_placeholder>", hf_processor.video_token, prompt)
-        text_outputs = tokenizer(prompt, **tok_kwargs, return_tensors="pt")
+        tok_kwargs = dict(tok_kwargs)
+        tok_kwargs.setdefault("return_tensors", "pt")
+        text_outputs = tokenizer(prompt, **tok_kwargs)
 
         return BatchFeature({**text_outputs, **image_outputs, **video_outputs})
+
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data={},
+            mm_kwargs={},
+            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
+        )
+
+        return processed_data.pop("input_ids")  # There is no extra batch dimension
 
     def _get_mm_fields_config(
         self,

@@ -243,8 +243,9 @@ class DeepseekVL2MultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
+            tok_kwargs = dict(tok_kwargs)
+            tok_kwargs.setdefault("add_special_tokens", True)
+            return self._call_hf_tokenizer(prompt, tok_kwargs)
 
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,

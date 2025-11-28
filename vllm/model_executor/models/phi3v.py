@@ -417,15 +417,30 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             tok_kwargs=tok_kwargs,
         )
 
-        input_ids = processed_outputs["input_ids"]
-        assert isinstance(input_ids, torch.Tensor)
+        if mm_data:
+            input_ids = processed_outputs["input_ids"]
+            assert isinstance(input_ids, torch.Tensor)
 
-        # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
-        # which will cause OverflowError when decoding the prompt_ids.
-        # Therefore, we need to do an early replacement here
-        input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
+            # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
+            # which will cause OverflowError when decoding the prompt_ids.
+            # Therefore, we need to do an early replacement here
+            input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
 
         return processed_outputs
+
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data={},
+            mm_kwargs={},
+            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
+        )
+
+        return processed_data.pop("input_ids")  # There is no extra batch dimension
 
     def _get_mm_fields_config(
         self,

@@ -1081,6 +1081,7 @@ class InputProcessingContext:
 
         mm_config = self.model_config.get_multimodal_config()
         merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs.setdefault("return_tensors", "pt")
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -1090,7 +1091,7 @@ class InputProcessingContext:
         )
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
             # See https://github.com/huggingface/tokenizers/issues/537
             if (
@@ -1424,7 +1425,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         "Instead, please specify dynamic update targets "
                         "in the same prompt update definition by passing "
                         "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
+                        len(item_prompt_updates),
                         modality,
                         item_idx,
                     )
@@ -1452,6 +1453,38 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             passthrough_data.update(items.get_passthrough_data())
 
         return processor_data, passthrough_data
+
+    def _call_hf_tokenizer(
+        self,
+        prompt: str,
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        from transformers.feature_extraction_utils import BatchFeature
+
+        tok_kwargs = dict(tok_kwargs)
+        tok_kwargs.setdefault("return_tensors", None)
+
+        tokenizer = self.info.get_tokenizer()
+
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            tokenizer.encode,
+            tok_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+        prompt_ids = tokenizer.encode(prompt, **allowed_kwargs)
+        if isinstance(prompt_ids, torch.Tensor):
+            prompt_ids = prompt_ids.tolist()
+
+        prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+        prompt_ids_batched = [prompt_ids]
+
+        tensor_type = tok_kwargs["return_tensors"]
+        if tensor_type == "pt":
+            prompt_ids_batched = torch.tensor(prompt_ids_batched)
+
+        return BatchFeature(dict(input_ids=prompt_ids_batched), tensor_type=tensor_type)
 
     def _call_hf_processor(
         self,
@@ -1504,6 +1537,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         In addition, return whether prompt updates have been applied.
         """
+        if not mm_items:
+            from transformers.feature_extraction_utils import BatchFeature
+
+            prompt_ids = self._apply_hf_processor_text_only(
+                prompt_text,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            return prompt_ids, BatchFeature(), False
+
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
         processed_data = self._call_hf_processor(
@@ -1514,7 +1557,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processed_data.update(passthrough_data)
 
-        (prompt_ids,) = processed_data.pop("input_ids").tolist()
+        prompt_ids_batched = processed_data.pop("input_ids")
+        if isinstance(prompt_ids_batched, torch.Tensor):
+            prompt_ids_batched = prompt_ids_batched.tolist()
+
+        (prompt_ids,) = prompt_ids_batched
 
         is_update_applied = self._hf_processor_applies_updates(
             prompt_text=prompt_text,
@@ -1537,12 +1584,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         correspond to each other, we create dummy multi-modal items
         to go along with the text.
         """
-        prompt_ids, _, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt_text,
-            mm_items=MultiModalDataItems({}),
-            hf_processor_mm_kwargs={},
-            tokenization_kwargs=tokenization_kwargs,
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data={},
+            mm_kwargs={},
+            # Avoid converting to tensors only to convert back to list
+            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
         )
+
+        (prompt_ids,) = processed_data.pop("input_ids")
 
         return prompt_ids
 

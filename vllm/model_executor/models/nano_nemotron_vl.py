@@ -20,6 +20,8 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers.processing_utils import TextKwargs
+from typing_extensions import Unpack
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -404,6 +406,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         images: Image.Image | list[Image.Image] | None = None,
         return_tensors: str | TensorType | None = None,
         max_num_tiles: int | None = None,
+        **text_kwargs: Unpack[TextKwargs],
     ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
@@ -417,7 +420,8 @@ class BaseNanoNemotronVLProcessor(ABC):
             max_num_tiles=max_num_tiles,
         )
 
-        text_inputs = self.tokenizer(text, add_special_tokens=False)
+        text_kwargs.setdefault("add_special_tokens", False)
+        text_inputs = self.tokenizer(text, **text_kwargs)
 
         combined_outputs = {**text_inputs, **image_inputs}
 
@@ -600,6 +604,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return_tensors: str | TensorType | None = None,
         max_num_tiles: int | None = None,
         dynamic_image_size: bool | None = None,
+        **text_kwargs: Unpack[TextKwargs],
     ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
@@ -622,7 +627,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             dynamic_image_size=dynamic_image_size,
         )
 
-        text_inputs = self.tokenizer(text, add_special_tokens=False)
+        text_kwargs.setdefault("add_special_tokens", False)
+        text_inputs = self.tokenizer(text, **text_kwargs)
 
         combined_outputs = {**text_inputs, **image_inputs, **video_inputs}
 

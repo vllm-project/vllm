@@ -197,6 +197,20 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
 
         return dummy_token_id
 
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data={},
+            mm_kwargs={},
+            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
+        )
+
+        return processed_data.pop("input_ids")  # There is no extra batch dimension
+
     def apply(
         self,
         prompt: str | list[int],

@@ -873,12 +873,17 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
 
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = tokenizer.encode(prompt, **tok_kwargs)
+        if isinstance(input_ids, torch.Tensor):
+            input_ids_batched = input_ids[None]
+        else:
+            input_ids_batched = [input_ids]
+
         mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs, tok_kwargs)
 
         return BatchFeature(
             {
-                "input_ids": input_ids,
+                "input_ids": input_ids_batched,
                 **mm_inputs,
             }
         )
