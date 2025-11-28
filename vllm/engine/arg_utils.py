@@ -1355,30 +1355,10 @@ class EngineArgs:
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
-
-        # Set default arguments for V1 Engine.
-        self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/s390x/RISCV CPUs in V1
-        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
-            CpuArchEnum.RISCV,
-        ):
-            logger.info(
-                "Chunked prefill is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_chunked_prefill = False
-            logger.info(
-                "Prefix caching is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_prefix_caching = False
-
-        assert self.enable_chunked_prefill is not None
+        self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
+        self._set_default_max_num_seqs_and_batched_tokens_args(
+            usage_context, model_config
+        )
 
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
@@ -1823,34 +1803,6 @@ class EngineArgs:
                 _raise_unsupported_error(feature_name=name)
 
     @classmethod
-    def get_chunked_prefill_prefix_caching_defaults(
-        cls,
-        model_config: ModelConfig,
-    ) -> tuple[bool, bool]:
-        if model_config.runner_type != "pooling":
-            default_chunked_prefill = True
-
-            # Disable prefix caching default for hybrid models and mamba-only
-            # models since the feature is still experimental.
-            default_prefix_caching = not (
-                model_config.is_hybrid or model_config.is_attention_free
-            )
-        else:
-            assert model_config.pooler_config is not None
-
-            pooling_type = model_config.pooler_config.pooling_type
-            incremental_prefill_supported = (
-                pooling_type is not None
-                and pooling_type.lower() == "last"
-                and getattr(model_config.hf_config, "is_causal", True)
-            )
-
-            default_chunked_prefill = incremental_prefill_supported
-            default_prefix_caching = incremental_prefill_supported
-
-        return default_chunked_prefill, default_prefix_caching
-
-    @classmethod
     def get_batch_defaults(
         cls,
         world_size: int,
@@ -1933,14 +1885,11 @@ class EngineArgs:
 
         return default_max_num_batched_tokens, default_max_num_seqs
 
-    def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+    def _set_default_chunked_prefill_and_prefix_caching_args(
+        self, model_config: ModelConfig
     ) -> None:
-        """Set Default Arguments for V1 Engine."""
-        (
-            default_chunked_prefill,
-            default_prefix_caching,
-        ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
+        default_chunked_prefill = model_config.is_chunked_prefill_supported
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.prefill_context_parallel_size > 1:
             default_chunked_prefill = False
@@ -2001,6 +1950,29 @@ class EngineArgs:
                 scope="local",
             )
 
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+            CpuArchEnum.POWERPC,
+            CpuArchEnum.S390X,
+            CpuArchEnum.RISCV,
+        ):
+            logger.info(
+                "Chunked prefill is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
+    def _set_default_max_num_seqs_and_batched_tokens_args(
+        self, usage_context: UsageContext, model_config: ModelConfig
+    ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
             default_max_num_batched_tokens,
