@@ -277,6 +277,7 @@ def _run_test_cache_eviction_shm(
 
     ##########################
     # STEP 1: Request 1 send
+    # This will fill up the cache
     ##########################
     sender_is_cached_item_req1 = p0_cache.is_cached(request1_hashes)
     # Cache is empty
@@ -315,10 +316,10 @@ def _run_test_cache_eviction_shm(
 
     ##########################
     # STEP 2: Request 2 send
+    # There is no eviction because image_A is protected
+    # No new item can add to cache
     ##########################
     sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
-    # Note that the result for image_A is False because it will be evicted,
-    # but not image_C
     assert sender_is_cached_item_req2 == [False, True]
 
     # Touch all mm hash for P0 Cache before process
@@ -353,6 +354,7 @@ def _run_test_cache_eviction_shm(
     for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
 
+    # Prove that cache state is unchanged
     expected_hashes = ["image_A", "image_B", "image_C"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
 
@@ -361,8 +363,6 @@ def _run_test_cache_eviction_shm(
     ##########################
     ##### Prove that cache eviction work normally
     sender_is_cached_item_req3 = p0_cache.is_cached(request3_hashes)
-    # Note that the result for image_A is False because it will be evicted,
-    # but not image_C
     assert sender_is_cached_item_req3 == [False, True]
 
     # Touch all mm hash for P0 Cache before process
