@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
-
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
@@ -10,6 +8,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemAddedEvent,
 )
+
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -30,6 +29,7 @@ INTEGRATION_TOOLS = [
         },
     }
 ]
+
 
 @pytest.fixture(scope="module")
 def responses_server():
