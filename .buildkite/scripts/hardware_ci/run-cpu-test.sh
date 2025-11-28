@@ -21,8 +21,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Try building the docker image
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$NUMA_NODE" --target vllm-test -f docker/Dockerfile.cpu .
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$NUMA_NODE"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --no-cache --tag cpu-test-"$NUMA_NODE" --target vllm-test -f docker/Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --no-cache --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$NUMA_NODE"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
 docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
@@ -42,9 +42,9 @@ function cpu_tests() {
     pip list"
 
   # offline inference
-#   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
-#     set -e
-#     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
+  docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
+    set -e
+    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run kernel tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
