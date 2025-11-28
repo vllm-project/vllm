@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+from typing import TYPE_CHECKING
 
-from .tokenizer import TokenizerLike
+if TYPE_CHECKING:
+    from .tokenizer import TokenizerLike
 
 
 class TokenizerRegistry:
@@ -18,7 +20,7 @@ class TokenizerRegistry:
         tokenizer_name: str,
         *args,
         **kwargs,
-    ) -> TokenizerLike:
+    ) -> "TokenizerLike":
         tokenizer_cls = TokenizerRegistry.REGISTRY.get(tokenizer_name)
         if tokenizer_cls is None:
             raise ValueError(f"Tokenizer {tokenizer_name} not found.")
