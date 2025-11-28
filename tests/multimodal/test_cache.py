@@ -236,13 +236,14 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
 
-# This test verifies shared-memory cache eviction behavior across processor (p0) 
+
+# This test verifies shared-memory cache eviction behavior across processor (p0)
 # and receiver (p1) caches.
 # Flow summary:
 # 1. Request 1 adds images A, B, C — completely filling the cache.
 # 2. Request 2 tries to add image_G and image_A, but image_G cannot be added
 #    because cache is full and A is protected from eviction — cache remains unchanged.
-# 3. Request 3 adds image_G again; this time, image_A is evicted, 
+# 3. Request 3 adds image_G again; this time, image_A is evicted,
 #    and image_G successfully fits,
 #    proving normal eviction and reuse behavior.
 def _run_test_cache_eviction_shm(
