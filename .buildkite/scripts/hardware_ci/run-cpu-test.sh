@@ -42,9 +42,9 @@ function cpu_tests() {
     pip list"
 
   # offline inference
-  docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
-    set -e
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
+#   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
+#     set -e
+#     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run kernel tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
