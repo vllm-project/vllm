@@ -372,6 +372,11 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
 
+Qwen3-Omni quickstart (SupportsTranscription):
+
+- Start the server: `vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --port 8000 --tensor-parallel-size 2` (adjust `--tensor-parallel-size` to match available GPUs)
+- Run the client: `python examples/online_serving/openai_qwen3_omni_transcription.py`
+
 #### API Enforced Limits
 
 Set the maximum audio file size (in MB) that VLLM will accept, via the
