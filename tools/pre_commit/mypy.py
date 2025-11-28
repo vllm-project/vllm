@@ -27,19 +27,24 @@ FILES = [
     "vllm/*.py",
     "vllm/assets",
     "vllm/distributed",
+    "vllm/engine",
     "vllm/entrypoints",
     "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
+    "vllm/plugins",
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
     "vllm/utils",
+    "vllm/worker",
     "vllm/v1/core",
     "vllm/v1/engine",
+    "vllm/v1/metrics",
     "vllm/v1/pool",
+    "vllm/v1/sample",
     "vllm/v1/worker",
 ]
 
@@ -50,24 +55,19 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/attention",
     "vllm/compilation",
-    "vllm/engine",
-    "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",
-    "vllm/plugins",
-    "vllm/worker",
     # v1 related
     "vllm/v1/attention",
     "vllm/v1/executor",
     "vllm/v1/kv_offload",
-    "vllm/v1/metrics",
-    "vllm/v1/sample",
     "vllm/v1/spec_decode",
     "vllm/v1/structured_output",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
+    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
