@@ -488,11 +488,9 @@ class GPUModelRunner(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, numpy=False
         )
         self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
-        self.discard_request_indices = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int64
+        self.discard_request_mask = self._make_buffer(
+            self.max_num_reqs, dtype=torch.bool
         )
-        self.num_discarded_requests = 0
-
         self.num_decode_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -1369,16 +1367,12 @@ class GPUModelRunner(
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
-        # Record the index of requests that should not be sampled,
+        # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
-        discard_requests_mask = self.seq_lens.np[:num_reqs] < num_tokens_np
-        discard_request_indices = np.nonzero(discard_requests_mask)[0]
-        self.num_discarded_requests = len(discard_request_indices)
-        self.discard_request_indices.np[: self.num_discarded_requests] = (
-            discard_request_indices
+        self.discard_request_mask.np[:num_reqs] = (
+            self.seq_lens.np[:num_reqs] < num_tokens_np
         )
-
-        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -2548,9 +2542,10 @@ class GPUModelRunner(
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        discard_sampled_tokens_req_indices = self.discard_request_indices.np[
-            : self.num_discarded_requests
-        ]
+        num_reqs = self.input_batch.num_reqs
+        discard_sampled_tokens_req_indices = np.nonzero(
+            self.discard_request_mask.np[:num_reqs]
+        )[0]
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
@@ -3131,8 +3126,7 @@ class GPUModelRunner(
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
-                        self.discard_request_indices.gpu,
-                        self.num_discarded_requests,
+                        self.discard_request_mask.gpu,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -3335,8 +3329,7 @@ class GPUModelRunner(
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
-                        self.discard_request_indices.gpu,
-                        self.num_discarded_requests,
+                        self.discard_request_mask.gpu,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -3363,24 +3356,34 @@ class GPUModelRunner(
                         sampled_token_ids,
                         spec_decode_metadata.num_draft_tokens,
                     )
+                    target_token_ids = self.input_ids.gpu[token_indices]
+                    target_positions = self._get_positions(token_indices)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[token_indices] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[token_indices]
                 else:
-                    common_attn_metadata, token_indices, token_indices_to_sample = (
+                    common_attn_metadata, token_indices_to_sample = (
                         self.drafter.prepare_inputs_padded(
                             common_attn_metadata,
                             spec_decode_metadata,
                             valid_sampled_tokens_count,
                         )
                     )
-
-                target_token_ids = self.input_ids.gpu[token_indices]
-                target_positions = self._get_positions(token_indices)
-                if self.use_aux_hidden_state_outputs:
-                    assert aux_hidden_states is not None
-                    target_hidden_states = torch.cat(
-                        [h[token_indices] for h in aux_hidden_states], dim=-1
-                    )
-                else:
-                    target_hidden_states = hidden_states[token_indices]
+                    total_num_tokens = common_attn_metadata.num_actual_tokens
+                    # When padding the batch, token_indices is just a range
+                    target_token_ids = self.input_ids.gpu[:total_num_tokens]
+                    target_positions = self._get_positions(total_num_tokens)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs:
                 mm_embed_inputs = self._gather_mm_embeddings(
