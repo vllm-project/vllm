@@ -256,7 +256,7 @@ def _plot_fig(
     dry_run: bool,
     fig_name: str,
     error_bars: bool,
-    fig_width: float,
+    fig_height: float,
     fig_dpi: int,
 ):
     fig_group, fig_data = fig_group_data
@@ -340,7 +340,7 @@ def _plot_fig(
         else "(All)"
     )
 
-    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_width)
+    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_height)
 
     if row_by and col_by:
         g.set_titles("{row_name}\n{col_name}")
@@ -415,7 +415,7 @@ def plot(
     dry_run: bool,
     fig_name: str = "FIGURE",
     error_bars: bool = True,
-    fig_width: float = 6.4,
+    fig_height: float = 6.4,
     fig_dpi: int = 300,
 ):
     all_data = [
@@ -453,7 +453,7 @@ def plot(
                     dry_run=dry_run,
                     fig_name=fig_name,
                     error_bars=error_bars,
-                    fig_width=fig_width,
+                    fig_height=fig_height,
                     fig_dpi=fig_dpi,
                 ),
                 fig_groups,
@@ -478,7 +478,7 @@ class SweepPlotArgs:
     dry_run: bool
     fig_name: str = "FIGURE"
     error_bars: bool = True
-    fig_width: float = 6.4
+    fig_height: float = 6.4
     fig_dpi: int = 300
 
     parser_name: ClassVar[str] = "plot"
@@ -511,7 +511,7 @@ class SweepPlotArgs:
             dry_run=args.dry_run,
             fig_name=args.fig_name,
             error_bars=not args.no_error_bars,
-            fig_width=args.fig_width,
+            fig_height=args.fig_height,
             fig_dpi=args.fig_dpi,
         )
 
@@ -621,10 +621,10 @@ class SweepPlotArgs:
             "By default, error bars are shown.",
         )
         parser.add_argument(
-            "--fig-width",
+            "--fig-height",
             type=float,
             default=6.4,
-            help="Width of each subplot in inches. Default: 6.4",
+            help="Height of each subplot in inches. Default: 6.4",
         )
         parser.add_argument(
             "--fig-dpi",
@@ -659,7 +659,7 @@ def run_main(args: SweepPlotArgs):
         dry_run=args.dry_run,
         fig_name=args.fig_name,
         error_bars=args.error_bars,
-        fig_width=args.fig_width,
+        fig_height=args.fig_height,
         fig_dpi=args.fig_dpi,
     )
 

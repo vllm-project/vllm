@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-try:
-    import pytest
-    import pandas as pd
-except ImportError:
-    pytest = None
-    pd = None
+import pandas as pd
+import pytest
 
 from vllm.benchmarks.sweep.plot import (
     PlotEqualTo,
