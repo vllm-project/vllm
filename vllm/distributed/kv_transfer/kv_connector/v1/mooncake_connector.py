@@ -510,10 +510,10 @@ class MooncakeConnectorWorker:
         if self.kv_role != "kv_consumer":
             self._sender_executor.shutdown(wait=False)
             if self._mooncake_sender_t:
-                self._mooncake_sender_t.join(timeout=0)
+                self._mooncake_sender_t.join()
         if self.kv_role != "kv_producer" and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
-            self._mooncake_receiver_t.join(timeout=0)
+            self._mooncake_receiver_t.join()
 
     def _receiver_loop(self, loop: asyncio.AbstractEventLoop):
         asyncio.set_event_loop(loop)
