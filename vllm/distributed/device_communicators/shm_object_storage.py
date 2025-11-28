@@ -574,7 +574,6 @@ class SingleWriterShmObjectStorage:
             value
         )
         buffer_size = self.flag_bytes + data_bytes + md_bytes
-
         # Sanity checks
         if buffer_size > self.max_object_size:
             raise ValueError(
@@ -596,6 +595,7 @@ class SingleWriterShmObjectStorage:
             self.copy_to_buffer(
                 object_data, data_bytes, object_metadata, md_bytes, data_view
             )
+        # NOTE(Long) For shm cache, when put sucessful, will set writer flag to 2, as read will try to read twice
         self.increment_writer_flag(monotonic_id)
 
         # Update key index
@@ -626,7 +626,7 @@ class SingleWriterShmObjectStorage:
 
         return obj
 
-    def touch(self, key: str, is_writer: bool = True) -> None:
+    def touch(self, key: str, address: int =0, monotonic_id: int = 0, is_writer: bool = True) -> None:
         """
         Touch an existing cached item to update its eviction status.
         
@@ -638,15 +638,11 @@ class SingleWriterShmObjectStorage:
             is_writer: If True, increment writer_flag (sender side).
                       If False, increment reader_count (receiver side).
             
-        Raises:
-            KeyError: If the key is not found in the storage
         """
-        if key not in self.key_index:
-            raise KeyError(f"Key '{key}' not found in the storage.")
         
-        address, monotonic_id = self.key_index[key]
         
         if is_writer:
+            address, monotonic_id = self.key_index[key]
             # Writer side: increment writer_flag to raise eviction threshold
             self.increment_writer_flag(monotonic_id)
         else:
@@ -654,8 +650,9 @@ class SingleWriterShmObjectStorage:
             with self._reader_lock:
                 with self.ring_buffer.access_buf(address) as (data_view, _):
                     reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
-                    new_count = reader_count + 1
-                    data_view[: self.flag_bytes] = self.ring_buffer.int2byte(new_count)
+                    # NOTE(LONG): Avoid touch item just add to cache because writer only touch 1 on first write
+                    if reader_count >= self.n_readers:
+                        self.increment_reader_flag(data_view[: self.flag_bytes])
 
     def handle(self):
         """Get handle for sharing across processes."""
