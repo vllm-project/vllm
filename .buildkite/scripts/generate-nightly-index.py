@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import Any, Optional, Tuple
-import re
-import json
-from urllib.parse import quote
+# stop ruff from complaining about line length (in comments)
+# ruff: noqa: E501
+
 import argparse
+import json
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -19,21 +22,23 @@ INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+
 @dataclass
 class WheelFileInfo:
     package_name: str
     version: str
-    build_tag: Optional[str]
+    build_tag: str | None
     python_tag: str
     abi_tag: str
     platform_tag: str
-    variant: Optional[str]
+    variant: str | None
     filename: str
+
 
 def parse_from_filename(file: str) -> WheelFileInfo:
     """
     Parse wheel file name to extract metadata.
-    
+
     The format of wheel names:
         {package_name}-{version}(-{build_tag})?-{python_tag}-{abi_tag}-{platform_tag}.whl
     All versions could contain a variant like '+cu129' or '.cpu' or `.rocm` (or not).
@@ -44,30 +49,30 @@ def parse_from_filename(file: str) -> WheelFileInfo:
         vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl
     """
     wheel_file_re = re.compile(
-        r'^(?P<package_name>.+)-(?P<version>[^-]+?)(-(?P<build_tag>[^-]+))?-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)\.whl$'
+        r"^(?P<package_name>.+)-(?P<version>[^-]+?)(-(?P<build_tag>[^-]+))?-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)\.whl$"
     )
     match = wheel_file_re.match(file)
     if not match:
         raise ValueError(f"Invalid wheel file name: {file}")
-    
-    package_name = match.group('package_name')
-    version = match.group('version')
-    build_tag = match.group('build_tag')
-    python_tag = match.group('python_tag')
-    abi_tag = match.group('abi_tag')
-    platform_tag = match.group('platform_tag')
-    
+
+    package_name = match.group("package_name")
+    version = match.group("version")
+    build_tag = match.group("build_tag")
+    python_tag = match.group("python_tag")
+    abi_tag = match.group("abi_tag")
+    platform_tag = match.group("platform_tag")
+
     # extract variant from version
     variant = None
-    if 'dev' in version:
-        ver_after_dev = version.split('dev')[-1]
-        if '.' in ver_after_dev:
-            variant = ver_after_dev.split('.')[-1]
-            version = version.removesuffix('.' + variant)
+    if "dev" in version:
+        ver_after_dev = version.split("dev")[-1]
+        if "." in ver_after_dev:
+            variant = ver_after_dev.split(".")[-1]
+            version = version.removesuffix("." + variant)
     else:
-        if '+' in version:
-            version, variant = version.split('+')
-    
+        if "+" in version:
+            version, variant = version.split("+")
+
     return WheelFileInfo(
         package_name=package_name,
         version=version,
@@ -76,8 +81,9 @@ def parse_from_filename(file: str) -> WheelFileInfo:
         abi_tag=abi_tag,
         platform_tag=platform_tag,
         variant=variant,
-        filename=file
+        filename=file,
     )
+
 
 def generate_project_list(subdir_names: list[str]) -> str:
     """
@@ -85,35 +91,41 @@ def generate_project_list(subdir_names: list[str]) -> str:
     """
     href_tags = []
     for name in sorted(subdir_names):
-        name = name.strip('/').strip('.')
+        name = name.strip("/").strip(".")
         href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
-    return INDEX_HTML_TEMPLATE.format(items='\n'.join(href_tags))
+    return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags))
 
 
-def generate_package_index_and_metadata(wheel_files: list[WheelFileInfo], wheel_base_dir: Path, index_base_dir: Path) -> Tuple[str, str]:
+def generate_package_index_and_metadata(
+    wheel_files: list[WheelFileInfo], wheel_base_dir: Path, index_base_dir: Path
+) -> tuple[str, str]:
     """
     Generate package index HTML content for a specific package, linking to actual wheel files.
     """
     href_tags = []
     metadata = []
     for file in sorted(wheel_files, key=lambda x: x.filename):
-        relative_path = wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
-        href_tags.append(f'    <a href="{quote(relative_path.as_posix())}">{file.filename}</a><br/>')
+        relative_path = (
+            wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
+        )
+        href_tags.append(
+            f'    <a href="{quote(relative_path.as_posix())}">{file.filename}</a><br/>'
+        )
         file_meta = asdict(file)
-        file_meta['path'] = relative_path.as_posix()
+        file_meta["path"] = relative_path.as_posix()
         metadata.append(file_meta)
-    index_str = INDEX_HTML_TEMPLATE.format(items='\n'.join(href_tags))
+    index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags))
     metadata_str = json.dumps(metadata, indent=2)
     return index_str, metadata_str
 
 
 def generate_index_and_metadata(
-        whl_files: list[str],
-        wheel_base_dir: Path,
-        index_base_dir: Path,
-        default_variant: Optional[str] = None,
-        alias_to_default: Optional[str] = None
-        ):
+    whl_files: list[str],
+    wheel_base_dir: Path,
+    index_base_dir: Path,
+    default_variant: str | None = None,
+    alias_to_default: str | None = None,
+):
     """
     Generate index for all wheel files.
 
@@ -121,9 +133,9 @@ def generate_index_and_metadata(
         whl_files (list[str]): List of wheel files (must be directly under `wheel_base_dir`).
         wheel_base_dir (Path): Base directory for wheel files.
         index_base_dir (Path): Base directory to store index files.
-        default_variant (Optional[str]): The default variant name, if any.
-        alias_to_default (Optional[str]): Alias variant name for the default variant, if any.
-    
+        default_variant (str | None): The default variant name, if any.
+        alias_to_default (str | None): Alias variant name for the default variant, if any.
+
     First, parse all wheel files to extract metadata.
     We need to collect all wheel files for each variant, and generate an index for it (in a sub-directory).
     The index for the default variant (if any) is generated in the root index directory.
@@ -150,7 +162,7 @@ def generate_index_and_metadata(
                 index.html
                 vllm/
                     index.html
-                    metadata.json 
+                    metadata.json
             cu130/ # cu130 variant sub-directory
                 index.html
                 vllm/
@@ -184,7 +196,7 @@ def generate_index_and_metadata(
     # Group by variant
     variant_to_files: dict[str, list[WheelFileInfo]] = {}
     for file in parsed_files:
-        variant = file.variant or 'default'
+        variant = file.variant or "default"
         if variant not in variant_to_files:
             variant_to_files[variant] = []
         variant_to_files[variant].append(file)
@@ -193,41 +205,49 @@ def generate_index_and_metadata(
 
     # sanity check for default variant
     if default_variant:
-        if 'default' in variant_to_files:
-            raise ValueError("All wheel files must have variant suffixes when `default_variant` is specified.")
+        if "default" in variant_to_files:
+            raise ValueError(
+                "All wheel files must have variant suffixes when `default_variant` is specified."
+            )
         if default_variant not in variant_to_files:
-            raise ValueError(f"Default variant '{default_variant}' not found among wheel files.")
+            raise ValueError(
+                f"Default variant '{default_variant}' not found among wheel files."
+            )
 
     if alias_to_default:
-        if 'default' not in variant_to_files:
-            raise ValueError("Alias to default variant specified, but no default variant found.")
+        if "default" not in variant_to_files:
+            raise ValueError(
+                "Alias to default variant specified, but no default variant found."
+            )
         if alias_to_default in variant_to_files:
-            raise ValueError(f"Alias variant name '{alias_to_default}' already exists among wheel files.")
+            raise ValueError(
+                f"Alias variant name '{alias_to_default}' already exists among wheel files."
+            )
         else:
-            variant_to_files[alias_to_default] = variant_to_files['default'].copy()
+            variant_to_files[alias_to_default] = variant_to_files["default"].copy()
             print(f"Alias variant '{alias_to_default}' created for default variant.")
 
     # Generate index for each variant
     subdir_names = set()
     for variant, files in variant_to_files.items():
-        if variant == 'default':
+        if variant == "default":
             variant_dir = index_base_dir
         else:
             variant_dir = index_base_dir / variant
             subdir_names.add(variant)
 
         variant_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # gather all package names in this variant
         packages = set(f.package_name for f in files)
-        if variant == 'default':
+        if variant == "default":
             # these packages should also appear in the "project list"
             # generate after all variants are processed
             subdir_names = subdir_names.union(packages)
         else:
             # generate project list for this variant directly
             project_list_str = generate_project_list(sorted(packages))
-            with open(variant_dir / 'index.html', 'w') as f:
+            with open(variant_dir / "index.html", "w") as f:
                 f.write(project_list_str)
 
         for package in packages:
@@ -236,18 +256,16 @@ def generate_index_and_metadata(
             package_dir = variant_dir / package
             package_dir.mkdir(parents=True, exist_ok=True)
             index_str, metadata_str = generate_package_index_and_metadata(
-                package_files,
-                wheel_base_dir,
-                package_dir
+                package_files, wheel_base_dir, package_dir
             )
-            with open(package_dir / 'index.html', 'w') as f:
+            with open(package_dir / "index.html", "w") as f:
                 f.write(index_str)
-            with open(package_dir / 'metadata.json', 'w') as f:
+            with open(package_dir / "metadata.json", "w") as f:
                 f.write(metadata_str)
-    
+
     # Generate top-level project list index
     project_list_str = generate_project_list(sorted(subdir_names))
-    with open(index_base_dir / 'index.html', 'w') as f:
+    with open(index_base_dir / "index.html", "w") as f:
         f.write(project_list_str)
 
 
@@ -260,16 +278,38 @@ if __name__ == "__main__":
         --alias-to-default <alias_variant_name> : (optional) alias variant name for the default variant
     """
 
-    parser = argparse.ArgumentParser(description="Process nightly build wheel files to generate indices.")
-    parser.add_argument('--version', type=str, required=True, help='Version string for the current build (e.g., commit hash)')
-    parser.add_argument('--current-objects', type=str, required=True, help='Path to JSON file containing current S3 objects listing in this version directory')
-    parser.add_argument('--output-dir', type=str, required=True, help='Directory to store generated index files')
-    parser.add_argument('--alias-to-default', type=str, default=None, help='Alias variant name for the default variant')
+    parser = argparse.ArgumentParser(
+        description="Process nightly build wheel files to generate indices."
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        required=True,
+        help="Version string for the current build (e.g., commit hash)",
+    )
+    parser.add_argument(
+        "--current-objects",
+        type=str,
+        required=True,
+        help="Path to JSON file containing current S3 objects listing in this version directory",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory to store generated index files",
+    )
+    parser.add_argument(
+        "--alias-to-default",
+        type=str,
+        default=None,
+        help="Alias variant name for the default variant",
+    )
 
     args = parser.parse_args()
 
     version = args.version
-    if '/' in version or '\\' in version:
+    if "/" in version or "\\" in version:
         raise ValueError("Version string must not contain slashes.")
     current_objects_path = Path(args.current_objects)
     output_dir = Path(args.output_dir)
@@ -277,7 +317,7 @@ if __name__ == "__main__":
         output_dir.mkdir(parents=True, exist_ok=True)
 
     # Read current objects JSON
-    with open(current_objects_path, 'r') as f:
+    with open(current_objects_path) as f:
         current_objects: dict[str, list[dict[str, Any]]] = json.load(f)
 
     # current_objects looks like from list_objects_v2 S3 API:
@@ -300,10 +340,10 @@ if __name__ == "__main__":
 
     # Extract wheel file keys
     wheel_files = []
-    for item in current_objects.get('Contents', []):
-        key: str = item['Key']
-        if key.endswith('.whl'):
-            wheel_files.append(key.split('/')[-1])  # only the filename is used
+    for item in current_objects.get("Contents", []):
+        key: str = item["Key"]
+        if key.endswith(".whl"):
+            wheel_files.append(key.split("/")[-1])  # only the filename is used
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
@@ -318,6 +358,6 @@ if __name__ == "__main__":
         wheel_base_dir=wheel_base_dir,
         index_base_dir=index_base_dir,
         default_variant=None,
-        alias_to_default=args.alias_to_default
+        alias_to_default=args.alias_to_default,
     )
     print(f"Index and metadata generated in {output_dir}")
