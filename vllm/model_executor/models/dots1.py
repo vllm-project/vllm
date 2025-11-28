@@ -181,13 +181,14 @@ class Dots1MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = (
-            self.experts(hidden_states=hidden_states, router_logits=router_logits)
-            * self.routed_scaling_factor
-        )
 
+        shared_out, routed_out = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
         if self.shared_experts is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+            final_hidden_states = (routed_out + shared_out) * self.routed_scaling_factor
+        else:
+            final_hidden_states = routed_out * self.routed_scaling_factor
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
