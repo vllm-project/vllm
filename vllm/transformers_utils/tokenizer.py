@@ -96,7 +96,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_all_special_tokens_extended = tokenizer.all_special_tokens_extended
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -117,10 +116,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         @property
         def all_special_tokens(self) -> list[str]:
             return tokenizer_all_special_tokens
-
-        @property
-        def all_special_tokens_extended(self) -> list[str]:
-            return tokenizer_all_special_tokens_extended
 
         @property
         def max_token_id(self) -> int:
