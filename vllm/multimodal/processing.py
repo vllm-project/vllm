@@ -777,7 +777,7 @@ def _apply_matches(
                 start_idx = prev_end_idx = match.end_idx
 
         if not found:
-            start_idx += 1
+            break  # No more matches to find, exit loop
 
     out_seqs.append(prompt[prev_end_idx:])
 
