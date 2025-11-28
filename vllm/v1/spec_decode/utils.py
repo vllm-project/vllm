@@ -61,45 +61,29 @@ def eagle_prepare_inputs_padded_kernel(
 @triton.jit
 def eagle_prepare_next_token_padded_kernel(
     sampled_token_ids_ptr,  # [num_reqs, num_sampled_tokens_per_req]
-    discard_request_indices_ptr,  # [num_discarded_requests]
+    discard_request_mask_ptr,  # [num_reqs]
     backup_next_token_ids_ptr,  # [num_reqs]
     next_token_ids_ptr,  # [num_reqs] (output)
     valid_sampled_tokens_count_ptr,  # [num_reqs] (output)
     vocab_size,  # tl.int32
-    num_discarded_requests,  # tl.int32
     num_sampled_tokens_per_req,  # tl.int32 (num_spec_tokens + 1)
     num_reqs,  # tl.int32
     stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
-    BLOCK_SIZE_DISCARD: tl.constexpr,  # Block size for checking for discarded requests
 ):
     """
     Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
     number of valid (1 + accepted) tokens for each request, and the corresponding
     "next" token id to sample from during speculative decoding. This is the
     "last accepted token" from the sampled tokens, or the backup token if no
-    tokens were accepted or if the request is in the discard list.
+    tokens were accepted or if the request is marked as discarded.
     """
     req_idx = tl.program_id(axis=0)
     if req_idx >= num_reqs:
         return
 
     # Check if this request is discarded.
-    # Since there are few discarded requests, we can do a simple search here,
-    # and should almost always finish in a single block-iteration.
-    is_discarded = False
-    req_idx_64 = req_idx.to(tl.int64)
-    discard_offs = tl.arange(0, BLOCK_SIZE_DISCARD)
-    for i in range(0, tl.cdiv(num_discarded_requests, BLOCK_SIZE_DISCARD)):
-        mask = (discard_offs + i * BLOCK_SIZE_DISCARD) < num_discarded_requests
-        discarded_idx_block = tl.load(
-            discard_request_indices_ptr + discard_offs + i * BLOCK_SIZE_DISCARD,
-            mask=mask,
-            other=-1,
-        )
-        # Check if req_idx is in this block
-        if tl.sum(tl.where(discarded_idx_block == req_idx_64, 1, 0)) > 0:
-            is_discarded = True
+    is_discarded = tl.load(discard_request_mask_ptr + req_idx)
 
     if is_discarded:
         backup_token = tl.load(backup_next_token_ids_ptr + req_idx)

@@ -560,8 +560,7 @@ class EagleProposer:
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
-        discard_request_indices: torch.Tensor,
-        num_discarded_requests: int,
+        discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -587,12 +586,8 @@ class EagleProposer:
         batch_size, num_tokens = sampled_token_ids.shape
         device = sampled_token_ids.device
 
-        assert discard_request_indices.dtype == torch.int64, (
-            "discard_request_indices must be torch.int64"
-        )
-        assert backup_tokens_gpu.dtype == torch.int32, (
-            "backup_tokens_gpu must be torch.int32"
-        )
+        assert discard_request_mask.dtype == torch.bool
+        assert backup_tokens_gpu.dtype == torch.int32
 
         next_token_ids = torch.empty((batch_size,), dtype=torch.int32, device=device)
         valid_sampled_tokens_count = torch.empty(
@@ -604,21 +599,17 @@ class EagleProposer:
 
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
-        BLOCK_SIZE_DISCARD = 32  # A small-ish block size for vectorized discard search
-
         eagle_prepare_next_token_padded_kernel[grid](
             sampled_token_ids,
-            discard_request_indices,
+            discard_request_mask,
             backup_tokens_gpu,
             next_token_ids,
             valid_sampled_tokens_count,
             gpu_input_batch.vocab_size,
-            num_discarded_requests,
             num_tokens,
             batch_size,
             sampled_token_ids.stride(0),
             BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-            BLOCK_SIZE_DISCARD=BLOCK_SIZE_DISCARD,
         )
 
         return next_token_ids, valid_sampled_tokens_count
