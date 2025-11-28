@@ -105,18 +105,36 @@ class PassConfig:
     improper state.
     """
 
-    enable_fusion: bool = Field(default=None)
-    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = Field(default=None)
+    # New flags
+    fuse_norm_quant: bool = Field(default=None)
+    """Whether to enable the custom RMSNorm+quant fusion pass."""
+    fuse_act_quant: bool = Field(default=None)
+    """Whether to enable the custom SiluMul+quant fusion pass."""
+    fuse_attn_quant: bool = Field(default=None)
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=None)
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = Field(default=None)
+    enable_sp: bool = Field(default=None)
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = Field(default=None)
+    fuse_gemm_comms: bool = Field(default=None)
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = Field(default=None)
+    fuse_allreduce_rms: bool = Field(default=None)
     """Whether to enable flashinfer allreduce fusion."""
+
+    # Deprecated flags
+    enable_fusion: bool | Field(default=None)
+    """Deprecated. Use fuse_norm_quant and fuse_act_quant instead."""
+    enable_attn_fusion: bool | Field(default=None)
+    """Deprecated. Use fuse_attn_quant instead."""
+    enable_noop: bool | Field(default=None)
+    """Deprecated. Use eliminate_noops instead."""
+    enable_sequence_parallelism: bool | Field(default=None)
+    """Deprecated. Use enable_sp instead."""
+    enable_async_tp: bool | Field(default=None)
+    """Deprecated. Use fuse_gemm_comms instead."""
+    enable_fi_allreduce_fusion: bool | Field(default=None)
+    """Deprecated. Use fuse_allreduce_rms instead."""
+
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
@@ -190,18 +208,77 @@ class PassConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if not self.enable_noop:
-            if self.enable_fusion:
+        # Handle deprecation and defaults
+        if self.enable_fusion is not None:
+            logger.warning_once(
+                "enable_fusion is deprecated and will be removed in a future release. "
+                "Use fuse_norm_quant and fuse_act_quant instead."
+            )
+            if not self.fuse_norm_quant:
+                self.fuse_norm_quant = True
+            if not self.fuse_act_quant:
+                self.fuse_act_quant = True
+
+        if self.enable_attn_fusion is not None:
+            logger.warning_once(
+                "enable_attn_fusion is deprecated and will be removed in "
+                "a future release. Use fuse_attn_quant instead."
+            )
+            if not self.fuse_attn_quant:
+                self.fuse_attn_quant = True
+
+        if self.enable_noop is not None:
+            logger.warning_once(
+                "enable_noop is deprecated and will be removed in a future release. "
+                "Use eliminate_noops instead."
+            )
+            if not self.eliminate_noops:
+                self.eliminate_noops = True
+
+        if self.enable_sequence_parallelism is not None:
+            logger.warning_once(
+                "enable_sequence_parallelism is deprecated and will be "
+                "removed in a future release. Use enable_sp instead."
+            )
+            if not self.enable_sp:
+                self.enable_sp = True
+
+        if self.enable_async_tp is not None:
+            logger.warning_once(
+                "enable_async_tp is deprecated and will be removed in "
+                "a future release. Use fuse_gemm_comms instead."
+            )
+            if not self.fuse_gemm_comms:
+                self.fuse_gemm_comms = True
+
+        if self.enable_fi_allreduce_fusion is not None:
+            logger.warning_once(
+                "enable_fi_allreduce_fusion is deprecated and will be "
+                "removed in a future release. Use fuse_allreduce_rms instead."
+            )
+            if not self.fuse_allreduce_rms:
+                self.fuse_allreduce_rms = True
+
+        # Force old flags to None to ensure they are not used
+        self.enable_fusion = None
+        self.enable_attn_fusion = None
+        self.enable_noop = None
+        self.enable_sequence_parallelism = None
+        self.enable_async_tp = None
+        self.enable_fi_allreduce_fusion = None
+
+        if not self.eliminate_noops:
+            if self.fuse_norm_quant or self.fuse_act_quant:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm/SiluMul + quant (fp8) fusion might not work"
                 )
-            if self.enable_attn_fusion:
+            if self.fuse_attn_quant:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
-            if self.enable_fi_allreduce_fusion:
+            if self.fuse_allreduce_rms:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
@@ -866,7 +943,7 @@ class CompilationConfig:
             self.set_splitting_ops_for_inductor_graph_partition()
             return
 
-        if self.pass_config.enable_attn_fusion:
+        if self.pass_config.fuse_attn_quant:
             # here use_inductor_graph_partition is False
             self.set_splitting_ops_for_attn_fusion()
             return
@@ -908,12 +985,12 @@ class CompilationConfig:
             self.splitting_ops = list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
-        assert self.pass_config.enable_attn_fusion
+        assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
                 logger.warning_once(
-                    "enable_attn_fusion is incompatible with piecewise "
+                    "fuse_attn_quant is incompatible with piecewise "
                     "cudagraph when use_inductor_graph_partition is off. "
                     "In this case, splitting_ops will be set to empty "
                     "list, and cudagraph_mode will be set to FULL. "
@@ -924,8 +1001,7 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
 
         assert not self.splitting_ops_contain_attention(), (
-            "attention ops should not be in splitting_ops "
-            "when enable_attn_fusion is True"
+            "attention ops should not be in splitting_ops when fuse_attn_quant is True"
         )
 
     def splitting_ops_contain_attention(self) -> bool:
@@ -1001,7 +1077,7 @@ class CompilationConfig:
         self, uniform_decode_query_len: int, tensor_parallel_size: int
     ):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sequence_parallelism:
+        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
             multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
             if (
                 multiple_of % uniform_decode_query_len != 0

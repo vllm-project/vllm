@@ -93,12 +93,13 @@ def enable_fusion(cfg: "VllmConfig") -> bool:
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": False,
-            "enable_fusion": False,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": False,
-            "enable_sequence_parallelism": False,
-            "enable_async_tp": False,
+            "eliminate_noops": False,
+            "fuse_norm_quant": False,
+            "fuse_act_quant": False,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": False,
+            "enable_sp": False,
+            "fuse_gemm_comms": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -107,12 +108,13 @@ OPTIMIZATION_LEVEL_00 = {
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": False,
-            "enable_sequence_parallelism": False,
-            "enable_async_tp": False,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_fusion,
+            "fuse_act_quant": enable_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": False,
+            "enable_sp": False,
+            "fuse_gemm_comms": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -121,12 +123,13 @@ OPTIMIZATION_LEVEL_01 = {
 OPTIMIZATION_LEVEL_02 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": IS_QUANTIZED,
-            "enable_sequence_parallelism": IS_DENSE,
-            "enable_async_tp": IS_DENSE,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_fusion,
+            "fuse_act_quant": enable_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": IS_QUANTIZED,
+            "enable_sp": IS_DENSE,
+            "fuse_gemm_comms": IS_DENSE,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -135,12 +138,13 @@ OPTIMIZATION_LEVEL_02 = {
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": IS_QUANTIZED,
-            "enable_sequence_parallelism": IS_DENSE,
-            "enable_async_tp": IS_DENSE,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_fusion,
+            "fuse_act_quant": enable_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": IS_QUANTIZED,
+            "enable_sp": IS_DENSE,
+            "fuse_gemm_comms": IS_DENSE,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -647,9 +651,9 @@ class VllmConfig:
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
-        if self.compilation_config.pass_config.enable_async_tp:
-            self.compilation_config.pass_config.enable_sequence_parallelism = True
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
+        if self.compilation_config.pass_config.fuse_gemm_comms:
+            self.compilation_config.pass_config.enable_sp = True
+        if self.compilation_config.pass_config.enable_sp:
             if "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
@@ -800,7 +804,7 @@ class VllmConfig:
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
+        if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,
             # native rms norm tracing errors due to incorrect residual shape.
             # Use custom rms norm to unblock. In the future,
@@ -1058,7 +1062,7 @@ class VllmConfig:
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sequence_parallelism
+                and self.compilation_config.pass_config.enable_sp
             ):
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes
