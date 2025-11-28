@@ -12,7 +12,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import ParamSpec
@@ -257,8 +257,11 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
         return False
 
 
-def _coro_anext(it: AsyncGenerator[T, None]):
-    return anext(it)
+# A hack to pass mypy
+if TYPE_CHECKING:
+
+    def anext(it: AsyncGenerator[T, None]):
+        return it.__anext__()
 
 
 async def merge_async_iterators(
@@ -278,9 +281,7 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {
-        loop.create_task(_coro_anext(it)): (i, it) for i, it in enumerate(iterators)
-    }
+    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -289,7 +290,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[loop.create_task(_coro_anext(it))] = pair
+                    awaits[loop.create_task(anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
