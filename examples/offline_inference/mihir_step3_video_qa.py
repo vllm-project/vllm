@@ -204,6 +204,7 @@ def main(args):
             "max_position_embedding": 2048,
             "share_expert_dim": 128,
             "share_q_dim": 64,
+            "architectures": ["Step3TextForCausalLM"],
         }
         
         # VL Config
