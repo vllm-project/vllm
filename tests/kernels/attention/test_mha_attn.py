@@ -26,7 +26,14 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-@pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
+devices = ["cpu"]
+if current_platform.is_cuda():
+    devices.append("cuda")
+if current_platform.is_rocm():
+    devices.append("rocm")
+
+
+@pytest.mark.parametrize("device", devices)
 def test_mha_attn_platform(device: str):
     """
     Test the attention selector between different platform and device.
