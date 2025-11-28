@@ -100,6 +100,7 @@ def _pad_out_ubatch_slice(ubatch_slices: UBatchSlices, num_total_tokens: int):
     ubatch_slices[1] = UBatchSlice(
         padded_second_ubatch_slice, padded_second_ubatch_slice
     )
+    return ubatch_slices
 
 
 def _synchronize_dp_ranks(
