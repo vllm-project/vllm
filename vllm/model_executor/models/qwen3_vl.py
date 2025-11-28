@@ -67,6 +67,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.evs import (
+    compute_mrope_for_media,
+    compute_retained_tokens_count,
+    compute_retention_mask,
+    recompute_mrope_positions,
+)
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
@@ -92,6 +98,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsMultiModalPruning,
     SupportsPP,
 )
 from .qwen2_5_vl import (
@@ -1043,6 +1050,21 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 for curr_time in timestamps
             ]
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
+
+            # EVS-specific code
+            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+            if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                T, H, W = map(int, grid_thw)
+                tokens_per_frame = (H // image_processor.merge_size) * (
+                    W // image_processor.merge_size
+                )
+                num_tokens_per_frame = compute_retained_tokens_count(
+                    tokens_per_frame,
+                    T,
+                    video_pruning_rate,
+                ) // T  # Divide by T to get tokens per frame
+            # End of EVS-specific code
+
             placeholder = []
             for frame_idx in frames_idx_token:
                 placeholder.extend(frame_idx)
@@ -1189,6 +1211,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsEagle3,
+    SupportsMultiModalPruning,
 ):
     merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
@@ -1234,6 +1257,10 @@ class Qwen3VLForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
@@ -1420,6 +1447,97 @@ class Qwen3VLForConditionalGeneration(
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
+    def _postprocess_image_embeds_evs(
+        self,
+        image_embeds_split: tuple[torch.Tensor, ...],
+        image_input: Qwen2_5_VLImageInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """
+        Append mrope positions for each for images.
+        This is necessary to recover correct mrope
+        positions after video pruning
+
+        Args:
+            image_embeds_split: Tuple of image embeddings for
+                each image item.
+            image_input: Image input data.
+
+        Returns:
+            Tuple of image embeddings for each image item.
+            Resulting embeddings will have extra 4 channels for
+            computed mrope positions.
+        """
+        merge_size = self.visual.spatial_merge_size
+        grid_thw = image_input["image_grid_thw"]
+        grid_thw_list = grid_thw.tolist()
+        image_embeds_out = []
+        for emb, size in zip(image_embeds_split, grid_thw_list):
+            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+            emb = torch.cat([emb, positions], dim=1)
+            image_embeds_out.append(emb)
+        image_embeds_split = image_embeds_out
+        return tuple(image_embeds_split)
+
+    def _postprocess_video_embeds_evs(
+        self,
+        video_embeds_split: tuple[torch.Tensor, ...],
+        video_input: Qwen2_5_VLVideoInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """
+        Prunes video embeddings via Efficient Video Sampling (EVS)
+        and then appends mrope positions for each retained embeddings
+
+        Args:
+            video_embeds_split: Tuple of video embeddings for each video item.
+            video_input: Video input data.
+
+        Returns:
+            Tuple of video embeddings for each video item.
+            Resulting embeddings will have extra 4 channels for
+            computed mrope positions.
+        """
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+        merge_size = self.visual.spatial_merge_size
+
+        # Cast to long to match the original code
+        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
+        second_per_grid_ts = video_input.get("second_per_grid_ts")
+        if second_per_grid_ts is None:
+            # For Qwen3-VL, second_per_grid_ts might not be available
+            # Use default value of 1.0 for each video
+            second_per_grid_ts = torch.ones(len(grid_thw_list), dtype=torch.long)
+        else:
+            second_per_grid_ts = second_per_grid_ts.long()
+        tokens_per_second = getattr(
+            self.config.vision_config, "tokens_per_second", 1.0
+        )
+
+        video_embeds_out = []
+        for emb, size, video_second_per_grid_t in zip(
+            video_embeds_split, grid_thw_list, second_per_grid_ts
+        ):
+            # For each video, we compute retention mask using EVS
+            retention_mask = compute_retention_mask(
+                emb,
+                size,
+                spatial_merge_size=self.visual.spatial_merge_size,
+                q=self.video_pruning_rate,
+            )
+            positions = compute_mrope_for_media(
+                size,
+                merge_size,
+                tokens_per_second=tokens_per_second,
+                video_second_per_grid=video_second_per_grid_t.item(),
+            ).to(emb.device)
+
+            emb = emb[retention_mask]
+            positions = positions[retention_mask]
+            emb = torch.cat([emb, positions], dim=1)
+            video_embeds_out.append(emb)
+        return tuple(video_embeds_out)
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
@@ -1460,6 +1578,63 @@ class Qwen3VLForConditionalGeneration(
                     offset += llm_grid_h * llm_grid_w
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
+    def recompute_mrope_positions(
+        self,
+        input_ids: list[int],
+        multimodal_embeddings: tuple[torch.Tensor, ...],
+        mrope_positions: torch.LongTensor,
+        num_computed_tokens: int,
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, int]:
+        """
+        Update part of input mrope positions (starting with
+        num_computed_tokens index). Original mrope_positions are computed
+        for unpruned sequence and becomes incorrect once pruning occurs,
+        so once we prune media tokens we should reflect this in the
+        mrope_positions before we feed it to LLM.
+
+        Args:
+            input_ids: (N,) All input tokens of the prompt (Containing
+                entire sequence).
+            multimodal_embeddings: Tuple of multimodal embeddings.
+            mrope_positions: Existing mrope positions (3, N) for entire
+                sequence
+            num_computed_tokens: A number of computed tokens so far.
+
+        Returns:
+            Tuple of (multimodal_embeddings, mrope_positions,
+                mrope_position_delta).
+        """
+        image_token_id = self.config.image_token_id
+        video_token_id = self.config.video_token_id
+        vision_start_token_id = self.config.vision_start_token_id
+
+        # Device
+        device = (
+            multimodal_embeddings[0].device
+            if len(multimodal_embeddings)
+            else mrope_positions.device
+        )
+
+        # Tensors
+        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+
+        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
+        mm_embeddings_pos = [
+            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
+        ]
+
+        positions, mrope_positions_delta = recompute_mrope_positions(
+            input_ids_t,
+            mm_embeddings_pos,
+            mrope_positions,
+            num_computed_tokens,
+            vision_start_token_id,
+            image_token_id,
+            video_token_id,
+        )
+
+        return tuple(mm_embeddings_out), positions, mrope_positions_delta
 
     def get_mrope_input_positions(
         self,
@@ -1510,9 +1685,17 @@ class Qwen3VLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(multimodal_input)
+                if self.is_multimodal_pruning_enabled:
+                    image_embeddings = self._postprocess_image_embeds_evs(
+                        image_embeddings, multimodal_input
+                    )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
+                if self.is_multimodal_pruning_enabled:
+                    video_embeddings = self._postprocess_video_embeds_evs(
+                        video_embeddings, multimodal_input
+                    )
                 multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
