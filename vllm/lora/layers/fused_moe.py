@@ -20,15 +20,26 @@ from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    modular_marlin_fused_moe,
+    MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
+    TritonExperts,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
+from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+    UnfusedOAITritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
+
+from .utils import _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -41,7 +52,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.device = base_layer.w2_weight.device
+        self.device = _get_lora_device(base_layer)
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
 
@@ -112,15 +123,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        m_fused_moe_fn = (
-            modular_triton_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
-            )
-            if not quant_config.use_mxfp4_w4a16
-            else modular_marlin_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
-            )
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        m_fused_moe_fn = FusedMoEModularKernel(
+            prepare_finalize,
+            self.base_layer.quant_method.select_gemm_impl(
+                prepare_finalize, self.base_layer
+            ),
+            self.base_layer.shared_experts,
+            getattr(self.base_layer, "shared_experts_stream", None),
         )
+        if quant_config.use_mxfp4_w4a16:
+            assert isinstance(
+                m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
+            )
+        else:
+            assert isinstance(
+                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
+            )
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
@@ -399,6 +418,61 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.w13_lora_b_stacked[1][lora_id][experts_id]
                 )
 
+    def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w13_lora_a
+
+        # w13_lora_a shape (num_experts,rank,input_size)
+        current_lora_rank = w13_lora_a.shape[1]
+        assert current_lora_rank % self.tp_size == 0
+        # Based on S-LoRA, we slice W13/W1/W3 A along the rank dim.
+        sliced_rank = current_lora_rank // self.tp_size
+        start_idx = self.tp_rank * sliced_rank
+        end_idx = (self.tp_rank + 1) * sliced_rank
+        return w13_lora_a[:, start_idx:end_idx, :]
+
+    def _slice_w13_b(self, w13_lora_b: torch.Tensor):
+        if self.tp_size == 1:
+            return w13_lora_b
+
+        # w13_lora_b shape (num_experts,output_size,rank)
+        shard_size = self.base_layer.intermediate_size_per_partition
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+
+        return w13_lora_b[:, start_idx:end_idx, :]
+
+    def _slice_w2_a(self, w2_lora_a: torch.Tensor) -> torch.Tensor:
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
+        if self.tp_size == 1:
+            return w2_lora_a
+        # w2_lora_a shape (num_experts,rank,input_size)
+        shard_size = self.base_layer.intermediate_size_per_partition
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+
+        return w2_lora_a[:, :, start_idx:end_idx]
+
+    def _slice_w2_b(self, w2_lora_b: torch.Tensor) -> torch.Tensor:
+        """
+        Applies to FusedMoEWithLoRA and FusedMoE3DWithLoRA
+        """
+        if self.tp_size == 1 or not self.fully_sharded:
+            return w2_lora_b
+        # Based on S-LoRA, we slice W2 B along the hidden_size dim.
+        # w2_lora_b shape (num_experts,output_size,rank)
+        current_lora_size = w2_lora_b.shape[1]
+
+        sliced_size = current_lora_size // self.tp_size
+        start_idx = self.tp_rank * sliced_size
+        end_idx = (self.tp_rank + 1) * sliced_size
+        return w2_lora_b[:, start_idx:end_idx, :]
+
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
@@ -409,6 +483,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.w2_lora_b_stacked[0][index] = 0
         self.adapter_enabled[index] = 0
 
+    #
+
     def set_lora(
         self,
         index: int,
@@ -416,69 +492,55 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
+        # Make mypy happy
         assert isinstance(lora_a, list)
         assert isinstance(lora_b, list)
+
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
-        for eid in range(len(lora_a) // 3):
-            w1_lora_a = lora_a[eid * 3]
-            w2_lora_a = lora_a[eid * 3 + 1]
-            w3_lora_a = lora_a[eid * 3 + 2]
-            w1_lora_b = lora_b[eid * 3]
-            w2_lora_b = lora_b[eid * 3 + 1]
-            w3_lora_b = lora_b[eid * 3 + 2]
 
-            # Handle the case of adding LoRA to only a subset of experts
-            if w1_lora_a is None or w2_lora_a is None or w3_lora_a is None:
-                continue
+        num_experts = self.w13_lora_a_stacked[0].shape[1]
 
-            if self.tp_size > 1:
-                shard_size = self.base_layer.intermediate_size_per_partition
-                start_idx = self.tp_rank * shard_size
-                end_idx = (self.tp_rank + 1) * shard_size
+        w1_lora_a, w2_lora_a, w3_lora_a = lora_a
+        w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+        assert (
+            num_experts
+            == w1_lora_a.shape[0]
+            == w2_lora_a.shape[0]
+            == w3_lora_a.shape[0]
+        )
 
-                w1_lora_b = w1_lora_b[start_idx:end_idx, :]
-                w3_lora_b = w3_lora_b[start_idx:end_idx, :]
-                w2_lora_a = w2_lora_a[:, start_idx:end_idx]
+        slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
+        slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
+        slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
+        slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
 
-                if self.fully_sharded:
-                    # Based on S-LoRA, we slice W1 and W3 A along the rank dim,
-                    # and W2 B along the hidden_size dim.
-                    w13_shard_size = self.w13_lora_a_stacked[0][index, eid].shape[0]
-                    w13_start_idx = self.tp_rank * w13_shard_size
-                    w13_end_idx = (self.tp_rank + 1) * w13_shard_size
-                    w1_lora_a = w1_lora_a[w13_start_idx:w13_end_idx, :]
-                    w3_lora_a = w3_lora_a[w13_start_idx:w13_end_idx, :]
+        sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
+        sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
 
-                    w2_shard_size = self.w2_lora_b_stacked[0][index, eid].shape[0]
-                    w2_start_idx = self.tp_rank * w2_shard_size
-                    w2_end_idx = (self.tp_rank + 1) * w2_shard_size
-                    w2_lora_b = w2_lora_b[w2_start_idx:w2_end_idx, :]
-            # w1 lora_a
-            self.w13_lora_a_stacked[0][
-                index, eid, : w1_lora_a.shape[0], : w1_lora_a.shape[1]
-            ].copy_(w1_lora_a, non_blocking=True)
-            # w3 lora_a
-            self.w13_lora_a_stacked[1][
-                index, eid, : w3_lora_a.shape[0], : w3_lora_a.shape[1]
-            ].copy_(w3_lora_a, non_blocking=True)
+        self.w13_lora_a_stacked[0][
+            index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
+        ].copy_(slliced_w1_lora_a, non_blocking=True)
 
-            # w1 lora_b
-            self.w13_lora_b_stacked[0][
-                index, eid, : w1_lora_b.shape[0], : w1_lora_b.shape[1]
-            ].copy_(w1_lora_b, non_blocking=True)
-            # w3 lora_b
-            self.w13_lora_b_stacked[1][
-                index, eid, : w3_lora_b.shape[0], : w3_lora_b.shape[1]
-            ].copy_(w3_lora_b, non_blocking=True)
+        self.w13_lora_a_stacked[1][
+            index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+        ].copy_(slliced_w3_lora_a, non_blocking=True)
 
-            self.w2_lora_a_stacked[0][
-                index, eid, : w2_lora_a.shape[0], : w2_lora_a.shape[1]
-            ].copy_(w2_lora_a, non_blocking=True)
+        self.w13_lora_b_stacked[0][
+            index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
+        ].copy_(slliced_w1_lora_b, non_blocking=True)
 
-            self.w2_lora_b_stacked[0][
-                index, eid, : w2_lora_b.shape[0], : w2_lora_b.shape[1]
-            ].copy_(w2_lora_b, non_blocking=True)
+        self.w13_lora_b_stacked[1][
+            index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+        ].copy_(slliced_w3_lora_b, non_blocking=True)
+
+        self.w2_lora_a_stacked[0][
+            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+        ].copy_(sliced_w2_lora_a, non_blocking=True)
+
+        self.w2_lora_b_stacked[0][
+            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+        ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
@@ -504,12 +566,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # return type(source_layer) is FusedMoE
 
-        return type(source_layer) is FusedMoE and len(packed_modules_list) == 2
+        # source_layer is FusedMoE or SharedFusedMoE
+        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
@@ -553,6 +615,9 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
+        assert isinstance(model_config, PretrainedConfig)
+        self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -563,20 +628,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._create_lora_a_weights(max_loras, lora_config)
         self._create_lora_b_weights(max_loras, lora_config)
 
-    def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
-        if self.tp_size == 1 or not self.fully_sharded:
-            return w13_lora_a
-
-        # w13_lora_a shape (num_experts,rank,input_size)
-        current_lora_rank = w13_lora_a.shape[1]
-        assert current_lora_rank % self.tp_size == 0
-
-        sliced_rank = current_lora_rank // self.tp_size
-        start_idx = self.tp_rank * sliced_rank
-        end_idx = (self.tp_rank + 1) * sliced_rank
-        return w13_lora_a[:, start_idx:end_idx, :]
-
-    def _slice_w13_b(self, w13_lora_b: torch.Tensor, is_interleave: bool = True):
+    def _slice_w13_b(self, w13_lora_b: torch.Tensor):
         if self.tp_size == 1:
             return w13_lora_b
 
@@ -584,7 +636,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         shard_size = self.base_layer.intermediate_size_per_partition
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        if is_interleave:
+        # HACK: Currently, only GPT-OSS is in interleaved order
+        if self._base_model == "GptOssForCausalLM":
             # For models like GPT-OSS, the weights of w1 (gate_proj) and w3 (up_proj)
             # in the interleaved order, and corresponding LoRA need to be processed.
             w1_lora_b = w13_lora_b[:, ::2, :]
@@ -603,28 +656,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
 
             return torch.cat([sliced_w1_lora_b, sliced_w3_lora_b], dim=1)
-
-    def _slice_w2_a(self, w2_lora_a: torch.Tensor) -> torch.Tensor:
-        if self.tp_size == 1:
-            return w2_lora_a
-        # w2_lora_a shape (num_experts,rank,input_size)
-        shard_size = self.base_layer.intermediate_size_per_partition
-        start_idx = self.tp_rank * shard_size
-        end_idx = (self.tp_rank + 1) * shard_size
-
-        return w2_lora_a[:, :, start_idx:end_idx]
-
-    def _slice_w2_b(self, w2_lora_b: torch.Tensor) -> torch.Tensor:
-        if self.tp_size == 1 or not self.fully_sharded:
-            return w2_lora_b
-        # Based on S-LoRA, we slice W2 B along the hidden_size dim.
-        # w2_lora_b shape (num_experts,output_size,rank)
-        current_lora_size = w2_lora_b.shape[1]
-
-        sliced_size = current_lora_size // self.tp_size
-        start_idx = self.tp_rank * sliced_size
-        end_idx = (self.tp_rank + 1) * sliced_size
-        return w2_lora_b[:, start_idx:end_idx, :]
 
     def set_lora(
         self,
@@ -656,7 +687,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
-        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b, is_interleave=True)
+        sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
@@ -709,8 +740,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-
-        return type(source_layer) is FusedMoE and len(packed_modules_list) == 1
+        # source_layer is FusedMoE or SharedFusedMoE
+        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
