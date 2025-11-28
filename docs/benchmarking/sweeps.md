@@ -2,7 +2,9 @@
 
 ## Online Benchmark
 
-[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
+### Basic
+
+`vllm bench sweep serve` automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
 
 Follow these steps to run the script:
 
@@ -89,9 +91,9 @@ vllm bench sweep serve \
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
   
-## SLA Auto-Tuner
+### SLA auto-tuner
 
-[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
+`vllm bench sweep serve_sla` is a wrapper over `vllm bench sweep serve` that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
 
 For example, to ensure E2E latency within different target values for 99% of requests:
 
@@ -137,9 +139,11 @@ The algorithm for adjusting the SLA variable is as follows:
 
     For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
 
-## Visualizer
+## Visualization
 
-[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
+### Basic
+
+`vllm bench sweep plot` can be used to plot performance curves from parameter sweep results.
 
 Example command:
 
@@ -155,7 +159,7 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
-## Pareto chart
+### Pareto chart
 
 `vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
 
