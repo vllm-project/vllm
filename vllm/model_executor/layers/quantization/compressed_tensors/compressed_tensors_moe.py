@@ -2509,8 +2509,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight_packed)
         set_weight_attrs(w2_weight_packed, extra_weight_attrs)
 
-        # TODO(czhu): fix TP > 1 case, probably this and other stuff
-        # needs change
         # weight_scale refers to the group-wise scales
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
@@ -2641,8 +2639,11 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
-        return super().maybe_make_prepare_finalize()
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalize | None:
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
