@@ -1,4 +1,3 @@
-
 # Performance Dashboard
 
 The performance dashboard is used to confirm whether new changes improve/degrade performance under various workloads.
