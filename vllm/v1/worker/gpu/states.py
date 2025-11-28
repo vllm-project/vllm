@@ -55,7 +55,8 @@ class SamplingMetadata:
         # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
         top_p = None
         top_k = None
-        # NOTE(woosuk): Make sure to set these to no-penalty values as we use
+        # NOTE(woosuk): We must set penalties to their default values to make sure
+        # the penalties kernel does not touch the placeholder bin_counts tensors.
         repetition_penalty = torch.ones(num_reqs, dtype=torch.float32, device=device)
         frequency_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         presence_penalty = torch.zeros(num_reqs, dtype=torch.float32, device=device)
@@ -64,7 +65,8 @@ class SamplingMetadata:
         max_num_logprobs = 20
 
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-        # NOTE(woosuk)
+        # NOTE(woosuk): These are placeholder tensors to avoid None checks in the
+        # penalties kernel.
         prompt_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
         output_bin_counts = torch.zeros(1, 1, dtype=torch.int32, device=device)
 
