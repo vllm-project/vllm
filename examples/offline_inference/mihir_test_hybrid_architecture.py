@@ -29,7 +29,7 @@ from typing import Optional
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.hybrid_attn_layer import HybridAttentionImpl
+from vllm.v1.attention.backends.hybrid_attn import HybridAttentionImpl
 from vllm.model_executor.layers.hybrid_ssm_adapter import HybridSSMAdapter
 from vllm.config import ModelConfig, CacheConfig, VllmConfig
 from vllm.utils import is_hip
