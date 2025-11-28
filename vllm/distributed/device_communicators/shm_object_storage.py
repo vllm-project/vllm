@@ -655,7 +655,10 @@ class SingleWriterShmObjectStorage:
             ):
                 reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
 
-                # Avoid increasing flag on newly added item (same as original note)
+                #NOTE(Long):
+                # Avoid increasing flag on newly added item (sync with sender)
+                # Since when a new item is added 
+                # pre-touch has no effect on writer side
                 if reader_count >= self.n_readers:
                     self.increment_reader_flag(data_view[: self.flag_bytes])
 
