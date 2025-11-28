@@ -33,6 +33,10 @@ try:
 except ImportError:
     cv2 = None
 
+import torch
+import torch.nn as nn
+from vllm.model_executor.models.utils import init_vllm_registered_model
+
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.video import VideoAsset
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -89,6 +93,30 @@ def generate_dummy_frames(num_frames: int = 8, width: int = 728, height: int = 7
         frames.append(Image.fromarray(data))
     return frames
 
+
+class SyntheticStep3VL(nn.Module):
+    """
+    Synthetic wrapper that mocks the Step3 architecture for testing Hybrid Attention.
+    It delegates to a tiny Step3Text model internally but mimics the VL interface.
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        # Create a minimal internal text model config
+        text_config = config.text_config
+        self.language_model = init_vllm_registered_model(
+            vllm_config=config._vllm_config,
+            hf_config=text_config,
+            prefix="language_model",
+        )
+
+    def load_weights(self, weights):
+        # No-op for synthetic
+        return
+
+    def forward(self, *args, **kwargs):
+        return self.language_model(*args, **kwargs)
+
 def main(args):
     # 1. Prepare Data (Frames)
     if args.use_dummy_video:
@@ -124,9 +152,12 @@ def main(args):
     # 3. Initialize LLM
     print(f"Initializing LLM with model: {args.model}")
     
+    # If we are using the synthetic path, we set model to None so we can inject our own
+    model_arg = args.model
+    
     # Aggressive configuration
     engine_args = EngineArgs(
-        model=args.model,
+        model=model_arg,
         max_num_batched_tokens=args.max_num_batched_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -137,6 +168,10 @@ def main(args):
         cpu_offload_gb=args.cpu_offload_gb,
         max_model_len=args.max_model_len,
     )
+
+    # Inject prefix sum mode if requested
+    if os.environ.get("VLLM_HYBRID_SSM_MODE") == "prefix_sum":
+        print("WARNING: Running in synthetic Prefix-Sum verification mode!")
 
     llm = LLM(**engine_args.__dict__)
 
