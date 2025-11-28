@@ -585,11 +585,12 @@ class EngineArgs:
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             model_id = self.model
             self.model = get_model_path(self.model, self.revision)
-            logger.info(
-                "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                model_id,
-                self.model,
-            )
+            if model_id is not self.model:
+                logger.info(
+                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
+                    model_id,
+                    self.model,
+                )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
