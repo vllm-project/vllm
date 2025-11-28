@@ -3,30 +3,35 @@
 """Attention layer."""
 
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionType,
-    MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -39,6 +44,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backends.mla.common import MLACommonImpl, reorg_kvcache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -47,9 +53,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if current_platform.is_rocm():
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx9
 else:
     on_gfx9 = lambda *args, **kwargs: False
+    rocm_aiter_ops = None
 
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -156,6 +164,17 @@ def _init_kv_cache_quant(
         # values after weight loading.
         layer.quant_method = quant_method
         layer.quant_method.create_weights(layer)
+
+
+def dynamic_per_batched_tensor_quant(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+):
+    DTYPE_MAX = torch.finfo(dtype).max
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+    scale = DTYPE_MAX / amax
+    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -599,6 +618,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.kv_b_proj = kv_b_proj
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -623,8 +643,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             use_mla=True,
             use_sparse=use_sparse,
         )
-        impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(
+        impl_cls = cast(type[MLACommonImpl[Any]], self.attn_backend.get_impl_cls())
+        self.impl: MLACommonImpl[Any] = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -661,6 +681,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         ]
 
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
         self.use_sparse = use_sparse
 
         # Initialize q/k/v range constants.
@@ -687,19 +708,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
-                    self,
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                     output=output,
                 )
-                return output
             else:
-                return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -720,9 +743,470 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.layer_name,
                 )
 
+    def forward_prefill(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> None:
+        """Prefill path orchestration in the layer."""
+        assert attn_metadata.prefill is not None
+        if self.impl.dcp_world_size is None:
+            self.impl.dcp_world_size = get_dcp_group().world_size
+
+        has_context = attn_metadata.prefill.chunked_context is not None
+
+        # KV projection and splitting
+        kv_nope = self.kv_b_proj(k_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        # Run prefill for new tokens
+        output_prefill = self.impl._run_prefill_new_tokens(
+            prefill=attn_metadata.prefill,
+            q=q,
+            k=k,
+            v=v,
+            return_softmax_lse=has_context,
+        )
+
+        # Handle chunked context if present
+        if has_context:
+            suffix_output, suffix_lse = output_prefill
+            prefill_metadata = attn_metadata.prefill
+            chunked_context = prefill_metadata.chunked_context
+
+            context_output = None
+            context_lse = None
+            iters = len(chunked_context.seq_tot)
+            workspace = chunked_context.workspace
+
+            for i in range(iters):
+                toks = chunked_context.seq_tot[i]
+
+                if self.impl.dcp_world_size > 1:
+                    # DCP path: use cp_gather_cache and allgather
+                    assert self._k_scale is None or (self._k_scale == 1.0).all(), (
+                        "DCP not support scaled kvcache now."
+                    )
+                    assert chunked_context.padded_local_chunk_seq_lens is not None
+                    assert chunked_context.local_context_lens_allranks is not None
+                    assert chunked_context.padded_local_cu_seq_lens is not None
+                    assert chunked_context.cu_seq_lens_lst is not None
+
+                    ops.cp_gather_cache(
+                        src_cache=kv_cache,
+                        dst=workspace,
+                        block_table=prefill_metadata.block_table,
+                        cu_seq_lens=chunked_context.padded_local_cu_seq_lens[i],
+                        batch_size=attn_metadata.num_prefills,
+                        seq_starts=chunked_context.starts[i],
+                    )
+                    # workspace
+                    # |------- N tokens --------|--------- N*dcp_size tokens ----------|
+                    # |<- use for loca_gather ->|<--------- use for allgather -------->|
+                    allgather_offset = workspace.shape[0] // (
+                        self.impl.dcp_world_size + 1
+                    )
+                    assert (
+                        allgather_offset * (self.impl.dcp_world_size + 1)
+                        == workspace.shape[0]
+                    )
+                    assert toks <= allgather_offset
+                    local_gathered_kvcache = workspace[:toks]
+                    cur_allgather_workspace = workspace[
+                        allgather_offset : allgather_offset
+                        * (1 + self.impl.dcp_world_size)
+                    ]
+                    assert (
+                        toks * self.impl.dcp_world_size
+                        <= cur_allgather_workspace.shape[0]
+                    )
+                    cur_allgather_kvcache = cur_allgather_workspace[
+                        : toks * self.impl.dcp_world_size
+                    ]
+                    cur_allgather_kvcache.copy_(
+                        get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
+                    )
+                    assert cur_allgather_kvcache.shape[-1] == (
+                        self.kv_lora_rank + self.qk_rope_head_dim
+                    )
+                    allgatered_kv_c_normed, allgatered_k_pe = (
+                        cur_allgather_kvcache.unsqueeze(1).split(
+                            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                        )
+                    )
+
+                    kv_c_normed, k_pe = reorg_kvcache(
+                        allgatered_kv_c_normed,
+                        allgatered_k_pe,
+                        padded_local_chunk_seq_lens_lst=chunked_context.padded_local_chunk_seq_lens[
+                            i
+                        ],
+                        local_context_lens_allranks=chunked_context.local_context_lens_allranks,
+                        sum_seq_len=chunked_context.cu_seq_lens_lst[i][-1],
+                        max_seq_len=chunked_context.max_seq_lens[i],
+                        toks=toks,
+                    )
+                    k_pe = k_pe.unsqueeze(1)
+                else:
+                    # Non-DCP path: use gather_and_maybe_dequant_cache
+                    ops.gather_and_maybe_dequant_cache(
+                        src_cache=kv_cache,
+                        dst=workspace,
+                        block_table=prefill_metadata.block_table,
+                        cu_seq_lens=chunked_context.cu_seq_lens[i],
+                        token_to_seq=chunked_context.token_to_seq[i],
+                        num_tokens=chunked_context.chunk_total_token[i],
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=self._k_scale,
+                        seq_starts=chunked_context.starts[i],
+                    )
+
+                    kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
+                    k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
+
+                # KV projection and splitting
+                kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+                )
+                k_nope, v_chunk = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
+
+                k_chunk = torch.cat(
+                    (k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1
+                )
+
+                # Run attention kernel for this chunk
+                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
+                    prefill=prefill_metadata,
+                    chunk_idx=i,
+                    q=q,
+                    k=k_chunk,
+                    v=v_chunk,
+                )
+
+                # Merge with previous chunks
+                if context_output is None:
+                    context_output = attn_output
+                    context_lse = attn_softmax_lse
+                else:
+                    output_tmp = torch.empty_like(context_output)
+                    output_lse_tmp = torch.empty_like(context_lse)
+                    merge_attn_states(
+                        output=output_tmp,
+                        output_lse=output_lse_tmp,
+                        prefix_output=context_output,
+                        prefix_lse=context_lse,
+                        suffix_output=attn_output,
+                        suffix_lse=attn_softmax_lse,
+                    )
+                    context_output = output_tmp
+                    context_lse = output_lse_tmp
+
+            # Merge context with new tokens
+            output = torch.empty_like(suffix_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+
+            # Unpad if necessary
+            if self.impl._pad_v:
+                assert context_output is not None
+                context_output = context_output[..., : v.shape[-1]]
+                suffix_output = suffix_output[..., : v.shape[-1]]
+
+            output = output.view(-1, self.num_heads, self.v_head_dim)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+        else:
+            output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
+            output.copy_(output_prefill)
+
+    def forward_decode(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        """Decode path orchestration in the layer."""
+        if self.impl.dcp_world_size is None:
+            self.impl.dcp_world_size = get_dcp_group().world_size
+
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+
+        # Split q into no-rope and rope parts
+        decode_q_nope, decode_q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        # (B, N, P) -> (N, B, P)
+        decode_q_nope = decode_q_nope.transpose(0, 1)
+
+        if self.impl.q_pad_num_heads is not None:
+            B, N, L = decode_q_pe.shape
+            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))
+            decode_pe_padded.resize_((B, N, L))
+            decode_pe_padded.copy_(decode_q_pe)
+            decode_q_pe = decode_pe_padded
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
+            decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                decode_q_nope,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            N, B, P = decode_q_nope.shape
+            _, _, L = self.W_UK_T.shape
+            if self.impl.q_pad_num_heads is not None:
+                decode_ql_nope = decode_q_nope.new_empty(
+                    (self.impl.q_pad_num_heads, B, L)
+                )
+                decode_ql_nope.resize_((N, B, L))
+            else:
+                decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+            torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+        if fp8_attention:
+            ql_nope_shape = decode_ql_nope.shape
+            decode_ql_nope, _ = ops.scaled_fp8_quant(
+                decode_ql_nope.reshape(
+                    [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                ),
+                self._q_scale,
+            )
+            decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+            q_pe_shape = decode_q_pe.shape
+            decode_q_pe, _ = ops.scaled_fp8_quant(
+                decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                self._q_scale,
+            )
+            decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+
+        decode_q = (decode_ql_nope, decode_q_pe)
+        if self.impl.dcp_world_size > 1:
+            assert not fp8_attention, "DCP not support fp8 kvcache now."
+            decode_q = torch.cat(decode_q, dim=-1)
+            decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
+        attn_out, lse = self.impl._forward_decode(
+            decode_q, kv_cache, attn_metadata, self
+        )
+
+        if self.impl.dcp_world_size > 1:
+            attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
+
+        out = torch.empty(
+            (q.shape[0], self.num_heads * self.v_head_dim),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        self._v_up_proj(attn_out, out=out)
+        return out
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        allow_compiled_split: bool = True,
+    ) -> torch.Tensor:
+        """Forward implementation for MLA attention."""
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for MLA"
+            )
+
+        # Allocate output if not provided
+        if output is None:
+            output = torch.empty(
+                (q.shape[0], self.num_heads * self.v_head_dim),
+                dtype=q.dtype,
+                device=q.device,
+            )
+
+        if attn_metadata is None:
+            return output.fill_(0)
+
+        # Write KV to cache first (outside backend)
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c_normed,
+                k_pe.squeeze(1) if k_pe.dim() > 2 else k_pe,
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        has_decode = attn_metadata.num_decodes > 0
+        has_prefill = attn_metadata.num_prefills > 0
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+        decode_q = q[:num_decode_tokens]
+        prefill_q = q[num_decode_tokens:]
+        prefill_k_c = kv_c_normed[num_decode_tokens:]
+        prefill_k_pe = k_pe[num_decode_tokens:]
+
+        # Process decode and prefill branches
+        if has_prefill:
+            self.forward_prefill(
+                prefill_q,
+                prefill_k_c,
+                prefill_k_pe,
+                kv_cache,
+                attn_metadata,
+                output=output[num_decode_tokens:],
+            )
+
+        if has_decode:
+            decode_out = self.forward_decode(decode_q, kv_cache, attn_metadata)
+            output[:num_decode_tokens] = decode_out
+
+        return output
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
+        def get_layer_weight(layer):
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
+            )
+
+        def get_and_maybe_dequant_weights(layer: LinearBase):
+            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                # NOTE: This should only be used offline, since it's O(N^3)
+                eye = torch.eye(
+                    layer.input_size_per_partition,
+                    dtype=act_dtype,
+                    device=get_layer_weight(layer).device,
+                )
+                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
+                del eye
+                # standardize to (output, input)
+                return dequant_weights.T
+            return layer.weight
+
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), (
+            f"{kv_b_proj_weight.shape=}, "
+            f"{self.kv_lora_rank=}, "
+            f"{self.num_heads=}, "
+            f"{self.qk_nope_head_dim=}, "
+            f"{self.v_head_dim=}"
+        )
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+
+        W_UK, W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            W_K = W_UK.transpose(0, 1)  # 16 512 128
+            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+                W_K, dtype=FP8_DTYPE
+            )
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+                W_V, dtype=FP8_DTYPE
+            )
+
+            # The kernel operates on non-padded inputs. Hence, pre-compiling
+            # triton kernel to avoid runtime compilation for unseen batch sizes
+            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+            # On DS-R1, this step adds roughly 50s to the model loading time.
+            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+            pre_compilation_list = list(range(1, max_batch_size + 1))
+            if is_global_first_rank():
+                pre_compilation_list = tqdm(
+                    pre_compilation_list,
+                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                    total=max_batch_size,
+                )
+
+            for m in pre_compilation_list:
+                x = torch.empty(
+                    (self.W_K.shape[0], m, self.W_K.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_K.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                )
+
+                x = torch.empty(
+                    (self.W_V.shape[0], m, self.W_V.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_V.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                )
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
+
+    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            out = out.view(-1, self.num_heads, self.v_head_dim)
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            x = rocm_aiter_ops.triton_fp8_bmm(
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+            # Convert from (B, N, V) to (B, N * V)
+            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            out.copy_(x)
+        else:
+            # Convert out buffer from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
+            torch.bmm(x, self.W_UV, out=out)
+            # Convert back to (B, N * V)
+            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)
 
     def calc_kv_scales(
         self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
@@ -907,7 +1391,13 @@ def unified_mla_attention(
     layer_name: str,
 ) -> torch.Tensor:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+    )
 
     return output
 
@@ -941,13 +1431,12 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    self.impl.forward(
-        self,
-        q,
-        kv_c_normed,
-        k_pe,
-        kv_cache,
-        attn_metadata,
+    self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
