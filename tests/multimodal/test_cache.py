@@ -465,8 +465,6 @@ def _run_test_cache_eviction_lru(
     # STEP 2: Request 2 send
     ##########################
     sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
-    # Note that the result for image_A is False because it will be evicted,
-    # but not image_C
     assert sender_is_cached_item_req2 == [False, False, True, True]
 
     # Touch all mm hash for P0 Cache before process
