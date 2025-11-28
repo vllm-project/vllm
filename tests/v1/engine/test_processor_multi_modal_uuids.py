@@ -7,7 +7,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import input_processor as processor_mod
+from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -36,7 +36,7 @@ def _mk_processor(
         raising=True,
     )
     monkeypatch.setattr(
-        processor_mod,
+        input_processor_mod,
         "processor_cache_from_config",
         lambda vllm_config, mm_registry: None,
         raising=True,

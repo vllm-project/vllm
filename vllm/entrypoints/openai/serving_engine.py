@@ -348,8 +348,8 @@ class OpenAIServing:
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        processor = self.input_processor
-        tokenizer = processor.tokenizer
+        input_processor = self.input_processor
+        tokenizer = input_processor.tokenizer
         if tokenizer is None:
             raise ValueError(
                 "You cannot use beam search when `skip_tokenizer_init` is True"
