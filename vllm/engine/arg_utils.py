@@ -1971,7 +1971,9 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self,
+        usage_context: UsageContext | None,
+        model_config: ModelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
