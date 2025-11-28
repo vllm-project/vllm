@@ -641,13 +641,11 @@ class SingleWriterShmObjectStorage:
 
         """
 
-        if is_writer:
+        if self._reader_lock is None:
             address, monotonic_id = self.key_index[key]
             # Writer side: increment writer_flag to raise eviction threshold
             self.increment_writer_flag(monotonic_id)
         else:
-            if self._reader_lock is None:
-                raise RuntimeError("Reader lock must be provided for readers.")
             with (
                 self._reader_lock,
                 self.ring_buffer.access_buf(address) as (data_view, _),

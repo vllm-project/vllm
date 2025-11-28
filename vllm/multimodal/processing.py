@@ -1731,7 +1731,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             item_hash for hashes in mm_hashes.values() for item_hash in hashes
         ]
         for mm_hash in updated_mm_hashes:
-            cache.update_cache_item_eviction_order(mm_hash)
+            cache.touch_cache_item(mm_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
