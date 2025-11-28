@@ -630,7 +630,7 @@ def get_head_ip() -> str:
             return ray.get_runtime_context().gcs_address.split(":")[0]
 
 
-def set_logger(logger):
+def set_logger(target_logger):
     """
     Add file handler to logger to output logs to Ray session directory.
     
@@ -638,7 +638,7 @@ def set_logger(logger):
     Log level is set to DEBUG, including timestamp, level, name, and message.
     
     Args:
-        logger: Logger object to configure
+        target_logger: Logger object to configure
     """
     # Get Ray session directory path
     session_dir = ray._private.worker._global_node.get_session_dir_path()
@@ -655,4 +655,4 @@ def set_logger(logger):
 
     # Add handler to existing logger
     # Add file handler to logger so it outputs to both console and file
-    logger.addHandler(file_handler)
+    target_logger.addHandler(file_handler)

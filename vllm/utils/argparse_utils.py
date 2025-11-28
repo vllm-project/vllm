@@ -191,9 +191,9 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def parse_args(  # type: ignore[override]
         self,
-        args: list[str] | None = None,
+        args: list[str] | dict[str, Any] | None = None,
         namespace: Namespace | None = None,
-        extra_params: dict[str, Any] | None = None,
+        extra_params: str = "",
     ):
         if args is None:
             args = sys.argv[1:]
