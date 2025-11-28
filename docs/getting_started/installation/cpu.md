@@ -149,10 +149,9 @@ For details on how these optimized configurations are determined, see: [performa
 To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
 Below is an example command to benchmark all CPU-supported models using optimized configurations.
-If RUN_FULL_TESTS=1 is not set, the script will only produce commands for the default model.
 
 ```bash
-ON_CPU=1 RUN_FULL_TESTS=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 When executed, the Benchmark Suite writes results to the benchmark/results/ directory.
