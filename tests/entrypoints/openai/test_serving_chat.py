@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import json
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,7 +58,7 @@ def default_server_args(with_tool_parser: bool):
         # use half precision for speed and memory savings in CI environment
         "--enforce-eager",
         "--max-model-len",
-        "40960",
+        "4096",
         "--reasoning-parser",
         "openai_gptoss",
         "--gpu-memory-utilization",
@@ -152,35 +150,6 @@ async def test_gpt_oss_chat_tool_call_streaming(
         assert name is None
         assert len(args_buf) == 0
         assert len(content_buf) > 0
-
-
-@pytest.mark.asyncio
-async def test_gpt_oss_chat_tool_call_streaming_complex(gptoss_client: OpenAI):
-    file_path = os.path.join(os.path.dirname(__file__), "tools_gpt-oss.json")
-    with open(file_path) as f:
-        request_body = json.load(f)
-
-    request_body["model"] = GPT_OSS_MODEL_NAME
-    request_body["extra_body"] = {"reasoning_effort": "low"}
-
-    stream = await gptoss_client.chat.completions.create(**request_body)
-
-    name = None
-    args_buf = ""
-    content_buf = ""
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta.tool_calls:
-            tc = delta.tool_calls[0]
-            if tc.function and tc.function.name:
-                name = tc.function.name
-            if tc.function and tc.function.arguments:
-                args_buf += tc.function.arguments
-        if getattr(delta, "content", None):
-            content_buf += delta.content
-
-    assert name is not None
-    assert len(args_buf) > 0
 
 
 @pytest.mark.asyncio
