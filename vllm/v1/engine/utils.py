@@ -20,9 +20,10 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -133,9 +134,18 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                # Adjust device control in DP for non-CUDA platforms
+                # as well as external and ray launchers
+                # For CUDA platforms, we use torch.cuda.set_device()
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel)
+                    if (
+                        data_parallel
+                        and (
+                            not current_platform.is_cuda_alike()
+                            or vllm_config.parallel_config.use_ray
+                        )
+                    )
                     else contextlib.nullcontext()
                 ):
                     proc.start()
@@ -173,15 +183,19 @@ def set_device_control_env_var(
     for engine subprocess.
     """
     world_size = vllm_config.parallel_config.world_size
+    local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size)
+    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
     with patch.dict(os.environ, values=((evar, value),)):
         yield
 
 
 def get_device_indices(
-    device_control_env_var: str, local_dp_rank: int, world_size: int
+    device_control_env_var: str,
+    local_dp_rank: int,
+    world_size: int,
+    local_world_size: int | None = None,
 ):
     """
     Returns a comma-separated string of device indices for the specified
@@ -190,10 +204,15 @@ def get_device_indices(
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
     this will select devices 2 and 3 for local_dp_rank=1.
     """
+    if local_world_size is None:
+        local_world_size = world_size
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
-            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) * world_size)
+            for i in range(
+                local_dp_rank * world_size,
+                local_dp_rank * world_size + local_world_size,
+            )
         )
     except IndexError as e:
         raise Exception(
@@ -352,8 +371,7 @@ class CoreEngineActorManager:
         )
         assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
         assert dp_master_ip_key in nodes[0], (
-            "The DP master node (ip: %s) is missing or dead",
-            dp_master_ip,
+            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
@@ -427,8 +445,7 @@ class CoreEngineActorManager:
                 if key != "node:__internal_head__" and key.startswith("node:")
             ]
             assert len(node_ip_keys) == 1, (
-                "Zero or multiple node IP keys found in node resources: %s",
-                node_ip_keys,
+                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
             )
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
@@ -445,11 +462,9 @@ class CoreEngineActorManager:
             if node_ip == dp_master_ip:
                 if dp_size_available < dp_size_local:
                     raise ValueError(
-                        "Not enough resources to allocate %s DP ranks "
-                        "on DP master node %s, possible to fit %s DP ranks",
-                        dp_size_local,
-                        dp_master_ip,
-                        dp_size_available,
+                        f"Not enough resources to allocate {dp_size_local} DP ranks "
+                        f"on DP master node {dp_master_ip}, possible to fit "
+                        f"{dp_size_available} DP ranks."
                     )
                 dp_size_to_allocate = dp_size_local
             elif pack_strategy == "strict":
@@ -493,6 +508,8 @@ class CoreEngineActorManager:
                 )
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
+                if len(placement_groups) == dp_size:
+                    break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
@@ -502,6 +519,13 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
+        assert len(placement_groups) == dp_size, (
+            f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
+        )
+        assert len(local_dp_ranks) == dp_size, (
+            f"local_dp_ranks length {len(local_dp_ranks)} does not match "
+            f"expected {dp_size}"
+        )
         return placement_groups, local_dp_ranks
 
     @staticmethod

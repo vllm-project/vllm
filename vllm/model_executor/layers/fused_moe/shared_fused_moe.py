@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
@@ -18,24 +21,40 @@ class SharedFusedMoE(FusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module | None,
+        gate: torch.nn.Module | None = None,
         use_overlapped: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
-        # Disable shared expert overlap if EP is disabled or we are not using
-        # flashinfer + DP since there is nothing to be gained in this case.
-        # Disabling the overlap optimization also prevents the shared experts
-        # from being hidden from torch.compile.
+
+        # Disable shared expert overlap if:
+        #   - we are using eplb, because of correctness issues
+        #   - we are using flashinfer with DP, since there nothint to gain
+        #   - we are using marlin kjernels
         self.use_overlapped = (
             use_overlapped
-            and not (self.use_ep or self.use_flashinfer_cutlass_kernels)
+            and not (
+                # TODO(wentao): find the root cause and remove this condition
+                self.enable_eplb
+                or (self.moe_config.use_flashinfer_cutlass_kernels and self.dp_size > 1)
+            )
             and self._shared_experts is not None
         )
+
+        self._gate = gate
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
+
+    @property
+    def gate(self) -> torch.nn.Module | None:
+        return self._gate if self.use_overlapped else None
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
 
     def forward(
         self,
@@ -50,7 +69,7 @@ class SharedFusedMoE(FusedMoE):
                 # should have been created with reduce_results=False.
                 if (
                     self.reduce_results
-                    and self.tp_size > 1
+                    and get_tensor_model_parallel_world_size() > 1
                     and self.must_reduce_shared_expert_outputs()
                 ):
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
@@ -66,4 +85,12 @@ class SharedFusedMoE(FusedMoE):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
+            # ensure early TP reduction of shared expert outputs when required
+            if (
+                shared_out is not None
+                and self.reduce_results
+                and get_tensor_model_parallel_world_size() > 1
+                and self.must_reduce_shared_expert_outputs()
+            ):
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out, fused_out

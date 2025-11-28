@@ -18,7 +18,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -49,8 +48,8 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (
 )
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils.collections import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
@@ -101,9 +100,10 @@ class MlpProjector(nn.Module):
         super().__init__()
 
         self.cfg = cfg
+        self.projector_type = cfg.projector_type
         assert not cfg.token_pooling, "Token pooling is not supported currently."
 
-        if cfg.projector_type == "downsample_mlp_gelu":
+        if self.projector_type == "downsample_mlp_gelu":
             mlp_depth = cfg.depth
             mlp_ratio = cfg.mlp_ratio
             modules = [
@@ -120,7 +120,8 @@ class MlpProjector(nn.Module):
             modules.append(nn.GELU())
             modules.append(nn.Linear(cfg.n_embed * mlp_ratio, cfg.n_embed))
             modules = nn.Sequential(*modules)
-
+        elif self.projector_type == "linear":
+            modules = nn.Linear(cfg.input_dim, cfg.n_embed)
         else:
             raise NotImplementedError(
                 f"Unsupported projector type: {cfg.projector_type}"
@@ -130,24 +131,25 @@ class MlpProjector(nn.Module):
 
     def forward(self, x):
         bs, hw, input_dim = x.shape
-        h = w = int((hw) ** 0.5)
-        """compute padding"""
-        if h % self.cfg.downsample_ratio:
-            pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
-        else:
-            pad = 0
-        x = x.reshape(bs, h, w, input_dim)
-        if pad > 0:
-            x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
-        """4 to 1 concat"""
-        x = x.permute(0, 3, 1, 2)  # B, C, H, W
-        x = F.unfold(
-            x,
-            kernel_size=self.cfg.downsample_ratio,
-            stride=self.cfg.downsample_ratio,
-            padding=0,
-        )  # B, C*4, HW // 4
-        x = x.permute(0, 2, 1)
+        if self.projector_type == "downsample_mlp_gelu":
+            h = w = int((hw) ** 0.5)
+            """compute padding"""
+            if h % self.cfg.downsample_ratio:
+                pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
+            else:
+                pad = 0
+            x = x.reshape(bs, h, w, input_dim)
+            if pad > 0:
+                x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
+            """4 to 1 concat"""
+            x = x.permute(0, 3, 1, 2)  # B, C, H, W
+            x = F.unfold(
+                x,
+                kernel_size=self.cfg.downsample_ratio,
+                stride=self.cfg.downsample_ratio,
+                padding=0,
+            )  # B, C*4, HW // 4
+            x = x.permute(0, 2, 1)
 
         return self.layers(x)
 
@@ -400,18 +402,10 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
-        if self.text_config.topk_method == "noaux_tc":
-            architectures = ["DeepseekV3ForCausalLM"]
-        elif not self.text_config.use_mla:
-            architectures = ["DeepseekForCausalLM"]
-        else:
-            architectures = ["DeepseekV2ForCausalLM"]
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
-            architectures=architectures,
         )
 
         self.make_empty_intermediate_tensors = (
@@ -600,19 +594,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
         self, image_input: DeepseekVL2ImageInputs
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            image_data = image_input["data"]
-            if is_list_of(image_data, torch.Tensor):
-                # it's already a list of tensors
-                return image_data
-            if len(image_data.shape) == 3:
-                # 3D tensor
-                return list(torch.unbind(image_data, dim=0))
-            raise ValueError(
-                "We expect batched 2D tensors; "
-                "this can be either a list of 2D tensors or a single 3D tensor."
-            )
+            return image_input["data"]
 
         pixel_values = image_input["data"]
         images_spatial_crop = image_input["images_spatial_crop"]
@@ -624,7 +608,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

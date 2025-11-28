@@ -114,7 +114,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
-        from vllm.utils import unique_filepath
+        from vllm.utils.system_utils import unique_filepath
 
         file_path = unique_filepath(
             lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py"

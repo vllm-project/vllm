@@ -2,19 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256, sha256_cbor
+from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -30,6 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
+    tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -51,7 +55,7 @@ pytestmark = pytest.mark.cpu_test
 def _auto_init_hash_fn(request):
     hash_fn: Callable
     if "hash_fn" in request.fixturenames:
-        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+        hash_fn = request.getfixturevalue("hash_fn")
     else:
         hash_fn = sha256
     init_none_hash(hash_fn)
@@ -59,12 +63,13 @@ def _auto_init_hash_fn(request):
 
 def make_request(
     request_id: str,
-    prompt_token_ids: list[int],
+    prompt_token_ids: list[int] | None,
     block_size: int = 3,
     hash_fn: Callable = hash,
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
+    prompt_embeds: torch.Tensor | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -88,6 +93,7 @@ def make_request(
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
+        prompt_embeds=prompt_embeds,
     )
 
 
@@ -446,6 +452,70 @@ def test_generate_block_hash_extra_keys_cache_salt():
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
     assert extra_keys == ("hash1", "salt")
     assert next_mm_idx == 1
+
+
+def test_generate_block_hash_extra_keys_prompt_embeds():
+    prompt_embeds = torch.randn(10, 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+    )
+
+    # Test with prompt embeds for the first block
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    expected_embeds = prompt_embeds[0:5]
+    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
+    assert extra_keys == (expected_bytes,)
+
+    # Test with prompt embeds for the second block
+    extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
+    expected_embeds = prompt_embeds[5:10]
+    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
+    assert extra_keys == (expected_bytes,)
+
+
+def test_generate_block_hash_extra_keys_different_prompt_embeds():
+    prompt_embeds1 = torch.randn(10, 3)
+    prompt_embeds2 = torch.randn(10, 3)
+    request1 = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds1,
+    )
+    request2 = make_request(
+        request_id="1",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds2,
+    )
+
+    extra_keys1, _ = generate_block_hash_extra_keys(request1, 0, 5, 0)
+    extra_keys2, _ = generate_block_hash_extra_keys(request2, 0, 5, 0)
+    assert extra_keys1 != extra_keys2
+
+
+def test_generate_block_hash_extra_keys_lora():
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+    )
+
+    request.lora_request = LoRARequest(
+        lora_name="test_lora_adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == ("test_lora_adapter",)
+
+    request.lora_request = None
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys is None
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1178,7 +1248,9 @@ def test_allocate_with_lookahead():
     )
 
     # Test case 1: Requires additional lookahead tokens
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1187,7 +1259,9 @@ def test_allocate_with_lookahead():
     assert len(blocks.get_block_ids()[0]) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1198,7 +1272,9 @@ def test_allocate_with_lookahead():
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1366,7 +1442,67 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size
+    # 6 full + 5 sliding, pad to 6 full + 6 sliding. This is a typical case for gpt-oss
+    # eagle where there is only one more full attention layer than sliding window layers
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+        "layer_3": new_kv_cache_spec(),
+        "layer_4": new_kv_cache_spec(),
+        "layer_5": new_kv_cache_spec(),
+        "layer_6": new_kv_cache_spec(),
+        "layer_7": new_sliding_window_spec(),
+        "layer_8": new_sliding_window_spec(),
+        "layer_9": new_sliding_window_spec(),
+        "layer_10": new_sliding_window_spec(),
+        "layer_11": new_sliding_window_spec(),
+    }
+
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 6 * 32]
+    )[0]
+    print(kv_cache_config_hybrid)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_7"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_8"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_3", "layer_9"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_4", "layer_10"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_5", "layer_11"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_6"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2", "layer_3", "layer_4", "layer_5", "layer_6"],
+                new_kv_cache_spec(),
+            ),
+            KVCacheGroupSpec(
+                ["layer_7", "layer_8", "layer_9", "layer_10", "layer_11"],
+                new_sliding_window_spec(),
+            ),
+        ],
+    )
+
+    # different hidden size but same type, use UniformTypeKVCacheSpecs
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=128),
         "layer_2": new_kv_cache_spec(head_size=64),
@@ -1389,6 +1525,40 @@ def test_get_kv_cache_config_one_worker():
             )
         ],
     )
+
+    # Different hidden size and different type, align by different block size
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_sliding_window_spec(head_size=32),
+    }
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
+    )[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32, shared_by=["layer_1", "layer_2"]
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_kv_cache_spec(head_size=64)),
+            KVCacheGroupSpec(
+                ["layer_2"], new_sliding_window_spec(head_size=32, block_size=32)
+            ),
+        ],
+    )
+
+    # different hidden size that cannot be aligned by using different block size
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_sliding_window_spec(head_size=96),
+    }
+
+    with pytest.raises(NotImplementedError):
+        get_kv_cache_configs(
+            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
+        )[0]
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
@@ -1536,3 +1706,88 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    expected_hash1 = hash_fn(
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(prompt_token_ids[:block_size]),
+            (block1_embeds_bytes,),
+        )
+    )
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    expected_hash2 = hash_fn(
+        (
+            block_hashes[0],
+            tuple(prompt_token_ids[block_size:num_tokens]),
+            (block2_embeds_bytes,),
+        )
+    )
+    assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
+        mm_hashes=["hash1", "hash2"],
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    expected_hash1 = hash_fn(
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(prompt_token_ids[:block_size]),
+            ("hash1", block1_embeds_bytes),
+        )
+    )
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    expected_hash2 = hash_fn(
+        (
+            block_hashes[0],
+            tuple(prompt_token_ids[block_size:num_tokens]),
+            ("hash2", block2_embeds_bytes),
+        )
+    )
+    assert block_hashes[1] == expected_hash2

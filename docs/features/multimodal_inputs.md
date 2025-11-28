@@ -359,13 +359,21 @@ Full example: [examples/offline_inference/audio_language.py](../../examples/offl
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
+You must enable this feature via `enable_mm_embeds=True`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
+
+#### Image Embeddings
+
 ??? code
 
     ```python
     from vllm import LLM
 
     # Inference with image embeddings as input
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", enable_mm_embeds=True)
 
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
@@ -397,7 +405,11 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     image_embeds = torch.load(...)
 
     # Qwen2-VL
-    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -407,7 +419,12 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     }
 
     # MiniCPM-V
-    llm = LLM("openbmb/MiniCPM-V-2_6", trust_remote_code=True, limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "openbmb/MiniCPM-V-2_6",
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -419,6 +436,36 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": mm_data,
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
+#### Audio Embeddings
+
+You can pass pre-computed audio embeddings similar to image embeddings:
+
+??? code
+
+    ```python
+    from vllm import LLM
+    import torch
+
+    # Enable audio embeddings support
+    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+
+    # Load pre-computed audio embeddings
+    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    audio_embeds = torch.load(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"audio": audio_embeds},
     })
 
     for o in outputs:
@@ -468,7 +515,7 @@ Then, you can use the OpenAI client as follows:
     )
 
     # Single-image input inference
-    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -494,8 +541,8 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output:", chat_response.choices[0].message.content)
 
     # Multi-image input inference
-    image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
-    image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+    image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
+    image_url_lion = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg"
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -732,7 +779,13 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+
+You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
 
 #### Image Embedding Inputs
 

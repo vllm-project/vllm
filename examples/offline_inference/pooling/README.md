@@ -38,6 +38,18 @@ python examples/offline_inference/pooling/multi_vector_retrieval.py
 python examples/offline_inference/pooling/ner.py
 ```
 
+## Prithvi Geospatial MAE usage
+
+```bash
+python examples/offline_inference/pooling/prithvi_geospatial_mae.py
+```
+
+## IO Processor Plugins for Prithvi Geospatial MAE
+
+```bash
+python examples/offline_inference/pooling/prithvi_geospatial_mae_io_processor.py
+```
+
 ## Qwen3 reranker usage
 
 ```bash

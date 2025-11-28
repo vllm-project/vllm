@@ -88,14 +88,15 @@ class WorkerLoRAManager:
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_modules: list[str] = []
+            expected_lora_lst: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_lora_lst.extend(packed_modules_mapping[module])
                 else:
-                    expected_lora_modules.append(module)
-
-            expected_lora_modules = list(set(expected_lora_modules))
+                    expected_lora_lst.append(module)
+                if module == "experts":
+                    expected_lora_lst.append(module)
+            expected_lora_modules = set(expected_lora_lst)
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
@@ -120,8 +121,7 @@ class WorkerLoRAManager:
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size
-                + self.lora_config.lora_extra_vocab_size,
+                target_embedding_padding=self.vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
@@ -142,12 +142,6 @@ class WorkerLoRAManager:
             # For BadRequestError
             raise e
 
-        if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
-            raise ValueError(
-                f"LoRA added vocab size {lora.extra_vocab_size} "
-                f"is greater than lora_extra_vocab_size "
-                f"{self.lora_config.lora_extra_vocab_size}."
-            )
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:

@@ -7,7 +7,7 @@ from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
 class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):
-    """The `throughput` subcommand for vllm bench."""
+    """The `throughput` subcommand for `vllm bench`."""
 
     name = "throughput"
     help = "Benchmark offline inference throughput."

@@ -15,7 +15,7 @@ from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
@@ -424,15 +424,12 @@ async def test_customize_loggers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_customize_aggregated_loggers(monkeypatch):
+async def test_customize_aggregated_loggers():
     """Test that we can customize the aggregated loggers.
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
-
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
                 TEXT_ENGINE_ARGS,

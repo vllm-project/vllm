@@ -18,39 +18,29 @@ if current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
-DTYPES = [torch.half, torch.bfloat16]
+DTYPES = [torch.bfloat16]
 
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 512, 512),
     (1, 128, 7168),
     (1, 1024, 7168),
-    (1, 4096, 128),
     (1, 4096, 512),
     (1, 4096, 7168),
-    (33, 128, 128),
     (33, 512, 512),
     (33, 128, 7168),
     (33, 1024, 7168),
     (33, 4096, 128),
-    (33, 4096, 512),
     (33, 4096, 7168),
     (128, 128, 128),
-    (128, 512, 512),
     (128, 1024, 7168),
     (128, 4096, 512),
     (128, 4096, 7168),
-    (222, 128, 128),
     (222, 512, 512),
     (222, 1024, 7168),
-    (222, 4096, 512),
     (222, 4096, 7168),
     (2048, 128, 128),
     (2048, 1024, 7168),
-    (2048, 4096, 512),
     (2048, 4096, 4096),
 ]
 

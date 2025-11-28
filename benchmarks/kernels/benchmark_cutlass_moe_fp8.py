@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_confi
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # Weight shapes for different models: [num_experts, topk, hidden_size,
 # intermediate_size]
@@ -255,8 +255,8 @@ def bench_run(
         torch.cuda.synchronize()
 
         # Timing
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = torch.Event(enable_timing=True)
+        end_event = torch.Event(enable_timing=True)
 
         latencies = []
         for _ in range(num_iters):

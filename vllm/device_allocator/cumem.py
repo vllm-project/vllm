@@ -18,7 +18,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -63,7 +63,7 @@ try:
     libcudart = CudaRTLibrary()
     cumem_available = True
 except ModuleNotFoundError:
-    # rocm platform does not support cumem allocator
+    # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
