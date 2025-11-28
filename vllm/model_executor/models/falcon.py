@@ -30,7 +30,7 @@ from torch import nn
 from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
