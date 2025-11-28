@@ -535,5 +535,5 @@ ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
-ENTRYPOINT ["vllm", "serve"]
+ENTRYPOINT ["standard-supervisor", "vllm", "serve"]
 #################### OPENAI API SERVER ####################
