@@ -760,11 +760,11 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
-    BLOCK_M,
-    BLOCK_Q,
-    num_q_blocks,
-    block_q_seq_boundaries_tensor,
-    seq_threshold_3D,
+    BLOCK_M=None,
+    BLOCK_Q=None,
+    num_q_blocks=None,
+    block_q_seq_boundaries_tensor=None,
+    seq_threshold_3D=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -786,6 +786,33 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+
+    # Assign the following variables if they are not assigned in the attention metadata.
+    if (
+        BLOCK_M is None
+        or BLOCK_Q is None
+        or num_q_blocks is None
+        or block_q_seq_boundaries_tensor is None
+        or seq_threshold_3D is None
+    ):
+        BLOCK_M = (
+            16
+            if num_queries_per_kv <= 16
+            else triton.next_power_of_2(num_queries_per_kv)
+        )
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+        block_q_seq_boundaries_tensor = torch.empty(
+            num_seqs + 1, dtype=torch.int32, device=cu_seqlens_q.device
+        )
+        block_q_seq_boundaries_tensor[0] = 0
+        block_q_seq_boundaries_tensor[1:].copy_(cu_seqlens_q[1:])
+        block_q_seq_boundaries_tensor[1:].sub_(cu_seqlens_q[:-1])
+        block_q_seq_boundaries_tensor[1:].add_(BLOCK_Q - 1)
+        block_q_seq_boundaries_tensor[1:].floor_divide_(BLOCK_Q)
+        block_q_seq_boundaries_tensor.cumsum_(dim=0)
+        num_q_blocks = block_q_seq_boundaries_tensor[-1]
+        seq_threshold_3D = 128 // num_kv_heads
 
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
