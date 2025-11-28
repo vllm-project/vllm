@@ -16,17 +16,13 @@ from typing_extensions import Self, assert_never, runtime_checkable
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
-from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
-from vllm.transformers_utils.registry import TokenizerRegistry
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
-from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import (
-    check_gguf_file,
-    is_gguf,
-    is_remote_gguf,
-    split_remote_gguf,
-)
+
+from .config import get_sentence_transformer_tokenizer_config
+from .gguf_utils import get_gguf_file_path_from_hf
+from .registry import TokenizerRegistry
+from .repo_utils import list_filtered_repo_files
+from .tokenizers import MistralTokenizer
+from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
