@@ -12,7 +12,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import ParamSpec
@@ -255,6 +255,13 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
         return asyncio.get_running_loop() == event_loop
     except RuntimeError:
         return False
+
+
+# A hack to pass mypy
+if TYPE_CHECKING:
+
+    def anext(it: AsyncGenerator[T, None]):
+        return it.__anext__()
 
 
 async def merge_async_iterators(
