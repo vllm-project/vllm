@@ -469,7 +469,10 @@ class Processor:
         pooling_params = None
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
-            sampling_params = params.clone()
+            # Copy to avoid mutations from validation methods affecting the original.
+            # We use a shallow copy to avoid deepcopying large read-only structures.
+            sampling_params = params.shallow_copy()
+
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 seq_len = length_from_prompt_token_ids_or_embeds(

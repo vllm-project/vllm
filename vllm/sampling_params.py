@@ -552,6 +552,33 @@ class SamplingParams(
         )
         return copy.deepcopy(self, memo=logit_processor_refs)
 
+    def shallow_copy(self) -> "SamplingParams":
+        """Perform a shallow copy and manually copy mutable fields.
+
+        This avoids deepcopying large read-only structures while ensuring
+        that mutable fields that may be modified by validation methods are
+        properly copied.
+
+        NOTE: When adding new mutable fields to SamplingParams that may be
+        modified by validation methods (e.g., update_from_generation_config,
+        update_from_tokenizer, _validate_structured_output), you MUST update
+        this method to copy those fields as well. Otherwise, mutations to the
+        copied instance may affect the original instance.
+
+        Returns:
+            A shallow copy of this SamplingParams instance with mutable fields
+            properly copied.
+        """
+        # Perform a shallow copy
+        copied = copy.copy(self)
+        # update_from_generation_config calls .add() and .update().
+        copied._all_stop_token_ids = set(self._all_stop_token_ids)
+        # _validate_structured_output modifies _backend and _backend_was_auto
+        # attributes on the nested structured_outputs object.
+        if copied.structured_outputs:
+            copied.structured_outputs = copy.copy(copied.structured_outputs)
+        return copied
+
     def __repr__(self) -> str:
         return (
             f"SamplingParams(n={self.n}, "
