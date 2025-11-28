@@ -3,7 +3,7 @@
 """
 This test file includes some cases where it is inappropriate to
 only get the `eos_token_id` from the tokenizer as defined by
-{meth}`vllm.LLMEngine._get_eos_token_id`.
+`vllm.LLMEngine._get_eos_token_id`.
 """
 
 from vllm.transformers_utils.config import try_get_generation_config
