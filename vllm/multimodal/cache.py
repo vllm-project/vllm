@@ -664,7 +664,7 @@ class BaseMultiModalReceiverCache(
 
     @abstractmethod
     def touch_cache_receiver(
-        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
         """
         Update the cache eviction order for a multi-modal item.
@@ -717,7 +717,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_cache_receiver(
-        self, mm_hash: str, mm_item: MultiModalKwargsItem | None
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
         self._cache.touch(mm_hash)
 
@@ -775,7 +775,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_cache_receiver(
-        self, mm_hash: str, mm_item: MultiModalKwargsItem | None
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.
         Increments reader_count on receiver side."""
