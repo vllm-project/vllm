@@ -203,7 +203,13 @@ def _cp_lse_common(
 
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
-    out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx, is_lse_base_on_e=is_lse_base_on_e)
+    out, lse = correct_attn_out(
+        cp_attn_out,
+        lses,
+        cp_group.rank_in_group,
+        ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+    )
     return out, lse
 
 
@@ -219,7 +225,9 @@ def cp_lse_ag_out_rs(
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
-    out, lse = _cp_lse_common(cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e)
+    out, lse = _cp_lse_common(
+        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+    )
     out = cp_group.reduce_scatter(out, dim=1)
 
     if return_lse:
@@ -242,7 +250,9 @@ def cp_lse_ag_out_ar(
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
-    out, lse = _cp_lse_common(cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e)
+    out, lse = _cp_lse_common(
+        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+    )
     out = cp_group.all_reduce(out)
 
     if return_lse:
