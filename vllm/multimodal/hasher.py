@@ -33,7 +33,7 @@ class MultiModalHasher:
             ):
                 # If the image has exif ImageID tag, use that
                 return (exif[Image.ExifTags.Base.ImageID].bytes,)
-            if hasattr(obj, '_image_bytes'):
+            if hasattr(obj, "_image_bytes"):
                 data = {"mode": obj.mode, "data": obj._image_bytes}
             else:
                 data = {"mode": obj.mode, "data": np.asarray(obj)}
