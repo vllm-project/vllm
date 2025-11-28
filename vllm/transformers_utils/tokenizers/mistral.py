@@ -255,10 +255,6 @@ class MistralTokenizer(TokenizerBase):
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
     @property
-    def all_special_tokens_extended(self) -> list[str]:
-        return self.all_special_tokens
-
-    @property
     def all_special_tokens(self) -> list[str]:
         return self._special_tokens
 
