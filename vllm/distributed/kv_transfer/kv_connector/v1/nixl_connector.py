@@ -288,7 +288,7 @@ class NixlConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return NixlPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -2345,9 +2345,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         return {
             "Num successful transfers": n,
             "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
-            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
-            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
             "Throughput (MB/s)": round(throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
@@ -2364,7 +2364,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
