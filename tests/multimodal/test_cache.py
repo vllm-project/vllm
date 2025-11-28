@@ -236,6 +236,7 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
 
+
 def _run_test_cache_eviction_lru(
     p0_cache: BaseMultiModalProcessorCache,
     p1_cache: BaseMultiModalReceiverCache,
@@ -349,6 +350,7 @@ def test_cache_eviction_lru_cache():
     receiver_cache = MultiModalReceiverCache(model_config)
 
     _run_test_cache_eviction_lru(sender_cache, receiver_cache, base_item_size=1)
+
 
 # This test verifies shared-memory cache eviction behavior across processor (p0)
 # and receiver (p1) caches.
@@ -511,6 +513,7 @@ def _run_test_cache_eviction_shm(
 
     expected_hashes = ["image_B", "image_C", "image_G"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
+
 
 def test_cache_eviction_shm_cache():
     vllm_config = VllmConfig(
