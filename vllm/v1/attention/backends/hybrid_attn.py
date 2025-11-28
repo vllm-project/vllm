@@ -19,6 +19,10 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mamba1_attn import (
+    Mamba1AttentionMetadata,
+    Mamba1AttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionImpl,
     TritonAttentionMetadata,
@@ -29,13 +33,19 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 logger = init_logger(__name__)
 
 
-# Thin alias so hybrid metadata is interchangeable with Triton metadata.
-HybridAttentionMetadata = TritonAttentionMetadata
+@dataclass
+class HybridAttentionMetadata:
+    triton_metadata: TritonAttentionMetadata
+    mamba_metadata: Mamba1AttentionMetadata
+
+    @property
+    def num_actual_tokens(self):
+        return self.triton_metadata.num_actual_tokens
 
 
 class HybridAttentionMetadataBuilder(
@@ -57,12 +67,31 @@ class HybridAttentionMetadataBuilder(
             kv_cache_spec, layer_names, vllm_config, device
         )
 
+        # Construct a MambaSpec for Mamba metadata generation
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
+        page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        mamba_spec = MambaSpec(
+            shapes=(),  # Dummy
+            dtypes=(),  # Dummy
+            block_size=mamba_block_size,
+            page_size_padded=page_size_padded,
+            mamba_type="mamba1",
+            num_speculative_blocks=0,
+        )
+        self._mamba_builder = Mamba1AttentionMetadataBuilder(
+            mamba_spec, layer_names, vllm_config, device
+        )
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> HybridAttentionMetadata:
-        return self._triton_builder.build_for_cudagraph_capture(
+        triton_meta = self._triton_builder.build_for_cudagraph_capture(
             common_attn_metadata
         )
+        mamba_meta = self._mamba_builder.build_for_cudagraph_capture(
+            common_attn_metadata
+        )
+        return HybridAttentionMetadata(triton_meta, mamba_meta)
 
     def build(
         self,
@@ -70,9 +99,13 @@ class HybridAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> HybridAttentionMetadata:
-        return self._triton_builder.build(
+        triton_meta = self._triton_builder.build(
             common_prefix_len, common_attn_metadata, fast_build
         )
+        mamba_meta = self._mamba_builder.build(
+            common_prefix_len, common_attn_metadata, fast_build
+        )
+        return HybridAttentionMetadata(triton_meta, mamba_meta)
 
 
 class HybridAttentionBackend(AttentionBackend):
@@ -248,13 +281,17 @@ class HybridAttentionImpl(AttentionImpl):
             raise ValueError("Output tensor must be provided.")
 
         # Step 1: delegate sliding-window attention to Triton.
+        # Unwrap triton metadata if it's our hybrid metadata
+        triton_metadata = (
+            attn_metadata.triton_metadata if attn_metadata is not None else None
+        )
         self._triton_impl.forward(
             layer,
             query,
             key,
             value,
             kv_cache,
-            attn_metadata,
+            triton_metadata,
             output=output,
             output_scale=output_scale,
             output_block_scale=output_block_scale,

@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+import math
 import os
 
 import torch
@@ -14,16 +15,32 @@ import torch.nn as nn
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     model_parallel_is_initialized,
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    selective_scan_fn,
+    selective_state_update,
+)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.v1.attention.backends.hybrid_attn import HybridAttentionMetadata
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
@@ -71,6 +88,80 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
 
         # Layer name used by vLLM's compilation / forward context.
         self.layer_name = prefix
+
+        # Defaults for Mamba1
+        self.time_step_rank = math.ceil(self.hidden_size / 16)
+        self.use_conv_bias = True
+        self.use_bias = False
+
+        # Layers
+        self.in_proj = MergedColumnParallelLinear(
+            self.hidden_size,
+            [self.intermediate_size] * 2,
+            bias=self.use_bias,
+            prefix=f"{prefix}.in_proj",
+        )
+        self.conv1d = ColumnParallelLinear(
+            self.conv_kernel_size,
+            self.intermediate_size,
+            bias=self.use_conv_bias,
+            prefix=f"{prefix}.conv1d",
+        )
+        # Unsqueeze conv1d weight to match Mamba expectations (intermediate_size, 1, kernel_size)
+        # But ColumnParallelLinear weight is (output_size, input_size) -> (intermediate_size, kernel_size)
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+
+        self.x_proj = RowParallelLinear(
+            self.intermediate_size,
+            self.time_step_rank + self.ssm_state_size * 2,
+            bias=False,
+            prefix=f"{prefix}.x_proj",
+        )
+        self.dt_proj = ColumnParallelLinear(
+            self.time_step_rank,
+            self.intermediate_size,
+            bias=True,
+            skip_bias_add=True,
+            prefix=f"{prefix}.dt_proj",
+        )
+        self.out_proj = RowParallelLinear(
+            self.intermediate_size,
+            self.hidden_size,
+            bias=self.use_bias,
+            input_is_parallel=True,
+            prefix=f"{prefix}.out_proj",
+        )
+
+        # Parameters A and D
+        if model_parallel_is_initialized():
+            tp_size = get_tensor_model_parallel_world_size()
+        else:
+            tp_size = 1
+
+        self.A = nn.Parameter(
+            torch.empty(
+                self.intermediate_size // tp_size,
+                self.ssm_state_size,
+                dtype=torch.float32,
+            )
+        )
+        self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
+
+        # Weight loaders for A and D
+        def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            param.data.copy_(
+                loaded_weight.data.split(loaded_weight.shape[0] // tp_size, dim=0)[
+                    tp_rank
+                ]
+            )
+
+        def A_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
+            weight_loader(param, -torch.exp(loaded_weight.float()))
+
+        set_weight_attrs(self.D, {"weight_loader": weight_loader})
+        set_weight_attrs(self.A, {"weight_loader": A_weight_loader})
 
         # Simple debug / experimentation knob for the history branch.
         # By default the adapter returns a zero contribution (\"disabled\").
@@ -197,7 +288,7 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
     def forward_history_branch_prefill(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: Any | None = None,
+        attn_metadata: HybridAttentionMetadata | Any | None = None,
     ) -> torch.Tensor:
         """History branch for prefill tokens.
 
@@ -219,24 +310,127 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         if attn_metadata is None:
             attn_metadata = self._get_mamba_attn_metadata()
 
-        if attn_metadata is None:
+        # Unwrap composite metadata if needed
+        if isinstance(attn_metadata, HybridAttentionMetadata):
+            mamba_metadata = attn_metadata.mamba_metadata
+        else:
+            mamba_metadata = attn_metadata
+
+        if mamba_metadata is None:
             # Profiling / shape-only runs: match the input shape.
             return torch.zeros_like(hidden_states)
 
-        num_actual_tokens: int = getattr(attn_metadata, "num_prefill_tokens", 0)
+        num_actual_tokens: int = getattr(mamba_metadata, "num_prefill_tokens", 0)
         if num_actual_tokens <= 0:
             return torch.zeros_like(hidden_states)
 
         # Fast path: keep the adapter as a no-op unless explicitly enabled.
-        if self.ssm_mode != "prefix_sum":
+        if self.ssm_mode == "prefix_sum":
+            # Generic over hidden_states rank: we treat dim 0 as the flattened
+            # token dimension and preserve all remaining dimensions.
+            prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
+            ssm_out = torch.zeros_like(hidden_states)
+            ssm_out[:num_actual_tokens] = prefix
+            return ssm_out
+
+        if self.ssm_mode == "disabled":
             return torch.zeros_like(hidden_states)
 
-        # Generic over hidden_states rank: we treat dim 0 as the flattened
-        # token dimension and preserve all remaining dimensions.
-        prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
-        ssm_out = torch.zeros_like(hidden_states)
-        ssm_out[:num_actual_tokens] = prefix
-        return ssm_out
+        # Mamba 1 Forward Pass (Prefill)
+        # 1. In Projection: (batch, seq, dim) -> (batch, seq, 2*inner)
+        # hidden_states is (total_tokens, dim)
+        xz, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        x, z = xz.chunk(2, dim=-1)
+
+        # 2. Convolution
+        # x needs to be (dim, total_tokens) for causal_conv1d_fn with varlen
+        x_t = x.transpose(0, 1).contiguous()
+        conv_weight = self.conv1d.weight
+        conv_bias = self.conv1d.bias
+
+        # Metadata fields
+        # query_start_loc_p: (batch+1,)
+        # state_indices_tensor: (batch, n_blocks) or (batch,)
+        query_start_loc = mamba_metadata.query_start_loc_p
+        cache_indices = mamba_metadata.state_indices_tensor
+        has_initial_state = mamba_metadata.has_initial_states_p
+        block_idx_first = mamba_metadata.block_idx_first_scheduled_token_p
+        block_idx_last = mamba_metadata.block_idx_last_scheduled_token
+        num_computed_tokens = mamba_metadata.num_computed_tokens_p
+
+        # kv_cache[0] is conv_state, kv_cache[1] is ssm_state
+        conv_state = self.kv_cache[0]
+        ssm_state = self.kv_cache[1]
+
+        x_conv = causal_conv1d_fn(
+            x_t,
+            conv_weight,
+            conv_bias,
+            conv_states=conv_state,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation="silu",
+            block_idx_first_scheduled_token=block_idx_first,
+            block_idx_last_scheduled_token=block_idx_last,
+            initial_state_idx=block_idx_first,  # Use first token block for init?
+            num_computed_tokens=num_computed_tokens,
+        )
+        # Transpose back to (total_tokens, dim)
+        x = x_conv.transpose(0, 1)
+
+        # 3. SSM
+        x_dbl = self.x_proj(x)  # (total_tokens, dt_rank + 2*d_state)
+        dt, B, C = torch.split(
+            x_dbl, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1
+        )
+        dt = self.dt_proj(dt)  # (total_tokens, inner_dim)
+
+        # A parameter needs to be passed as -exp(A)
+        # But we store it as A. MambaMixer uses A_weight_loader to store -exp(A) in the parameter?
+        # In my __init__, I used A_weight_loader which loads it as -exp(float(weight)).
+        # So self.A already contains -exp(A).
+        # However, selective_scan_fn expects A.
+        # Wait, `MambaMixer` in vLLM sets:
+        # weight_loader(param, -torch.exp(loaded_weight.float()))
+        # So self.A is -exp(A_original).
+        # selective_scan_fn uses A directly.
+        # So we just pass self.A.
+
+        # x, dt, z are (total_tokens, dim)
+        # B, C are (total_tokens, d_state)
+        # selective_scan_fn handles varlen with query_start_loc
+        y = selective_scan_fn(
+            x,
+            ssm_state,
+            dt,
+            self.A,
+            B,
+            C,
+            self.D,
+            z,
+            self.dt_proj.bias,
+            delta_softplus=True,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            block_idx_first_scheduled_token=block_idx_first,
+            block_idx_last_scheduled_token=block_idx_last,
+            initial_state_idx=block_idx_first,
+        )
+
+        # 4. Out Projection
+        out = self.out_proj(y)
+
+        # Pad output if needed to match hidden_states size (if we only processed valid tokens)
+        # hidden_states is (total_slots, dim) maybe?
+        # num_actual_tokens is what we processed.
+        if out.shape[0] < hidden_states.shape[0]:
+            full_out = torch.zeros_like(hidden_states)
+            full_out[:num_actual_tokens] = out
+            return full_out
+        
+        return out
 
     def forward_history_branch_decode(
         self,
@@ -260,7 +454,13 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         if attn_metadata is None:
             attn_metadata = self._get_mamba_attn_metadata()
 
-        if attn_metadata is None:
+        # Unwrap composite metadata if needed
+        if isinstance(attn_metadata, HybridAttentionMetadata):
+            mamba_metadata = attn_metadata.mamba_metadata
+        else:
+            mamba_metadata = attn_metadata
+
+        if mamba_metadata is None:
             # Profiling / shape-only runs: match the input shape.
             return torch.zeros_like(hidden_states)
 
@@ -268,20 +468,161 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
         # but fall back to the generic num_actual_tokens field exposed by
         # Triton-style attention metadata.
         num_actual_tokens: int | None = getattr(
-            attn_metadata, "num_decode_tokens", None
+            mamba_metadata, "num_decode_tokens", None
         )
         if num_actual_tokens is None:
-            num_actual_tokens = getattr(attn_metadata, "num_actual_tokens", 0)
+            # Only if we passed Triton metadata by mistake, but we are unwrapping.
+            # Mamba metadata has num_decode_tokens.
+            num_actual_tokens = getattr(mamba_metadata, "num_actual_tokens", 0)
 
         if num_actual_tokens <= 0:
             return torch.zeros_like(hidden_states)
 
-        if self.ssm_mode != "prefix_sum":
+        if self.ssm_mode == "prefix_sum":
+            prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
+            ssm_out = torch.zeros_like(hidden_states)
+            ssm_out[:num_actual_tokens] = prefix
+            return ssm_out
+
+        if self.ssm_mode == "disabled":
             return torch.zeros_like(hidden_states)
 
-        prefix = torch.cumsum(hidden_states[:num_actual_tokens], dim=0)
-        ssm_out = torch.zeros_like(hidden_states)
-        ssm_out[:num_actual_tokens] = prefix
-        return ssm_out
+        # Mamba 1 Forward Pass (Decode)
+        # hidden_states: (num_decodes, dim)
+        # Processing one token per sequence.
+        
+        # 1. In Projection
+        xz, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        x, z = xz.chunk(2, dim=-1)
+
+        # 2. Conv1d Step
+        conv_state = self.kv_cache[0]
+        ssm_state = self.kv_cache[1]
+        cache_indices = mamba_metadata.state_indices_tensor
+        # For decode, block_idx_last_scheduled_token tells where to write/read the step state?
+        # Actually cache_indices is (batch, max_blocks) or (batch,).
+        # causal_conv1d_update takes conv_state_indices.
+        # In Mamba1AttentionMetadata, state_indices_tensor is the block table.
+        
+        block_idx_last = mamba_metadata.block_idx_last_scheduled_token # (batch,)
+        
+        x = causal_conv1d_update(
+            x,
+            conv_state,
+            self.conv1d.weight,
+            self.conv1d.bias,
+            activation="silu",
+            conv_state_indices=cache_indices,
+            block_idx_last_scheduled_token=block_idx_last,
+            # initial_state_idx?
+        )
+
+        # 3. SSM Step
+        x_dbl = self.x_proj(x)
+        dt, B, C = torch.split(
+            x_dbl, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1
+        )
+        dt = self.dt_proj(dt)
+        
+        # selective_state_update(state, x, dt, A, B, C, D, z, dt_bias, dt_softplus=True)
+        # state: ssm_state (batch, dim, dstate) - wait, here we have KV cache which might be paged?
+        # ssm_state in kv_cache[1].
+        # selective_state_update supports state_batch_indices (cache_indices).
+        
+        # Note: state_batch_indices is cache_indices.
+        # If we use prefix caching, we have block indices.
+        # Does selective_state_update support block indices?
+        # It takes `state_batch_indices`.
+        # If state is (num_blocks, ...), then state_batch_indices should be (batch,) pointing to the block.
+        # But we have multiple blocks per request?
+        # No, for Mamba state, we only need the *current* state.
+        # But `ssm_state` is allocated as `(num_blocks, ...)` or `(tot_blocks, ...)`?
+        # The `MambaSpec` defines the shape.
+        # `selective_state_update` updates state in place.
+        # We need to pass the index of the block that holds the current state.
+        # `block_idx_last_scheduled_token`?
+        # Wait, Mamba state is size-fixed per sequence. Why blocks?
+        # vLLM uses blocks to manage memory.
+        # For Mamba, the state is small (dim*dstate).
+        # Does it span multiple blocks?
+        # `MambaSpec` defines `block_size`.
+        # If `block_size` is 1 (or small), we might need to know which block holds the state.
+        # But Mamba state is a *hidden state* (recurrent). It doesn't grow with sequence length like KV cache.
+        # So there is only ONE state per sequence (or per head/layer).
+        # Why `MambaSpec`?
+        # To allocate memory in the block manager.
+        # If Mamba state fits in one block, fine.
+        # `MambaManager` allocates blocks.
+        # For Mamba, we usually just need one block per sequence to store the state?
+        # Yes, "SSM State: A fixed-size, recurrent state".
+        # So `cache_indices` should point to *that* block.
+        # In `Mamba1AttentionMetadata`, `state_indices_tensor` is `block_table_tensor`.
+        # If we assume 1 block per seq, `block_table_tensor[:, 0]` gives the index.
+        # `Mamba1AttentionMetadataBuilder` handles this:
+        # if enable_prefix_caching: returns full table.
+        # else: returns `block_table_tensor[:, 0]`.
+        
+        # `selective_state_update` takes `state_batch_indices`.
+        # If `cache_indices` is 1D (batch,), it works.
+        # If it is 2D (batch, blocks), we need to select the right one.
+        # `block_idx_last_scheduled_token` points to the last block?
+        # If Mamba state is always in the *last* block?
+        # Or if Mamba state is *distributed*? No, it's fixed size.
+        # It should be in *one* block (or a set of blocks representing the state).
+        # But vLLM Mamba implementation seems to treat the state as being stored in the "last" scheduled block or using `block_idx_last_scheduled_token` to find it?
+        # Actually, looking at `causal_conv1d_update` call above:
+        # `conv_state_indices=cache_indices`, `block_idx_last_scheduled_token=block_idx_last`.
+        # It seems to handle indirection.
+        
+        # For `selective_state_update`:
+        # It has `state_batch_indices`.
+        # Does it accept `block_idx_...`?
+        # No, the signature is:
+        # def selective_state_update(state, x, dt, A, B, C, D=None, z=None, ..., state_batch_indices=None, ...)
+        # It doesn't seem to support the advanced block lookup that `causal_conv1d` does.
+        # Wait, `vllm/model_executor/layers/mamba/ops/mamba_ssm.py`:
+        # `selective_state_update` documentation says `state_batch_indices: (batch,)`.
+        # It doesn't mention `block_idx`.
+        
+        # So we must pass the *actual* block index for each request.
+        # If `cache_indices` is 2D (from metadata with APC), we need to select the correct block index.
+        # If APC is enabled, `block_idx_last_scheduled_token` holds the index *into* `cache_indices`?
+        # `causal_conv1d_update` docs:
+        # "The pointer into conv_state_indices, where the last cache block to be filled is located."
+        
+        # So `real_index = cache_indices[i, block_idx_last[i]]`.
+        # We need to gather these indices if `cache_indices` is 2D.
+        
+        # Mamba1AttentionMetadata logic:
+        # If `enable_prefix_caching`: `state_indices_tensor` is `block_table_tensor` (2D).
+        # Else: `block_table_tensor[:, 0]` (1D).
+        
+        # So if 2D, we need to gather.
+        # But `selective_state_update` expects 1D `state_batch_indices`.
+        
+        real_indices = cache_indices
+        if cache_indices.dim() == 2:
+             # Gather
+             # block_idx_last is (batch,).
+             # cache_indices is (batch, max_blocks).
+             # We want cache_indices[range(batch), block_idx_last].
+             # But wait, block_idx_last is int32 tensor.
+             real_indices = cache_indices.gather(1, block_idx_last.unsqueeze(1)).squeeze(1)
+        
+        out = selective_state_update(
+            ssm_state,
+            x,
+            dt,
+            self.A,
+            B,
+            C,
+            self.D,
+            z,
+            self.dt_proj.bias,
+            dt_softplus=True,
+            state_batch_indices=real_indices,
+        )
+        
+        return self.out_proj(out)
 
 
