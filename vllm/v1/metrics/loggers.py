@@ -104,8 +104,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.mm_caching_metrics = CachingMetrics()
 
         self.spec_decoding_logging = SpecDecodingLogging()
-        kv_tranfer_config = self.vllm_config.kv_transfer_config
-        self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
@@ -380,7 +380,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        per_engine_labelvalues: dict[int, list[str]] = {
+        per_engine_labelvalues: dict[int, list[object]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
 
@@ -1052,7 +1052,7 @@ PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
 def make_per_engine(
-    metric: PromMetric, engine_idxs: list[int], model_name: str
+    metric: PromMetric, engine_idxs: list[int], model_name: object
 ) -> dict[int, PromMetric]:
     return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
 
