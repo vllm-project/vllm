@@ -77,16 +77,14 @@ def generate_traces(
         for key, value in extra_env_vars.items():
             os.environ[key] = value
     
-    # Enable FlashInfer in vLLM
+    # Set up tracing
+    os.environ["FIB_ENABLE_TRACING"] = "1"
+    os.environ["FIB_DATASET_PATH"] = output_dir
     os.environ.setdefault("VLLM_USE_FLASHINFER", "1")
     
-    # Import flashinfer_bench WITHOUT FIB_ENABLE_TRACING env var
-    # (setting it before import causes circular import bug)
-    import flashinfer_bench
-    
-    # Enable tracing programmatically
-    flashinfer_bench.enable_tracing(output_dir)
-    print(f"✓ flashinfer_bench tracing enabled -> {output_dir}")
+    # Import flashinfer_bench FIRST to install tracing adapters
+    import flashinfer_bench  # noqa: F401
+    print(f"✓ flashinfer_bench tracing enabled")
     
     # Now import vLLM
     from vllm import LLM, SamplingParams
