@@ -26,13 +26,8 @@ class TestPlotFilters:
             'value': [10, 20, 30, 40, 50]
         })
         
-        # DataFrame with "inf" as string (edge case)
-        self.df_inf_string = pd.DataFrame({
-            'request_rate': [1.0, 5.0, 10.0, 'inf', 'inf'],
-            'value': [10, 20, 30, 40, 50]
-        })
-        
-        # DataFrame with float('inf')
+        # DataFrame with float('inf') - note: string "inf" values are coerced
+        # to float when loading data, so we only test with float('inf')
         self.df_inf_float = pd.DataFrame({
             'request_rate': [1.0, 5.0, 10.0, float('inf'), float('inf')],
             'value': [10, 20, 30, 40, 50]
@@ -48,15 +43,6 @@ class TestPlotFilters:
         filter_obj = PlotEqualTo('request_rate', target)
         result = filter_obj.apply(self.df_numeric)
         assert len(result) == expected_count
-
-    def test_equal_to_inf_string(self):
-        """Test PlotEqualTo with 'inf' string edge case."""
-        # When filtering for "inf" string
-        filter_obj = PlotEqualTo('request_rate', 'inf')
-        result = filter_obj.apply(self.df_inf_string)
-        # Should match both string 'inf' entries
-        assert len(result) == 2
-        assert all(result['request_rate'] == 'inf')
 
     def test_equal_to_inf_float(self):
         """Test PlotEqualTo with float('inf')."""
@@ -74,14 +60,6 @@ class TestPlotFilters:
         filter_obj = PlotNotEqualTo('request_rate', target)
         result = filter_obj.apply(self.df_numeric)
         assert len(result) == expected_count
-
-    def test_not_equal_to_inf_string(self):
-        """Test PlotNotEqualTo with 'inf' string edge case."""
-        filter_obj = PlotNotEqualTo('request_rate', 'inf')
-        result = filter_obj.apply(self.df_inf_string)
-        # Should exclude 'inf' strings
-        assert len(result) == 3
-        assert all(result['request_rate'] != 'inf')
 
     def test_not_equal_to_inf_float(self):
         """Test PlotNotEqualTo with float('inf')."""
@@ -166,19 +144,3 @@ class TestPlotFilters:
         """Test parsing empty filter string."""
         filters = PlotFilters.parse_str("")
         assert len(filters) == 0
-
-    def test_inf_string_mixed_dataframe(self):
-        """Test filtering DataFrame with mixed 'inf' representations."""
-        # Create a DataFrame with both string 'inf' and float inf
-        df_mixed = pd.DataFrame({
-            'request_rate': [1.0, 'inf', float('inf'), 10.0],
-            'value': [10, 20, 30, 40]
-        })
-        
-        # Filter for 'inf'
-        filter_obj = PlotEqualTo('request_rate', 'inf')
-        result = filter_obj.apply(df_mixed)
-        
-        # Should match both 'inf' string and float('inf')
-        # Note: The implementation tries to convert to float, so both should match
-        assert len(result) == 2
