@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 
 from vllm import version
 
+from ...conftest import LocalAssetServer
 from ...utils import RemoteOpenAIServer
 
 MODELS = {
@@ -69,7 +70,6 @@ async def client(server):
 
 
 _PROMPT = "Hello my name is Robert and I love magic"
-_IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
 
 def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: int):
@@ -183,9 +183,6 @@ async def test_metrics_counts(
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
-    "vllm:gpu_cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries",
-    "vllm:gpu_prefix_cache_hits",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
@@ -250,6 +247,7 @@ HIDDEN_DEPRECATED_METRICS: list[str] = [
 
 @pytest.mark.asyncio
 async def test_metrics_exist(
+    local_asset_server: LocalAssetServer,
     server: RemoteOpenAIServer,
     client: openai.AsyncClient,
     model_key: str,
@@ -265,13 +263,21 @@ async def test_metrics_exist(
             temperature=0.0,
         )
     else:
+        # https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg
         await client.chat.completions.create(
             model=model_name,
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": _IMAGE_URL}},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": local_asset_server.url_for(
+                                    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+                                ),
+                            },
+                        },
                         {"type": "text", "text": "What's in this image?"},
                     ],
                 }

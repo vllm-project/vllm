@@ -94,6 +94,9 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_sweep_plot = auto_mock("vllm.benchmarks.sweep.plot", "SweepPlotArgs")
+bench_sweep_plot_pareto = auto_mock(
+    "vllm.benchmarks.sweep.plot_pareto", "SweepPlotParetoArgs"
+)
 bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
 bench_sweep_serve_sla = auto_mock(
     "vllm.benchmarks.sweep.serve_sla", "SweepServeSLAArgs"
@@ -221,6 +224,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "bench_latency": create_parser(bench_latency.add_cli_args),
         "bench_serve": create_parser(bench_serve.add_cli_args),
         "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
+        "bench_sweep_plot_pareto": create_parser(bench_sweep_plot_pareto.add_cli_args),
         "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
         "bench_sweep_serve_sla": create_parser(bench_sweep_serve_sla.add_cli_args),
         "bench_throughput": create_parser(bench_throughput.add_cli_args),

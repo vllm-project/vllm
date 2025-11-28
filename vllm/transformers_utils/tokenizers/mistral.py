@@ -312,13 +312,27 @@ class MistralTokenizer(TokenizerBase):
         truncation: bool = False,
         max_length: int | None = None,
     ):
-        return self.transformers_tokenizer(
+        if text_pair is not None:
+            raise ValueError(
+                "`text_pair` is not supported by `MistralTokenizer.__call__`."
+            )
+
+        encoded = self.transformers_tokenizer(
             text=text,
             text_pair=text_pair,
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
         )
+        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
+        # is in, revert to only call self.transformers_tokenizer(...).
+        # Hack to fix wrongly added eos token, when fix will be supported the condition
+        # below will be False even before the revert is done.
+        if encoded["input_ids"] and encoded["input_ids"][-1] == self.eos_token_id:
+            encoded["input_ids"].pop(-1)
+            if attention_mask := encoded.get("attention_mask"):
+                attention_mask.pop(-1)
+        return encoded
 
     @property
     def vocab(self) -> list[str]:
@@ -349,6 +363,8 @@ class MistralTokenizer(TokenizerBase):
         max_length: int | None = None,
         add_special_tokens: bool | None = None,
     ) -> list[int]:
+        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
+        # is in, directly call self.transformers_tokenizer.encode(...).
         encoded = self.tokenizer.encode(
             text, bos=add_special_tokens is not False, eos=False
         )
@@ -387,6 +403,8 @@ class MistralTokenizer(TokenizerBase):
         )
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
+        # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
             ids = [ids]
 

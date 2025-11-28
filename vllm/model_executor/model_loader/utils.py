@@ -11,19 +11,12 @@ import torch
 from torch import nn
 from typing_extensions import assert_never
 
-from vllm.attention import Attention
-from vllm.attention.layer import MLAAttention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.models.adapters import (
-    as_embedding_model,
-    as_reward_model,
-    as_seq_cls_model,
-    try_create_mm_pooling_model_cls,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -88,6 +81,14 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
+    if getattr(model, "process_weights_after_loading_already_called", False):
+        # In case `process_weights_after_loading` is called multiple times
+        # we'll skip it at later times
+        logger.debug_once(
+            "process_weights_after_loading already called for model %s", model
+        )
+        return
+
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
         maybe_save_metadata_and_attributes_for_weight_reloading,
@@ -164,6 +165,13 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 
 
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    from vllm.model_executor.models.adapters import (
+        as_embedding_model,
+        as_reward_model,
+        as_seq_cls_model,
+        try_create_mm_pooling_model_cls,
+    )
+
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     model_cls, arch = model_config.registry.resolve_model_cls(

@@ -21,7 +21,7 @@ import torch
 from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -332,18 +332,21 @@ class Gemma3nAttention(nn.Module):
         )
 
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        layer_type = config.layer_types[layer_idx]
+        is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
         # Initialize the rotary embedding.
-        if is_sliding:
-            # Local attention. Override the values in config.json.
-            rope_theta = config.rope_local_base_freq
-            rope_scaling = {"rope_type": "default"}
+        if layer_type in config.rope_parameters:
+            # Transformers v5 rope config.
+            rope_parameters = config.rope_parameters[layer_type]
         else:
+            # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            rope_theta = config.rope_theta
-            rope_scaling = config.rope_scaling
+            rope_parameters = config.rope_parameters.copy()
+            # Local attention. Override the values in config.json.
+            if is_sliding:
+                rope_parameters["rope_theta"] = config.rope_local_base_freq
 
         first_kv_shared_layer_idx = (
             config.num_hidden_layers - config.num_kv_shared_layers
@@ -383,9 +386,8 @@ class Gemma3nAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=rope_scaling,
         )
 
         self.attn = Attention(

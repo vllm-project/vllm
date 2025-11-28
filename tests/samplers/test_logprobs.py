@@ -24,9 +24,7 @@ def test_ranks(
     greedy,
     flat_logprobs,
     example_prompts,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("VLLM_FLAT_LOGPROBS", "1" if flat_logprobs else "0")
     with vllm_runner(model, dtype=dtype, max_logprobs=MAX_LOGPROBS) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
         example_prompt_tokens = [tokenizer.encode(prompt) for prompt in example_prompts]
@@ -36,6 +34,7 @@ def test_ranks(
             max_tokens=MAX_TOKENS,
             logprobs=NUM_TOP_LOGPROBS,
             prompt_logprobs=NUM_PROMPT_LOGPROBS,
+            flat_logprobs=flat_logprobs,
         )
         results = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
 

@@ -340,4 +340,11 @@ full_cg_backend_configs = {
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
     ),
+    "RocmAttn": BackendConfig(
+        name="RocmAttn",
+        env_vars={"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
+        comp_config={
+            "cudagraph_mode": "FULL",
+        },
+    ),
 }

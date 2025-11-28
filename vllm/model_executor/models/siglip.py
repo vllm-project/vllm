@@ -24,6 +24,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -286,7 +287,7 @@ class SiglipVisionEmbeddings(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -827,6 +828,7 @@ class SiglipVisionModel(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.quant_config = quant_config
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config,
@@ -911,10 +913,36 @@ class SiglipVisionModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
+                param = maybe_swap_ffn_param(
+                    name, param, loaded_weight, params_dict, self.quant_config
+                )
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+def maybe_swap_ffn_param(
+    name: str,
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    params_dict: dict[str, torch.Tensor],
+    quant_config: QuantizationConfig,
+) -> torch.Tensor:
+    if not (quant_config and quant_config.get_name() == "gguf") or ".fc" not in name:
+        return param
+    # Some GGUF models have fc1 and fc2 weights swapped
+    tp_size = get_tensor_model_parallel_world_size()
+    output_dim = getattr(param, "output_dim", 0)
+    output_size = param.size(output_dim) * tp_size
+    weight_out_size = loaded_weight.size(output_dim)
+    if ".fc1." in name and output_size != weight_out_size:
+        new_name = name.replace(".fc1.", ".fc2.")
+        param = params_dict[new_name]
+    elif ".fc2." in name and output_size != weight_out_size:
+        new_name = name.replace(".fc2.", ".fc1.")
+        param = params_dict[new_name]
+    return param
 
 
 # Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200

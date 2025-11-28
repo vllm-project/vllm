@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
@@ -188,7 +189,7 @@ class MiniMaxText01Attention(nn.Module):
         num_kv_heads: int,
         rotary_dim: int,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
+        rope_parameters: dict | None = None,
         sliding_window: int | None = None,
         quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
@@ -214,7 +215,6 @@ class MiniMaxText01Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.sliding_window = sliding_window
         self.prefix = prefix
 
@@ -247,7 +247,7 @@ class MiniMaxText01Attention(nn.Module):
             head_size=self.head_dim,
             rotary_dim=rotary_dim,
             max_position=max_position,
-            base=int(rope_theta),
+            rope_parameters=rope_parameters,
             is_neox_style=True,
             dtype=torch.float32,
         )
@@ -286,8 +286,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.expert_num = expert_num
-
-        rope_theta = getattr(config, "rope_theta", 10000)
 
         head_dim = getattr(config, "head_dim", None)
         if head_dim is None:
@@ -328,7 +326,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 else head_dim,
                 num_kv_heads=config.num_key_value_heads,
                 max_position=max_position_embeddings,
-                rope_theta=rope_theta,
+                rope_parameters=config.rope_parameters,
                 sliding_window=config.sliding_window,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,

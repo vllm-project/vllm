@@ -30,7 +30,7 @@ import torch
 from torch import nn
 from transformers import PersimmonConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -106,7 +106,6 @@ class PersimmonAttention(nn.Module):
         self.num_heads = self.total_num_heads // tensor_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
         self.partial_rotary_factor = config.partial_rotary_factor
         self.is_causal = True
 
@@ -138,7 +137,7 @@ class PersimmonAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=config.rope_parameters,
             partial_rotary_factor=self.partial_rotary_factor,
         )
         self.scaling = self.head_dim**-0.5

@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import fields
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +20,6 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import (
-    GuidedDecodingParams,
     SamplingParams,
     StructuredOutputsParams,
 )
@@ -46,17 +44,45 @@ EAGLE_SPEC_CONFIG = {
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
+    # it, we skip these tests for now.
+    # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
+    pytest.param(
+        "mistralai/Ministral-8B-Instruct-2410",
+        "lm-format-enforcer",
+        "hf",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
+    pytest.param(
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "lm-format-enforcer",
+        "auto",
+        None,
+        marks=pytest.mark.skip(
+            reason=(
+                "Flaky: lm-format-enforcer intermittently returns"
+                "incomplete JSON."
+                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
+            )
+        ),
+    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
     # ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG),
 ]
@@ -80,24 +106,6 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-def test_guided_decoding_deprecated():
-    with pytest.warns(DeprecationWarning, match="GuidedDecodingParams is deprecated.*"):
-        guided_decoding = GuidedDecodingParams(json_object=True)
-
-    structured_outputs = StructuredOutputsParams(json_object=True)
-    assert fields(guided_decoding) == fields(structured_outputs)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp1 = SamplingParams(guided_decoding=guided_decoding)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp2 = SamplingParams.from_optional(guided_decoding=guided_decoding)
-
-    assert sp1 == sp2
-    assert sp1.structured_outputs == guided_decoding
-
-
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
@@ -128,6 +136,8 @@ def test_structured_output(
         ),
         seed=120,
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
     )
 
@@ -602,7 +612,6 @@ Make the response as short as possible.
                 )
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
     [
@@ -687,7 +696,6 @@ def test_structured_output_with_reasoning_matrices(
         jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
     unsupported_json_schema: dict[str, Any],
@@ -699,6 +707,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
+        load_format="auto",
+        config_format="auto",
     )
 
     sampling_params = SamplingParams(
@@ -734,7 +744,6 @@ def test_structured_output_auto_mode(
         assert isinstance(parsed_json, dict)
 
 
-@pytest.mark.skip_global_cleanup
 def test_guidance_no_additional_properties():
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
@@ -871,13 +880,11 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
                 output_json = json.loads(generated_text)
 
 
-@pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
-def test_structured_output_with_structural_tag(
-    guided_decoding_backend: str,
-):
+@pytest.mark.parametrize("backend", ["xgrammar"])
+def test_structured_output_with_structural_tag(backend: str):
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
-        guided_decoding_backend=guided_decoding_backend,
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
     )
 
     structural_tag_config = {
@@ -895,7 +902,7 @@ def test_structured_output_with_structural_tag(
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=500,
-        guided_decoding=StructuredOutputsParams(
+        structured_outputs=StructuredOutputsParams(
             structural_tag=json.dumps(structural_tag_config)
         ),
     )
