@@ -30,19 +30,6 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   # x86 + CUDA builds
-  - label: "Build wheel - CUDA 12.8"
-    depends_on: ~
-    id: build-wheel-cuda-12-8
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
-      - "mkdir artifacts"
-      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
-    env:
-      DOCKER_BUILDKIT: "1"
-
   - label: "Build wheel - CUDA 12.9"
     depends_on: ~
     id: build-wheel-cuda-12-9
@@ -109,7 +96,6 @@ steps:
   - label: "Annotate release workflow"
     depends_on:
       - create-multi-arch-manifest
-      - build-wheel-cuda-12-8
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
