@@ -349,8 +349,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                 attn_backend_override=attn_backend_override,
             )
         )
-        # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
-        from vllm.platforms import current_platform
 
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
