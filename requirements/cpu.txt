@@ -7,17 +7,17 @@ numba == 0.61.2; platform_machine != "s390x" # Required for N-gram speculative d
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.8.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
+torch==2.9.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
 torch==2.9.0; platform_system == "Darwin"
-torch==2.8.0; platform_machine == "ppc64le" or platform_machine == "aarch64"
+torch==2.9.0; platform_machine == "ppc64le" or platform_machine == "aarch64"
 
 # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
 torchaudio; platform_machine != "ppc64le" and platform_machine != "s390x"
-torchaudio==2.8.0; platform_machine == "ppc64le"
+torchaudio==2.9.0; platform_machine == "ppc64le"
 
 # required for the image processor of phi3v, this must be updated alongside torch
 torchvision; platform_machine != "ppc64le" and platform_machine != "s390x"
-torchvision==0.23.0; platform_machine == "ppc64le"
+torchvision==0.24.0; platform_machine == "ppc64le"
 datasets # for benchmark scripts
 
 # Intel Extension for PyTorch, only for x86_64 CPUs

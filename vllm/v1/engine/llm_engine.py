@@ -250,6 +250,9 @@ class LLMEngine:
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
@@ -262,10 +265,10 @@ class LLMEngine:
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request_id, params)
         for idx in range(n):
-            request_id, params = parent_req.get_child_info(idx)
+            request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
             child_request.request_id = request_id
-            child_request.sampling_params = params
+            child_request.sampling_params = child_params
 
             # Make a new RequestState and queue.
             self.output_processor.add_request(

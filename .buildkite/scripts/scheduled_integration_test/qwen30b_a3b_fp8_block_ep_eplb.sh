@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-# args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT]
+# args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT] [DATA_PARALLEL_SIZE] [TENSOR_PARALLEL_SIZE]
 THRESHOLD=${1:-0.8}
 NUM_Q=${2:-1319}
 PORT=${3:-8020}
+DATA_PARALLEL_SIZE=${4:-2}
+TENSOR_PARALLEL_SIZE=${5:-2}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
 mkdir -p "${OUT_DIR}"
 
@@ -17,7 +19,16 @@ wait_for_server() {
 }
 
 MODEL="QWen/Qwen3-30B-A3B-FP8"
-BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+# Set BACKENDS based on platform
+if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
+  # ROCm platform
+  BACKENDS=("allgather_reducescatter")
+  # Disable MOE padding for ROCm since it is causing eplb to fail
+  export VLLM_ROCM_MOE_PADDING=0
+else
+  # Non-ROCm platform (CUDA/other)
+  BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+fi
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -36,8 +47,10 @@ for BACK in "${BACKENDS[@]}"; do
   VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
-    --tensor-parallel-size 2 \
-    --data-parallel-size 2 \
+    --enable-eplb \
+    --eplb-config '{"window_size":10, "step_interval":100, "num_redundant_experts":0, "log_balancedness":true}' \
+    --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
+    --data-parallel-size ${DATA_PARALLEL_SIZE} \
     --enable-expert-parallel \
     --trust-remote-code \
     --max-model-len 2048 \

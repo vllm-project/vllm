@@ -12,6 +12,12 @@ from tests.models.language.pooling.embed_utils import run_embedding_correctness_
 from tests.models.utils import EmbedModelInfo
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
+    )
 
 MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),

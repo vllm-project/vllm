@@ -87,6 +87,11 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     # Set small draft model len to force doesn't-fit-in-drafter case.
     spec_config_short = spec_config | {"max_model_len": 50}
 
+    test_sampling_params = [
+        dict(),
+        dict(logprobs=2),
+    ]
+
     # test_preemption, executor, async_scheduling,
     # spec_config, test_prefill_chunking
     test_configs = [
@@ -103,7 +108,7 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         (True, "uni", True, spec_config_short, True),
     ]
 
-    run_tests(monkeypatch, MTP_MODEL, test_configs, [{}])
+    run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
 
 
 @dynamo_config.patch(cache_size_limit=16)

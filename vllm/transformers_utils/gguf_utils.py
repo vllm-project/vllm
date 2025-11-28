@@ -9,6 +9,7 @@ from gguf.constants import Keys, VisionProjectorType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -164,3 +165,44 @@ def maybe_patch_hf_config_from_gguf(
             hf_config = new_hf_config
 
     return hf_config
+
+
+def get_gguf_file_path_from_hf(
+    repo_id: str | Path,
+    quant_type: str,
+    revision: str | None = None,
+) -> str:
+    """Get the GGUF file path from HuggingFace Hub based on repo_id and quant_type.
+
+    Args:
+        repo_id: The HuggingFace repository ID (e.g., "Qwen/Qwen3-0.6B")
+        quant_type: The quantization type (e.g., "Q4_K_M", "F16")
+        revision: Optional revision/branch name
+
+    Returns:
+        The path to the GGUF file on HuggingFace Hub (e.g., "filename.gguf"),
+    """
+    repo_id = str(repo_id)
+    gguf_patterns = [
+        f"*-{quant_type}.gguf",
+        f"*-{quant_type}-*.gguf",
+        f"*/*-{quant_type}.gguf",
+        f"*/*-{quant_type}-*.gguf",
+    ]
+    matching_files = list_filtered_repo_files(
+        repo_id,
+        allow_patterns=gguf_patterns,
+        revision=revision,
+    )
+
+    if len(matching_files) == 0:
+        raise ValueError(
+            "Could not find GGUF file for repo %s with quantization %s.",
+            repo_id,
+            quant_type,
+        )
+
+    # Sort to ensure consistent ordering (prefer non-sharded files)
+    matching_files.sort(key=lambda x: (x.count("-"), x))
+    gguf_filename = matching_files[0]
+    return gguf_filename

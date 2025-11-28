@@ -1110,6 +1110,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=16384,
         max_num_seqs=16,
+        trust_remote_code=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -1351,10 +1352,18 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str], seed: int | None):
+def run_generate(
+    model,
+    question: str,
+    image_urls: list[str],
+    seed: int | None,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(
@@ -1377,7 +1386,13 @@ def run_generate(model, question: str, image_urls: list[str], seed: int | None):
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str], seed: int | None):
+def run_chat(
+    model: str,
+    question: str,
+    image_urls: list[str],
+    seed: int | None,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory
@@ -1387,6 +1402,8 @@ def run_chat(model: str, question: str, image_urls: list[str], seed: int | None)
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = (
@@ -1462,6 +1479,13 @@ def parse_args():
         default=2,
         help="Number of images to use for the demo.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
     return parser.parse_args()
 
 
@@ -1469,13 +1493,20 @@ def main(args: Namespace):
     model = args.model_type
     method = args.method
     seed = args.seed
+    tensor_parallel_size = args.tensor_parallel_size
+
+    if tensor_parallel_size is not None and tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {tensor_parallel_size}"
+        )
 
     image_urls = IMAGE_URLS[: args.num_images]
 
     if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
+        run_generate(model, QUESTION, image_urls, seed, tensor_parallel_size)
     elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
+        run_chat(model, QUESTION, image_urls, seed, tensor_parallel_size)
     else:
         raise ValueError(f"Invalid method: {method}")
 

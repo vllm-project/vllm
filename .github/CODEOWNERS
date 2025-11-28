@@ -9,6 +9,7 @@
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
+/vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
@@ -59,6 +60,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
+/tests/v1/determinism @yewentao256 
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
