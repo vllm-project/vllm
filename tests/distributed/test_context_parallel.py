@@ -31,6 +31,7 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    pcp_size: int
     cp_kv_cache_interleave_size: int
     eager_mode: bool
     chunked_prefill: bool
@@ -55,6 +56,7 @@ class CPTestSettings:
         tp_base: int = 4,
         pp_base: int = 1,
         dcp_base: int = 1,
+        pcp_base: int = 1,
         cp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
@@ -70,7 +72,8 @@ class CPTestSettings:
                             ParallelSetup(
                                 tp_size=tp_base,
                                 pp_size=pp_multiplier * pp_base,
-                                dcp_size=int(dcp_multiplier * tp_base),
+                                dcp_size=max(1, int(dcp_multiplier * tp_base)),
+                                pcp_size=pcp_base,
                                 cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
                                 eager_mode=eager_mode_val,
                                 chunked_prefill=chunked_prefill_val,
@@ -116,6 +119,7 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        pcp_size,
         cp_kv_cache_interleave_size,
         eager_mode,
         chunked_prefill,
@@ -196,7 +200,9 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
-        "--dcp-kv-cache-interleave-size",
+        "--prefill-context-parallel-size",
+        str(pcp_size),
+        "--cp-kv-cache-interleave-size",
         str(cp_kv_cache_interleave_size),
         "--distributed-executor-backend",
         distributed_backend,
@@ -228,6 +234,8 @@ CP_TEXT_GENERATION_MODELS = {
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
         CPTestSettings.detailed(tp_base=2, cp_kv_cache_interleave_size=64),
+        CPTestSettings.detailed(tp_base=1, pcp_base=2),
+        CPTestSettings.detailed(tp_base=1, pcp_base=2, cp_kv_cache_interleave_size=64),
     ],
     "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
