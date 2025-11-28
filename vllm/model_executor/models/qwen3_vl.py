@@ -1123,14 +1123,14 @@ class Qwen3LLMModel(Qwen3Model):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        
+
         aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             if layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
