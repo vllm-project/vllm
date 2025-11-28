@@ -673,7 +673,7 @@ class MooncakeConnectorWorker:
             raise RuntimeError(f"Error in batch_transfer_sync_write: {ret_value}")
 
         logger.debug(
-            "Sending to %s done, toke %s",
+            "Sending to %s done, took %s",
             remote_session,
             time.perf_counter() - start_time,
         )
