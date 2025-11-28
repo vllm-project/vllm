@@ -9,7 +9,6 @@ from numbers import Number
 from typing import Any, NamedTuple
 from unittest.mock import patch
 
-import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -17,9 +16,6 @@ from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention.backends.abstract import AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import (
-    STR_BACKEND_ENV_VAR,
-)
 from vllm.utils.torch_utils import make_tensor_with_pad
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
@@ -215,22 +211,6 @@ def make_causal_mask(
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1, float("-inf")).masked_fill(mask == 0, 0.0)
     return mask
-
-
-def override_backend_env_variable(
-    mpatch: pytest.MonkeyPatch, backend_name: str
-) -> None:
-    """
-    Override the environment variable indicating the vLLM backend temporarily,
-    using pytest monkeypatch to ensure that the env vars get
-    reset once the test context exits.
-
-    Arguments:
-
-    * mpatch: pytest monkeypatch instance
-    * backend_name: attention backend name to force
-    """
-    mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
 
 
 def ref_masked_attention(
