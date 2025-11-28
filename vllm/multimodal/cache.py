@@ -353,7 +353,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         return mm_item
 
-    def touch_cache_item(
+    def touch_cache_sender(
         self,
         mm_hash: str,
     ) -> None:
@@ -414,7 +414,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
-    def touch_cache_item(
+    def touch_cache_sender(
         self,
         mm_hash: str,
     ) -> None:
@@ -515,7 +515,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             return mm_item
 
     @override
-    def touch_cache_item(
+    def touch_cache_sender(
         self,
         mm_hash: str,
     ) -> None:
@@ -639,14 +639,14 @@ class BaseMultiModalReceiverCache(
         item in updated list evict during update.
         """
         for feature in mm_features:
-            self.touch_cache_feature(feature.identifier, feature.data)
+            self.touch_cache_receiver(feature.identifier, feature.data)
 
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data, feature.identifier)
         return mm_features
 
     @abstractmethod
-    def touch_cache_feature(self, mm_hash: str, mm_item: _I | None = None) -> None:
+    def touch_cache_receiver(self, mm_hash: str, mm_item: _I | None = None) -> None:
         """
         Update the cache eviction order for a multi-modal item.
 
@@ -697,7 +697,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         return mm_item
 
     @override
-    def touch_cache_feature(
+    def touch_cache_receiver(
         self, mm_hash: str, mm_item: Optional["MultiModalKwargsItem"] = None
     ) -> None:
         self._cache.touch(mm_hash)
@@ -755,7 +755,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         return mm_item
 
     @override
-    def touch_cache_feature(
+    def touch_cache_receiver(
         self, mm_hash: str, mm_item: Optional["MultiModalKwargsItem"] = None
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.

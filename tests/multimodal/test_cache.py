@@ -286,7 +286,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request1_hashes:
-        p0_cache.touch_cache_item(mm_hash)
+        p0_cache.touch_cache_sender(mm_hash)
 
     ###########################
     # Process request 1 for P0 Cache
@@ -307,7 +307,7 @@ def _run_test_cache_eviction_shm(
     ###########################
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
-        p1_cache.touch_cache_feature(mm_hash, mm_item)
+        p1_cache.touch_cache_receiver(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
@@ -325,7 +325,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request2_hashes:
-        p0_cache.touch_cache_item(mm_hash)
+        p0_cache.touch_cache_sender(mm_hash)
 
     ###########################
     # Process request 2 for P0 Cache
@@ -350,7 +350,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
-        p1_cache.touch_cache_feature(mm_hash, mm_item)
+        p1_cache.touch_cache_receiver(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
@@ -368,7 +368,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request3_hashes:
-        p0_cache.touch_cache_item(mm_hash)
+        p0_cache.touch_cache_sender(mm_hash)
 
     ###########################
     # Process request 3 for P0 Cache
@@ -391,7 +391,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
-        p1_cache.touch_cache_feature(mm_hash, mm_item)
+        p1_cache.touch_cache_receiver(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
@@ -430,7 +430,7 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request1_hashes:
-        p0_cache.touch_cache_item(mm_hash)
+        p0_cache.touch_cache_sender(mm_hash)
 
     ###########################
     # Process request 1 for P0 Cache
@@ -449,7 +449,7 @@ def _run_test_cache_eviction_lru(
     ###########################
     # Touch all mm hash for P1 Cache before process
     for mm_hash in request1_hashes:
-        p1_cache.touch_cache_feature(mm_hash)
+        p1_cache.touch_cache_receiver(mm_hash)
 
     for h in request1_hashes:
         p1_cache.get_and_update_item(request1_items[h], h)
@@ -470,7 +470,7 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request2_hashes:
-        p0_cache.touch_cache_item(mm_hash)
+        p0_cache.touch_cache_sender(mm_hash)
 
     ###########################
     # Process request 2 for P0 Cache
@@ -489,7 +489,7 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash in request2_hashes:
-        p1_cache.touch_cache_feature(mm_hash)
+        p1_cache.touch_cache_receiver(mm_hash)
 
     for h in request2_hashes:
         p1_cache.get_and_update_item(request2_items[h], h)
