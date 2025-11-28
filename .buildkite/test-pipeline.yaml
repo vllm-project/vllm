@@ -57,8 +57,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
-  timeout_in_minutes: 10
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 10min
+  timeout_in_minutes: 15
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
