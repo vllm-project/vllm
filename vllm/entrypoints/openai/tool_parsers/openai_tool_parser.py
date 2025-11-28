@@ -77,7 +77,7 @@ class OpenAIToolParser(ToolParser):
                     final_content = msg_text
 
             # Check for partial responses:
-            # current content without recipient and final channel
+            # current content in final channel without recipient and final content.
             if (
                 parser.current_content
                 and final_content is None
