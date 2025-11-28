@@ -232,9 +232,9 @@ class PCPManager:
         Args:
             tokens: 1D numpy array of length num_reqs containing the number of new
                     tokens scheduled for each request (before PCP splitting).
+            arange_np: 1D numpy array of length max_buffer_num_tokens used for
+                       efficient batched arange operations.
             num_reqs: Total number of requests in the batch.
-            pcp_world_size: Number of PCP ranks.
-            pcp_rank: Current PCP rank ID (0 to pcp_world_size-1).
             reorder_batch_threshold: Threshold for decode vs prefill requests.
 
         Returns:
