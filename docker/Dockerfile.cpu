@@ -55,10 +55,7 @@ ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=requirements/common.txt \
-    --mount=type=bind,src=requirements/cpu.txt,target=requirements/cpu.txt \
-    uv pip install --upgrade pip && \
-    uv pip install -r requirements/cpu.txt
+    uv pip install --upgrade pip
 
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
