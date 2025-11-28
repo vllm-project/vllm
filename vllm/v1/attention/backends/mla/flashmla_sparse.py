@@ -413,10 +413,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             dtype=torch.int32,
             device=device,
         )
-        # Per-request cache_seqlens buffer (all set to topk_tokens)
-        self.decode_cache_seqlens_buffer = torch.full(
-            (max_num_seqs,), self.topk_tokens, dtype=torch.int32, device=device
-        )
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -548,9 +544,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
 
-            # Per-request cache_seqlens: [topk_tokens] * num_decodes
-            decode_cache_seqlens = self.decode_cache_seqlens_buffer[:num_decodes]
-
+            decode_cache_seqlens = common_attn_metadata.seq_lens[:num_decodes]
             tile_scheduler_metadata, num_splits = get_mla_metadata(
                 cache_seqlens=decode_cache_seqlens,
                 num_q_tokens_per_head_k=decode_query_len * self.num_heads,
