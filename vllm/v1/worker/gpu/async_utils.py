@@ -21,6 +21,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
     ):
+        # NOTE(woosuk): We must retain references to the GPU tensors,
+        # as the copy operations are performed on a different CUDA stream than
+        # the one where the tensors were created.
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
@@ -51,7 +54,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             else:
                 self.logprobs_tensors = None
-            self.num_sampled_tokens = num_sampled_tokens.to("cpu", non_blocking=True)
+            self.num_sampled_tokens_cpu = num_sampled_tokens.to(
+                "cpu", non_blocking=True
+            )
             self.prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
             if self.model_runner_output.prompt_logprobs_dict:
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items():
@@ -63,7 +68,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
-        num_sampled_tokens_np = self.num_sampled_tokens.numpy()
+        num_sampled_tokens_np = self.num_sampled_tokens_cpu.numpy()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

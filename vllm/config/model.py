@@ -14,6 +14,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -61,7 +61,6 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -440,13 +439,6 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            # Check if this is a GGUF model (either local file or remote GGUF)
-            if is_gguf(self.model):
-                raise ValueError(
-                    "Using a tokenizer is mandatory when loading a GGUF model. "
-                    "Please specify the tokenizer path or name using the "
-                    "--tokenizer argument."
-                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -699,6 +691,14 @@ class ModelConfig:
             }
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+
+        # Multimodal GGUF models must use original repo for mm processing
+        if is_gguf(self.tokenizer) and self.is_multimodal_model:
+            raise ValueError(
+                "Loading a multimodal GGUF model needs to use original "
+                "tokenizer. Please specify the unquantized hf model's "
+                "repo name or path using the --tokenizer argument."
+            )
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
