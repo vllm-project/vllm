@@ -35,9 +35,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.processor import Processor
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -112,7 +112,7 @@ class AsyncLLM(EngineClient):
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -297,7 +297,7 @@ class AsyncLLM(EngineClient):
                 "Processor has been moved under OpenAIServing and will "
                 "be removed from AsyncLLM in v0.13."
             )
-            request = self.processor.process_inputs(
+            request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -481,7 +481,7 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
-        processor = self.processor
+        processor = self.input_processor
 
         async def output_handler():
             try:
@@ -699,11 +699,11 @@ class AsyncLLM(EngineClient):
 
     @property
     def tokenizer(self) -> AnyTokenizer | None:
-        return self.processor.tokenizer
+        return self.input_processor.tokenizer
 
     @tokenizer.setter
     def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
-        self.processor.tokenizer = tokenizer
+        self.input_processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -738,7 +738,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self) -> None:

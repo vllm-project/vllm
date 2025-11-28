@@ -7,8 +7,8 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import processor as processor_mod
-from vllm.v1.engine.processor import Processor
+from vllm.v1.engine import input_processor as processor_mod
+from vllm.v1.engine.input_processor import InputProcessor
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
@@ -18,7 +18,7 @@ baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
 # Mock processor for testing
 def _mk_processor(
     monkeypatch, *, mm_cache_gb: float = 4.0, enable_prefix_caching: bool = True
-) -> Processor:
+) -> InputProcessor:
     """
     Create a Processor instance with minimal configuration suitable for unit
     tests without accessing external resources.
@@ -65,7 +65,7 @@ def _mk_processor(
         device_config=DeviceConfig(device="cpu"),
     )
 
-    return Processor(vllm_config, tokenizer=None)
+    return InputProcessor(vllm_config, tokenizer=None)
 
 
 def test_multi_modal_uuids_length_mismatch_raises(monkeypatch):
