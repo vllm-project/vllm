@@ -357,19 +357,22 @@ class MLACommonPrefillMetadata:
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
 
+    @dataclass
+    class PCPMetadata:
+        # For PCP
+        pcp_allgather_restore_idx: torch.Tensor | None = None
+        kv_head_indices: torch.Tensor | None = None
+        kv_tail_indices: torch.Tensor | None = None
+        query_head_indices: torch.Tensor | None = None
+        query_tail_indices: torch.Tensor | None = None
+        output_restore_idx: torch.Tensor | None = None
+
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     query_seq_lens: torch.Tensor | None = None
-
-    # For PCP
-    pcp_allgather_restore_idx: torch.Tensor | None = None
-    kv_head_indices: torch.Tensor | None = None
-    kv_tail_indices: torch.Tensor | None = None
-    query_head_indices: torch.Tensor | None = None
-    query_tail_indices: torch.Tensor | None = None
-    output_restore_idx: torch.Tensor | None = None
+    pcp_metadata: PCPMetadata | None = None
 
 
 @dataclass
@@ -983,18 +986,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     <= self.chunked_prefill_workspace_size
                 )
 
-            kv_head_indices = None
-            kv_tail_indices = None
-            query_head_indices = None
-            query_tail_indices = None
-            output_restore_idx = None
+            pcp_metadata = None
             if self.pcp_world_size > 1:
                 # NOTE(yyj): We need to get the indices here for
                 # split the query, key and value in prefill forward.
                 q_head_idx, q_tail_idx = get_pcp_query_indices(
                     prefill_query_start_loc_cpu
                 )
-                output_restore_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
                 prefill_kv_start_loc_cpu = (
                     prefill_query_start_loc_cpu * self.pcp_world_size
                 )
@@ -1003,23 +1002,21 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.pcp_rank,
                     self.pcp_world_size,
                 )
-                kv_head_indices = kv_head_idx.to(device, dtype=torch.int32)
-                kv_tail_indices = kv_tail_idx.to(device, dtype=torch.int32)
-                query_head_indices = q_head_idx.to(device, dtype=torch.int32)
-                query_tail_indices = q_tail_idx.to(device, dtype=torch.int32)
-                output_restore_idx = output_restore_idx.to(device, dtype=torch.int32)
+                pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
+                    kv_head_indices = kv_head_idx.to(device, dtype=torch.int32),
+                    kv_tail_indices = kv_tail_idx.to(device, dtype=torch.int32),
+                    query_head_indices = q_head_idx.to(device, dtype=torch.int32),
+                    query_tail_indices = q_tail_idx.to(device, dtype=torch.int32),
+                    output_restore_idx = output_res_idx.to(device, dtype=torch.int32),
+                    pcp_allgather_restore_idx=pcp_allgather_restore_idx,
+                )
 
             prefill_metadata = self.prefill_metadata_cls(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
-                pcp_allgather_restore_idx=pcp_allgather_restore_idx,
-                kv_head_indices=kv_head_indices,
-                kv_tail_indices=kv_tail_indices,
-                query_head_indices=query_head_indices,
-                query_tail_indices=query_tail_indices,
-                output_restore_idx=output_restore_idx,
+                pcp_metadata=pcp_metadata,
             )
 
             if self._use_cudnn_prefill:
@@ -1428,14 +1425,32 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert self.pcp_world_size is not None
         assert self.pcp_rank is not None
         if self.pcp_world_size > 1:
-            # NOTE(yyj) PCP split the sequence using the DualChunkSwap strategy
-            # to ensure load balancing, so we need to split the query, key and
-            # value into two parts and run the attention twice.
-            # TODO(yyj) Add comments to clarify ...
+            # NOTE When PCP is enabled, we split the queries keys and values into
+            # "head" and "tail" parts using the DualChunkSwap strategy to balance
+            # workload across PCP ranks. We run attention twice (once for the head
+            # part and once for the tail part), then concatenate the results and
+            # restore the original ordering.
+            #
+            # Example pcp_world_size=2 & full sequence: [0,1,2,3]
+            #
+            #   pcp_rank0: Q [0,3] KV [0,1,2,3]
+            #    Q\KV  0 1 2 3
+            # head 0   1 0 0 0
+            #      -----------
+            # tail 3   1 1 1 1
+            #
+            #   pcp_rank1: Q[1,3] KV[0,1,2,3]
+            #    Q\KV  0 1 2 3
+            # head 1   1 1 0 0
+            #      -----------
+            # tail 2   1 1 1 0
+
+            pcp_metadata = prefill.pcp_metadata
+            assert pcp_metadata is not None
             output_head, lse_head = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, prefill.query_head_indices),
-                k=torch.index_select(k, 0, prefill.kv_head_indices),
-                v=torch.index_select(v, 0, prefill.kv_head_indices),
+                q=torch.index_select(q, 0, pcp_metadata.query_head_indices),
+                k=torch.index_select(k, 0, pcp_metadata.kv_head_indices),
+                v=torch.index_select(v, 0, pcp_metadata.kv_head_indices),
                 cu_seqlens_q=prefill.query_start_loc // 2,
                 cu_seqlens_k=prefill.query_start_loc // 2 * (self.pcp_rank + 1),
                 max_seqlen_q=prefill.max_query_len // 2,
@@ -1446,9 +1461,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
-                q=torch.index_select(q, 0, prefill.query_tail_indices),
-                k=torch.index_select(k, 0, prefill.kv_tail_indices),
-                v=torch.index_select(v, 0, prefill.kv_tail_indices),
+                q=torch.index_select(q, 0, pcp_metadata.query_tail_indices),
+                k=torch.index_select(k, 0, pcp_metadata.kv_tail_indices),
+                v=torch.index_select(v, 0, pcp_metadata.kv_tail_indices),
                 cu_seqlens_q=prefill.query_start_loc // 2,
                 cu_seqlens_k=prefill.query_start_loc
                 // 2
@@ -1463,7 +1478,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
             output = torch.cat([output_head, output_tail], dim=0)
-            output_restore_idx = prefill.output_restore_idx
+            output_restore_idx = pcp_metadata.output_restore_idx
             if return_softmax_lse:
                 # FA returns LSE in shape [ H, B ]
                 lse = torch.cat([lse_head, lse_tail], dim=-1)
@@ -2064,12 +2079,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if self.pcp_world_size > 1:
             if attn_metadata.prefill is not None:
-                assert attn_metadata.prefill.pcp_allgather_restore_idx is not None
+                pcp_metadata = attn_metadata.prefill.pcp_metadata
+                assert pcp_metadata.pcp_allgather_restore_idx is not None
                 k_c_normed, k_pe = pcp_kv_allgather_and_restore(
                     k_c_normed,
                     k_pe,
                     num_actual_toks,
-                    attn_metadata.prefill.pcp_allgather_restore_idx,
+                    pcp_metadata.pcp_allgather_restore_idx,
                     get_pcp_group(),
                 )
             else:
