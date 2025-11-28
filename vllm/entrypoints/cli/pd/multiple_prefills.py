@@ -60,7 +60,8 @@ class _VllmService(_BaseVllmService):
         Returns:
             Dict[str, Any]: Updated role parameters with actual values
         """
-        host, port = self.socket.getsockname()
+        # Use ip_and_port() to ensure socket is created
+        host, port = self.ip_and_port()
         
         # Replace host and port in role_params if specified
         if self.role_params.get("host"):

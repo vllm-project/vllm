@@ -586,8 +586,13 @@ class BasePDJob:
                 # Wait for 1 second
                 # Check every second to avoid high CPU usage
                 time.sleep(1)
-        except Exception:
+        except KeyboardInterrupt:
+            # Handle Ctrl+C gracefully
+            logger.info("Received KeyboardInterrupt, shutting down...")
+            ray.shutdown()
+        except Exception as e:
             # Shutdown Ray cluster on exception to clean up resources
+            logger.error(f"Exception occurred: {e}, shutting down...")
             ray.shutdown()
 
 
