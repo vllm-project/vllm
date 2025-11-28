@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 def __getattr__(name: str):
-    # TODO: Move AnyTokenizer into this file
+    # TODO: Move TokenizerLike into this file
     # and move TokenizerRegistry into `registry.py` with a deprecation
     if name == "AnyTokenizer":
         warnings.warn(

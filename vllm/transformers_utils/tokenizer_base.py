@@ -2,12 +2,30 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import warnings
 from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Self, runtime_checkable
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+
+def __getattr__(name: str):
+    # TODO: Move TokenizerLike into `tokenizer.py`
+    # and move TokenizerRegistry into `registry.py` with a deprecation
+    if name == "TokenizerBase":
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer_base.TokenizerBase` has been moved to "
+            "`vllm.transformers_utils.tokenizer.TokenizerLike`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return TokenizerLike
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @runtime_checkable
