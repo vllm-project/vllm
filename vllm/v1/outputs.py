@@ -29,27 +29,15 @@ class LogprobsLists(NamedTuple):
     # different for each request.
     cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start_req_idx: int, end_req_idx: int):
-        if self.cu_num_generated_tokens:
-            start = self.cu_num_generated_tokens[start_req_idx]
-            end = self.cu_num_generated_tokens[end_req_idx]
-            # Recompute cumulative array starting from 0
-            cu_num_offset = self.cu_num_generated_tokens[start_req_idx]
-            sliced_cu_num_generated_tokens = [
-                cu_num - cu_num_offset
-                for cu_num in self.cu_num_generated_tokens[
-                    start_req_idx : end_req_idx + 1
-                ]
-            ]
-        else:
-            start = start_req_idx
-            end = end_req_idx
-            sliced_cu_num_generated_tokens = None
+    def slice_request(self, req_idx: int, num_positions: int):
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
         return LogprobsLists(
-            self.logprob_token_ids[start:end],
-            self.logprobs[start:end],
-            self.sampled_token_ranks[start:end],
-            sliced_cu_num_generated_tokens,
+            self.logprob_token_ids[req_idx:end_idx],
+            self.logprobs[req_idx:end_idx],
+            self.sampled_token_ranks[req_idx:end_idx],
+            None,
         )
 
 
