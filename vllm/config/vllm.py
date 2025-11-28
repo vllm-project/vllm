@@ -3,15 +3,15 @@
 
 import copy
 import getpass
-import hashlib
 import json
 import os
 import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from datetime import datetime
+from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, get_args
@@ -25,6 +25,7 @@ from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
+from vllm.utils.hashing import safe_hash
 
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -55,6 +56,103 @@ else:
     KVCacheConfig = Any
 
 logger = init_logger(__name__)
+
+
+class OptimizationLevel(IntEnum):
+    """Optimization level enum."""
+
+    O0 = 0
+    """O0 : No optimization. no compilation, no cudagraphs, no other
+    optimization, just starting up immediately"""
+    O1 = 1
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    cudagraphs"""
+    O2 = 2
+    """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
+    O3 = 3
+    """O3: Currently the same as -O2s."""
+
+
+IS_QUANTIZED = False
+IS_DENSE = False
+# The optimizations that depend on these properties currently set to False
+# in all cases.
+# if model_config is not None:
+#     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
+#     IS_DENSE = lambda c: not c.model_config.is_model_moe()
+# See https://github.com/vllm-project/vllm/issues/25689.
+
+
+def enable_fusion(cfg: "VllmConfig") -> bool:
+    """Returns True if RMS norm or quant FP8 is enabled."""
+    return cfg.compilation_config.is_custom_op_enabled(
+        "rms_norm"
+    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+
+
+OPTIMIZATION_LEVEL_00 = {
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": False,
+            "enable_fusion": False,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": False,
+            "enable_sequence_parallelism": False,
+            "enable_async_tp": False,
+        },
+        "cudagraph_mode": CUDAGraphMode.NONE,
+        "use_inductor_graph_partition": False,
+    },
+}
+OPTIMIZATION_LEVEL_01 = {
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": False,
+            "enable_sequence_parallelism": False,
+            "enable_async_tp": False,
+        },
+        "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+        "use_inductor_graph_partition": False,
+    },
+}
+OPTIMIZATION_LEVEL_02 = {
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": IS_QUANTIZED,
+            "enable_sequence_parallelism": IS_DENSE,
+            "enable_async_tp": IS_DENSE,
+        },
+        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "use_inductor_graph_partition": False,
+    },
+}
+OPTIMIZATION_LEVEL_03 = {
+    "compilation_config": {
+        "pass_config": {
+            "enable_noop": True,
+            "enable_fusion": enable_fusion,
+            "enable_fi_allreduce_fusion": False,
+            "enable_attn_fusion": IS_QUANTIZED,
+            "enable_sequence_parallelism": IS_DENSE,
+            "enable_async_tp": IS_DENSE,
+        },
+        "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+        "use_inductor_graph_partition": False,
+    },
+}
+
+OPTIMIZATION_LEVEL_TO_CONFIG = {
+    OptimizationLevel.O0: OPTIMIZATION_LEVEL_00,
+    OptimizationLevel.O1: OPTIMIZATION_LEVEL_01,
+    OptimizationLevel.O2: OPTIMIZATION_LEVEL_02,
+    OptimizationLevel.O3: OPTIMIZATION_LEVEL_03,
+}
 
 
 @config
@@ -96,7 +194,7 @@ class VllmConfig:
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, one can append compilation arguments via 
-    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -116,6 +214,11 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
+    optimization_level: OptimizationLevel = OptimizationLevel.O2
+    """The optimization level. These levels trade startup time cost for
+    performance, with -O0 having the best startup time and -O3 having the best
+    performance. -02 is used by defult. See  OptimizationLevel for full
+    description."""
 
     def compute_hash(self) -> str:
         """
@@ -193,7 +296,7 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = hashlib.md5(
+                additional_config_hash = safe_hash(
                     json.dumps(additional_config, sort_keys=True).encode(),
                     usedforsecurity=False,
                 ).hexdigest()
@@ -204,9 +307,9 @@ class VllmConfig:
             vllm_factors.append("None")
         factors.append(vllm_factors)
 
-        hash_str = hashlib.md5(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
+            :10
+        ]
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
@@ -296,6 +399,50 @@ class VllmConfig:
         model_config.hf_config = hf_config
 
         return replace(self, model_config=model_config)
+
+    def _set_config_default(self, config_obj: Any, key: str, value: Any) -> None:
+        """Set config attribute to default if not already set by user.
+
+        Args:
+            config_obj: Configuration object to update.
+            key: Attribute name.
+            value: Default value (static or callable).
+        """
+        if getattr(config_obj, key) is None:
+            # Some config values are known before initialization and are
+            # hard coded.
+            # Other values depend on the user given configuration, so they are
+            # implemented with lambda functions and decided at run time.
+            setattr(config_obj, key, value(self) if callable(value) else value)
+
+    def _apply_optimization_level_defaults(self, defaults: dict[str, Any]) -> None:
+        """Apply optimization level defaults using self as root.
+
+        Recursively applies values from defaults into nested config objects.
+        Only fields present in defaults are overwritten.
+
+        If the user configuration does not specify a value for a default field
+        and if the default field is still None after all user selections are
+        applied, then default values will be applied to the field. User speciied
+        fields will not be overridden by the default.
+
+        Args:
+            defaults: Dictionary of default values to apply.
+        """
+
+        def apply_recursive(config_obj: Any, config_defaults: dict[str, Any]) -> None:
+            """Recursively apply defaults to config_obj, using self as root."""
+            for key, value in config_defaults.items():
+                if not hasattr(config_obj, key):
+                    continue
+
+                current = getattr(config_obj, key)
+                if isinstance(value, dict) and is_dataclass(current):
+                    apply_recursive(current, value)
+                else:
+                    self._set_config_default(config_obj, key, value)
+
+        apply_recursive(self, defaults)
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
@@ -434,17 +581,47 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation mode, then
-        # we use the default mode. The default mode depends on other
-        # settings (see the below code).
+        if (
+            self.optimization_level > OptimizationLevel.O0
+            and self.model_config is not None
+            and self.model_config.enforce_eager
+        ):
+            logger.warning("Enforce eager set, overriding optimization level to -O0")
+            self.optimization_level = OptimizationLevel.O0
+
+        if self.compilation_config.backend == "eager" or (
+            self.compilation_config.mode is not None
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.warning(
+                "Inductor compilation was disabled by user settings,"
+                "Optimizations settings that are only active during"
+                "Inductor compilation will be ignored."
+            )
+
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
+
         if self.compilation_config.mode is None:
-            if self.model_config is not None and not self.model_config.enforce_eager:
+            if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
-        # If user does not set custom ops via none or all set it here based on
-        # compilation mode and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
@@ -454,29 +631,47 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
+        default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
+        self._apply_optimization_level_defaults(default_config)
+        if (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.info(
+                "Cudagraph mode %s is not compatible with compilation mode %s."
+                "Overriding to NONE.",
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.mode,
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
+            if "-rms_norm" in self.compilation_config.custom_ops:
+                logger.warning(
+                    "RMS norm force disabled, sequence parallelism might break"
+                )
+            else:
+                self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.support_static_graph_mode():
-            # if cudagraph_mode is not explicitly set by users, set default
-            # value
-            if self.compilation_config.cudagraph_mode is None:
-                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                    # default to full and piecewise for most models
-                    self.compilation_config.cudagraph_mode = (
-                        CUDAGraphMode.FULL_AND_PIECEWISE
-                    )
-                else:
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
             # if cudagraph_mode has full cudagraphs, we need to check support
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 # decode context parallel does not support full cudagraphs
                 if self.parallel_config.decode_context_parallel_size > 1:
                     logger.warning_once(
                         "Decode context parallel (DCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                # prefill context parallel do not support full cudagraphs
+                elif self.parallel_config.prefill_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Prefill context parallel (PCP) is enabled, which is "
                         "incompatible with full CUDA graphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
@@ -610,22 +805,34 @@ class VllmConfig:
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
             assert (
-                self.parallel_config.dcp_kv_cache_interleave_size
+                self.parallel_config.cp_kv_cache_interleave_size
                 <= self.cache_config.block_size
                 and self.cache_config.block_size
-                % self.parallel_config.dcp_kv_cache_interleave_size
+                % self.parallel_config.cp_kv_cache_interleave_size
                 == 0
             ), (
                 f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by dcp_kv_cache_interleave_size "
-                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
         assert (
-            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            self.parallel_config.cp_kv_cache_interleave_size == 1
             or self.speculative_config is None
-        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
+        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
