@@ -134,6 +134,8 @@ def main(args):
         reasoning_parser="step3", # Enable Step3 reasoning parser if applicable
         trust_remote_code=True,
         enforce_eager=args.enforce_eager,
+        cpu_offload_gb=args.cpu_offload_gb,
+        max_model_len=args.max_model_len,
     )
 
     llm = LLM(**engine_args.__dict__)
@@ -242,6 +244,18 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Tensor parallel size.",
+    )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=float,
+        default=0.0,
+        help="CPU memory to use for offloading (GB).",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Maximum model context length.",
     )
     parser.add_argument(
         "--enforce-eager",
