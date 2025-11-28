@@ -16,10 +16,6 @@ class TestTokenizer(TokenizerBase):
         return TestTokenizer()
 
     @property
-    def all_special_tokens_extended(self) -> list[str]:
-        raise NotImplementedError()
-
-    @property
     def all_special_tokens(self) -> list[str]:
         raise NotImplementedError()
 
