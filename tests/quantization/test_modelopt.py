@@ -88,6 +88,6 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
         llm.apply_model(check_model)
 
         # Run a simple generation test to ensure the model works
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         assert output
         print(f"ModelOpt FP8 output: {output}")

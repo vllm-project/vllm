@@ -7,7 +7,7 @@ This document shows you some examples of the different options that are
 available to generate structured outputs.
 
 !!! warning
-    If you are still using the following deprecated API fields, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
+    If you are still using the following deprecated API fields which were removed in v0.12.0, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
 
     - `guided_json` -> `{"structured_outputs": {"json": ...}}` or `StructuredOutputsParams(json=...)`
     - `guided_regex` -> `{"structured_outputs": {"regex": ...}}` or `StructuredOutputsParams(regex=...)`
@@ -204,7 +204,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
             }
         },
     )
-    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("reasoning: ", completion.choices[0].message.reasoning)
     print("content: ", completion.choices[0].message.content)
     ```
 

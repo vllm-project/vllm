@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
+
+from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
 
@@ -11,6 +14,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -18,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
+    ECConnectorMetadata = object
     KVConnectorMetadata = object
     LoRARequest = object
     MultiModalFeatureSpec = object
@@ -39,11 +44,15 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
+    # Only used for v2 model runner.
+    prefill_token_ids: list[int] | None = None
+
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -55,6 +64,7 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            prefill_token_ids=prefill_token_ids,
         )
 
     def __repr__(self) -> str:
@@ -63,6 +73,7 @@ class NewRequestData:
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids={self.prompt_token_ids},"
+            f"prefill_token_ids={self.prefill_token_ids},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -96,16 +107,16 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
-    # If resumed_from_preemption is False, new_block_ids will be appended to
-    # the request's block IDs. If True, new_block_ids will be used as the
+    # For request ids not in resumed_req_ids, new_block_ids will be appended to
+    # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
-    resumed_from_preemption: list[bool]
+    resumed_req_ids: set[str]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # If resumed_from_preemption is True, propogate the token ids to the
-    # connector, otherwise will be empty.
-    resumed_req_token_ids: list[list[int] | None]
+    # For requests not scheduled in the last step, propagate the token ids to the
+    # connector. Won't contain requests that were scheduled in the prior step.
+    all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -114,13 +125,26 @@ class CachedRequestData:
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
+    @cached_property
+    @deprecated("use resumed_req_ids field")
+    def resumed_from_preemption(self) -> list[bool]:
+        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
+
+    @cached_property
+    @deprecated("use all_token_ids field")
+    def resumed_req_token_ids(self) -> list[list[int] | None]:
+        return [
+            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
+            for req_id in self.req_ids
+        ]
+
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
-            resumed_from_preemption=[],
+            resumed_req_ids=set(),
             new_token_ids=[],
-            resumed_req_token_ids=[],
+            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -165,12 +189,38 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # ids of structured outputs requests included in the bitmask, in the
-    # same order as the corresponding stacked rows of the bitmask.
-    # There may be more than one row per request in the case of speculative decoding.
-    structured_output_request_ids: list[str]
-    # the bitmask for the whole batch
-    grammar_bitmask: "npt.NDArray[np.int32] | None"
+    # Request IDs that are preempted in this step.
+    # Only used for v2 model runner.
+    preempted_req_ids: set[str] | None = None
+
+    # Whether the scheduled requests have all the output tokens they
+    # need to perform grammar bitmask computation.
+    pending_structured_output_tokens: bool = False
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # EC Cache Connector metadata
+    ec_connector_metadata: ECConnectorMetadata | None = None
+
+    @classmethod
+    def make_empty(cls) -> "SchedulerOutput":
+        return cls(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+
+@dataclass
+class GrammarOutput:
+    # ids of structured output requests.
+    structured_output_request_ids: list[str]
+    # Bitmask ordered as structured_output_request_ids.
+    grammar_bitmask: "npt.NDArray[np.int32]"

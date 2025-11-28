@@ -10,18 +10,39 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t>
+template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
 __global__ void rms_norm_kernel(
-    scalar_t* __restrict__ out,          // [..., hidden_size]
-    const scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int64_t input_stride,
+    scalar_t* __restrict__ out,           // [..., hidden_size]
+    const scalar_t* __restrict__ input,   // [..., hidden_size]
+    const int64_t input_stride_d2,        // input.stride(-2)
+    const int64_t input_stride_d3,        // input.stride(-3)
+    const int64_t input_stride_d4,        // input.stride(-4)
+    const int64_t input_shape_d2,         // input.size(-2)
+    const int64_t input_shape_d3,         // input.size(-3)
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
-  const scalar_t* input_row = input + blockIdx.x * input_stride;
+  const scalar_t* input_row;
+  if constexpr (NUM_DIMS == 2) {
+    // 2D for layernorm normal case [batch_size, hidden]
+    input_row = input + blockIdx.x * input_stride_d2;
+  } else if constexpr (NUM_DIMS == 3) {
+    // 3D for q/k norm [batch_size, num_heads, head_size]
+    int batch_idx = blockIdx.x / input_shape_d2;
+    int head_idx = blockIdx.x % input_shape_d2;
+    input_row =
+        input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+  } else if constexpr (NUM_DIMS == 4) {
+    // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
+    int batch_idx = blockIdx.x / (input_shape_d3 * input_shape_d2);
+    int remaining = blockIdx.x % (input_shape_d3 * input_shape_d2);
+    int seq_idx = remaining / input_shape_d2;
+    int head_idx = remaining % input_shape_d2;
+    input_row = input + batch_idx * input_stride_d4 +
+                seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+  }
 
-  constexpr int VEC_SIZE = 8;
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
@@ -45,10 +66,20 @@ __global__ void rms_norm_kernel(
   }
   __syncthreads();
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)input[blockIdx.x * input_stride + idx];
-    out[blockIdx.x * hidden_size + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+  scalar_t* out_row = out + blockIdx.x * hidden_size;
+  auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+  auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
+  for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
+    vec_n_t<scalar_t, VEC_SIZE> dst;
+    vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
+    vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; j++) {
+      float x = static_cast<float>(src1.val[j]);
+      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+    }
+    v_out[i] = dst;
   }
 }
 
@@ -155,30 +186,44 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
               double epsilon) {
   TORCH_CHECK(out.is_contiguous());
+  if (input.stride(-1) != 1) {
+    input = input.contiguous();
+  }
   TORCH_CHECK(input.stride(-1) == 1);
   TORCH_CHECK(weight.is_contiguous());
 
   int hidden_size = input.size(-1);
 
-  // We cannot just use `input.stride(-2)` if the tensor is not row-major.
-  // Instead, we use a 2d view to get the second-innermost stride.
-  // That way the dimensions (except the last one) can be arbitrarily permuted.
-  torch::Tensor input_view = input.view({-1, hidden_size});
+  int num_tokens = input.numel() / hidden_size;
+  int num_dims = input.dim();
+  int64_t input_stride_d2 = input.stride(-2);
+  int64_t input_stride_d3 = (num_dims >= 3) ? input.stride(-3) : 0;
+  int64_t input_stride_d4 = (num_dims >= 4) ? input.stride(-4) : 0;
+  int64_t input_shape_d2 = (num_dims >= 3) ? input.size(-2) : 0;
+  int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
 
-  int num_tokens = input_view.numel() / hidden_size;
-  int64_t input_stride = input_view.stride(-2);
-
+  // For large num_tokens, use smaller blocks to increase SM concurrency.
+  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input_view));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input_view.scalar_type(), "rms_norm_kernel", [&] {
-        vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            out.data_ptr<scalar_t>(), input_view.data_ptr<scalar_t>(),
-            input_stride, weight.data_ptr<scalar_t>(), epsilon, num_tokens,
-            hidden_size);
+  VLLM_DISPATCH_RANK234(num_dims, [&] {
+    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
+      const int calculated_vec_size =
+          std::gcd(16 / sizeof(scalar_t), hidden_size);
+      const int block_size =
+          std::min(hidden_size / calculated_vec_size, max_block_size);
+      dim3 block(block_size);
+      VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
+        vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank>
+            <<<grid, block, 0, stream>>>(
+                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+                input_stride_d2, input_stride_d3, input_stride_d4,
+                input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
+                epsilon, num_tokens, hidden_size);
       });
+    });
+  });
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \

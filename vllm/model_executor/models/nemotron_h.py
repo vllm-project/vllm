@@ -20,6 +20,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
+from itertools import islice
 
 import torch
 from torch import nn
@@ -49,7 +50,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -62,6 +62,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MixtureOfExperts,
     SupportsLoRA,
+    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -375,8 +376,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        output = torch.empty_like(hidden_states)
-        self.mixer(hidden_states, output)
+        output = self.mixer(hidden_states)
         return output, residual
 
 
@@ -511,21 +511,14 @@ class NemotronHModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
@@ -548,13 +541,13 @@ class NemotronHModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             len(config.hybrid_override_pattern), get_layer, prefix=f"{prefix}.layers"
         )
-        self.make_empty_intmd_tensors = make_empty_intermediate_tensors_factory(
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
 
         self.norm_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -563,20 +556,19 @@ class NemotronHModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        residual = None
-        for i, layer in enumerate(self.layers):
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -632,6 +624,9 @@ class NemotronHModel(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                if is_pp_missing_parameter(name, self):
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -677,6 +672,9 @@ class NemotronHModel(nn.Module):
                     if is_expert_weight:
                         continue
 
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -695,6 +693,7 @@ class NemotronHForCausalLM(
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
+    SupportsMambaPrefixCaching,
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
@@ -760,7 +759,7 @@ class NemotronHForCausalLM(
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         self.quant_config = vllm_config.quant_config
@@ -771,33 +770,25 @@ class NemotronHForCausalLM(
         self.model = NemotronHModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
-        self.make_empty_intmd_tensors = self.model.make_empty_intmd_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
         # Set MoE hyperparameters
         if self.model.has_moe:
             self.expert_weights = []
             self.num_expert_groups = config.n_group
 
-            self.moe_layers: list[SharedFusedMoE] = []
+            self.moe_layers = []
             example_moe = None
             for layer in self.model.layers:
                 if isinstance(layer, NemotronHMoEDecoderLayer):
@@ -813,22 +804,6 @@ class NemotronHForCausalLM(
             self.num_routed_experts = example_moe.n_routed_experts
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def update_physical_experts_metadata(
         self,
@@ -847,8 +822,8 @@ class NemotronHForCausalLM(
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

@@ -19,13 +19,13 @@ On the client side, run:
 import argparse
 import asyncio
 import contextlib
-import gc
 import importlib.util
 import json
 import os
 import random
 import shutil
 import time
+import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
@@ -48,6 +48,8 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -188,9 +190,16 @@ async def get_request(
             total_requests,
             request_rate,
         )
+        assert current_request_rate > 0.0, (
+            f"Obtained non-positive request rate {current_request_rate}."
+        )
         request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
             delay_ts.append(0)
+        elif burstiness == float("inf"):
+            # when burstiness tends to infinity, the delay time becomes constant
+            # and tends to the inverse of the request rate
+            delay_ts.append(1.0 / current_request_rate)
         else:
             theta = 1.0 / (current_request_rate * burstiness)
 
@@ -1160,7 +1169,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--request-id-prefix",
         type=str,
         required=False,
-        default="benchmark-serving",
+        default=f"bench-{uuid.uuid4().hex[:8]}-",
         help="Specify the prefix of request id.",
     )
 
@@ -1325,8 +1334,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         api_url = f"{args.base_url}{args.endpoint}"
         base_url = f"{args.base_url}"
     else:
-        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        base_url = f"http://{args.host}:{args.port}"
+        host_port = join_host_port(args.host, args.port)
+        api_url = f"http://{host_port}{args.endpoint}"
+        base_url = f"http://{host_port}"
 
     # Headers
     headers = None
@@ -1350,6 +1360,14 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # when using random datasets, default to ignoring EOS
+    # so generation runs to the requested length
+    if (
+        args.dataset_name in ("random", "random-mm")
+        and args.backend in OPENAI_COMPATIBLE_BACKENDS
+    ):
+        args.ignore_eos = True
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
@@ -1398,8 +1416,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
-    gc.collect()
-    gc.freeze()
+    freeze_gc_heap()
 
     benchmark_result = await benchmark(
         task_type=task_type,

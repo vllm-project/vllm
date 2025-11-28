@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
@@ -35,23 +35,27 @@ class BatchDescriptor(NamedTuple):
     """
 
     num_tokens: int
-    uniform_decode: bool = False
+    num_reqs: int | None = None
     """
-    False can also be used for an uniform decode batch to dispatch to the 
-    cudagraph supporting non-uniform batches.
+    Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
+    the cudagraphs can handle any number of requests.
+    """
+    uniform: bool = False
+    """
+    True if all the requests in the batch have the same number of tokens.
     """
     has_lora: bool = False
     """
     Whether this batch has active LoRA adapters.
     """
 
-    @property
-    def non_uniform(self) -> "BatchDescriptor":
+    def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
         """
-        Return a non-uniform version of current batch descriptor.
+        Return a relaxed version of current batch descriptor that is still compatible
+        with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
         """
         return BatchDescriptor(
-            self.num_tokens, uniform_decode=False, has_lora=self.has_lora
+            self.num_tokens, num_reqs=None, uniform=False, has_lora=self.has_lora
         )
 
 
@@ -153,7 +157,7 @@ class DPMetadata:
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
         """
-        Context mamager for setting self.local_sizes. Same as self.chunked_sizes
+        Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(
@@ -185,18 +189,13 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     """
-    Type AttentionMetadata for v0, 
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
     Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
     for each microbatch.
     Set dynamically for each forward pass
     """
-    attn_metadata: Union[
-        "AttentionMetadata",
-        dict[str, "AttentionMetadata"],
-        list[dict[str, "AttentionMetadata"]],
-    ]
+    attn_metadata: dict[str, "AttentionMetadata"] | list[dict[str, "AttentionMetadata"]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -224,6 +223,10 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def is_forward_context_available() -> bool:
+    return _forward_context is not None
 
 
 def create_forward_context(
@@ -324,14 +327,7 @@ def set_forward_context(
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = (
-                    attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
-                )
-            else:
-                # for v1 attention backends
-                batchsize = num_tokens
+            batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch

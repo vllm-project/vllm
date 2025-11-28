@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -54,8 +55,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
-
-from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
@@ -121,6 +120,7 @@ def fused_moe_kernel_gptq_awq(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -356,6 +356,7 @@ def fused_moe_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -646,7 +647,6 @@ def invoke_fused_moe_kernel(
                 bit,
             )
             return
-
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
@@ -686,6 +686,7 @@ def invoke_fused_moe_kernel(
         )
     else:
         config = config.copy()
+        config["SPLIT_K"] = 1
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
@@ -816,6 +817,9 @@ def get_config_file_name(
     E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
+    # Set device_name to H200 if a device from the H200 family is detected
+    if "H200" in device_name.split("_"):
+        device_name = "NVIDIA_H200"
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
         "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
@@ -868,8 +872,10 @@ def get_moe_configs(
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info(
-                    "Using configuration from %s for MoE layer.", config_file_path
+                logger.info_once(
+                    "Using configuration from %s for MoE layer.",
+                    config_file_path,
+                    scope="global",
                 )
                 # If a configuration has been found, return it
                 tuned_config = json.load(f)
@@ -983,6 +989,7 @@ def get_default_config(
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
+            "SPLIT_K": 1,
         }
         return config
 
@@ -996,6 +1003,7 @@ def get_default_config(
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 32,
+            "SPLIT_K": 1,
             "num_warps": 4,
             "num_stages": 3 if not current_platform.is_rocm() else 2,
         }
@@ -1006,19 +1014,20 @@ def get_default_config(
         bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk, block_shape[1], E, bit)
         if use_moe_wna16_cuda:
-            config = {"BLOCK_SIZE_M": min(16, M)}
+            config = {"BLOCK_SIZE_M": min(16, M), "SPLIT_K": 1}
         elif M <= 20:
-            config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         elif M <= 40:
-            config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         else:
-            config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
+            config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
     elif M <= E:
         config = {
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 32,
             "BLOCK_SIZE_K": 64,
             "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
         }
     else:
         config = {
@@ -1026,6 +1035,7 @@ def get_default_config(
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
+            "SPLIT_K": 1,
         }
     return config
 
@@ -1080,11 +1090,11 @@ def vllm_topk_softmax(
     return topk_weights, topk_indices
 
 
-def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
-    if is_rocm_aiter_moe_enabled():
-        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
-
-        return rocm_aiter_topk_softmax
+def dispatch_topk_func(
+    use_rocm_aiter: bool = False,
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
+        return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
 
 
@@ -1112,7 +1122,7 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func()
+    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
     topk_weights, topk_ids = topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
@@ -1238,7 +1248,6 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1252,7 +1261,6 @@ def eplb_map_to_physical_and_record(
         expert_load_view: The expert load view.
         logical_to_physical_map: The logical to physical map.
         logical_replica_count: The logical replica count.
-        indices_type: The indices type.
 
     Returns:
         The physical expert ids.
@@ -1302,9 +1310,6 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-
-    if indices_type is not None:
-        topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
 
 
@@ -1321,24 +1326,37 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    if scoring_func == "softmax":
+    if scoring_func == "sigmoid":
+        # Fully fused kernel path for sigmoid
+        topk_values, topk_indices = ops.grouped_topk(
+            gating_output,  # raw logits
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias.to(gating_output.dtype),
+            1,  # scoring_func=1 for sigmoid
+        )
+    elif scoring_func == "softmax":
+        # Apply softmax in Python, then use fused kernel
+        # TODO: Add support for softmax in kernel
         scores = torch.softmax(gating_output, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        topk_values, topk_indices = ops.grouped_topk(
+            scores,  # pre-computed scores
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias.to(gating_output.dtype),
+            0,  # scoring_func=0 (no activation, scores already computed)
+        )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
-    topk_values, topk_indices = ops.grouped_topk(
-        scores,
-        scores_with_bias.to(scores.dtype),
-        num_expert_group,
-        topk_group,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-    )
-    return topk_values.to(torch.float32), topk_indices.to(torch.int32)
+    # Fused kernel outputs float32 values and int32 indices directly
+    return topk_values, topk_indices
 
 
 def inplace_fused_experts(
