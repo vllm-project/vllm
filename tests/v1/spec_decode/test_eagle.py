@@ -103,16 +103,23 @@ def test_prepare_next_token_ids():
         mock_request.num_computed_tokens = 0
         mock_requests[req_id] = mock_request
 
+    # explicitly discard the last request
+    discarded_req_mask = torch.tensor(
+        [False, False, False, True], dtype=torch.bool, device=device
+    )
     sampled_token_ids = [
         [0, 1, -1, -1, -1],  # 1 accepted, 3 rejected, "1" sampled
         [0, 1, 2, 3, 4],  # all accepted, "4" sampled
         [-1, -1, -1, -1, -1],  # sampling skipped, use backup token "30"
-        [-1, -1, -1, -1, -1],  # this request will be discarded
+        [0, 1, 2, -1, -1],  # explicitly discarded, sampling should be ignored
     ]
     sampled_token_ids_tensor = torch.tensor(
         sampled_token_ids, dtype=torch.int32, device=device
     )
     sampled_token_ids_cpu = [[i for i in seq if i != -1] for seq in sampled_token_ids]
+    for i in range(len(sampled_token_ids_cpu)):
+        if discarded_req_mask[i]:
+            sampled_token_ids_cpu[i] = []
 
     expected_next_token_ids_cpu = [1, 4, 30, 40]
     expected_next_token_ids_tensor = torch.tensor(
@@ -136,9 +143,6 @@ def test_prepare_next_token_ids():
         device=device,
     )
 
-    discarded_req_indices = torch.tensor([3], dtype=torch.int64, device=device)
-    num_discarded_reqs = 1
-
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
@@ -149,8 +153,7 @@ def test_prepare_next_token_ids():
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,
-            discarded_req_indices,
-            num_discarded_reqs,
+            discarded_req_mask,
         )
     )
 
