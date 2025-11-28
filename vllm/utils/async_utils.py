@@ -257,6 +257,10 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
         return False
 
 
+def _coro_anext(it: AsyncGenerator[T, None]):
+    return anext(it)
+
+
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T, None],
 ) -> AsyncGenerator[tuple[int, T], None]:
@@ -274,7 +278,9 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
+    awaits = {
+        loop.create_task(_coro_anext(it)): (i, it) for i, it in enumerate(iterators)
+    }
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -283,7 +289,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair
+                    awaits[loop.create_task(_coro_anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
