@@ -979,5 +979,58 @@ class rocm_aiter_ops:
 
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
+    @staticmethod
+    def shuffle_weight_a16w4(
+        tensor: torch.Tensor, NLane: int, gate_up: bool
+    ) -> torch.Tensor:
+        """
+        Shuffle weight tensor for w4a16 quantization.
+        
+        Args:
+            tensor: Weight tensor to shuffle
+            NLane: Number of lanes (typically 16)
+            gate_up: Whether this is gate/up projection (True) or down projection (False)
+        
+        Returns:
+            Shuffled weight tensor
+        """
+        from aiter.ops.shuffle import shuffle_weight_a16w4
+        
+        return shuffle_weight_a16w4(tensor, NLane=NLane, gate_up=gate_up)
+
+    @staticmethod
+    def shuffle_scale_a16w4(
+        tensor: torch.Tensor, experts_cnt: int, gate_up: bool
+    ) -> torch.Tensor:
+        """
+        Shuffle scale tensor for w4a16 quantization.
+        
+        Args:
+            tensor: Scale tensor to shuffle [n_experts, k_]
+            experts_cnt: Number of experts
+            gate_up: Whether this is gate/up projection (True) or down projection (False)
+        
+        Returns:
+            Shuffled scale tensor
+        """
+        from aiter.ops.shuffle import shuffle_scale_a16w4
+        
+        return shuffle_scale_a16w4(tensor, experts_cnt=experts_cnt, gate_up=gate_up)
+
+    @staticmethod
+    def f32_to_e8m0(tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Convert float32 tensor to e8m0 format.
+        
+        Args:
+            tensor: Float32 tensor
+        
+        Returns:
+            Tensor in e8m0 format
+        """
+        from aiter.utility import fp4_utils
+        
+        return fp4_utils.f32_to_e8m0(tensor)
+
 
 rocm_aiter_ops.register_ops_once()

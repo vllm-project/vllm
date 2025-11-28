@@ -647,6 +647,8 @@ def invoke_fused_moe_kernel(
                 bit,
             )
             return
+
+        print("fused_moe_kernel_gptq_awq")
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
