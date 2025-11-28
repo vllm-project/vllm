@@ -69,7 +69,6 @@ else:
     ParallelConfig = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
-    AttnTypeStr = Any
 
 logger = init_logger(__name__)
 
