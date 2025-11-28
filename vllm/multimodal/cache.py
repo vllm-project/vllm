@@ -5,7 +5,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, Generic, Optional, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
 import torch
 from typing_extensions import override
@@ -663,7 +663,7 @@ class BaseMultiModalReceiverCache(
         return mm_features
 
     @abstractmethod
-    def touch_cache_receiver(self, mm_hash: str, mm_item: _I | None = None) -> None:
+    def touch_cache_receiver(self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None) -> None:
         """
         Update the cache eviction order for a multi-modal item.
 
