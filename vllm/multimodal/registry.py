@@ -202,7 +202,7 @@ class MultiModalRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if hasattr(model_cls, "_processor_factory"):
+            if "_processor_factory" in model_cls.__dict__:
                 logger.warning(
                     "Model class %s already has a multi-modal processor "
                     "registered to %s. It is overwritten by the new one.",
