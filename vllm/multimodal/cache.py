@@ -303,6 +303,22 @@ class BaseMultiModalProcessorCache(
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
     @abstractmethod
+    def touch_cache_sender(
+        self,
+        mm_hash: str,
+    ) -> None:
+        """
+        Update the cache eviction order for a multi-modal item.
+
+        This is used to touch the item in the cache without changing
+        its value.
+
+        Args:
+            mm_hash: The hash of the multi-modal item.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
         Get (and reset) the multi-modal cache stats.
@@ -353,6 +369,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         return mm_item
 
+    @override
     def touch_cache_sender(
         self,
         mm_hash: str,
@@ -698,7 +715,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_cache_receiver(
-        self, mm_hash: str, mm_item: Optional["MultiModalKwargsItem"] = None
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None
     ) -> None:
         self._cache.touch(mm_hash)
 
@@ -756,7 +773,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_cache_receiver(
-        self, mm_hash: str, mm_item: Optional["MultiModalKwargsItem"] = None
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.
         Increments reader_count on receiver side."""
