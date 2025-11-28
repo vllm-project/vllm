@@ -27,7 +27,7 @@ def parser():
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--enable-feature", action="store_true")
     parser.add_argument("--hf-overrides", type=json.loads)
-    parser.add_argument("-O", "--compilation-config", type=json.loads)
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
     parser.add_argument("--optimization-level", type=int)
     return parser
 
@@ -167,8 +167,8 @@ def test_dict_args(parser):
         "--hf-overrides.key2.key4",
         "val3",
         # Test compile config and compilation mode
-        "-O.use_inductor_graph_partition=true",
-        "-O.backend",
+        "-cc.use_inductor_graph_partition=true",
+        "-cc.backend",
         "custom",
         "-O1",
         # Test = sign
@@ -191,9 +191,9 @@ def test_dict_args(parser):
         "--hf_overrides.key14.key15",
         "-minus.and.dot",
         # Test array values
-        "-O.custom_ops+",
+        "-cc.custom_ops+",
         "-quant_fp8",
-        "-O.custom_ops+=+silu_mul,-rms_norm",
+        "-cc.custom_ops+=+silu_mul,-rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -234,7 +234,7 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         "--hf-overrides.key1",
         "val2",
         "-O1",
-        "-O.mode",
+        "-cc.mode",
         "2",
         "-O3",
     ]
@@ -380,29 +380,29 @@ def test_load_config_file(tmp_path):
 
 
 def test_compilation_mode_string_values(parser):
-    """Test that -O.mode accepts both integer and string mode values."""
-    args = parser.parse_args(["-O.mode", "0"])
+    """Test that -cc.mode accepts both integer and string mode values."""
+    args = parser.parse_args(["-cc.mode", "0"])
     assert args.compilation_config == {"mode": 0}
 
     args = parser.parse_args(["-O3"])
     assert args.optimization_level == 3
 
-    args = parser.parse_args(["-O.mode=NONE"])
+    args = parser.parse_args(["-cc.mode=NONE"])
     assert args.compilation_config == {"mode": "NONE"}
 
-    args = parser.parse_args(["-O.mode", "STOCK_TORCH_COMPILE"])
+    args = parser.parse_args(["-cc.mode", "STOCK_TORCH_COMPILE"])
     assert args.compilation_config == {"mode": "STOCK_TORCH_COMPILE"}
 
-    args = parser.parse_args(["-O.mode=DYNAMO_TRACE_ONCE"])
+    args = parser.parse_args(["-cc.mode=DYNAMO_TRACE_ONCE"])
     assert args.compilation_config == {"mode": "DYNAMO_TRACE_ONCE"}
 
-    args = parser.parse_args(["-O.mode", "VLLM_COMPILE"])
+    args = parser.parse_args(["-cc.mode", "VLLM_COMPILE"])
     assert args.compilation_config == {"mode": "VLLM_COMPILE"}
 
-    args = parser.parse_args(["-O.mode=none"])
+    args = parser.parse_args(["-cc.mode=none"])
     assert args.compilation_config == {"mode": "none"}
 
-    args = parser.parse_args(["-O.mode=vllm_compile"])
+    args = parser.parse_args(["-cc.mode=vllm_compile"])
     assert args.compilation_config == {"mode": "vllm_compile"}
 
 
@@ -458,3 +458,25 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
+
+
+def test_o_legacy_syntax_deprecation(caplog_vllm):
+    """Test that -O.* dotted syntax emits warnings and converts correctly to -cc syntax."""
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
+
+    # Test that -O.backend gets converted correctly AND emits warning
+    args = parser.parse_args(["-O.backend=eager"])
+    assert args.compilation_config == {"backend": "eager"}
+
+    # Check that deprecation warning was logged
+    assert len(caplog_vllm.records) >= 1
+    assert (
+        "The -O.* dotted syntax for --compilation-config is deprecated"
+        in caplog_vllm.text
+    )
+
+    # Test that -O.mode gets converted correctly
+    # Note: warning_once won't emit again in same session
+    args = parser.parse_args(["-O.mode=2"])
+    assert args.compilation_config == {"mode": 2}

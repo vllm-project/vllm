@@ -1113,7 +1113,7 @@ class EngineArgs:
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
         vllm_group.add_argument(
-            "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
+            "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
