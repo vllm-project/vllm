@@ -1079,7 +1079,7 @@ class OpenAIServing:
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         messages: list[ChatCompletionMessageParam],
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -1095,6 +1095,11 @@ class OpenAIServing:
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
     ]:
+        if tokenizer is None:
+            raise ValueError(
+                "Unable to get tokenizer because skip_tokenizer_init is True"
+            )
+
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
