@@ -110,7 +110,11 @@ json2envs() {
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  timeout 1200 bash -c '
+  local timeout_val="1200"
+  if [ "$TEST_MODE" == "1" ];then
+    timeout_val="1"
+  fi
+  timeout "$timeout_val" bash -c '
     until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
@@ -238,7 +242,11 @@ run_latency_tests() {
     echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval "$latency_command"
+    if [ "$TEST_MODE" == "1" ];then
+      echo "TEST MODE for '$latency_command'"
+    else
+      eval "$latency_command"
+    fi
 
     kill_gpu_processes
 
@@ -306,7 +314,11 @@ run_throughput_tests() {
     echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval "$throughput_command"
+    if [ "$TEST_MODE" == "1" ];then
+      echo "TEST MODE for '$throughput_command'"
+    else
+      eval "$throughput_command"
+    fi
 
     kill_gpu_processes
 
@@ -316,12 +328,54 @@ run_throughput_tests() {
 run_serving_tests() {
   # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
+  #
+  # Supported JSON formats:
+  # 1) Old format: top-level array
+  #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #
+  # 2) New format: object with defaults + tests
+  #    {
+  #      "defaults": { ... },
+  #      "tests": [
+  #        {
+  #          "test_name": "...",
+  #          "server_parameters": {...},
+  #          "client_parameters": {...},
+  #          "server_environment_variables": {...},
+  #          "qps_list": [...],
+  #          "max_concurrency_list": [...]
+  #        },
+  #        ...
+  #      ]
+  #    }
 
   local serving_test_file
   serving_test_file=$1
 
   # Iterate over serving tests
-  jq -c '.[]' "$serving_test_file" | while read -r params; do
+  jq -c '
+    if type == "array" then
+      # Old format: each element is a test
+      .[]
+    elif (type == "object" and has("tests")) then
+      # New format: merge defaults into each test
+      . as $root
+      | ($root.defaults // {}) as $d
+      | ($root.tests // [])[]
+      # default qps / max_concurrency from defaults if missing
+      | .qps_list = (.qps_list // $d.qps_list)
+      | .max_concurrency_list = (.max_concurrency_list // $d.max_concurrency_list)
+      # merge envs / params: test overrides defaults
+      | .server_environment_variables =
+          (($d.server_environment_variables // {}) + (.server_environment_variables // {}))
+      | .server_parameters =
+          (($d.server_parameters // {}) + (.server_parameters // {}))
+      | .client_parameters =
+          (($d.client_parameters // {}) + (.client_parameters // {}))
+    else
+      error("Unsupported serving test file format: must be array or object with .tests")
+    end
+  ' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -335,20 +389,25 @@ run_serving_tests() {
       continue
     fi
 
-    # get client and server arguments
+    # get client and server arguments (after jq merge for new-format)
     server_params=$(echo "$params" | jq -r '.server_parameters')
     server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
+
     server_args=$(json2args "$server_params")
     server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
+
+    # qps_list
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
+
+    # max_concurrency_list (fallback to num_prompts if missing)
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
     if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
-        num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
-        max_concurrency_list="[$num_prompts]"
+      num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
+      max_concurrency_list="[$num_prompts]"
     fi
     max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     echo "Running over max concurrency list $max_concurrency_list"
@@ -386,8 +445,13 @@ run_serving_tests() {
     # support remote vllm server
     client_remote_args=""
     if [[ -z "${REMOTE_HOST}" ]]; then
-      bash -c "$server_command" &
-      server_pid=$!
+      if [ "$TEST_MODE" == "1" ]; then
+        echo "TEST MODE for '$server_command'"
+        server_pid=''
+      else
+        bash -c "$server_command" &
+        server_pid=$!
+      fi
       # wait until the server is alive
       if wait_for_server; then
         echo ""
@@ -432,7 +496,11 @@ run_serving_tests() {
         echo "Running test case $test_name with qps $qps"
         echo "Client command: $client_command"
 
-        bash -c "$client_command"
+        if [ "$TEST_MODE" == "1" ]; then
+          echo "TEST MODE for '$client_command'"
+        else
+          bash -c "$client_command"
+        fi
 
         # record the benchmarking commands
         jq_output=$(jq -n \
@@ -450,7 +518,7 @@ run_serving_tests() {
     done
 
     # clean up
-    kill -9 $server_pid
+    kill -9 $server_pid 2>/dev/null || true
     kill_gpu_processes
   done
 }
