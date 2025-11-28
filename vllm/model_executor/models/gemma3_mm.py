@@ -237,8 +237,9 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         )
         max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
 
-        # Result in the max possible feature size (h:w = max_num_crops:1)
-        return ImageSize(height=50 * max_num_crops, width=50)
+        vision_config = self.get_hf_config().vision_config
+        native_size = vision_config.image_size
+        return ImageSize(height=native_size * max_num_crops, width=native_size)
 
 
 class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
