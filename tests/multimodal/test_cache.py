@@ -326,7 +326,6 @@ def _run_test_cache_eviction_lru(
     for h in request2_hashes:
         p1_cache.get_and_update_item(request2_items[h], h)
 
-    print(list(p0_cache._cache.order))
     expected_hashes = ["image_D", "image_E", "image_A", "image_C"]
     assert list(p0_cache._cache.order) == expected_hashes
 
