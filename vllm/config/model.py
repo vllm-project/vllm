@@ -353,7 +353,6 @@ class ModelConfig:
             "hf_token",
             "hf_overrides",
             "logits_processor_pattern",
-            "enable_sleep_mode",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
