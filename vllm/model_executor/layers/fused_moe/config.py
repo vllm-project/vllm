@@ -719,6 +719,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -925,6 +929,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.moe_parallel_config.use_nixl_ep_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):

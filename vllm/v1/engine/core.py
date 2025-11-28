@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
@@ -104,6 +105,9 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
@@ -220,12 +224,10 @@ class EngineCore:
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
-                dp_group = getattr(self, "dp_group", None)
-                assert dp_group is not None
-                self.available_gpu_memory_for_kv_cache = (
-                    ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
-                )
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                # NOTE(yongji): should already be set
+                # during _eep_scale_up_before_kv_init
+                assert self.available_gpu_memory_for_kv_cache > 0
                 available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
                     kv_cache_specs
                 )
@@ -553,6 +555,14 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
 
+    def _eep_scale_up_before_kv_init(self):
+        raise NotImplementedError
+
+    def _eep_send_worker_notification(
+        self, notification_type: str, vllm_config: VllmConfig | None = None
+    ):
+        raise NotImplementedError
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -605,6 +615,12 @@ class EngineCoreProc(EngineCore):
                 and not vllm_config.parallel_config.data_parallel_external_lb
             )
 
+            self.addresses = addresses
+            self.process_input_queue_block = True
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_send_worker_notification(
+                    "NEW_WORKERS_INIT_READY", vllm_config=vllm_config
+                )
             self._init_data_parallel(vllm_config)
 
             super().__init__(
@@ -874,8 +890,14 @@ class EngineCoreProc(EngineCore):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+            block = self.process_input_queue_block
+            try:
+                req = self.input_queue.get(block=block)
+                self._handle_client_request(*req)
+            except queue.Empty:
+                break
+            if not block:
+                break
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -1018,6 +1040,11 @@ class EngineCoreProc(EngineCore):
                 for input_socket, _ in poller.poll():
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    # NOTE(yongji): ignore READY message sent by DP coordinator
+                    # that is used to notify newly started engines
+                    if type_frame.buffer == b"READY":
+                        assert input_socket == coord_socket
+                        continue
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
@@ -1120,6 +1147,10 @@ class DPEngineCoreProc(EngineCoreProc):
         self.current_wave = 0
         self.last_counts = (0, 0)
 
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+
+        self.eep_scaling_state: ElasticEPScalingState | None = None
+
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         super().__init__(
@@ -1154,7 +1185,9 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
         self.dp_rank = dp_rank
-        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        self.dp_group, self.dp_store = (
+            vllm_config.parallel_config.stateless_init_dp_group(return_store=True)
+        )
 
     def shutdown(self):
         super().shutdown()
@@ -1210,7 +1243,12 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
-            # 2) Step the engine core.
+            if self.eep_scaling_state is not None:
+                _ = self.eep_scaling_state.progress()
+                if self.eep_scaling_state.is_complete():
+                    self.process_input_queue_block = True
+                    self.eep_scaling_state = None
+
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
@@ -1260,54 +1298,124 @@ class DPEngineCoreProc(EngineCoreProc):
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
-        stateless_destroy_torch_distributed_process_group(self.dp_group)
-        self.shutdown()
+        from copy import deepcopy
 
-        parallel_config = self.vllm_config.parallel_config
-        old_dp_size = parallel_config.data_parallel_size
-        parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
-        if reconfig_request.new_data_parallel_rank != -1:
-            parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank
-        # local rank specifies device visibility, it should not be changed
-        assert (
-            reconfig_request.new_data_parallel_rank_local
-            == ReconfigureRankType.KEEP_CURRENT_RANK
-        )
-        parallel_config.data_parallel_master_ip = (
-            reconfig_request.new_data_parallel_master_ip
-        )
-        parallel_config.data_parallel_master_port = (
-            reconfig_request.new_data_parallel_master_port
-        )
-        if reconfig_request.new_data_parallel_rank != -2:
-            self.dp_rank = parallel_config.data_parallel_rank
-            self.dp_group = parallel_config.stateless_init_dp_group()
-        reconfig_request.new_data_parallel_master_port = (
-            parallel_config.data_parallel_master_port
-        )
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
-        self.model_executor.reinitialize_distributed(reconfig_request)
-        if reconfig_request.new_data_parallel_size > old_dp_size:
-            assert self.available_gpu_memory_for_kv_cache > 0
-            # pass available_gpu_memory_for_kv_cache from existing
-            # engine-cores to new engine-cores so they can directly
-            # use it in _initialize_kv_caches() rather than profiling.
-            ParallelConfig.sync_kv_cache_memory_size(
-                self.dp_group, self.available_gpu_memory_for_kv_cache
-            )
-            # NOTE(yongji): newly joined workers require dummy_run even
-            # CUDA graph is not used
-            self.model_executor.collective_rpc("compile_or_warm_up_model")
+        new_parallel_config = deepcopy(self.vllm_config.parallel_config)
+        old_dp_size = new_parallel_config.data_parallel_size
+        new_parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
         if (
             reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+            != ReconfigureRankType.KEEP_CURRENT_RANK
         ):
-            self.shutdown()
-            logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
-        else:
-            logger.info(
-                "Distributed environment reinitialized for DP rank %s", self.dp_rank
+            new_parallel_config.data_parallel_rank = (
+                reconfig_request.new_data_parallel_rank
             )
+        new_parallel_config.data_parallel_master_ip = (
+            reconfig_request.new_data_parallel_master_ip
+        )
+        new_parallel_config.data_parallel_master_port = (
+            reconfig_request.new_data_parallel_master_port
+        )
+        new_parallel_config._data_parallel_master_port_list = (
+            reconfig_request.new_data_parallel_master_port_list
+        )
+
+        is_scale_down = reconfig_request.new_data_parallel_size < old_dp_size
+        is_shutdown = (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        )
+
+        self.eep_scaling_state = ElasticEPScalingState(
+            model_executor=self.model_executor,
+            engine_core=self,
+            vllm_config=self.vllm_config,
+            new_parallel_config=new_parallel_config,
+            worker_type="removing" if is_shutdown else "existing",
+            scale_type="scale_down" if is_scale_down else "scale_up",
+            reconfig_request=reconfig_request,
+        )
+        self.process_input_queue_block = False
+        logger.info(
+            "[Elastic EP] Received reconfiguration request and starting scaling up/down"
+        )
+
+    def _eep_send_worker_notification(
+        self, notification_type: str, vllm_config: VllmConfig | None = None
+    ):
+        """
+        Send notifications to EngineCoreClient, which can then forward
+        the notifications to other engine processes. It is used for:
+        1) In scale up: new workers to notify exisiting workers that they are ready;
+        2) In scale down: removing workers to notify EngineCoreClient
+           so EngineCoreClient can release their ray placement groups;
+        3) Both scale up/down: to notify EngineCoreClient that exisiting workers
+           have already switched to the new parallel setup.
+        """
+        if vllm_config is None:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        else:
+            dp_rank = vllm_config.parallel_config.data_parallel_rank
+        notification_data = (notification_type, dp_rank)
+        outputs = EngineCoreOutputs(
+            utility_output=UtilityOutput(
+                call_id=-1, result=UtilityResult(notification_data)
+            )
+        )
+        outputs.engine_index = self.engine_index
+
+        if hasattr(self, "output_thread") and self.output_thread.is_alive():
+            self.output_queue.put_nowait((0, outputs))
+        else:
+            encoder = MsgpackEncoder()
+            with (
+                zmq.Context() as ctx,
+                make_zmq_socket(
+                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+                ) as socket,
+            ):
+                socket.send_multipart(encoder.encode(outputs))
+
+    def eep_handle_worker_notification(self, notification_type: str):
+        """
+        Handle notification received from EngineCoreClient (forwarded from new workers).
+        """
+        assert self.eep_scaling_state is not None
+        self.eep_scaling_state.handle_notification(notification_type)
+
+    def _eep_scale_up_before_kv_init(self):
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
+
+        self.eep_scaling_state = ElasticEPScalingState(
+            model_executor=self.model_executor,
+            engine_core=self,
+            vllm_config=self.vllm_config,
+            new_parallel_config=self.vllm_config.parallel_config,
+            worker_type="new",
+            scale_type="scale_up",
+            reconfig_request=None,
+        )
+        self.model_executor.collective_rpc("init_device")
+        kwargs = {}
+        if isinstance(self.model_executor, RayDistributedExecutor):
+            kwargs["max_concurrent_workers"] = (
+                self.vllm_config.parallel_config.max_parallel_loading_workers
+            )
+        self.model_executor.collective_rpc("load_model")
+        self._eep_send_worker_notification("NEW_WORKERS_WEIGHTS_INIT_READY")
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("receive_weights",)
+        )
+        self.available_gpu_memory_for_kv_cache = (
+            ParallelConfig.sync_kv_cache_memory_size(self.dp_group, -1)
+        )
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("prepare_new_worker",)
+        )
+        self.process_input_queue_block = False
 
 
 class DPEngineCoreActor(DPEngineCoreProc):
