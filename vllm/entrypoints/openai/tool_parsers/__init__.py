@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "xlam_tool_parser",
         "xLAMToolParser",
     ),
+    "step_deepresearch": (
+        "step_deepresearch_tool_parser",
+        "StepDeepResearchToolParser",
+    ),
 }
 
 
