@@ -1489,6 +1489,7 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
+<<<<<<< HEAD
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
@@ -1632,3 +1633,11 @@ class Scheduler(SchedulerInterface):
         # Return the IDs of affected running requests to skip in
         # update_from_output.
         return sync_affected_req_ids
+=======
+            if req_id not in self.requests:
+                logger.warning(
+                    "Got finished sending KV transfer for request %s,"
+                    "but the request is already freed.", req_id)
+            else:
+                self._free_blocks(self.requests[req_id])
+>>>>>>> upstream/releases/v0.11.0

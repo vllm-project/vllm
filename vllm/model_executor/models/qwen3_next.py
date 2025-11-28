@@ -12,6 +12,7 @@ from transformers.activations import ACT2FN
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
+<<<<<<< HEAD
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -27,6 +28,14 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+=======
+from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
+                         VllmConfig, get_current_vllm_config)
+from vllm.distributed import (divide, get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
@@ -99,6 +108,10 @@ KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
+<<<<<<< HEAD
+=======
+
+>>>>>>> upstream/releases/v0.11.0
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -136,6 +149,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
+<<<<<<< HEAD
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
@@ -143,6 +157,19 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
+=======
+        self.experts = FusedMoE(num_experts=self.n_routed_experts,
+                                top_k=config.num_experts_per_tok,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.moe_intermediate_size,
+                                reduce_results=False,
+                                renormalize=config.norm_topk_prob,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts",
+                                enable_eplb=self.enable_eplb,
+                                num_redundant_experts=self.n_redundant_experts,
+                                is_sequence_parallel=self.is_sequence_parallel)
+>>>>>>> upstream/releases/v0.11.0
 
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
 
@@ -185,6 +212,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
+<<<<<<< HEAD
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
             final_hidden_states = self.experts(
@@ -197,13 +225,30 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
+=======
+        shared_output = None
+>>>>>>> upstream/releases/v0.11.0
         if self.shared_expert is not None:
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
+<<<<<<< HEAD
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
+=======
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
+
+        if shared_output is not None:
+            final_hidden_states = final_hidden_states + shared_output
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0)
+>>>>>>> upstream/releases/v0.11.0
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
@@ -881,17 +926,27 @@ class Qwen3NextDecoderLayer(nn.Module):
                     1,
                     1,
                     config.hidden_size,
+<<<<<<< HEAD
                     dtype=config.dtype,
                 ),
             )
+=======
+                    dtype=config.torch_dtype,
+                ), )
+>>>>>>> upstream/releases/v0.11.0
             self.ffn_layer_scale = torch.nn.Parameter(
                 torch.zeros(
                     1,
                     1,
                     config.hidden_size,
+<<<<<<< HEAD
                     dtype=config.dtype,
                 ),
             )
+=======
+                    dtype=config.torch_dtype,
+                ), )
+>>>>>>> upstream/releases/v0.11.0
 
     def forward(
         self,
@@ -960,7 +1015,11 @@ class Qwen3NextModel(nn.Module):
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
+<<<<<<< HEAD
 
+=======
+        lora_config = vllm_config.lora_config
+>>>>>>> upstream/releases/v0.11.0
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 

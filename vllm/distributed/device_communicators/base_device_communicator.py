@@ -63,12 +63,19 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
+<<<<<<< HEAD
     def dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
     ):
+=======
+    def dispatch(self,
+                 hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor,
+                 is_sequence_parallel: bool = False):
+>>>>>>> upstream/releases/v0.11.0
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -77,7 +84,13 @@ class All2AllManagerBase:
     def max_sms_used(self) -> int | None:
         return None  # None means it could use the whole GPU
 
+<<<<<<< HEAD
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
+=======
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False):
+>>>>>>> upstream/releases/v0.11.0
         raise NotImplementedError
 
     def destroy(self):
@@ -279,7 +292,11 @@ class DeviceCommunicatorBase:
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+<<<<<<< HEAD
         is_sequence_parallel: bool = False,
+=======
+        is_sequence_parallel: bool = False
+>>>>>>> upstream/releases/v0.11.0
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Dispatch the hidden states and router logits to the appropriate device.
@@ -287,9 +304,15 @@ class DeviceCommunicatorBase:
         """
         return hidden_states, router_logits
 
+<<<<<<< HEAD
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
+=======
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
+>>>>>>> upstream/releases/v0.11.0
         """
         Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.

@@ -69,6 +69,7 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
+<<<<<<< HEAD
         return (
             2
             * self.block_size
@@ -76,6 +77,10 @@ class AttentionSpec(KVCacheSpec):
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+=======
+        return 2 * self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
+>>>>>>> upstream/releases/v0.11.0
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,7 @@ class FullAttentionSpec(AttentionSpec):
             "All attention layers in the same KV cache group must be FullAttentionSpec."
         )
 
+<<<<<<< HEAD
         sliding_window = set(
             spec.sliding_window for spec in specs if spec.sliding_window is not None
         )
@@ -135,6 +141,14 @@ class FullAttentionSpec(AttentionSpec):
         assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         )
+=======
+        sliding_window = set(spec.sliding_window for spec in specs
+                             if spec.sliding_window is not None)
+        attention_chunk_size = set(spec.attention_chunk_size for spec in specs
+                                   if spec.attention_chunk_size is not None)
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge")
+>>>>>>> upstream/releases/v0.11.0
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -161,7 +175,11 @@ class FullAttentionSpec(AttentionSpec):
 @dataclass(frozen=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
+<<<<<<< HEAD
     cache_dtype_str: str | None = None
+=======
+    cache_dtype_str: Optional[str] = None
+>>>>>>> upstream/releases/v0.11.0
 
     @property
     def page_size_bytes(self) -> int:
@@ -169,16 +187,22 @@ class MLAAttentionSpec(FullAttentionSpec):
             # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
             #  for details.
             return self.block_size * 656
+<<<<<<< HEAD
         return (
             self.block_size
             * self.num_kv_heads
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+=======
+        return self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
+>>>>>>> upstream/releases/v0.11.0
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+<<<<<<< HEAD
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
@@ -186,6 +210,14 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must use the same "
             "quantization method."
         )
+=======
+            "All attention layers in the same KV cache group must be "
+            "MLAAttentionSpec.")
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method.")
+>>>>>>> upstream/releases/v0.11.0
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -318,12 +350,21 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         one_spec = next(iter(kv_cache_specs.values()))
         if isinstance(one_spec, FullAttentionSpec):
             return all(
+<<<<<<< HEAD
                 isinstance(spec, FullAttentionSpec) for spec in kv_cache_specs.values()
             )
         elif isinstance(one_spec, CrossAttentionSpec):
             return all(
                 isinstance(spec, CrossAttentionSpec) for spec in kv_cache_specs.values()
             )
+=======
+                isinstance(spec, FullAttentionSpec)
+                for spec in kv_cache_specs.values())
+        elif isinstance(one_spec, CrossAttentionSpec):
+            return all(
+                isinstance(spec, CrossAttentionSpec)
+                for spec in kv_cache_specs.values())
+>>>>>>> upstream/releases/v0.11.0
         elif isinstance(one_spec, SlidingWindowSpec):
             return all(
                 isinstance(spec, SlidingWindowSpec)

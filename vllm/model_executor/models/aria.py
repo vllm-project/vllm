@@ -9,8 +9,12 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
+<<<<<<< HEAD
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+=======
+from vllm.config import QuantizationConfig, VllmConfig
+>>>>>>> upstream/releases/v0.11.0
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -314,9 +318,15 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
+<<<<<<< HEAD
         self.mlp = AriaTextMoELayer(
             config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
+=======
+        self.mlp = AriaTextMoELayer(config,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.mlp")
+>>>>>>> upstream/releases/v0.11.0
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):

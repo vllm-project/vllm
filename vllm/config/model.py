@@ -170,10 +170,17 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+<<<<<<< HEAD
     allowed_media_domains: list[str] | None = None
     """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
+=======
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
+    revision: Optional[str] = None
+>>>>>>> upstream/releases/v0.11.0
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
     code_revision: str | None = None
@@ -1203,6 +1210,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
+<<<<<<< HEAD
         elif self.hf_text_config.model_type in (
             "deepseek_v2",
             "deepseek_v3",
@@ -1214,13 +1222,23 @@ class ModelConfig:
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
         ):
+=======
+        elif self.hf_text_config.model_type in \
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp',
+              'kimi_k2', 'longcat_flash'):
+>>>>>>> upstream/releases/v0.11.0
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
+<<<<<<< HEAD
             return (
                 self.hf_text_config.model.model_type
                 in ("deepseek_v2", "deepseek_v3", "deepseek_v32")
+=======
+            return self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
+>>>>>>> upstream/releases/v0.11.0
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False

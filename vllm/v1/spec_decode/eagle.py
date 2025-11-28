@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -81,6 +82,7 @@ class EagleProposer:
             vllm_config.model_config
         )
 
+<<<<<<< HEAD
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
@@ -107,6 +109,21 @@ class EagleProposer:
                 cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
                 and not self.speculative_config.enforce_eager
             )
+=======
+        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.draft_indexer_metadata_builder: Optional[
+            AttentionMetadataBuilder] = None
+        self.attn_layer_names: list[str] = []
+        self.indexer_layer_names: list[str] = []
+
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager
+                               and not self.speculative_config.enforce_eager)
+        self.cudagraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+>>>>>>> upstream/releases/v0.11.0
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
@@ -245,6 +262,7 @@ class EagleProposer:
 
         assert self.runner is not None
 
+<<<<<<< HEAD
         if self.attn_metadata_builder is None:
             attn_metadata_builder = self._get_attention_metadata_builder()
         else:
@@ -253,14 +271,26 @@ class EagleProposer:
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
+=======
+        # FIXME: need to consider multiple kv_cache_groups
+        ubatch_id = dbo_current_ubatch_id()
+        attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0)
+>>>>>>> upstream/releases/v0.11.0
         # FIXME: support hybrid kv for draft model (remove separate indexer)
         if self.draft_indexer_metadata_builder:
             draft_indexer_metadata = (
                 self.draft_indexer_metadata_builder.build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
                     draft_index=0,
+<<<<<<< HEAD
                 )
             )
+=======
+                ))
+>>>>>>> upstream/releases/v0.11.0
         else:
             draft_indexer_metadata = None
         # At this moment, we assume all eagle layers belong to the same KV
@@ -268,6 +298,33 @@ class EagleProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+<<<<<<< HEAD
+=======
+        for layer_name in self.indexer_layer_names:
+            assert draft_indexer_metadata is not None
+            per_layer_attn_metadata[layer_name] = draft_indexer_metadata
+
+        if self.use_cuda_graph and \
+                num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+        else:
+            num_input_tokens = num_tokens
+        # copy inputs to buffer for cudagraph
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
+        if self.is_multimodal_model:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings=mm_embeds or None,
+            )
+            self.inputs_embeds[:num_tokens] = inputs_embeds
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
+        else:
+            inputs_embeds = None
+            input_ids = self.input_ids[:num_input_tokens]
+>>>>>>> upstream/releases/v0.11.0
 
         for layer_name in self.indexer_layer_names:
             assert draft_indexer_metadata is not None
@@ -471,8 +528,13 @@ class EagleProposer:
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+<<<<<<< HEAD
                 common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
             )
+=======
+                common_attn_metadata=common_attn_metadata,
+                draft_index=token_index + 1)
+>>>>>>> upstream/releases/v0.11.0
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -961,6 +1023,7 @@ class EagleProposer:
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
+<<<<<<< HEAD
             get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
         )
         # FIXME: support hybrid kv for draft model
@@ -969,6 +1032,13 @@ class EagleProposer:
                 self.vllm_config, DeepseekV32IndexerCache
             ).keys()
         )
+=======
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+        # FIXME: support hybrid kv for draft model
+        target_indexer_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config,
+                                        DeepseekV32IndexerCache).keys())
+>>>>>>> upstream/releases/v0.11.0
 
         from vllm.compilation.backends import set_model_tag
 
@@ -978,6 +1048,7 @@ class EagleProposer:
             )
 
         draft_attn_layer_names = (
+<<<<<<< HEAD
             get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
             - target_attn_layer_names
         )
@@ -986,11 +1057,21 @@ class EagleProposer:
         )
         draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
         self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
+=======
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+        indexer_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                     DeepseekV32IndexerCache)
+        draft_indexer_layer_names = (indexer_layers.keys() -
+                                     target_indexer_layer_names)
+        self.attn_layer_names = list(draft_attn_layer_names)
+>>>>>>> upstream/releases/v0.11.0
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
             first_layer = self.indexer_layer_names[0]
             self.draft_indexer_metadata_builder = (
+<<<<<<< HEAD
                 indexer_layers[first_layer]
                 .get_attn_backend()
                 .get_builder_cls()(
@@ -1015,6 +1096,17 @@ class EagleProposer:
                     "falling back to text-only mode"
                 )
                 self.supports_mm_inputs = False
+=======
+                indexer_layers[first_layer].get_attn_backend().get_builder_cls(
+                )(
+                    indexer_layers[first_layer].get_kv_cache_spec(),
+                    self.indexer_layer_names,
+                    self.vllm_config,
+                    self.device,
+                ))
+        else:
+            self.draft_indexer_metadata_builder = None
+>>>>>>> upstream/releases/v0.11.0
 
         if supports_multimodal(target_model):
             # handle multimodality

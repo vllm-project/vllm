@@ -411,6 +411,7 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+<<<<<<< HEAD
         from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 
         return rmsnorm_fn(
@@ -422,6 +423,9 @@ class RMSNormGated(CustomOp):
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
         )
+=======
+        return poly_norm(x, self.weight, self.bias, self.variance_epsilon)
+>>>>>>> upstream/releases/v0.11.0
 
 
 class LayerNorm(nn.Module):
@@ -437,6 +441,11 @@ class LayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor):
+<<<<<<< HEAD
         return F.layer_norm(
             x.float(), (self.dim,), self.weight, self.bias, self.eps
         ).type_as(x)
+=======
+        return F.layer_norm(x.float(), (self.dim, ), self.weight, self.bias,
+                            self.eps).type_as(x)
+>>>>>>> upstream/releases/v0.11.0

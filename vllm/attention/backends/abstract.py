@@ -75,7 +75,11 @@ class AttentionBackend(ABC):
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
+<<<<<<< HEAD
     ) -> tuple[int, ...]:
+=======
+    ) -> Tuple[int, ...]:
+>>>>>>> upstream/releases/v0.11.0
         raise NotImplementedError
 
     @staticmethod

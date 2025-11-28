@@ -419,9 +419,14 @@ class Qwen3VLMoeForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
+<<<<<<< HEAD
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
+=======
+        if not multimodal_config.get_limit_per_prompt("image") and \
+            not multimodal_config.get_limit_per_prompt("video"):
+>>>>>>> upstream/releases/v0.11.0
             self.visual = None
         else:
             self.visual = Qwen3_VisionTransformer(
@@ -431,6 +436,7 @@ class Qwen3VLMoeForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
+<<<<<<< HEAD
 
         self.language_model = Qwen3MoeLLMForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
@@ -440,6 +446,8 @@ class Qwen3VLMoeForConditionalGeneration(
         self.packed_modules_mapping = (
             self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
+=======
+>>>>>>> upstream/releases/v0.11.0
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -456,8 +464,12 @@ class Qwen3VLMoeForConditionalGeneration(
             self.deepstack_input_embeds = [
                 torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
+<<<<<<< HEAD
                     config.text_config.hidden_size,
                 )
+=======
+                    config.text_config.hidden_size)
+>>>>>>> upstream/releases/v0.11.0
                 for _ in range(self.deepstack_num_level)
             ]
         else:

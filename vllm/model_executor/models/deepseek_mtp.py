@@ -68,9 +68,15 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+<<<<<<< HEAD
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
         self.device = current_platform.device_type
+=======
+        self.eh_proj = nn.Linear(config.hidden_size * 2,
+                                 config.hidden_size,
+                                 bias=False)
+>>>>>>> upstream/releases/v0.11.0
 
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
@@ -79,6 +85,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,
                 dtype=torch.int32,
+<<<<<<< HEAD
                 device=self.device,
             )
         else:
@@ -93,6 +100,14 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             config=self.config,
             topk_indices_buffer=topk_indices_buffer,
         )
+=======
+                device="cuda")
+        else:
+            topk_indices_buffer = None
+        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix,
+                                                topk_indices_buffer)
+>>>>>>> upstream/releases/v0.11.0
 
     def forward(
         self,

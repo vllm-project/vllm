@@ -200,12 +200,23 @@ class Attention(nn.Module, AttentionLayerBase):
         num_heads: int,
         head_size: int,
         scale: float,
+<<<<<<< HEAD
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
+=======
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        logits_soft_cap: Optional[float] = None,
+        per_layer_sliding_window: Optional[int] = None,
+        use_mla: bool = False,
+        use_sparse: bool = False,
+>>>>>>> upstream/releases/v0.11.0
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
@@ -249,6 +260,22 @@ class Attention(nn.Module, AttentionLayerBase):
             self, quant_config, prefix, kv_cache_dtype, calculate_kv_scales
         )
 
+<<<<<<< HEAD
+=======
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
+        # The output scale on host memory. This should be the input scale of
+        # the quant op after this attention layer.
+        self._o_scale_float: Optional[float] = None
+
+        self.use_mla = use_mla
+        self.use_sparse = use_sparse
+>>>>>>> upstream/releases/v0.11.0
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -259,6 +286,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
+<<<<<<< HEAD
             self.attn_backend = get_attn_backend(
                 head_size,
                 dtype,
@@ -268,6 +296,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 has_sink=self.has_sink,
                 attn_type=attn_type,
             )
+=======
+            self.attn_backend = get_attn_backend(head_size,
+                                                 dtype,
+                                                 kv_cache_dtype,
+                                                 block_size,
+                                                 use_mla=use_mla,
+                                                 has_sink=self.has_sink,
+                                                 use_sparse=use_sparse)
+>>>>>>> upstream/releases/v0.11.0
         else:
             self.attn_backend = attn_backend
 

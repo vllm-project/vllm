@@ -49,6 +49,7 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = ["TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"]
 
     @classmethod
+<<<<<<< HEAD
     def import_kernels(cls) -> None:
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
@@ -72,6 +73,16 @@ class TpuPlatform(Platform):
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on TPU.")
         if selected_backend != AttentionBackendEnum.PALLAS:
+=======
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink, use_sparse) -> str:
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on TPU.")
+        if selected_backend != _Backend.PALLAS:
+>>>>>>> upstream/releases/v0.11.0
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         logger.info("Using Pallas V1 backend.")

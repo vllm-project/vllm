@@ -1931,28 +1931,44 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         (
             QWEN2VL_MODEL_ID,
             {
+<<<<<<< HEAD
                 "add_vision_id",
                 "add_generation_prompt",
                 "continue_final_message",
                 "tools",
+=======
+                "add_vision_id", "add_generation_prompt",
+                "continue_final_message", "tools"
+>>>>>>> upstream/releases/v0.11.0
             },
         ),
         (
             QWEN3_MODEL_ID,
             {
+<<<<<<< HEAD
                 "enable_thinking",
                 "add_generation_prompt",
                 "continue_final_message",
                 "tools",
+=======
+                "enable_thinking", "add_generation_prompt",
+                "continue_final_message", "tools"
+>>>>>>> upstream/releases/v0.11.0
             },
         ),
     ],
 )
+<<<<<<< HEAD
 def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwargs):
+=======
+def test_resolve_hf_chat_template_kwargs(sample_json_schema, model,
+                                         expected_kwargs):
+>>>>>>> upstream/releases/v0.11.0
     """checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
+<<<<<<< HEAD
     tools = [
         {
             "type": "function",
@@ -1963,6 +1979,16 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
             },
         }
     ]
+=======
+    tools = ([{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema,
+        },
+    }])
+>>>>>>> upstream/releases/v0.11.0
 
     chat_template_kwargs = {
         # both unused
@@ -1970,7 +1996,10 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+<<<<<<< HEAD
         "tokenize": True,
+=======
+>>>>>>> upstream/releases/v0.11.0
         # used by tokenizer
         "continue_final_message": True,
         "tools": tools,
@@ -1989,12 +2018,18 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
+<<<<<<< HEAD
         skip_tokenizer_init=model_info.require_embed_inputs,
         enable_prompt_embeds=model_info.require_embed_inputs,
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
+=======
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
+>>>>>>> upstream/releases/v0.11.0
 
     # Build the tokenizer
     tokenizer = get_tokenizer(
@@ -2009,6 +2044,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tools=tools,
         model_config=model_config,
     )
+<<<<<<< HEAD
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
     ):
@@ -2019,10 +2055,13 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
             chat_template=chat_template,
             chat_template_kwargs=chat_template_kwargs,
         )
+=======
+>>>>>>> upstream/releases/v0.11.0
     resolved_chat_template_kwargs = resolve_chat_template_kwargs(
         tokenizer,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+<<<<<<< HEAD
         raise_on_unexpected=False,
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
@@ -2060,6 +2099,11 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
     # Unknown params should be filtered out
     assert "unknown_param" not in resolved_mock
 
+=======
+    )
+    assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
+
+>>>>>>> upstream/releases/v0.11.0
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`

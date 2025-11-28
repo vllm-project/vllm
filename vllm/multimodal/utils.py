@@ -58,7 +58,11 @@ class MediaConnector:
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
+<<<<<<< HEAD
         allowed_media_domains: list[str] | None = None,
+=======
+        allowed_media_domains: Optional[list[str]] = None,
+>>>>>>> upstream/releases/v0.11.0
     ) -> None:
         """
         Args:
@@ -133,6 +137,7 @@ class MediaConnector:
         return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+<<<<<<< HEAD
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -142,6 +147,14 @@ class MediaConnector:
                 f"{self.allowed_media_domains}. Input URL domain: "
                 f"{url_spec.hostname}"
             )
+=======
+        if self.allowed_media_domains and url_spec.hostname not in \
+            self.allowed_media_domains:
+            raise ValueError(
+                f"The URL must be from one of the allowed domains: "
+                f"{self.allowed_media_domains}. Input URL domain: "
+                f"{url_spec.hostname}")
+>>>>>>> upstream/releases/v0.11.0
 
     def load_from_url(
         self,
@@ -192,7 +205,12 @@ class MediaConnector:
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
+<<<<<<< HEAD
             future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
+=======
+            future = loop.run_in_executor(global_thread_pool,
+                                          media_io.load_bytes, data)
+>>>>>>> upstream/releases/v0.11.0
             return await future
 
         if url_spec.scheme == "data":

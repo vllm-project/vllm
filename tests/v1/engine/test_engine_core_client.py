@@ -804,6 +804,13 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
 
         # Only implement the methods that are actually called during init
         from vllm.v1.kv_cache_interface import FullAttentionSpec
+<<<<<<< HEAD
+=======
+        mock_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=1,
+                                      head_size=64,
+                                      dtype=torch.float16)
+>>>>>>> upstream/releases/v0.11.0
 
         mock_spec = FullAttentionSpec(
             block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16

@@ -28,6 +28,7 @@ from vllm.attention import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+<<<<<<< HEAD
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -35,6 +36,11 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+=======
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+from vllm.model_executor.layers.fused_moe import FusedMoE
+>>>>>>> upstream/releases/v0.11.0
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -44,10 +50,14 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
+<<<<<<< HEAD
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+=======
+    default_weight_loader, maybe_remap_kv_scale_name)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
@@ -85,9 +95,12 @@ class Llama4MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+<<<<<<< HEAD
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
+=======
+>>>>>>> upstream/releases/v0.11.0
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(
@@ -136,8 +149,11 @@ class Llama4MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             is_sequence_parallel=self.is_sequence_parallel,
+<<<<<<< HEAD
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+=======
+>>>>>>> upstream/releases/v0.11.0
         )
 
     def forward(self, hidden_states):
@@ -312,12 +328,20 @@ class Llama4Attention(nn.Module):
 
 
 class Llama4DecoderLayer(nn.Module):
+<<<<<<< HEAD
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         config: Llama4TextConfig | None = None,
     ) -> None:
+=======
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[Llama4TextConfig] = None) -> None:
+>>>>>>> upstream/releases/v0.11.0
         super().__init__()
 
         config = config or vllm_config.model_config.hf_config

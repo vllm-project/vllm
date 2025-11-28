@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cfloat>
+#include <cfloat>  // FLT_MIN
+#include <map>
+#include <vector>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -428,16 +430,31 @@ __global__ void concat_and_cache_ds_mla_kernel(
   const int64_t dst_idx_start =
       block_idx * block_stride + block_offset * entry_stride;
 
+<<<<<<< HEAD
   // For the NoPE part, each tile of 128 elements is handled by half of one warp
   // (16 threads). There are 4 total tiles, so 2 warps (64 threads).
   // Lanes 0 and 16 of each warp write the scale values for that warp's tiles.
   // The RoPE part (last 64 elements) is handled by another 1 warp (32 threads).
   // So in total, we use 3 warps (96 threads) per block.
+=======
+  // Create 4 tile scales in shared memory
+  __shared__ float smem[20];
+  float* shard_abs_max = smem;
+  float* tile_scales = smem + 16;
+
+  // For the NoPE part, each tile of 128 elements is handled by 4 warps
+  // (128 threads). There are 4 total tiles, so 16 warps (512 threads).
+  // The first thread of the first warp in each tile writes the scale
+  // value for the tile. The RoPE part (last 64 elements) is handled
+  // by another 2 warps (64 threads).
+  // So in total, we use 18 warps (576 threads) per block.
+>>>>>>> upstream/releases/v0.11.0
 
   // Cast kv_cache to 16_bit for RoPE values
   scalar_t* kv_cache_16bit =
       reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
 
+<<<<<<< HEAD
   // The last warp handles the RoPE part
   if (threadIdx.x >= 64) {
     // Each thread handles two elements of RoPE
@@ -503,6 +520,70 @@ __global__ void concat_and_cache_ds_mla_kernel(
   // Store as aligned 64-bit writes
   *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) =
       *reinterpret_cast<const uint64_t*>(result);
+=======
+  // The last 64 threads handle the RoPE part
+  if (threadIdx.x >= kv_lora_rank) {
+    const int8_t pe_idx = threadIdx.x - kv_lora_rank;
+    const int64_t src_idx = token_idx * k_pe_stride + pe_idx;
+    // RoPE values start after the packed 8-bit NoPE values and the
+    // 32-bit scales
+    const int64_t dst_idx = kv_lora_rank / 2 + 8 + pe_idx;
+    kv_cache_16bit[dst_idx] = k_pe[src_idx];
+    return;
+  }
+
+  // Determine the scale for each chunk of NoPE
+  const int16_t tile_idx = threadIdx.x >> 7;
+  const int16_t warp_idx = (threadIdx.x & 127) >> 5;
+  const int16_t lane_idx = threadIdx.x & 31;
+
+  // Load the NoPE element for this thread into registers
+  const int64_t src_idx = token_idx * kv_c_stride + threadIdx.x;
+  const scalar_t src_val = kv_c[src_idx];
+
+  // Warp-level reduction to find the max absolute value in the warp
+  float max_abs = fabsf(src_val);
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2) {
+#ifdef USE_ROCM
+    max_abs = fmaxf(max_abs, __shfl_down_sync(UINT64_MAX, max_abs, offset));
+#else
+    max_abs = fmaxf(max_abs, __shfl_down_sync(0xFFFFFFFF, max_abs, offset));
+#endif
+  }
+
+  // The first lane of each warp in each tile writes the max_abs of this part
+  // of the tile to shared memory
+  if (lane_idx == 0) {
+    shard_abs_max[tile_idx * 4 + warp_idx] = max_abs;
+  }
+  __syncthreads();
+
+  // The first lane of the first warp in each tile computes the scale for the
+  // tile and writes it to shared memory and to kv_cache
+  if (warp_idx == 0 && lane_idx == 0) {
+    float4 shard_abs_max_vec =
+        reinterpret_cast<float4*>(shard_abs_max)[tile_idx];
+    float tile_scale = fmaxf(fmaxf(shard_abs_max_vec.x, shard_abs_max_vec.y),
+                             fmaxf(shard_abs_max_vec.z, shard_abs_max_vec.w)) /
+                       448.f;
+
+    // Avoid division by zero in `scaled_convert`
+    tile_scales[tile_idx] = fmaxf(tile_scale, FLT_MIN);
+    float* kv_cache_32bit = reinterpret_cast<float*>(&kv_cache[dst_idx_start]);
+    const uint64_t dst_idx = kv_lora_rank / 4 + tile_idx;
+    kv_cache_32bit[dst_idx] = tile_scales[tile_idx];
+  }
+
+  __syncthreads();
+
+  // Now all threads in the block scale and write their element
+  const float scale_val = tile_scales[tile_idx];
+  const int64_t dst_idx = dst_idx_start + threadIdx.x;
+  kv_cache[dst_idx] =
+      fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
+          src_val, scale_val);
+>>>>>>> upstream/releases/v0.11.0
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -552,11 +633,15 @@ __global__ void indexer_k_quant_and_cache_kernel(
 #ifndef USE_ROCM
   __syncwarp();
 #endif
+<<<<<<< HEAD
 #if defined(__gfx942__)
   float scale = fmaxf(amax, 1e-4) / 224.0f;
 #else
   float scale = fmaxf(amax, 1e-4) / 448.0f;
 #endif
+=======
+  float scale = fmaxf(amax, 1e-4) / 448.0f;
+>>>>>>> upstream/releases/v0.11.0
   if (use_ue8m0) {
     scale = exp2f(ceilf(log2f(scale)));
   }
@@ -576,6 +661,7 @@ __global__ void indexer_k_quant_and_cache_kernel(
   }
 }
 
+<<<<<<< HEAD
 template <int BLOCK_Y_SIZE>
 __global__ void cp_gather_indexer_k_quant_cache_kernel(
     const char* __restrict__ kv_cache,  // [num_blocks, block_size,
@@ -640,6 +726,8 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
   }
 }
 
+=======
+>>>>>>> upstream/releases/v0.11.0
 }  // namespace vllm
 
 // KV_T is the data type of key and value tensors.
@@ -811,12 +899,22 @@ void concat_and_cache_mla(
 
   if (kv_cache_dtype == "fp8_ds_mla") {
     dim3 grid(num_tokens);
+<<<<<<< HEAD
     // For the NoPE part, each tile of 128 elements is handled by half of one
     // warp (16 threads). There are 4 total tiles, so 2 warps (64 threads).
     // Lanes 0 and 16 of each warp write the scale values for that warp's tiles.
     // The RoPE part (last 64 elements) is handled by another 1 warp (32
     // threads). So in total, we use 3 warps (96 threads) per block.
     dim3 block(96);
+=======
+    // For the NoPE part, each tile of 128 elements is handled by 4 warps
+    // (128 threads). There are 4 total tiles, so 16 warps (512 threads).
+    // The first thread of the first warp in each tile writes the scale
+    // value for the tile. The RoPE part (last 64 elements) is handled
+    // by another 2 warps (64 threads).
+    // So in total, we use 18 warps (576 threads) per block.
+    dim3 block(576);
+>>>>>>> upstream/releases/v0.11.0
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
   } else {
@@ -1240,6 +1338,7 @@ void indexer_k_quant_and_cache(
   DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
+<<<<<<< HEAD
 
 // Macro to dispatch the kernel based on the data amount.
 #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
@@ -1296,3 +1395,5 @@ void cp_gather_indexer_k_quant_cache(
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
   }
 }
+=======
+>>>>>>> upstream/releases/v0.11.0

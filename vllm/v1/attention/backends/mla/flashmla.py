@@ -254,7 +254,11 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
+<<<<<<< HEAD
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+=======
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+>>>>>>> upstream/releases/v0.11.0
         # TODO: (zyongye) decode function for mla here
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

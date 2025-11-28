@@ -666,13 +666,17 @@ def test_concat_and_cache_ds_mla(
     seed: int,
     device: str,
 ) -> None:
+<<<<<<< HEAD
     if current_platform.is_rocm():
         pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
+=======
+>>>>>>> upstream/releases/v0.11.0
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     kv_cache_dtype = "fp8_ds_mla"
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
+<<<<<<< HEAD
     torch.cuda.set_device(device)
 
     total_slots = num_blocks * block_size
@@ -692,6 +696,29 @@ def test_concat_and_cache_ds_mla(
         kv_cache_dtype=kv_cache_dtype,
         device=device,
     )
+=======
+
+    total_slots = num_blocks * block_size
+    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens,
+                       qk_rope_head_dim,
+                       dtype=dtype,
+                       device=device)
+    entry_size = kv_lora_rank + (4 * 4) + (2 * qk_rope_head_dim)
+
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(num_blocks,
+                                 block_size,
+                                 entry_size,
+                                 dtype=torch.uint8,
+                                 kv_cache_dtype=kv_cache_dtype,
+                                 device=device)
+>>>>>>> upstream/releases/v0.11.0
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
@@ -718,6 +745,7 @@ def test_concat_and_cache_ds_mla(
             manual_max = abs(tile_data_float[0])
             for j in range(1, 128):
                 manual_max = max(manual_max, abs(tile_data_float[j]))
+<<<<<<< HEAD
             tile_scale = manual_max / 448.0
 
             ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
@@ -728,6 +756,16 @@ def test_concat_and_cache_ds_mla(
                 tile_scale.item(),
                 kv_dtype="fp8",
             )
+=======
+            tile_scale = manual_max / 448.
+
+            ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
+
+            ops.convert_fp8(ref_cache_slice[tile_start:tile_end],
+                            tile_data,
+                            tile_scale.item(),
+                            kv_dtype="fp8")
+>>>>>>> upstream/releases/v0.11.0
 
         for j in range(qk_rope_head_dim):
             ref_cache_16bit[kv_lora_rank // 2 + 8 + j] = k_pe[i, j]
@@ -738,7 +776,12 @@ def test_concat_and_cache_ds_mla(
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
+<<<<<<< HEAD
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale)
+=======
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
+                             kv_cache_dtype, scale)
+>>>>>>> upstream/releases/v0.11.0
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
@@ -749,6 +792,7 @@ def test_concat_and_cache_ds_mla(
 
         kv_nope = kv_cache_slice[:kv_lora_rank]
         ref_nope = ref_cache_slice[:kv_lora_rank]
+<<<<<<< HEAD
         kv_scales = kv_cache_slice.view(torch.float32)[
             kv_lora_rank // 4 : kv_lora_rank // 4 + 4
         ]
@@ -757,6 +801,14 @@ def test_concat_and_cache_ds_mla(
         ]
         kv_rope = kv_cache_slice.view(dtype)[kv_lora_rank // 2 + 8 :]
         ref_rope = ref_cache_slice.view(dtype)[kv_lora_rank // 2 + 8 :]
+=======
+        kv_scales = kv_cache_slice.view(torch.float32)[kv_lora_rank //
+                                                       4:kv_lora_rank // 4 + 4]
+        ref_scales = ref_cache_slice.view(
+            torch.float32)[kv_lora_rank // 4:kv_lora_rank // 4 + 4]
+        kv_rope = kv_cache_slice.view(dtype)[kv_lora_rank // 2 + 8:]
+        ref_rope = ref_cache_slice.view(dtype)[kv_lora_rank // 2 + 8:]
+>>>>>>> upstream/releases/v0.11.0
 
         torch.testing.assert_close(kv_nope, ref_nope, atol=0.001, rtol=0.1)
         torch.testing.assert_close(kv_scales, ref_scales, atol=0.001, rtol=0.1)

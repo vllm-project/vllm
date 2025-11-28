@@ -34,6 +34,7 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
+<<<<<<< HEAD
     def import_kernels(cls) -> None:
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
@@ -70,6 +71,26 @@ class XPUPlatform(Platform):
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
             return AttentionBackendEnum.FLASH_ATTN.get_path()
+=======
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool, use_sparse) -> str:
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on XPU.")
+        use_v1 = envs.VLLM_USE_V1
+        if not use_v1:
+            raise ValueError("XPU backend only supports V1.")
+        TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN:
+            logger.info_once("Using Triton backend on V1 engine.")
+            return TRITON_ATTN
+        elif selected_backend == _Backend.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return FLASH_ATTN
+>>>>>>> upstream/releases/v0.11.0
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "

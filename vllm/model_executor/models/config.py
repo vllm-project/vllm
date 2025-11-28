@@ -346,6 +346,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # get attention page size (for 1 token)
+<<<<<<< HEAD
         # Attention backend constraints:
         # - FlashAttention (FA) requires block size to be multiple of 16
         # - MLA (Multi-head Latent Attention) requires larger alignment:
@@ -379,6 +380,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
             ).page_size_bytes
+=======
+        attn_page_size_1_token = FullAttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=kv_cache_dtype).page_size_bytes
+>>>>>>> upstream/releases/v0.11.0
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
@@ -483,6 +491,31 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
         if cache_config.cache_dtype.startswith("fp8"):
+            cache_config.cache_dtype = "fp8_ds_mla"
+            logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
+        if cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+            logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+
+class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
+        """
+        hf_config = vllm_config.model_config.hf_config
+
+        # Mirror the check in vllm/model_executor/models/deepseek_v2.py
+        is_v32 = hasattr(hf_config, "index_topk")
+        assert is_v32
+
+        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
+        #   "auto")
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto" or \
+            cache_config.cache_dtype.startswith("fp8"):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

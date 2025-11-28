@@ -87,7 +87,10 @@ def get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+<<<<<<< HEAD
     attn_type: str | None = None,
+=======
+>>>>>>> upstream/releases/v0.11.0
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -106,7 +109,10 @@ def get_attn_backend(
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
+<<<<<<< HEAD
         attn_type=attn_type,
+=======
+>>>>>>> upstream/releases/v0.11.0
     )
 
 
@@ -119,7 +125,10 @@ def _cached_get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+<<<<<<< HEAD
     attn_type: str | None = None,
+=======
+>>>>>>> upstream/releases/v0.11.0
 ) -> type[AttentionBackend]:
     # Check whether a particular choice of backend was
     # previously forced.
@@ -154,6 +163,7 @@ def _cached_get_attn_backend(
                 ) from e
 
     # get device-specific attn_backend
+<<<<<<< HEAD
     from vllm.platforms import current_platform
 
     sig = inspect.signature(current_platform.get_attn_backend_cls)
@@ -187,6 +197,11 @@ def _cached_get_attn_backend(
             use_sparse,
             attn_type,
         )
+=======
+    attention_cls = current_platform.get_attn_backend_cls(
+        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
+        use_mla, has_sink, use_sparse)
+>>>>>>> upstream/releases/v0.11.0
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"

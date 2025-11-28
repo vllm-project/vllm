@@ -63,16 +63,25 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
+<<<<<<< HEAD
 async def test_fetch_image_base64(
     url_images: dict[str, Image.Image], raw_image_url: str, suffix: str
 ):
+=======
+async def test_fetch_image_base64(url_images: dict[str, Image.Image],
+                                  raw_image_url: str, suffix: str):
+>>>>>>> upstream/releases/v0.11.0
     connector = MediaConnector(
         # Domain restriction should not apply to data URLs.
         allowed_media_domains=[
             "www.bogotobogo.com",
             "github.com",
+<<<<<<< HEAD
         ]
     )
+=======
+        ])
+>>>>>>> upstream/releases/v0.11.0
     url_image = url_images[raw_image_url]
 
     try:
@@ -409,6 +418,7 @@ def test_argsort_mm_positions(case):
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_allowed_media_domains(video_url: str, num_frames: int):
     connector = MediaConnector(
+<<<<<<< HEAD
         media_io_kwargs={
             "video": {
                 "num_frames": num_frames,
@@ -419,6 +429,15 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
             "github.com",
         ],
     )
+=======
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }},
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ])
+>>>>>>> upstream/releases/v0.11.0
 
     video_sync, metadata_sync = connector.fetch_video(video_url)
     video_async, metadata_async = await connector.fetch_video_async(video_url)

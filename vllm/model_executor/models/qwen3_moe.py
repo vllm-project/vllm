@@ -34,12 +34,18 @@ from torch import nn
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+<<<<<<< HEAD
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+=======
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -59,9 +65,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+<<<<<<< HEAD
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+=======
+    default_weight_loader, maybe_remap_kv_scale_name)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
@@ -160,6 +170,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
+<<<<<<< HEAD
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -174,6 +185,19 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             routing_method_type=RoutingMethodType.Renormalize,
         )
+=======
+        self.experts = FusedMoE(num_experts=self.n_routed_experts,
+                                top_k=config.num_experts_per_tok,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.moe_intermediate_size,
+                                reduce_results=True,
+                                renormalize=config.norm_topk_prob,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts",
+                                enable_eplb=self.enable_eplb,
+                                num_redundant_experts=self.n_redundant_experts,
+                                is_sequence_parallel=self.is_sequence_parallel)
+>>>>>>> upstream/releases/v0.11.0
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -204,6 +228,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
+            final_hidden_states = final_hidden_states[:num_tokens]
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
 
         # return to 1d if input is 1d
@@ -315,6 +344,10 @@ class Qwen3MoeAttention(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
+<<<<<<< HEAD
+=======
+
+>>>>>>> upstream/releases/v0.11.0
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -348,11 +381,18 @@ class Qwen3MoeDecoderLayer(nn.Module):
             [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         )
         if (layer_idx not in mlp_only_layers) and (
+<<<<<<< HEAD
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
             self.mlp = Qwen3MoeSparseMoeBlock(
                 vllm_config=vllm_config, prefix=f"{prefix}.mlp"
             )
+=======
+                config.num_experts > 0 and
+            (layer_idx + 1) % config.decoder_sparse_step == 0):
+            self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
+                                              prefix=f"{prefix}.mlp")
+>>>>>>> upstream/releases/v0.11.0
         else:
             self.mlp = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
@@ -411,7 +451,12 @@ class Qwen3MoeModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
+<<<<<<< HEAD
             lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config, prefix=prefix),
+=======
+            lambda prefix: Qwen3MoeDecoderLayer(vllm_config=vllm_config,
+                                                prefix=prefix),
+>>>>>>> upstream/releases/v0.11.0
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

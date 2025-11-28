@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
+<<<<<<< HEAD
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
@@ -59,6 +60,23 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
+=======
+from vllm.utils import cdiv, is_pin_memory_available
+from vllm.utils.flashinfer import (can_use_trtllm_attention,
+                                   flashinfer_disable_q_quantization,
+                                   supports_trtllm_attention,
+                                   use_trtllm_attention)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
+# yapf: enable
+>>>>>>> upstream/releases/v0.11.0
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024

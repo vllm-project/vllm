@@ -219,30 +219,23 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
-    "DeciLMForCausalLM": _HfExamplesInfo(
-        "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-        trust_remote_code=True,
-    ),
-    "DeepseekForCausalLM": _HfExamplesInfo(
-        "deepseek-ai/deepseek-moe-16b-base",
-        trust_remote_code=True,
-    ),
-    "DeepseekV2ForCausalLM": _HfExamplesInfo(
-        "deepseek-ai/DeepSeek-V2-Lite-Chat",
-        trust_remote_code=True,
-    ),
-    "DeepseekV3ForCausalLM": _HfExamplesInfo(
-        "deepseek-ai/DeepSeek-V3",
-        trust_remote_code=True,
-    ),
+    "DeciLMForCausalLM": _HfExamplesInfo("nvidia/Llama-3_3-Nemotron-Super-49B-v1", # noqa: E501
+                                         trust_remote_code=True),
+    "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
+    "DeepseekV2ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V2-Lite-Chat",  # noqa: E501
+                                         trust_remote_code=True),
+    "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
+                                         trust_remote_code=True),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
-    "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
-    "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
-    "ExaoneForCausalLM": _HfExamplesInfo(
-        "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
-    ),
-    "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
-    "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
+    "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT",
+                                            min_transformers_version="4.54"),
+    "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
+                                               min_transformers_version="4.54"),
+    "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct",
+                                         trust_remote_code=True),
+    "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B",
+                                          min_transformers_version="4.54"),
+    "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),

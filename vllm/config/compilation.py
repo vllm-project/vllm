@@ -527,6 +527,7 @@ class CompilationConfig:
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
+<<<<<<< HEAD
         "vllm::unified_attention",
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention",
@@ -539,6 +540,17 @@ class CompilationConfig:
         "vllm::gdn_attention_core",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
+=======
+        "vllm.unified_attention",
+        "vllm.unified_attention_with_output",
+        "vllm.mamba_mixer2",
+        "vllm.mamba_mixer",
+        "vllm.short_conv",
+        "vllm.linear_attention",
+        "vllm.plamo2_mamba_mixer",
+        "vllm.gdn_attention",
+        "vllm.sparse_attn_indexer",
+>>>>>>> upstream/releases/v0.11.0
     ]
 
     def compute_hash(self) -> str:

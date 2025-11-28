@@ -10,6 +10,7 @@ from transformers import GptOssConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+<<<<<<< HEAD
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -19,6 +20,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+=======
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -33,7 +40,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+<<<<<<< HEAD
 from vllm.platforms import current_platform
+=======
+>>>>>>> upstream/releases/v0.11.0
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 
@@ -161,6 +171,7 @@ class MLPBlock(torch.nn.Module):
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.router = torch.nn.Linear(config.hidden_size, config.num_local_experts)
         assert config.intermediate_size % self.world_size == 0
+<<<<<<< HEAD
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -175,18 +186,36 @@ class MLPBlock(torch.nn.Module):
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
         )
+=======
+        self.experts = FusedMoE(num_experts=config.num_local_experts,
+                                top_k=config.num_experts_per_tok,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.intermediate_size,
+                                reduce_results=True,
+                                renormalize=True,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts",
+                                apply_router_weight_on_input=False,
+                                has_bias=True,
+                                activation="swigluoai",
+                                is_sequence_parallel=self.is_sequence_parallel)
+>>>>>>> upstream/releases/v0.11.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         num_tokens = x.shape[0]
         if self.is_sequence_parallel:
             x = sequence_parallel_chunk(x)
 
+<<<<<<< HEAD
         if current_platform.is_rocm():
             g = rocm_unquantized_gemm(
                 self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:
             g = self.router(x)
+=======
+        g = self.router(x)
+>>>>>>> upstream/releases/v0.11.0
         x = self.experts(hidden_states=x, router_logits=g)
 
         if self.is_sequence_parallel:
@@ -199,7 +228,10 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
+<<<<<<< HEAD
         quant_config: QuantizationConfig,
+=======
+>>>>>>> upstream/releases/v0.11.0
         prefix: str = "",
     ):
         super().__init__()
@@ -208,6 +240,7 @@ class TransformerBlock(torch.nn.Module):
         cache_config = vllm_config.cache_config
 
         self.layer_idx = extract_layer_index(prefix)
+<<<<<<< HEAD
         self.attn = OAIAttention(
             config,
             prefix=f"{prefix}.attn",
@@ -215,6 +248,14 @@ class TransformerBlock(torch.nn.Module):
             cache_config=cache_config,
         )
         self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
+=======
+        self.attn = OAIAttention(config,
+                                 prefix=f"{prefix}.attn",
+                                 cache_config=cache_config)
+        self.mlp = MLPBlock(vllm_config,
+                            self.layer_idx,
+                            prefix=f"{prefix}.mlp")
+>>>>>>> upstream/releases/v0.11.0
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -248,7 +289,10 @@ class GptOssModel(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+<<<<<<< HEAD
         self.quant_config = vllm_config.quant_config
+=======
+>>>>>>> upstream/releases/v0.11.0
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(

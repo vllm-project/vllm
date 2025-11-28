@@ -391,6 +391,7 @@ class ParallelConfig:
     # Not needed for pplx-kernels as it can handle duplicate input tokens.
     @property
     def use_sequence_parallel_moe(self) -> bool:
+<<<<<<< HEAD
         return (
             self.all2all_backend
             in (
@@ -420,6 +421,14 @@ class ParallelConfig:
     @property
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
+=======
+        return (envs.VLLM_ALL2ALL_BACKEND
+                in ("allgather_reducescatter", "naive",
+                    "deepep_high_throughput", "deepep_low_latency")
+                and self.enable_expert_parallel
+                and self.tensor_parallel_size > 1
+                and self.data_parallel_size > 1)
+>>>>>>> upstream/releases/v0.11.0
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:

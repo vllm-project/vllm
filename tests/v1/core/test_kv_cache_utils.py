@@ -20,6 +20,7 @@ from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
+<<<<<<< HEAD
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
@@ -46,6 +47,20 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
+=======
+    BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
+    estimate_max_model_len, generate_block_hash_extra_keys,
+    generate_scheduler_kv_cache_config, get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config, get_request_block_hasher,
+    hash_block_tokens, init_none_hash, is_kv_cache_spec_uniform,
+    make_block_hash_with_group_id)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, MLAAttentionSpec,
+                                        SlidingWindowSpec,
+                                        UniformTypeKVCacheSpecs)
+from vllm.v1.metrics.stats import PrefixCacheStats
+>>>>>>> upstream/releases/v0.11.0
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -97,6 +112,7 @@ def make_request(
     )
 
 
+<<<<<<< HEAD
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -123,6 +139,30 @@ def new_sliding_window_spec(
         dtype=dtype,
         sliding_window=sliding_window,
     )
+=======
+def new_kv_cache_spec(block_size=16,
+                      num_kv_heads=2,
+                      head_size=64,
+                      dtype=torch.float32,
+                      sliding_window=None):
+    return FullAttentionSpec(block_size=block_size,
+                             num_kv_heads=num_kv_heads,
+                             head_size=head_size,
+                             dtype=dtype,
+                             sliding_window=sliding_window)
+
+
+def new_sliding_window_spec(block_size=16,
+                            num_kv_heads=2,
+                            head_size=64,
+                            dtype=torch.float32,
+                            sliding_window=1):
+    return SlidingWindowSpec(block_size=block_size,
+                             num_kv_heads=num_kv_heads,
+                             head_size=head_size,
+                             dtype=dtype,
+                             sliding_window=sliding_window)
+>>>>>>> upstream/releases/v0.11.0
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1662,6 +1702,7 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+<<<<<<< HEAD
     return MLAAttentionSpec(
         block_size=16,
         num_kv_heads=16,
@@ -1669,6 +1710,13 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+=======
+    return MLAAttentionSpec(block_size=16,
+                            num_kv_heads=16,
+                            head_size=64,
+                            dtype=torch.float32,
+                            cache_dtype_str=cache_dtype_str)
+>>>>>>> upstream/releases/v0.11.0
 
 
 def test_merge_mla_spec():
@@ -1706,6 +1754,7 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+<<<<<<< HEAD
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1791,3 +1840,5 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         )
     )
     assert block_hashes[1] == expected_hash2
+=======
+>>>>>>> upstream/releases/v0.11.0

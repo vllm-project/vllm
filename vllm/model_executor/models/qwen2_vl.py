@@ -984,7 +984,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_processor=None,
         )
 
+<<<<<<< HEAD
     def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
+=======
+    def _get_max_video_frames(self,
+                              max_tokens: int,
+                              start_num_frames: int = 1) -> int:
+>>>>>>> upstream/releases/v0.11.0
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = start_num_frames
@@ -1014,9 +1020,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_videos = mm_counts.get("video", 0)
 
         max_total_frames = self._get_max_video_frames(seq_len)
+<<<<<<< HEAD
         max_frames_per_video = min(
             max_total_frames // max(max_videos, 1), max_frames_per_video
         )
+=======
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   max_frames_per_video)
+>>>>>>> upstream/releases/v0.11.0
 
         return max(max_frames_per_video, 1)
 

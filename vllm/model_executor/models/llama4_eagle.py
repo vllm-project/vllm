@@ -59,6 +59,7 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
+<<<<<<< HEAD
         # Temporarily modify vllm_config.quant_config for draft model layers
         original_quant_config = vllm_config.quant_config
         vllm_config.quant_config = quant_config
@@ -80,6 +81,20 @@ class LlamaModel(nn.Module):
             self.config.hidden_size * 2, self.config.hidden_size, bias=False
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+=======
+        self.layers = nn.ModuleList([
+            Llama4DecoderLayer(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
+            ) for i in range(self.config.num_hidden_layers)
+        ])
+        self.fc = torch.nn.Linear(self.config.hidden_size * 2,
+                                  self.config.hidden_size,
+                                  bias=False)
+        self.norm = RMSNorm(self.config.hidden_size,
+                            eps=self.config.rms_norm_eps)
+>>>>>>> upstream/releases/v0.11.0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

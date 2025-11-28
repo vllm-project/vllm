@@ -728,6 +728,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Timeout for fetching audio when serving multimodal models
     # Default is 10 seconds
+<<<<<<< HEAD
     "VLLM_AUDIO_FETCH_TIMEOUT": lambda: int(
         os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")
     ),
@@ -736,6 +737,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
         int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))
     ),
+=======
+    "VLLM_AUDIO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Whether to allow HTTP redirects when fetching from media URLs.
+    # Default to True
+    "VLLM_MEDIA_URL_ALLOW_REDIRECTS":
+    lambda: bool(int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))),
+
+>>>>>>> upstream/releases/v0.11.0
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
     # Default is 8

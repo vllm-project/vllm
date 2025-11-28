@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 46d64a8ebef03fa50b4ae74937276a5c940e3f95
+        GIT_TAG 5f65b85703c7ed75fda01e06495077caad207c3f
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -92,7 +92,7 @@ if(FLASH_MLA_ARCHS)
         SRCS "${FlashMLA_Extension_SOURCES}"
         CUDA_ARCHS "${FLASH_MLA_ARCHS}")
 
-    define_extension_target(
+    define_gpu_extension_target(
         _flashmla_C
         DESTINATION vllm
         LANGUAGE ${VLLM_GPU_LANG}
@@ -109,7 +109,7 @@ if(FLASH_MLA_ARCHS)
         $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API>
         $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
 
-    define_extension_target(
+    define_gpu_extension_target(
         _flashmla_extension_C
         DESTINATION vllm
         LANGUAGE ${VLLM_GPU_LANG}

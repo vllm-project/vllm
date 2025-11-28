@@ -1184,7 +1184,38 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     # requantize the weight and input to the specific scale
     # at the same time.
     should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
+<<<<<<< HEAD
         layer.orig_dtype, layer.weight
+=======
+        layer.orig_dtype, layer.weight)
+    if is_deep_gemm_e8m0_used() and should_use_deepgemm:
+        block_sz = tuple(layer.weight_block_size)
+        requant_weight_ue8m0_inplace(layer.weight.data,
+                                     layer.weight_scale.data, block_sz)
+    # SM90 Block FP8 CUTLASS requires row-major weight scales
+    elif (current_platform.is_device_capability(90)
+          and cutlass_block_fp8_supported and not should_use_deepgemm):
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.data.T.contiguous(), requires_grad=False)
+
+
+def apply_fp8_block_linear(layer: torch.nn.Module, input: torch.Tensor,
+                           bias: Optional[torch.Tensor],
+                           cutlass_block_fp8_supported: bool,
+                           use_aiter_and_is_supported: bool) -> torch.Tensor:
+    """Apply block-wise FP8 linear operation."""
+    assert layer.weight_block_size is not None
+
+    return torch.ops.vllm.apply_w8a8_block_fp8_linear(
+        input=input,
+        weight=layer.weight,
+        block_size=layer.weight_block_size,
+        weight_scale=layer.weight_scale,
+        input_scale=layer.input_scale,
+        bias=bias,
+        cutlass_block_fp8_supported=cutlass_block_fp8_supported,
+        use_aiter_and_is_supported=use_aiter_and_is_supported,
+>>>>>>> upstream/releases/v0.11.0
     )
     if should_use_deepgemm:
         dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(

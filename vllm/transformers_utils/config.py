@@ -87,10 +87,15 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
+<<<<<<< HEAD
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     hunyuan_vl="HunYuanVLConfig",
     kimi_linear="KimiLinearConfig",
+=======
+    deepseek_v3="DeepseekV3Config",
+    deepseek_v32="DeepseekV3Config",
+>>>>>>> upstream/releases/v0.11.0
     kimi_vl="KimiVLConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)

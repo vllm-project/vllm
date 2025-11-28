@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+<<<<<<< HEAD
 """Tests for v1 MLA backends without GPUModelRunner dependency.
 
 Known Issues:
@@ -7,10 +8,15 @@ Known Issues:
   test_backend_correctness[mixed_small] when run after
   test_backend_correctness[small_prefill], but passes when run alone.
 """
+=======
+"""Tests for v1 MLA backends without GPUModelRunner dependency."""
+from typing import Optional, Union
+>>>>>>> upstream/releases/v0.11.0
 
 import pytest
 import torch
 
+<<<<<<< HEAD
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -26,6 +32,15 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.mla.common import QueryLenSupport
+=======
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
+                                      create_standard_kv_cache_spec,
+                                      create_vllm_config,
+                                      get_attention_backend)
+from vllm import _custom_ops as ops
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+>>>>>>> upstream/releases/v0.11.0
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -118,6 +133,7 @@ BATCH_SPECS = {
 
 
 def create_and_prepopulate_kv_cache(
+<<<<<<< HEAD
     kv_c_contexts: list[torch.Tensor],
     k_pe_contexts: list[torch.Tensor],
     block_size: int,
@@ -130,6 +146,19 @@ def create_and_prepopulate_kv_cache(
     kv_cache_dtype: str | None = None,
     scale: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
+=======
+        kv_c_contexts: list[torch.Tensor],
+        k_pe_contexts: list[torch.Tensor],
+        block_size: int,
+        head_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        num_blocks: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        randomize_blocks: bool = True,
+        kv_cache_dtype: Optional[str] = None,
+        scale: Union[float, torch.Tensor] = 1.0) -> torch.Tensor:
+>>>>>>> upstream/releases/v0.11.0
     """Create and prepopulate an MLA KV cache with context data.
 
     Args:
@@ -149,7 +178,11 @@ def create_and_prepopulate_kv_cache(
                         fp8 DeepSeek MLA layout via concat_and_cache_mla.
         scale: Scaling factor forwarded to concat_and_cache_mla when the
                fp8 cache layout is requested.
+<<<<<<< HEAD
 
+=======
+        
+>>>>>>> upstream/releases/v0.11.0
     Returns:
         MLA KV cache tensor
     """
@@ -167,6 +200,7 @@ def create_and_prepopulate_kv_cache(
 
     if use_fp8_ds_mla:
         if not kv_c_contexts:
+<<<<<<< HEAD
             raise ValueError(
                 "kv_c_contexts cannot be empty when using fp8_ds_mla cache dtype"
             )
@@ -187,6 +221,29 @@ def create_and_prepopulate_kv_cache(
         kv_cache = torch.zeros(
             num_blocks, block_size, head_size, dtype=dtype, device=device
         )
+=======
+            raise ValueError("kv_c_contexts cannot be empty when using"
+                             " fp8_ds_mla cache dtype")
+        kv_lora_rank = kv_c_contexts[0].shape[-1]
+        rope_dim = k_pe_contexts[0].shape[-1]
+        entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+        kv_cache = torch.zeros(num_blocks,
+                               block_size,
+                               entry_size,
+                               dtype=torch.uint8,
+                               device=device)
+        scale_tensor = (scale
+                        if isinstance(scale, torch.Tensor) else torch.tensor(
+                            scale, dtype=torch.float32, device=device))
+        scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
+    else:
+        # Create MLA KV cache: (num_blocks, block_size, head_size)
+        kv_cache = torch.empty(num_blocks,
+                               block_size,
+                               head_size,
+                               dtype=dtype,
+                               device=device)
+>>>>>>> upstream/releases/v0.11.0
         kv_cache_flat = kv_cache.view(-1, head_size)
 
     # Populate the cache with the context tokens
@@ -202,7 +259,12 @@ def create_and_prepopulate_kv_cache(
         start = start_block_idx * block_size
 
         if use_fp8_ds_mla:
+<<<<<<< HEAD
             slots = torch.arange(context_len, device=device, dtype=torch.long) + start
+=======
+            slots = torch.arange(context_len, device=device,
+                                 dtype=torch.long) + start
+>>>>>>> upstream/releases/v0.11.0
             ops.concat_and_cache_mla(
                 kv_c_context,
                 k_pe_context.squeeze(1),
@@ -212,7 +274,12 @@ def create_and_prepopulate_kv_cache(
                 scale=scale_tensor,
             )
         else:
+<<<<<<< HEAD
             kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)], dim=-1)
+=======
+            kv_context = torch.cat(
+                [kv_c_context, k_pe_context.squeeze(1)], dim=-1)
+>>>>>>> upstream/releases/v0.11.0
             end = start + kv_context.shape[0]
             kv_cache_flat[start:end, ...] = kv_context
 

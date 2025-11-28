@@ -58,6 +58,8 @@ void cp_gather_cache(
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+
+// TODO(dev): check if the cp_gather_indexer_k_quant_cache is still needed after indexer_k_quant_and_cache.
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]

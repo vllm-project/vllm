@@ -53,11 +53,21 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
+<<<<<<< HEAD
         self.mtp_emb_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mtp_hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mtp_linear_proj = nn.Linear(
             config.hidden_size * 2, config.hidden_size, bias=False
         )
+=======
+        self.mtp_emb_norm = RMSNorm(config.hidden_size,
+                                    eps=config.rms_norm_eps)
+        self.mtp_hidden_norm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.mtp_linear_proj = nn.Linear(config.hidden_size * 2,
+                                         config.hidden_size,
+                                         bias=False)
+>>>>>>> upstream/releases/v0.11.0
         self.mtp_block = LlamaDecoderLayer(vllm_config, prefix)
 
     def forward(
@@ -94,6 +104,7 @@ class ErnieMultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         # to map the exact layer index from weights
+<<<<<<< HEAD
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): ErnieMultiTokenPredictorLayer(
@@ -106,6 +117,17 @@ class ErnieMultiTokenPredictor(nn.Module):
                 )
             }
         )
+=======
+        self.layers = torch.nn.ModuleDict({
+            str(idx):
+            ErnieMultiTokenPredictorLayer(
+                vllm_config,
+                f"{prefix}.layers.{idx}",
+            )
+            for idx in range(self.mtp_start_layer_idx,
+                             self.mtp_start_layer_idx + self.num_mtp_layers)
+        })
+>>>>>>> upstream/releases/v0.11.0
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,

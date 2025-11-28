@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+<<<<<<< HEAD
+=======
+import gc
+>>>>>>> upstream/releases/v0.11.0
 import hashlib
 import importlib
 import inspect
@@ -1399,7 +1403,30 @@ class AuthenticationMiddleware:
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
+<<<<<<< HEAD
         self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
+=======
+        self.api_tokens = [
+            hashlib.sha256(t.encode("utf-8")).digest() for t in tokens
+        ]
+
+    def verify_token(self, headers: Headers) -> bool:
+        authorization_header_value = headers.get("Authorization")
+        if not authorization_header_value:
+            return False
+
+        scheme, _, param = authorization_header_value.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+
+        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+
+        token_match = False
+        for token_hash in self.api_tokens:
+            token_match |= secrets.compare_digest(param_hash, token_hash)
+
+        return token_match
+>>>>>>> upstream/releases/v0.11.0
 
     def verify_token(self, headers: Headers) -> bool:
         authorization_header_value = headers.get("Authorization")
@@ -1428,7 +1455,12 @@ class AuthenticationMiddleware:
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith("/v1") and not self.verify_token(headers):
+<<<<<<< HEAD
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+=======
+            response = JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+>>>>>>> upstream/releases/v0.11.0
             return response(scope, receive, send)
         return self.app(scope, receive, send)
 
@@ -1837,6 +1869,7 @@ async def init_app_state(
         lora_modules=lora_modules,
     )
     await state.openai_serving_models.init_static_loras()
+<<<<<<< HEAD
     state.openai_serving_responses = (
         OpenAIServingResponses(
             engine_client,
@@ -1944,6 +1977,87 @@ async def init_app_state(
         if ("embed" in supported_tasks or "score" in supported_tasks)
         else None
     )
+=======
+    state.openai_serving_responses = OpenAIServingResponses(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tool_parser=args.tool_call_parser,
+        tool_server=tool_server,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        log_error_stack=args.log_error_stack,
+    ) if "generate" in supported_tasks else None
+    state.openai_serving_chat = OpenAIServingChat(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        args.response_role,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.
+        exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        log_error_stack=args.log_error_stack,
+    ) if "generate" in supported_tasks else None
+    state.openai_serving_completion = OpenAIServingCompletion(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+        log_error_stack=args.log_error_stack,
+    ) if "generate" in supported_tasks else None
+    state.openai_serving_pooling = OpenAIServingPooling(
+        engine_client,
+        vllm_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
+    ) if "encode" in supported_tasks else None
+    state.openai_serving_embedding = OpenAIServingEmbedding(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
+    ) if "embed" in supported_tasks else None
+    state.openai_serving_classification = ServingClassification(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
+    ) if "classify" in supported_tasks else None
+    state.openai_serving_scores = ServingScores(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
+    ) if ("embed" in supported_tasks or "score" in supported_tasks) else None
+>>>>>>> upstream/releases/v0.11.0
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         state.openai_serving_models,

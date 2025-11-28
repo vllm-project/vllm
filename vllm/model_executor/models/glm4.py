@@ -133,12 +133,20 @@ class Glm4Attention(nn.Module):
 
 
 class Glm4DecoderLayer(nn.Module):
+<<<<<<< HEAD
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         config: Glm4Config | None = None,
     ) -> None:
+=======
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[Glm4Config] = None) -> None:
+>>>>>>> upstream/releases/v0.11.0
         super().__init__()
 
         config = config or vllm_config.model_config.hf_config

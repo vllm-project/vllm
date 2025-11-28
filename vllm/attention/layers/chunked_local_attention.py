@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+<<<<<<< HEAD
+=======
+from typing import ClassVar, List, Optional
+>>>>>>> upstream/releases/v0.11.0
 
 import torch
 
@@ -10,6 +14,7 @@ from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backends.utils import (
+<<<<<<< HEAD
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -21,6 +26,10 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     KVCacheSpec,
 )
+=======
+    AttentionCGSupport, CommonAttentionMetadata,
+    make_local_attention_virtual_batches, subclass_attention_backend)
+>>>>>>> upstream/releases/v0.11.0
 
 from ..layer import Attention
 
@@ -37,6 +46,7 @@ def create_chunked_local_attention_backend(
     assert issubclass(underlying_builder, AttentionMetadataBuilder)
 
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
+<<<<<<< HEAD
         @classmethod
         def get_cudagraph_support(
             cls: type["AttentionMetadataBuilder"],
@@ -46,6 +56,10 @@ def create_chunked_local_attention_backend(
             # Explicit override in case the underlying builder specialized this getter.
             # @override omitted only because of mypy limitation due to type variable.
             return AttentionCGSupport.NEVER
+=======
+        cudagraph_support: ClassVar[AttentionCGSupport] = \
+            AttentionCGSupport.NEVER
+>>>>>>> upstream/releases/v0.11.0
 
         def build(
             self,

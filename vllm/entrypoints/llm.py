@@ -114,7 +114,11 @@ class LLM:
             or videos from directories specified by the server file system.
             This is a security risk. Should only be enabled in trusted
             environments.
+<<<<<<< HEAD
         allowed_media_domains: If set, only media URLs that belong to this
+=======
+        allowed_media_domains: If set, only media URLs that belong to this 
+>>>>>>> upstream/releases/v0.11.0
             domain can be used for multi-modal inputs.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
@@ -195,7 +199,11 @@ class LLM:
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
+<<<<<<< HEAD
         allowed_media_domains: list[str] | None = None,
+=======
+        allowed_media_domains: Optional[list[str]] = None,
+>>>>>>> upstream/releases/v0.11.0
         tensor_parallel_size: int = 1,
         dtype: ModelDType = "auto",
         quantization: QuantizationMethods | None = None,

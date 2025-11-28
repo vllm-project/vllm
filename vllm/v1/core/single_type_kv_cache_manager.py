@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+<<<<<<< HEAD
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -17,6 +18,13 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+=======
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        CrossAttentionSpec, FullAttentionSpec,
+                                        KVCacheSpec, MambaSpec,
+                                        MLAAttentionSpec, SlidingWindowSpec)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.v1.request import Request
 
 

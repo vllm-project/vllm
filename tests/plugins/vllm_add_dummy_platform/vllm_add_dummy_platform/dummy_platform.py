@@ -20,6 +20,7 @@ class DummyPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         vllm_config.compilation_config.custom_ops = ["all"]
 
+<<<<<<< HEAD
     def get_attn_backend_cls(
         self,
         backend_name,
@@ -31,4 +32,9 @@ class DummyPlatform(Platform):
         has_sink,
         use_sparse,
     ):
+=======
+    def get_attn_backend_cls(self, backend_name, head_size, dtype,
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             has_sink, use_sparse):
+>>>>>>> upstream/releases/v0.11.0
         return "vllm_add_dummy_platform.dummy_attention_backend.DummyAttentionBackend"  # noqa E501

@@ -13,10 +13,15 @@ from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
 from vllm.config import VllmConfig
+<<<<<<< HEAD
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+=======
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+>>>>>>> upstream/releases/v0.11.0
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -28,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
+<<<<<<< HEAD
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
@@ -37,6 +43,11 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     get_cuda_view_from_cpu_tensor,
 )
+=======
+from vllm.utils import (cdiv, direct_register_custom_op,
+                        get_cuda_view_from_cpu_tensor, is_pin_memory_available,
+                        is_uva_available)
+>>>>>>> upstream/releases/v0.11.0
 
 logger = init_logger(__name__)
 
@@ -816,6 +827,16 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
+<<<<<<< HEAD
+=======
+def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
+    if hasattr(hf_config, "hidden_size"):
+        return hf_config.hidden_size
+    text_config = hf_config.get_text_config()
+    return text_config.hidden_size
+
+
+>>>>>>> upstream/releases/v0.11.0
 # Chunk x along the num_tokens axis for sequence parallelism
 # NOTE: This is wrapped in a torch custom op to work around the following issue:
 # The output tensor can have a sequence length 0 at small input sequence lengths
@@ -855,6 +876,7 @@ direct_register_custom_op(
     op_name="sequence_parallel_chunk_impl",
     op_func=sequence_parallel_chunk_impl,
     fake_impl=sequence_parallel_chunk_impl_fake,
+<<<<<<< HEAD
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -879,3 +901,7 @@ def process_eagle_weight(
         model.has_own_lm_head = True
     if "embed_tokens" in name:
         model.has_own_embed_tokens = True
+=======
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+>>>>>>> upstream/releases/v0.11.0

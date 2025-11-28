@@ -28,6 +28,7 @@ else:
 
 logger = init_logger(__name__)
 
+<<<<<<< HEAD
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
@@ -47,14 +48,26 @@ SpeculativeMethod = Literal[
     "suffix",
     EagleModelTypes,
 ]
+=======
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
+                            "mlp_speculator", "draft_model", "deepseek_mtp",
+                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
+                            "longcat_flash_mtp", "mtp"]
+MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
+                   "qwen3_next_mtp", "longcat_flash_mtp")
+>>>>>>> upstream/releases/v0.11.0
 
 
 @config
 @dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
+<<<<<<< HEAD
 
     enforce_eager: bool | None = None
+=======
+    enforce_eager: Optional[bool] = None
+>>>>>>> upstream/releases/v0.11.0
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
     num_speculative_tokens: int = Field(default=None, gt=0)
@@ -237,17 +250,31 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
+<<<<<<< HEAD
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
+=======
+        if self.method in MTP_MODEL_TYPES:
+            logger.warning("method `%s` is deprecated and replaced with mtp.",
+                           self.method)
+>>>>>>> upstream/releases/v0.11.0
             self.method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":
+<<<<<<< HEAD
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
+=======
+                assert (
+                    self.target_model_config
+                    is not None), "target_model_config must be present for mtp"
+                if self.target_model_config.hf_text_config.model_type \
+                    == "deepseek_v32":
+>>>>>>> upstream/releases/v0.11.0
                     # FIXME(luccafong): cudgraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
                     self.enforce_eager = True
@@ -320,9 +347,18 @@ class SpeculativeConfig:
                     runner="draft",
                     tokenizer=self.target_model_config.tokenizer,
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
+<<<<<<< HEAD
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
+=======
+                    trust_remote_code=self.target_model_config.
+                    trust_remote_code,
+                    allowed_local_media_path=self.target_model_config.
+                    allowed_local_media_path,
+                    allowed_media_domains=self.target_model_config.
+                    allowed_media_domains,
+>>>>>>> upstream/releases/v0.11.0
                     dtype=self.target_model_config.dtype,
                     seed=self.target_model_config.seed,
                     revision=self.revision,
@@ -350,6 +386,7 @@ class SpeculativeConfig:
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
+<<<<<<< HEAD
                 elif self.draft_model_config.hf_config.model_type in get_args(
                     MTPModelTypes
                 ):
@@ -363,6 +400,19 @@ class SpeculativeConfig:
                 elif self.draft_model_config.hf_config.model_type in (
                     "longcat_flash_mtp"
                 ):
+=======
+                elif (self.draft_model_config.hf_config.model_type
+                      in MTP_MODEL_TYPES):
+                    self.method = "mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "Enabling num_speculative_tokens > 1 will run" \
+                                "multiple times of forward on same MTP layer" \
+                                ",which may result in lower acceptance rate" \
+                            )
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("longcat_flash_mtp")):
+>>>>>>> upstream/releases/v0.11.0
                     self.method = "longcat_flash_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -376,8 +426,12 @@ class SpeculativeConfig:
                         "Speculative decoding with draft model is not "
                         "supported yet. Please consider using other "
                         "speculative decoding methods such as ngram, medusa, "
+<<<<<<< HEAD
                         "eagle, or mtp."
                     )
+=======
+                        "eagle, or mtp.")
+>>>>>>> upstream/releases/v0.11.0
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):

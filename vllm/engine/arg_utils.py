@@ -362,8 +362,14 @@ class EngineArgs:
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
+<<<<<<< HEAD
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
+=======
+    allowed_media_domains: Optional[
+        list[str]] = ModelConfig.allowed_media_domains
+    download_dir: Optional[str] = LoadConfig.download_dir
+>>>>>>> upstream/releases/v0.11.0
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
@@ -611,6 +617,7 @@ class EngineArgs:
         )
         model_group.add_argument("--dtype", **model_kwargs["dtype"])
         model_group.add_argument("--seed", **model_kwargs["seed"])
+<<<<<<< HEAD
         model_group.add_argument("--hf-config-path", **model_kwargs["hf_config_path"])
         model_group.add_argument(
             "--allowed-local-media-path", **model_kwargs["allowed_local_media_path"]
@@ -618,6 +625,14 @@ class EngineArgs:
         model_group.add_argument(
             "--allowed-media-domains", **model_kwargs["allowed_media_domains"]
         )
+=======
+        model_group.add_argument("--hf-config-path",
+                                 **model_kwargs["hf_config_path"])
+        model_group.add_argument("--allowed-local-media-path",
+                                 **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--allowed-media-domains",
+                                 **model_kwargs["allowed_media_domains"])
+>>>>>>> upstream/releases/v0.11.0
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
         model_group.add_argument(
@@ -1779,8 +1794,38 @@ class EngineArgs:
                 raise NotImplementedError(
                     "Draft model speculative decoding is not supported yet. "
                     "Please consider using other speculative decoding methods "
+<<<<<<< HEAD
                     "such as ngram, medusa, eagle, or mtp."
                 )
+=======
+                    "such as ngram, medusa, eagle, or mtp.")
+
+        V1_BACKENDS = [
+            "FLASH_ATTN",
+            "PALLAS",
+            "TRITON_ATTN",
+            "TRITON_MLA",
+            "CUTLASS_MLA",
+            "FLASHMLA",
+            "FLASH_ATTN_MLA",
+            "FLASHINFER",
+            "FLASHINFER_MLA",
+            "ROCM_AITER_MLA",
+            "TORCH_SDPA",
+            "FLEX_ATTENTION",
+            "TREE_ATTN",
+            "XFORMERS",
+            "ROCM_ATTN",
+        ]
+        if (envs.is_set("VLLM_ATTENTION_BACKEND")
+                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
+            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
+            return False
+
+        #############################################################
+        # Experimental Features - allow users to opt in.
+>>>>>>> upstream/releases/v0.11.0
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(

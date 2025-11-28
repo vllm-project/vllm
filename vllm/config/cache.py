@@ -19,6 +19,7 @@ else:
 
 logger = init_logger(__name__)
 
+<<<<<<< HEAD
 BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
@@ -29,6 +30,11 @@ CacheDType = Literal[
     "fp8_inc",
     "fp8_ds_mla",
 ]
+=======
+BlockSize = Literal[1, 8, 16, 32, 64, 128]
+CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2",
+                     "fp8_inc"]
+>>>>>>> upstream/releases/v0.11.0
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -186,6 +192,7 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+<<<<<<< HEAD
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
@@ -197,6 +204,49 @@ class CacheConfig:
                 "scaling factor."
             )
         return cache_dtype
+=======
+    @model_validator(mode='after')
+    def _verify_args(self) -> Self:
+        if self.cpu_offload_gb < 0:
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
+
+        if self.gpu_memory_utilization > 1.0:
+            raise ValueError(
+                "GPU memory utilization must be less than 1.0. Got "
+                f"{self.gpu_memory_utilization}.")
+
+        return self
+
+    def _verify_cache_dtype(self) -> None:
+        if self.cache_dtype == "auto":
+            pass
+        elif self.cache_dtype in get_args(CacheDType):
+            if self.cache_dtype.startswith("fp8"):
+                logger.info(
+                    "Using fp8 data type to store kv cache. It reduces the GPU "
+                    "memory footprint and boosts the performance. "
+                    "Meanwhile, it may cause accuracy drop without a proper "
+                    "scaling factor.")
+        else:
+            raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
+
+    def _verify_prefix_caching(self) -> None:
+        if not self.enable_prefix_caching:
+            return
+
+        if self.sliding_window is not None and not envs.VLLM_USE_V1:
+            raise NotImplementedError(
+                "Prefix caching is not supported with sliding window. "
+                "Run with --disable-sliding-window to use prefix caching.")
+
+        if (self.enable_prefix_caching and self.prefix_caching_hash_algo
+                not in get_args(PrefixCachingHashAlgo)):
+            raise ValueError(
+                "Unknown prefix caching hash algorithm: "
+                f"{self.prefix_caching_hash_algo}. Must be one of "
+                f"{get_args(PrefixCachingHashAlgo)}.")
+>>>>>>> upstream/releases/v0.11.0
 
     def verify_with_parallel_config(
         self,

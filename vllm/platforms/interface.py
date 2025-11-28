@@ -223,6 +223,7 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
+<<<<<<< HEAD
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
@@ -244,6 +245,12 @@ class Platform:
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
+=======
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool, use_sparse: bool) -> str:
+>>>>>>> upstream/releases/v0.11.0
         """Get the attention backend class of a device."""
         return ""
 

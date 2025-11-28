@@ -13,7 +13,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+<<<<<<< HEAD
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+=======
+>>>>>>> upstream/releases/v0.11.0
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -36,6 +39,7 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
+<<<<<<< HEAD
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -51,6 +55,17 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
         qkv_input_size = 2 * self.hidden_size if layer_idx == 0 else self.hidden_size
+=======
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[LlamaConfig] = None) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+        config = config or vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+>>>>>>> upstream/releases/v0.11.0
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -156,6 +171,7 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
+<<<<<<< HEAD
         self.layers = nn.ModuleList(
             [
                 LlamaDecoderLayer(
@@ -180,6 +196,13 @@ class LlamaModel(nn.Module):
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
+=======
+        self.layers = nn.ModuleList([
+            LlamaDecoderLayer(
+                current_vllm_config,
+                prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                config=self.config,
+>>>>>>> upstream/releases/v0.11.0
             )
         self.norm = RMSNorm(
             self.config.hidden_size,

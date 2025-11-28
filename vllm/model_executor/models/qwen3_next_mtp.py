@@ -76,10 +76,15 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             Qwen3NextDecoderLayer(
                 vllm_config,
                 layer_type="full_attention",
+<<<<<<< HEAD
                 prefix=f"{prefix}.layers.{idx}",
             )
             for idx in range(self.num_mtp_layers)
         )
+=======
+                prefix=f'{prefix}.layers.{idx}',
+            ) for idx in range(self.num_mtp_layers))
+>>>>>>> upstream/releases/v0.11.0
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
