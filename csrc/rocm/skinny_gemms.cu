@@ -1370,9 +1370,11 @@ __device__ inline int min__(int a, int b) {
 
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
+
 __global__ void __launch_bounds__(WvPrGrp*THRDS)
+__attribute__((amdgpu_waves_per_eu(1, 1)))
     wvSplitKrc_(const int K, const int M, const int Bx, const int By,
-                     const scalar_t* B, const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ B, const scalar_t* __restrict__ A,
                      const scalar_t* __restrict__ BIAS,
 		     float* glbl,
 		     int* cntr,
@@ -1496,27 +1498,26 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
         const uint32_t thrd = ((threadIdx.y/sprdN) * THRDS + threadIdx.x);
 	//printf("[%d]", kFit);
 #pragma unroll
-        for (uint32_t k = 0; k < kFit; // min_(K, max_lds_len/N);
+        for (int k = 0; k < kFit; // min_(K, max_lds_len/N);
                       k += THRDS * (WvPrGrp/sprdN) * A_CHUNK) {
-          const uint32_t kOff = k + (thrd * A_CHUNK);//min_(kFit-1, k + (thrd * A_CHUNK));
-
-          if (kOff < kFit) { //  && (kBase + kOff < K)) // continue;
+          //const uint32_t kOff = k + (thrd * A_CHUNK);//min_(kFit-1, k + (thrd * A_CHUNK));
+          unsigned int kOff = min__(kFit-1, k + (thrd * A_CHUNK));
+    
+	  if (kBase + kOff < K) {
+	  //if ((kOff < kFit) && (kBase + kOff < K)) {
 	    constexpr int unrl = 8;
-            bigType tmp[unrl];
-	    //for( int n=0; n<unrl; n++) tmp[n].h8 = {0};
-#pragma unroll
+            //bigType tmp[unrl];// = {0};
+//#pragma unroll
+//	    for(uint32_t n=0; n<unrl; n++) tmp[n].h8 = {0};
             for (int nt=0; nt<N/sprdN; nt+=NTILE) {
 	      for (int n8=0; n8<NTILE/unrl; n8++) {
-               for (int n=0; n<unrl; n++) {
-                const uint32_t k_in = k_str + kBase + kOff + (n+n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*K;
-                tmp[n] =
-		  *((bigType*)(&A[k_in]));
-               }
-#pragma unroll
-               for (int n=0; n<unrl; n++) {
-		const uint32_t k_ot = kOff + (n+n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*kFitPdd;
-                *((bigType*)(&s[k_ot])) = tmp[n];
-               }
+               const unsigned int k_in = k_str + kBase + kOff + (n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*K;
+               const unsigned int k_ot = kOff + (n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*kFitPdd;
+               bigType tmp[unrl];
+               for (unsigned int n=0; n<unrl; n++)
+                tmp[n].h8 = *((scalar8*)(&A[k_in+n*K]));
+               for (unsigned int n=0; n<unrl; n++)
+                *((scalar8*)(&s[k_ot+n*kFitPdd])) = tmp[n].h8;
 	      }
 	    }
 	  }
@@ -1617,18 +1618,13 @@ __global__ void __launch_bounds__(WvPrGrp*THRDS)
 
     if (!doRdc) {
      if (m + (threadIdx.x%16) < M) {
-      scalar_t biases[N/NTILE/GrpsShrB][4];
+      scalar_t biases[N/NTILE/GrpsShrB][4] = {};
       if (BIAS)
       for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
        for (uint32_t j=0; j<4; j++) {
         int mindx = m + (threadIdx.x%16);
         int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
-        if constexpr (std::is_same_v<scalar_t, half>) {
-              biases[nt][j] = __half2float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-        } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              biases[nt][j] =
-                  __bfloat162float(BIAS[(mindx % Bx) + (nindx % By) * M]);
-        }
+        biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
        }
       }
       for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
