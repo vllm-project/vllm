@@ -72,8 +72,7 @@ def test_without_spec_decoding(
     ]
 
     if current_platform.is_rocm():
-        # On ROCm, FP variance between execution configs can cause different
-        # token selections. Only test with structured_outputs (deterministic)
+        # On ROCm, Only test with structured_outputs (deterministic)
         # and skip chunk_prefill (more variable).
         test_configs = [
             cfg
@@ -204,8 +203,7 @@ def run_tests(
                 )
 
                 # On ROCm with TRITON_ATTN (spec decoding test), skip strict
-                # logprobs comparison when logprobs are requested, as numerical
-                # variance causes slight differences
+                # logprobs comparison when logprobs are requested
                 skip_logprobs_check = (
                     current_platform.is_rocm()
                     and params.get("logprobs")
@@ -352,6 +350,7 @@ def _all_logprobs_match(req_a, req_b) -> bool:
 def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
     if current_platform.is_rocm():
         # ROCm has higher numerical variance
+        # due to use of float16.
         rel_tol, abs_tol = 5e-2, 1e-5
     else:
         rel_tol, abs_tol = 1e-3, 1e-6
