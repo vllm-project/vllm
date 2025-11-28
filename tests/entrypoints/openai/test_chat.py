@@ -16,11 +16,19 @@ from openai import BadRequestError
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def server(qwen3_lora_files):  # noqa: F811
+def zephyr_lora_files():
+    """Download zephyr LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+
+
+@pytest.fixture(scope="module")
+def server(zephyr_lora_files):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -31,7 +39,7 @@ def server(qwen3_lora_files):  # noqa: F811
         # lora config below
         "--enable-lora",
         "--lora-modules",
-        f"qwen3-lora={qwen3_lora_files}",
+        f"zephyr-lora={zephyr_lora_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -54,7 +62,7 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -78,7 +86,7 @@ async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_zero_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -104,7 +112,7 @@ async def test_zero_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -130,7 +138,7 @@ async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -239,7 +247,7 @@ async def test_more_than_one_prompt_logprobs_chat(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -284,7 +292,7 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
-    [MODEL_NAME, "qwen3-lora"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
     messages = [
@@ -330,7 +338,7 @@ async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    ["Qwen/Qwen3-0.6B", "qwen3-lora"],
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
 )
 async def test_chat_completion_stream_options(
     client: openai.AsyncOpenAI, model_name: str

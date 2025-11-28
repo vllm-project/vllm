@@ -9,7 +9,7 @@ from huggingface_hub import snapshot_download
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-LORA_NAME = "charent/self_cognition_Alic"
+LORA_NAME = "charent/self_cognition_Alice"
 PA_NAME = "swapnilbp/llama_tweet_ptune"
 
 
