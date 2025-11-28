@@ -384,7 +384,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on CPU.")
         return False
 
     @classmethod
