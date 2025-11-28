@@ -34,8 +34,8 @@ from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.entrypoints.pooling.score.api_router import (
     create_score,
     do_rerank,
-    score,
     rerank,
+    score,
 )
 from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
 

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
-from typing import assert_never
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import JSONResponse
+from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
