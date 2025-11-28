@@ -13,7 +13,6 @@ import sys
 import sysconfig
 from pathlib import Path
 from shutil import which
-from typing import Optional
 
 import torch
 from packaging.version import Version, parse
@@ -649,16 +648,19 @@ package_data = {
     ]
 }
 
-def _fetch_metadata_for_variant(variant: Optional[str]) -> tuple[list[dict], str]:
+
+def _fetch_metadata_for_variant(variant: str | None) -> tuple[list[dict], str]:
     base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
     variant_dir = f"{variant}/" if variant is not None else ""
     repo_url = f"https://wheels.vllm.ai/{base_commit}/{variant_dir}vllm/"
     meta_url = repo_url + "metadata.json"
     from urllib.request import urlopen
+
     with urlopen(meta_url) as resp:
         assert resp.status == 200, f"Failed to fetch metadata from {meta_url}"
         wheels = json.loads(resp.read().decode("utf-8"))
     return wheels, repo_url
+
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
@@ -668,9 +670,10 @@ if envs.VLLM_USE_PRECOMPILED:
         wheel_url = wheel_location
     else:
         import platform
+
         arch = platform.machine()
         # try to fetch the wheel metadata from the nightly wheel repo
-        variant = 'cu' + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
         try:
             wheels, repo_url = _fetch_metadata_for_variant(variant)
         except Exception as e:
@@ -696,7 +699,9 @@ if envs.VLLM_USE_PRECOMPILED:
 },
 ...]"""
         for wheel in wheels:
-            if wheel.get("package_name") == "vllm" and arch in wheel.get("platform_tag", ""):
+            if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                "platform_tag", ""
+            ):
                 print(f"Found precompiled wheel metadata: {wheel}")
                 assert "path" in wheel, f"Wheel metadata missing path: {wheel}"
                 wheel_url = repo_url + wheel["path"]
