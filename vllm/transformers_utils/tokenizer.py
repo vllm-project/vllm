@@ -8,18 +8,18 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import huggingface_hub
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never, runtime_checkable
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
+from vllm.transformers_utils.registry import TokenizerRegistry
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
-from vllm.transformers_utils.tokenizer_base import TokenizerLike
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import (
     check_gguf_file,
@@ -30,15 +30,13 @@ from vllm.transformers_utils.utils import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-else:
-    ModelConfig = Any
+    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
 
 logger = init_logger(__name__)
 
 
 def __getattr__(name: str):
-    # TODO: Move TokenizerLike into this file
-    # and move TokenizerRegistry into `registry.py` with a deprecation
     if name == "AnyTokenizer":
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been renamed to "
@@ -51,6 +49,103 @@ def __getattr__(name: str):
         return TokenizerLike
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+@runtime_checkable
+class TokenizerLike(Protocol):
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        /,
+        *,
+        revision: str | None = None,
+    ) -> Self:
+        raise NotImplementedError
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        raise NotImplementedError
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        raise NotImplementedError
+
+    @property
+    def bos_token_id(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def eos_token_id(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def is_fast(self) -> bool:
+        raise NotImplementedError
+
+    @property
+    def vocab_size(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def max_token_id(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def truncation_side(self) -> str:
+        raise NotImplementedError
+
+    def __hash__(self) -> int:
+        return hash(id(self))
+
+    def __len__(self) -> int:
+        return self.vocab_size
+
+    def __call__(
+        self,
+        text: str | list[str] | list[int],
+        text_pair: str | None = None,
+        add_special_tokens: bool = False,
+        truncation: bool = False,
+        max_length: int | None = None,
+    ):
+        raise NotImplementedError
+
+    def get_vocab(self) -> dict[str, int]:
+        raise NotImplementedError
+
+    def get_added_vocab(self) -> dict[str, int]:
+        raise NotImplementedError
+
+    def encode(
+        self,
+        text: str,
+        truncation: bool | None = None,
+        max_length: int | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
+        raise NotImplementedError
+
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> list[int]:
+        raise NotImplementedError
+
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+        raise NotImplementedError
+
+    def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+        raise NotImplementedError
+
+    def convert_ids_to_tokens(
+        self,
+        ids: list[int],
+        skip_special_tokens: bool = True,
+    ) -> list[str]:
+        raise NotImplementedError
 
 
 def decode_tokens(
@@ -228,8 +323,6 @@ def get_tokenizer(
             str(tokenizer_name), revision=revision
         )
     elif tokenizer_mode == "custom":
-        from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
-
         logger.debug_once(f"Loading CustomTokenizer from {tokenizer_name}")
         tokenizer = TokenizerRegistry.get_tokenizer(
             str(tokenizer_name),
@@ -295,7 +388,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     **kwargs: Any,
 ):
     return cached_get_tokenizer(
@@ -307,7 +400,7 @@ def cached_tokenizer_from_config(
     )
 
 
-def init_tokenizer_from_configs(model_config: ModelConfig):
+def init_tokenizer_from_configs(model_config: "ModelConfig"):
     runner_type = model_config.runner_type
     if runner_type == "generate" or runner_type == "draft":
         truncation_side = "left"

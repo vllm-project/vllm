@@ -4,15 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
-import torch.nn as nn
-
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (
     TokenizerLike,
     cached_tokenizer_from_config,
 )
-from vllm.utils.collection_utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
@@ -29,10 +26,11 @@ from .profiling import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
 
-N = TypeVar("N", bound=type[nn.Module])
+N = TypeVar("N", bound=type["SupportsMultiModal"])
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 _I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
@@ -97,9 +95,6 @@ class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
     """
-
-    def __init__(self) -> None:
-        self._processor_factories = ClassRegistry[nn.Module, _ProcessorFactories]()
 
     def _extract_mm_options(
         self,
@@ -210,7 +205,7 @@ class MultiModalRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if self._processor_factories.contains(model_cls, strict=True):
+            if "_processor_factory" in model_cls.__dict__:
                 logger.warning(
                     "Model class %s already has a multi-modal processor "
                     "registered to %s. It is overwritten by the new one.",
@@ -218,7 +213,7 @@ class MultiModalRegistry:
                     self,
                 )
 
-            self._processor_factories[model_cls] = _ProcessorFactories(
+            model_cls._processor_factory = _ProcessorFactories(
                 info=info,
                 dummy_inputs=dummy_inputs,
                 processor=processor,
@@ -228,12 +223,13 @@ class MultiModalRegistry:
 
         return wrapper
 
-    def _get_model_cls(self, model_config: "ModelConfig"):
+    def _get_model_cls(self, model_config: "ModelConfig") -> "SupportsMultiModal":
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        return model_cls
+        assert hasattr(model_cls, "_processor_factory")
+        return cast("SupportsMultiModal", model_cls)
 
     def _create_processing_ctx(
         self,
@@ -254,7 +250,7 @@ class MultiModalRegistry:
         tokenizer: TokenizerLike | None = None,
     ) -> BaseProcessingInfo:
         model_cls = self._get_model_cls(model_config)
-        factories = self._processor_factories[model_cls]
+        factories = model_cls._processor_factory
         ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
 
@@ -272,7 +268,7 @@ class MultiModalRegistry:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
-        factories = self._processor_factories[model_cls]
+        factories = model_cls._processor_factory
 
         ctx = self._create_processing_ctx(model_config, tokenizer)
 

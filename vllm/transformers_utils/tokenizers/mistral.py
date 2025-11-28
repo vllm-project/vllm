@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer_base import TokenizerLike
+from vllm.transformers_utils.tokenizer import TokenizerLike
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
