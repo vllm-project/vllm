@@ -11,9 +11,14 @@ import pytest_asyncio
 from openai import OpenAI
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -418,6 +423,35 @@ async def _async_serving_chat_init():
     return serving_completion
 
 
+def _build_minimal_serving_chat_with_model_type(
+    model_type: str,
+) -> OpenAIServingChat:
+    """Build a minimal OpenAIServingChat with a mocked model_config.
+
+    This helper avoids loading any real models by using MagicMocks for
+    the engine client and models.
+    """
+    mock_model_config = MockModelConfig()
+    mock_model_config.hf_config.model_type = model_type
+
+    engine_client = MagicMock(spec=AsyncLLM)
+
+    models = MagicMock()
+    models.model_config = mock_model_config
+    models.processor = MagicMock()
+    models.io_processor = MagicMock()
+
+    serving_chat = OpenAIServingChat(
+        engine_client=engine_client,
+        models=models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+    return serving_chat
+
+
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
@@ -728,3 +762,99 @@ async def test_serving_chat_data_parallel_rank_extraction():
     # Verify that data_parallel_rank defaults to None
     assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
+
+
+@pytest.mark.parametrize(
+    "model_type, expected_id_type",
+    [
+        ("kimi_k2", "kimi_k2"),
+        ("kimi_linear", "kimi_k2"),
+        ("KiMi_Custom", "kimi_k2"),
+        ("gpt_oss", "random"),
+        ("any", "random"),
+    ],
+)
+def test_tool_call_id_type_for_kimi_and_other_models(model_type, expected_id_type):
+    """Kimi-family models should use 'kimi_k2' ID type, others 'random'."""
+    serving_chat = _build_minimal_serving_chat_with_model_type(model_type)
+    assert serving_chat.tool_call_id_type == expected_id_type
+
+
+def test_kimi_tool_call_ids_follow_functions_name_index_pattern():
+    """Kimi-family models should generate IDs as 'functions.<name>:<idx>'."""
+    serving_chat = _build_minimal_serving_chat_with_model_type("kimi_k2")
+
+    base_tool_calls = [
+        ToolCall(
+            function=FunctionCall(name="get_weather", arguments="{}"),
+            type="function",
+        ),
+        ToolCall(
+            function=FunctionCall(name="get_stock_price", arguments="{}"),
+            type="function",
+        ),
+    ]
+
+    tool_call_items, next_idx = serving_chat._build_tool_call_class_items(
+        tool_calls=base_tool_calls,
+        tool_call_class=ToolCall,
+        history_tool_call_cnt=0,
+    )
+
+    assert next_idx == len(base_tool_calls)
+    assert tool_call_items[0].id == "functions.get_weather:0"
+    assert tool_call_items[1].id == "functions.get_stock_price:1"
+
+
+def test_mistral_tool_call_ids_preserve_mistral_format():
+    """MistralToolCall IDs should use Mistral's 9-char alphanumeric format."""
+    serving_chat = _build_minimal_serving_chat_with_model_type("mistral")
+
+    base_tool_calls = [
+        ToolCall(
+            function=FunctionCall(name="get_weather", arguments="{}"),
+            type="function",
+        ),
+        ToolCall(
+            function=FunctionCall(name="get_stock_price", arguments="{}"),
+            type="function",
+        ),
+    ]
+
+    tool_call_items, next_idx = serving_chat._build_tool_call_class_items(
+        tool_calls=base_tool_calls,
+        tool_call_class=MistralToolCall,
+        history_tool_call_cnt=0,
+    )
+
+    assert next_idx == len(base_tool_calls)
+    assert all(MistralToolCall.is_valid_id(tc.id) for tc in tool_call_items)
+    # IDs should be unique across tool calls
+    assert tool_call_items[0].id != tool_call_items[1].id
+
+
+def test_generic_tool_call_ids_use_random_prefix():
+    """Non-Kimi, non-Mistral models should use 'chatcmpl-tool-' IDs."""
+    serving_chat = _build_minimal_serving_chat_with_model_type("any")
+
+    base_tool_calls = [
+        ToolCall(
+            function=FunctionCall(name="get_weather", arguments="{}"),
+            type="function",
+        ),
+        ToolCall(
+            function=FunctionCall(name="get_stock_price", arguments="{}"),
+            type="function",
+        ),
+    ]
+
+    tool_call_items, next_idx = serving_chat._build_tool_call_class_items(
+        tool_calls=base_tool_calls,
+        tool_call_class=ToolCall,
+        history_tool_call_cnt=0,
+    )
+
+    assert next_idx == len(base_tool_calls)
+    ids = [tc.id for tc in tool_call_items]
+    assert all(id_.startswith("chatcmpl-tool-") for id_ in ids)
+    assert ids[0] != ids[1]
