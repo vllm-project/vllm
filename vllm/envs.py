@@ -1220,11 +1220,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
                       os.getenv("VLLM_USE_FLASHINFER", "0")))
     ),
     # If set to 1, enable FlashInfer fused allreduce + RMSNorm for tensor
-    # parallel inference. Requires SM >= 90 (Hopper) and TP > 1.
-    # Falls back to VLLM_USE_FLASHINFER if not explicitly set.
+    # parallel inference. Requires SM >= 90 (Hopper), TP > 1.
+    # NOTE: This is NOT auto-enabled by VLLM_USE_FLASHINFER because
+    # FlashInfer 0.5.2/0.5.3 (versions vLLM supports) have compatibility issues
+    # with the allreduce fusion - the Python bindings exist but JIT compilation
+    # fails. Only set this if you have verified your FlashInfer build works.
     "VLLM_USE_FLASHINFER_ALLREDUCE": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_ALLREDUCE",
-                      os.getenv("VLLM_USE_FLASHINFER", "0")))
+        int(os.getenv("VLLM_USE_FLASHINFER_ALLREDUCE", "0"))
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.

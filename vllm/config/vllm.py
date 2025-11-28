@@ -463,34 +463,18 @@ class VllmConfig:
         if envs.VLLM_USE_FLASHINFER:
             logger.info(
                 "VLLM_USE_FLASHINFER is enabled. FlashInfer will be used for: "
-                "attention, sampling, MoE, RMSNorm, activations, allreduce, "
-                "and all2all (where applicable and supported by hardware)."
+                "attention, sampling, MoE, RMSNorm, activations, and all2all "
+                "(where applicable and supported by hardware)."
             )
 
-        # Auto-enable FlashInfer allreduce fusion when VLLM_USE_FLASHINFER_ALLREDUCE
-        # is set and conditions are met (TP > 1, CUDA, SM >= 90)
-        if (
-            envs.VLLM_USE_FLASHINFER_ALLREDUCE
-            and not self.compilation_config.pass_config.enable_fi_allreduce_fusion
-            and self.parallel_config.tensor_parallel_size > 1
-            and current_platform.is_cuda()
-        ):
-            device_capability = current_platform.get_device_capability()
-            if device_capability is not None and device_capability.to_int() >= 90:
-                self.compilation_config.pass_config.enable_fi_allreduce_fusion = True
-                # Also enable noop elimination which is required for the fusion
-                self.compilation_config.pass_config.enable_noop = True
-                logger.info(
-                    "FlashInfer allreduce fusion enabled "
-                    "(via VLLM_USE_FLASHINFER_ALLREDUCE or VLLM_USE_FLASHINFER)."
-                )
-            else:
-                logger.warning(
-                    "VLLM_USE_FLASHINFER_ALLREDUCE is set but FlashInfer "
-                    "allreduce fusion requires SM >= 90 (Hopper or newer). "
-                    "Current device capability: %s",
-                    device_capability,
-                )
+        # NOTE: FlashInfer allreduce fusion (enable_fi_allreduce_fusion) is NOT
+        # auto-enabled here because it has known compatibility issues with
+        # FlashInfer 0.5.2/0.5.3 (the versions vLLM supports). The Python bindings
+        # exist but JIT compilation fails due to CUDA struct mismatches.
+        # Users who want to enable this feature should:
+        # 1. Set VLLM_USE_FLASHINFER_ALLREDUCE=1 explicitly
+        # 2. Use compilation_config.pass_config.enable_fi_allreduce_fusion=True
+        # 3. Verify they have a compatible FlashInfer build
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default

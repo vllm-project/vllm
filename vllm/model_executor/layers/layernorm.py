@@ -68,7 +68,10 @@ def fused_add_rms_norm(
         from flashinfer.norm import fused_add_rmsnorm
 
         logger.info_once("Using FlashInfer fused_add_rmsnorm.")
-        return fused_add_rmsnorm(x, residual, weight, variance_epsilon)
+        # FlashInfer's fused_add_rmsnorm is in-place and returns None
+        # It modifies x and residual in-place: x = rmsnorm(x + residual), residual = x + residual
+        fused_add_rmsnorm(x, residual, weight, variance_epsilon)
+        return x, residual
 
     from vllm import _custom_ops as ops
 
