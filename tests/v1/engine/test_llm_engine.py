@@ -222,12 +222,26 @@ def test_kv_cache_metrics_surface_in_llm_get_metrics(vllm_runner):
         disable_log_stats=False,
         kv_cache_metrics=True,
         kv_cache_metrics_sample=1.0,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.3,
     ) as vllm_model:
         llm: LLM = vllm_model.llm
-        sampling_params = SamplingParams(temperature=0.0, max_tokens=8)
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
 
-        outputs = llm.generate(["hello world"], sampling_params)
-        assert outputs
+        # Generate first request to populate cache
+        prompt = "Generating first request to populate cache. " * 5
+        outputs1 = llm.generate([prompt], sampling_params)
+        assert outputs1
+
+        # Generate second request with same prefix to trigger cache reuse
+        # and potential evictions
+        outputs2 = llm.generate([prompt], sampling_params)
+        assert outputs2
+
+        # Generate a third request with different prefix to force evictions
+        different_prompt = "A different prompt that will use different blocks. " * 5
+        outputs3 = llm.generate([different_prompt], sampling_params)
+        assert outputs3
 
         llm.llm_engine.do_log_stats()
 
