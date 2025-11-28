@@ -1190,3 +1190,81 @@ class TestApplyMatchesPerformance:
         # Replacement should have been made
         assert "".join(result) == "x" * 10000 + "REPLACED"
         assert match_result["image"][0] == 0
+
+    def test_non_consecutive_placeholders_with_large_gap(self):
+        """
+        Test that placeholders with large text gaps between them work correctly.
+        This verifies the fix handles non-consecutive placeholders.
+        """
+        mock_tokenizer = cast(AnyTokenizer, object())
+
+        # Large gap between placeholders
+        gap = "x" * 5000
+        prompt = f"<image>{gap}<image>"
+
+        mm_prompt_updates = {
+            "image": [
+                [PromptReplacement("image", "<image>", "IMG1").resolve(0)],
+                [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
+            ]
+        }
+
+        result, match_result = _apply_matches(
+            prompt,
+            mm_prompt_updates,
+            mock_tokenizer,
+        )
+
+        assert "".join(result) == f"IMG1{gap}IMG2"
+        assert match_result["image"][0] == 0
+        assert match_result["image"][1] == 0
+
+    def test_three_non_consecutive_placeholders(self):
+        """Test three placeholders at beginning, middle, and end."""
+        mock_tokenizer = cast(AnyTokenizer, object())
+
+        prompt = "<image> start, middle <image> text, end <image>"
+        mm_prompt_updates = {
+            "image": [
+                [PromptReplacement("image", "<image>", "A").resolve(0)],
+                [PromptReplacement("image", "<image>", "B").resolve(1)],
+                [PromptReplacement("image", "<image>", "C").resolve(2)],
+            ]
+        }
+
+        result, match_result = _apply_matches(
+            prompt,
+            mm_prompt_updates,
+            mock_tokenizer,
+        )
+
+        assert "".join(result) == "A start, middle B text, end C"
+        assert match_result["image"][0] == 0
+        assert match_result["image"][1] == 0
+        assert match_result["image"][2] == 0
+
+    def test_mixed_modalities_non_consecutive(self):
+        """Test multiple modality types with non-consecutive placeholders."""
+        mock_tokenizer = cast(AnyTokenizer, object())
+
+        prompt = "<image> some text <audio> more text <image>"
+        mm_prompt_updates = {
+            "image": [
+                [PromptReplacement("image", "<image>", "IMG1").resolve(0)],
+                [PromptReplacement("image", "<image>", "IMG2").resolve(1)],
+            ],
+            "audio": [
+                [PromptReplacement("audio", "<audio>", "AUD1").resolve(0)],
+            ],
+        }
+
+        result, match_result = _apply_matches(
+            prompt,
+            mm_prompt_updates,
+            mock_tokenizer,
+        )
+
+        assert "".join(result) == "IMG1 some text AUD1 more text IMG2"
+        assert match_result["image"][0] == 0
+        assert match_result["image"][1] == 0
+        assert match_result["audio"][0] == 0
