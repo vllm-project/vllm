@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
+from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -171,6 +172,8 @@ class SchedulerStats:
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
+    perf_stats: PerfStats | None = None
 
 
 @dataclass

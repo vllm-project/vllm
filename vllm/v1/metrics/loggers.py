@@ -27,6 +27,15 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
+# NOTE: Can't export PR right now if we do a normal
+# import above, presumably because the internal base
+# is not in sync with OSS base. Fix later when landing.
+# (https://www.internalfb.com/sandcastle/workflow/882705526976543532/artifact/actionlog.882705527169694229.stdout.1)
+try:
+    from vllm.v1.metrics.perf import PerfMetricsLogging
+except:
+    raise
+
 logger = init_logger(__name__)
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
@@ -106,6 +115,10 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
+
+        if self._enable_perf_stats():
+            self.perf_metrics_logging = PerfMetricsLogging(vllm_config)
+
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
@@ -126,6 +139,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+
+    def _enable_perf_stats(self) -> bool:
+        return True
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -163,6 +179,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.kv_connector_logging.observe(kv_connector_stats)
             if not self.aggregated:
                 self.last_scheduler_stats = scheduler_stats
+            if (perf_stats := scheduler_stats.perf_stats) and self._enable_perf_stats():
+                self.perf_metrics_logging.observe(perf_stats)
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
@@ -229,6 +247,10 @@ class LoggingStatLogger(StatLoggerBase):
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
+
+        if self._enable_perf_stats():
+            self.perf_metrics_logging.log(log_parts, log_args)
+
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
@@ -267,6 +289,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
     @property
     def log_prefix(self):
         return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+
+    def _enable_perf_stats(self) -> bool:
+        # Adding per_gpu perf stats across engines can lead to misleading numbers.
+        return False
 
     def record(
         self,
