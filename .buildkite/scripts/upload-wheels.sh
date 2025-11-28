@@ -4,6 +4,7 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
+DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 
 # Assume wheels are in artifacts/dist/*.whl
 wheel_files=(artifacts/dist/*.whl)
