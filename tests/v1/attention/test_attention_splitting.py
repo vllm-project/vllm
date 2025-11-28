@@ -154,7 +154,10 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
 
 
 def apply_split_decodes_and_prefills(
-    query_lens: list[int], decode_threshold: int, require_uniform: bool
+    query_lens: list[int],
+    decode_threshold: int,
+    require_uniform: bool,
+    padded_num_tokens: int | None = None,
 ):
     """Helper function to apply split_decodes_and_prefills and return
     the results."""
@@ -165,6 +168,10 @@ def apply_split_decodes_and_prefills(
         block_size=16,
         device=device,
     )
+
+    if padded_num_tokens is not None:
+        common_metadata.num_actual_tokens = padded_num_tokens
+
     return split_decodes_and_prefills(
         common_metadata,
         decode_threshold=decode_threshold,
@@ -269,6 +276,22 @@ def test_split_decodes_and_prefills_uniform_mixed_batch_non_uniform_decodes():
     assert num_prefills == 7  # 1, 2, 4, 5, 6, 7, 8 are all > 4 or non-uniform
     assert num_decode_tokens == 2  # only the first 2
     assert num_prefill_tokens == (sum(query_lens) - 2)  # rest of the tokens
+
+
+def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
+    """uniform batch where all query lengths are identical with 0 length padded reqs."""
+    # All query lengths are 2, with decode_threshold=3 (so 2 <= 3)
+    # This triggers the padded uniform path at line 891
+    query_lens = [2, 2, 2, 0]
+    padded_num_tokens = 8
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        apply_split_decodes_and_prefills(query_lens, 3, True, padded_num_tokens)
+    )
+    # With uniform batch, all requests are treated as decodes
+    assert num_decodes == 4
+    assert num_prefills == 0
+    assert num_decode_tokens == padded_num_tokens
+    assert num_prefill_tokens == 0
 
 
 @pytest.mark.parametrize(
