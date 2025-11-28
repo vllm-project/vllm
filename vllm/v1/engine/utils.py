@@ -1032,7 +1032,7 @@ def wait_for_engine_startup(
             cache_config.num_gpu_blocks = num_gpu_blocks
 
             num_cpu_blocks = cache_config.num_cpu_blocks or 0
-            num_cpu_blocks += msg["num_cpu_blocks"]
+            num_cpu_blocks += msg.get("num_cpu_blocks") or 0
             cache_config.num_cpu_blocks = num_cpu_blocks
 
             # In external DP LB mode, the coordinator address that the
