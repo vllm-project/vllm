@@ -19,14 +19,14 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     list_filtered_repo_files,
 )
-from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
-from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import (
+from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

@@ -43,7 +43,7 @@ def is_remote_gguf(model: str | Path) -> bool:
     pattern = r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*:[A-Za-z0-9_+-]+$"
     model = str(model)
     if re.fullmatch(pattern, model):
-        repo, quant_type = model.rsplit(":", 1)
+        _, quant_type = model.rsplit(":", 1)
         return is_valid_gguf_quant_type(quant_type)
     return False
 

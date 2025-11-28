@@ -5,13 +5,15 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.transformers_utils.gguf_utils import (
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
+)
 from vllm.transformers_utils.utils import (
     is_cloud_storage,
     is_gcs,
-    is_gguf,
-    is_remote_gguf,
     is_s3,
-    split_remote_gguf,
 )
 
 

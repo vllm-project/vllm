@@ -40,13 +40,13 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import (
+from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
     is_gguf,
     is_remote_gguf,
-    parse_safetensors_file_metadata,
     split_remote_gguf,
 )
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
