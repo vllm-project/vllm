@@ -20,4 +20,4 @@ class TestUseExistingTorch:
         # Simplified approach (current implementation)
         requires_files_simplified = glob.glob("requirements/*.txt") + ["pyproject.toml"]
 
-        assert requires_files_original == requires_files_simplified
+        assert set(requires_files_original) == set(requires_files_simplified)
