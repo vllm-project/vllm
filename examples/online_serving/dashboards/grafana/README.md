@@ -11,9 +11,9 @@ vLLM performance and metrics.
 
 ## Dashboard Descriptions
 
-- **[performance_statistics.json](./performance_statistics.json)**: Tracks performance metrics including latency and
+- **performance_statistics.json**: Tracks performance metrics including latency and
   throughput for your vLLM service.
-- **[query_statistics.json](./query_statistics.json)**: Tracks query performance, request volume, and key
+- **query_statistics.json**: Tracks query performance, request volume, and key
   performance indicators for your vLLM service.
 
 ## Deployment Options

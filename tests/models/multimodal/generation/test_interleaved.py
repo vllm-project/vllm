@@ -28,8 +28,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     give the same result.
     """
 
-    image_cherry = convert_image_mode(
-        ImageAsset("cherry_blossom").pil_image, "RGB")
+    image_cherry = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
     image_stop = convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB")
     images = [image_cherry, image_stop]
     video = VideoAsset(name="baby_reading", num_frames=16).np_ndarrays
@@ -47,29 +46,30 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
         ),
     ]
 
-    with vllm_runner(model,
-                     runner="generate",
-                     dtype=dtype,
-                     limit_mm_per_prompt={"image": 2},
-                     max_model_len=32768,
-                     max_num_seqs=2,
-                     tensor_parallel_size=1,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        model,
+        runner="generate",
+        dtype=dtype,
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=32768,
+        max_num_seqs=2,
+        tensor_parallel_size=1,
+        enforce_eager=True,
+    ) as vllm_model:
         vllm_outputs_per_case = [
-            vllm_model.generate_greedy(prompts,
-                                       max_tokens,
-                                       images=images,
-                                       videos=videos)
+            vllm_model.generate_greedy(
+                prompts, max_tokens, images=images, videos=videos
+            )
             for prompts, images, videos in inputs
         ]
 
     all_results = [output[0][1] for output in vllm_outputs_per_case]
-    outputs = [(total_str, total_str.find("assistant\n") + len("assistant\n"))
-               for total_str in all_results]
-    prompt_lengths = [prompt_len for _, prompt_len in outputs]
-    generated_strs = [
-        total_str[prompt_len:] for total_str, prompt_len in outputs
+    outputs = [
+        (total_str, total_str.find("assistant\n") + len("assistant\n"))
+        for total_str in all_results
     ]
+    prompt_lengths = [prompt_len for _, prompt_len in outputs]
+    generated_strs = [total_str[prompt_len:] for total_str, prompt_len in outputs]
     interleaved_prompt_len, noninterleaved_prompt_len = prompt_lengths
     interleaved_output_str, noninterleaved_output_str = generated_strs
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -22,7 +23,8 @@ class OffloadingSpec(ABC):
     def __init__(self, vllm_config: "VllmConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
-            "subject to change in the future as we iterate the design.")
+            "subject to change in the future as we iterate the design."
+        )
         self.vllm_config = vllm_config
 
         kv_transfer_config = vllm_config.kv_transfer_config
@@ -31,7 +33,8 @@ class OffloadingSpec(ABC):
 
         self.gpu_block_size = vllm_config.cache_config.block_size
         self.offloaded_block_size = int(
-            self.extra_config.get("block_size", self.gpu_block_size))
+            self.extra_config.get("block_size", self.gpu_block_size)
+        )
 
         assert self.offloaded_block_size % self.gpu_block_size == 0
 
@@ -46,14 +49,16 @@ class OffloadingSpec(ABC):
 
     @abstractmethod
     def get_handlers(
-        self, kv_caches: dict[str, torch.Tensor]
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec],
-                        OffloadingHandler]]:
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        attn_backends: dict[str, type[AttentionBackend]],
+    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         """
         Get offloading handlers along with their respective src and dst types.
 
         Args:
             kv_caches: A dictionary of layer_name -> gpu_kv_cache tensor.
+            attn_backends: A dictionary of layer_name -> AttentionBackend.
 
         Yields:
             Tuples of (src_type, dst_type, offloading_handler).

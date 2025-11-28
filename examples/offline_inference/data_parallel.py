@@ -33,7 +33,7 @@ import os
 from time import sleep
 
 from vllm import LLM, SamplingParams
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 
 def parse_args():
@@ -95,12 +95,19 @@ def parse_args():
     parser.add_argument(
         "--compilation-config",
         type=int,
-        help=("Compilation optimization (O) level 0-3."),
+        help=("Compilation optimization (O) mode 0-3."),
     )
     parser.add_argument(
         "--quantization",
         type=str,
     )
+    parser.add_argument(
+        "--disable-expert-parallel",
+        dest="enable_expert_parallel",
+        action="store_false",
+        help="Disable expert parallel (default: enabled).",
+    )
+    parser.set_defaults(enable_expert_parallel=True)
     return parser.parse_args()
 
 
@@ -113,6 +120,7 @@ def main(
     dp_master_port,
     GPUs_per_dp_rank,
     enforce_eager,
+    enable_expert_parallel,
     trust_remote_code,
     max_num_seqs,
     max_model_len,
@@ -168,7 +176,7 @@ def main(
         model=model,
         tensor_parallel_size=GPUs_per_dp_rank,
         enforce_eager=enforce_eager,
-        enable_expert_parallel=True,
+        enable_expert_parallel=enable_expert_parallel,
         trust_remote_code=trust_remote_code,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
@@ -229,6 +237,7 @@ if __name__ == "__main__":
                 dp_master_port,
                 tp_size,
                 args.enforce_eager,
+                args.enable_expert_parallel,
                 args.trust_remote_code,
                 args.max_num_seqs,
                 args.max_model_len,

@@ -21,9 +21,9 @@ deployment methods:
 
 ## Dashboard Descriptions
 
-- **[performance_statistics.yaml](./performance_statistics.yaml)**: Performance metrics with aggregated latency
+- **performance_statistics.yaml**: Performance metrics with aggregated latency
   statistics
-- **[query_statistics.yaml](./query_statistics.yaml)**: Query performance and deployment metrics
+- **query_statistics.yaml**: Query performance and deployment metrics
 
 ## Deployment Options
 
