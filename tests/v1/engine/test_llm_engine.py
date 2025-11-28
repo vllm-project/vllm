@@ -236,15 +236,15 @@ def test_kv_cache_metrics_surface_in_llm_get_metrics(vllm_runner):
             metric.name: metric for metric in metrics if isinstance(metric, Histogram)
         }
 
-        lifetime_hist = histograms.get("vllm_kv_block_lifetime_seconds")
-        idle_hist = histograms.get("vllm_kv_block_idle_before_evict_seconds")
+        lifetime_hist = histograms.get("vllm:kv_block_lifetime_seconds")
+        idle_hist = histograms.get("vllm:kv_block_idle_before_evict_seconds")
 
         assert lifetime_hist is not None
         assert idle_hist is not None
         assert lifetime_hist.count > 0
         assert idle_hist.count > 0
 
-        assert "vllm_kv_block_reuse_gap_seconds" in histograms
+        assert "vllm:kv_block_reuse_gap_seconds" in histograms
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])

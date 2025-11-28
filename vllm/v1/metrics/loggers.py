@@ -885,7 +885,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             ]
 
             histogram_kv_block_lifetime = self._histogram_cls(
-                name="vllm_kv_block_lifetime_seconds",
+                name="vllm:kv_block_lifetime_seconds",
                 documentation=(
                     "Histogram of KV cache block lifetime from allocation to eviction. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
@@ -898,7 +898,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
 
             histogram_kv_block_idle_before_evict = self._histogram_cls(
-                name="vllm_kv_block_idle_before_evict_seconds",
+                name="vllm:kv_block_idle_before_evict_seconds",
                 documentation=(
                     "Histogram of idle time before KV cache block eviction. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
@@ -911,7 +911,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
 
             histogram_kv_block_reuse_gap = self._histogram_cls(
-                name="vllm_kv_block_reuse_gap_seconds",
+                name="vllm:kv_block_reuse_gap_seconds",
                 documentation=(
                     "Histogram of time gaps between consecutive KV cache block "
                     "accesses. Only the most recent accesses are recorded "

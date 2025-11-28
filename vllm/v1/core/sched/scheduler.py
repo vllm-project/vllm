@@ -42,7 +42,6 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import (
-    KVCacheEvictionEvent,
     PrefixCacheStats,
     SchedulerStats,
 )
@@ -1360,9 +1359,11 @@ class Scheduler(SchedulerInterface):
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
         connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
-        eviction_events: list[KVCacheEvictionEvent] = []
-        if self.kv_metrics_collector is not None:
-            eviction_events = self.kv_metrics_collector.drain_events()
+        eviction_events = (
+            self.kv_metrics_collector.drain_events()
+            if self.kv_metrics_collector is not None
+            else []
+        )
         spec_stats = spec_decoding_stats
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
