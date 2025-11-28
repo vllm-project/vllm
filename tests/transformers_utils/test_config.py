@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from vllm.transformers_utils.config import list_filtered_repo_files
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 
 @pytest.mark.parametrize(
@@ -44,7 +44,7 @@ def test_list_filtered_repo_files(
 
         # Patch list_repo_files called by fn
         with patch(
-            "vllm.transformers_utils.config.list_repo_files",
+            "vllm.transformers_utils.repo_utils.list_repo_files",
             MagicMock(return_value=_glob_path()),
         ) as mock_list_repo_files:
             out_files = sorted(
