@@ -380,7 +380,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        per_engine_labelvalues = {idx: [model_name, str(idx)] for idx in engine_indexes}
+        per_engine_labelvalues: dict[int, list[object]] = {
+            idx: [model_name, str(idx)] for idx in engine_indexes
+        }
 
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config, labelnames, per_engine_labelvalues
