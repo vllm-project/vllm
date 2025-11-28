@@ -4509,6 +4509,13 @@ class GPUModelRunner(
                     ", ".join(missing_layer_names[:3])
                     + ("..." if len(missing_layer_names) > 3 else ""),
                 )
+                # Also log what local layers we found for debugging PP issues
+                logger.debug(
+                    "Local layers found: %d (sample: %s)",
+                    len(layers),
+                    ", ".join(list(layers.keys())[:3])
+                    + ("..." if len(layers) > 3 else ""),
+                )
 
             local_layer_names = [
                 layer_name
@@ -5220,6 +5227,42 @@ class GPUModelRunner(
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
+
+        # Validate that the kv_cache_config layers match layers on this rank.
+        # This helps catch mismatches in pipeline parallelism setups.
+        layer_type = cast(type[Any], AttentionLayerBase)
+        local_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config, layer_type
+        )
+        config_layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            config_layer_names.update(group.layer_names)
+        local_layer_names = set(local_attn_layers.keys())
+
+        # Log info about layer configuration for debugging PP issues
+        if config_layer_names and local_layer_names:
+            config_sample = sorted(config_layer_names)[:3]
+            local_sample = sorted(local_layer_names)[:3]
+            logger.debug(
+                "KV cache config has %d layers (sample: %s), "
+                "local rank has %d layers (sample: %s)",
+                len(config_layer_names), config_sample,
+                len(local_layer_names), local_sample
+            )
+
+            # Check for complete mismatch which indicates config was sent to
+            # wrong worker (likely PP rank ordering issue)
+            overlap = config_layer_names & local_layer_names
+            if len(overlap) == 0 and len(config_layer_names) > 0:
+                raise RuntimeError(
+                    f"KV cache config layers do not match local layers. "
+                    f"Config layers (sample): {config_sample}, "
+                    f"Local layers (sample): {local_sample}. "
+                    f"This usually indicates a pipeline parallelism "
+                    f"configuration issue where kv_cache_configs ordering "
+                    f"doesn't match worker global_rank ordering."
+                )
+
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
