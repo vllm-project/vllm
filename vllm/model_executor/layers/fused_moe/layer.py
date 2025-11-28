@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from functools import partial
 from typing import Literal, cast, get_args, overload
 
 import torch
@@ -2053,7 +2052,7 @@ class FusedMoE(CustomOp):
 
                 return states
 
-            if self.shared_experts is not None and self.num_fused_shared_experts == 0:
+            if self.shared_experts is not None:
                 return (
                     final_hidden_states[0],
                     combine_output(final_hidden_states[1]),

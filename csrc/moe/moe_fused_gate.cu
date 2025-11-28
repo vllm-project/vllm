@@ -1,3 +1,5 @@
+// copied from
+// https://github.com/sgl-project/sglang/blob/v0.5.5/sgl-kernel/csrc/moe/moe_fused_gate.cu
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cutlass/array.h>
