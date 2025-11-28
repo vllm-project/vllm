@@ -643,8 +643,9 @@ class SingleWriterShmObjectStorage:
             monotonic_id: Monotonic ID of the object (only for readers)
 
         """
-
         if self._reader_lock is None:
+            if key not in self.key_index:
+                return None
             address, monotonic_id = self.key_index[key]
             # Writer side: increment writer_flag to raise eviction threshold
             self.increment_writer_flag(monotonic_id)

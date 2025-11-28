@@ -1729,7 +1729,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # list evict during update
         for hashes in mm_hashes.values():
             for item_hash in hashes:
-                cache.touch_cache_sender(item_hash)
+                cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 

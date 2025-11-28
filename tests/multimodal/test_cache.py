@@ -267,7 +267,7 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request1_hashes:
-        p0_cache.touch_cache_sender(mm_hash)
+        p0_cache.touch_sender_cache_item(mm_hash)
 
     ###########################
     # Process request 1 for P0 Cache
@@ -286,18 +286,13 @@ def _run_test_cache_eviction_lru(
     ###########################
     # Touch all mm hash for P1 Cache before process
     for mm_hash in request1_hashes:
-        p1_cache.touch_cache_receiver(mm_hash)
+        p1_cache.touch_receiver_cache_item(mm_hash)
 
     for h in request1_hashes:
         p1_cache.get_and_update_item(request1_items[h], h)
 
     expected_hashes = ["image_A", "image_B", "image_C"]
-    if isinstance(p0_cache, MultiModalProcessorSenderCache):
-        assert list(p0_cache._cache.order) == expected_hashes
-    elif isinstance(p0_cache, ShmObjectStoreSenderCache):
-        assert list(p0_cache._p0_cache) == expected_hashes
-    if isinstance(p1_cache, MultiModalReceiverCache):
-        assert list(p1_cache._cache.order) == expected_hashes
+    assert list(p0_cache._cache.order) == expected_hashes
 
     ##########################
     # STEP 2: Request 2 send
@@ -307,7 +302,7 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request2_hashes:
-        p0_cache.touch_cache_sender(mm_hash)
+        p0_cache.touch_sender_cache_item(mm_hash)
 
     ###########################
     # Process request 2 for P0 Cache
@@ -326,19 +321,14 @@ def _run_test_cache_eviction_lru(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash in request2_hashes:
-        p1_cache.touch_cache_receiver(mm_hash)
+        p1_cache.touch_receiver_cache_item(mm_hash)
 
     for h in request2_hashes:
         p1_cache.get_and_update_item(request2_items[h], h)
 
     print(list(p0_cache._cache.order))
     expected_hashes = ["image_D", "image_E", "image_A", "image_C"]
-    if isinstance(p0_cache, MultiModalProcessorSenderCache):
-        assert list(p0_cache._cache.order) == expected_hashes
-    elif isinstance(p0_cache, ShmObjectStoreSenderCache):
-        assert list(p0_cache._p0_cache) == expected_hashes
-    if isinstance(p1_cache, MultiModalReceiverCache):
-        assert list(p1_cache._cache.order) == expected_hashes
+    assert list(p0_cache._cache.order) == expected_hashes
 
 
 def test_cache_eviction_lru_cache():
@@ -356,11 +346,13 @@ def test_cache_eviction_lru_cache():
 # and receiver (p1) caches.
 # Flow summary:
 # 1. Request 1 adds images A, B, C — completely filling the cache.
-# 2. Request 2 tries to add image_G and image_A, but image_G cannot be added
-#    because cache is full and A is protected from eviction — cache remains unchanged.
-# 3. Request 3 adds image_G again; this time, image_A is evicted,
-#    and image_G successfully fits,
-#    proving normal eviction and reuse behavior.
+# 2. Request 2 tries to add image_G and image_A, but image_G cannot be added because
+#    cache is full and A is protected from eviction — cache remains unchanged.
+# 3. Request 3 adds image_G, image_H, image_I and image_B
+#    this time, image_A is evicted, freeing 5MB space
+#    and image_G, image_H successfully fits,
+#    image_B is protected from eviction then image_i cannot be added.
+#    This proving normal eviction and reuse behavior.
 def _run_test_cache_eviction_shm(
     p0_cache: BaseMultiModalProcessorCache,
     p1_cache: BaseMultiModalReceiverCache,
@@ -368,7 +360,7 @@ def _run_test_cache_eviction_shm(
 ):
     request1_hashes = ["image_A", "image_B", "image_C"]
     request1_items = {
-        h: MultiModalKwargsItem.dummy(h, nbytes=2 * base_item_size)
+        h: MultiModalKwargsItem.dummy(h, nbytes=5 * base_item_size)
         for h in request1_hashes
     }
     request1_items_p0_result = []
@@ -376,16 +368,16 @@ def _run_test_cache_eviction_shm(
     request2_hashes = ["image_G", "image_A"]
     request2_items = {
         h: MultiModalKwargsItem.dummy(
-            h, nbytes=(2 if h in request1_hashes else 1) * base_item_size
+            h, nbytes=(5 if h in request1_hashes else 2) * base_item_size
         )
         for h in request2_hashes
     }
     request2_items_p0_result = []
 
-    request3_hashes = ["image_G", "image_B"]
+    request3_hashes = ["image_G", "image_H", "image_I", "image_B"]
     request3_items = {
         h: MultiModalKwargsItem.dummy(
-            h, nbytes=(2 if h in request1_hashes else 1) * base_item_size
+            h, nbytes=(5 if h in request1_hashes else 2) * base_item_size
         )
         for h in request3_hashes
     }
@@ -401,7 +393,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request1_hashes:
-        p0_cache.touch_cache_sender(mm_hash)
+        p0_cache.touch_sender_cache_item(mm_hash)
 
     ###########################
     # Process request 1 for P0 Cache
@@ -422,7 +414,7 @@ def _run_test_cache_eviction_shm(
     ###########################
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
-        p1_cache.touch_cache_receiver(mm_hash, mm_item)
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
@@ -440,7 +432,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request2_hashes:
-        p0_cache.touch_cache_sender(mm_hash)
+        p0_cache.touch_sender_cache_item(mm_hash)
 
     ###########################
     # Process request 2 for P0 Cache
@@ -465,7 +457,7 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
-        p1_cache.touch_cache_receiver(mm_hash, mm_item)
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
@@ -479,11 +471,11 @@ def _run_test_cache_eviction_shm(
     ##########################
     ##### Prove that cache eviction work normally
     sender_is_cached_item_req3 = p0_cache.is_cached(request3_hashes)
-    assert sender_is_cached_item_req3 == [False, True]
+    assert sender_is_cached_item_req3 == [False, False, False, True]
 
     # Touch all mm hash for P0 Cache before process
     for mm_hash in request3_hashes:
-        p0_cache.touch_cache_sender(mm_hash)
+        p0_cache.touch_sender_cache_item(mm_hash)
 
     ###########################
     # Process request 3 for P0 Cache
@@ -498,7 +490,9 @@ def _run_test_cache_eviction_shm(
         request3_items_p0_result.append(p0_result[0])
 
     # image_A got evict and image_G add to cache
-    assert p0_cache.is_cached(request3_hashes) == [True, True]
+    # image_B is still protected
+    # image_G, image_H fit but image_I cannot fit
+    assert p0_cache.is_cached(request3_hashes) == [True, True, False, True]
 
     ###########################
     # Process request 3 for P1 Cache
@@ -506,12 +500,12 @@ def _run_test_cache_eviction_shm(
 
     # Touch all mm hash for P1 Cache before process
     for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
-        p1_cache.touch_cache_receiver(mm_hash, mm_item)
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
 
     for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
         p1_cache.get_and_update_item(mm_item, mm_hash)
 
-    expected_hashes = ["image_B", "image_C", "image_G"]
+    expected_hashes = ["image_B", "image_C", "image_G", "image_H"]
     assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
 
 
@@ -520,8 +514,8 @@ def test_cache_eviction_shm_cache():
         model_config=ModelConfig(
             model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
             mm_processor_cache_type="shm",
-            mm_shm_cache_max_object_size_mb=3,
-            mm_processor_cache_gb=6.2 * MiB_bytes / GiB_bytes,
+            mm_shm_cache_max_object_size_mb=6,
+            mm_processor_cache_gb=15.2 * MiB_bytes / GiB_bytes,
         ),
     )
     sender_cache = ShmObjectStoreSenderCache(vllm_config)
