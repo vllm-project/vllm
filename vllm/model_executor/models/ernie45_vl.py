@@ -200,7 +200,6 @@ class Ernie4_5_VisionAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
@@ -495,7 +494,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-
 
     @property
     def dtype(self) -> torch.dtype:
