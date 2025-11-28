@@ -257,31 +257,17 @@ class FlexibleArgumentParser(ArgumentParser):
             ):
                 # Convert -O <n> to --optimization-level <n>
                 processed_args.append("--optimization-level")
-            elif arg.startswith("-O") and arg[2] == ".":
-                # Handle -O.* dotted syntax - check if compilation config related
-                # If it has compilation config options, emit deprecation warning
-                if any(
-                    cc_option in arg
-                    for cc_option in [
-                        ".mode",
-                        ".backend",
-                        ".custom_option",
-                        ".enable_fusion",
-                        ".disable_custom_fusion",
-                    ]
-                ):
-                    logger.warning_once(
-                        "The -O.* dotted syntax for --compilation-config is "
-                        "deprecated and will be removed in v0.13.0. Please use "
-                        "-cc.* instead. Example: -cc.backend=eager instead of "
-                        "-O.backend=eager.",
-                        scope="deprecation-compilation-config-O-flag",
-                    )
-                    converted_arg = arg.replace("-O", "-cc", 1)
-                    processed_args.append(converted_arg)
-                else:
-                    # This is the new optimization level syntax, keep as-is
-                    processed_args.append(arg)
+            elif arg.startswith("-O."):
+                # Handle -O.* dotted syntax - ALL dotted syntax is deprecated
+                logger.warning_once(
+                    "The -O.* dotted syntax for --compilation-config is "
+                    "deprecated and will be removed in v0.13.0 or v1.0.0"
+                    ", whichever is earlier.  Please use -cc.* instead. "
+                    "Example: -cc.backend=eager instead of "
+                    "-O.backend=eager."
+                )
+                converted_arg = arg.replace("-O", "-cc", 1)
+                processed_args.append(converted_arg)
             else:
                 processed_args.append(arg)
 

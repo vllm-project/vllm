@@ -273,7 +273,7 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "-O",
+            "-cc",
             '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], "backend": "eager"}',
         ]
     )
