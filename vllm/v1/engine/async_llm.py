@@ -27,7 +27,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import TokenizerLike, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
@@ -119,9 +119,10 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
+            self.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -698,14 +699,14 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
 
     @property
-    def tokenizer(self) -> AnyTokenizer | None:
+    def tokenizer(self) -> TokenizerLike | None:
         return self.processor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
         self.processor.tokenizer = tokenizer
 
-    async def get_tokenizer(self) -> AnyTokenizer:
+    async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
                 "Unable to get tokenizer because skip_tokenizer_init is True"

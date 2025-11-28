@@ -36,7 +36,7 @@ from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 logger = init_logger(__name__)
 
 
-class Processor:
+class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,

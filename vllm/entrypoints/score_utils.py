@@ -20,9 +20,9 @@ from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
     PreTrainedTokenizer,
     PreTrainedTokenizerFast,
+    TokenizerLike,
 )
 
 ScoreContentPartParam: TypeAlias = (
@@ -93,7 +93,7 @@ def parse_score_data(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
 ) -> tuple[str, str, MultiModalDataDict | None]:
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
@@ -181,7 +181,7 @@ def post_process_tokens(
 
 def get_score_prompt(
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,

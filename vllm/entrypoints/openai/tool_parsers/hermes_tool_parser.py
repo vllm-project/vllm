@@ -22,13 +22,13 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import MistralTokenizer, TokenizerLike
 
 logger = init_logger(__name__)
 
 
 class Hermes2ProToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         if isinstance(self.model_tokenizer, MistralTokenizer):

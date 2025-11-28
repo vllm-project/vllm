@@ -72,8 +72,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
     MistralTokenizer,
+    TokenizerLike,
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
@@ -350,11 +350,11 @@ class LLM:
         self.processor = self.llm_engine.processor
         self.io_processor = self.llm_engine.io_processor
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
     @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
@@ -1244,7 +1244,7 @@ class LLM:
 
     def _embedding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         text_1: list[str | TextPrompt | TokensPrompt],
         text_2: list[str | TextPrompt | TokensPrompt],
         truncate_prompt_tokens: int | None = None,
@@ -1276,7 +1276,7 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
         truncate_prompt_tokens: int | None = None,

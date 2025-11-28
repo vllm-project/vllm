@@ -28,7 +28,7 @@ ALLOWED_FILES = {
     "vllm/distributed/device_communicators/shm_object_storage.py",
     "vllm/utils/hashing.py",
     "tests/utils_/test_hashing.py",
-    "tests/tokenization/test_cached_tokenizer.py",
+    "tests/transformers_utils/test_cached_tokenizer.py",
     "benchmarks/kernels/graph_machete_bench.py",
     "benchmarks/kernels/benchmark_lora.py",
     "benchmarks/kernels/benchmark_machete.py",

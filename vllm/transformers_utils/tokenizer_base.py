@@ -2,73 +2,64 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+from typing_extensions import Self, runtime_checkable
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
-class TokenizerBase(ABC):
-    @property
-    @abstractmethod
-    def all_special_tokens_extended(self) -> list[str]:
-        raise NotImplementedError()
+@runtime_checkable
+class TokenizerLike(Protocol):
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        /,
+        *,
+        revision: str | None = None,
+    ) -> "Self":
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def all_special_tokens(self) -> list[str]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def all_special_ids(self) -> list[int]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def bos_token_id(self) -> int:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def eos_token_id(self) -> int:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
-    def sep_token(self) -> str:
-        raise NotImplementedError()
-
-    @property
-    @abstractmethod
-    def pad_token(self) -> str:
-        raise NotImplementedError()
-
-    @property
-    @abstractmethod
     def is_fast(self) -> bool:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def vocab_size(self) -> int:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def max_token_id(self) -> int:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
-    @abstractmethod
     def truncation_side(self) -> str:
-        raise NotImplementedError()
+        raise NotImplementedError
+
+    def __hash__(self) -> int:
+        return hash(id(self))
 
     def __len__(self) -> int:
         return self.vocab_size
 
-    @abstractmethod
     def __call__(
         self,
         text: str | list[str] | list[int],
@@ -77,26 +68,14 @@ class TokenizerBase(ABC):
         truncation: bool = False,
         max_length: int | None = None,
     ):
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def get_vocab(self) -> dict[str, int]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def get_added_vocab(self) -> dict[str, int]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
-    def encode_one(
-        self,
-        text: str,
-        truncation: bool = False,
-        max_length: int | None = None,
-    ) -> list[int]:
-        raise NotImplementedError()
-
-    @abstractmethod
     def encode(
         self,
         text: str,
@@ -104,32 +83,28 @@ class TokenizerBase(ABC):
         max_length: int | None = None,
         add_special_tokens: bool | None = None,
     ) -> list[int]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def apply_chat_template(
         self,
         messages: list["ChatCompletionMessageParam"],
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> list[int]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
-        raise NotImplementedError()
+        raise NotImplementedError
 
-    @abstractmethod
     def convert_ids_to_tokens(
         self,
         ids: list[int],
         skip_special_tokens: bool = True,
     ) -> list[str]:
-        raise NotImplementedError()
+        raise NotImplementedError
 
 
 class TokenizerRegistry:
@@ -145,7 +120,7 @@ class TokenizerRegistry:
         tokenizer_name: str,
         *args,
         **kwargs,
-    ) -> TokenizerBase:
+    ) -> TokenizerLike:
         tokenizer_cls = TokenizerRegistry.REGISTRY.get(tokenizer_name)
         if tokenizer_cls is None:
             raise ValueError(f"Tokenizer {tokenizer_name} not found.")

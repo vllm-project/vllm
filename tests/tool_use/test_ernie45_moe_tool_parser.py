@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.transformers_utils.tokenizer import TokenizerLike, get_tokenizer
 
 # Use a common model that is likely to be available
 MODEL = "baidu/ERNIE-4.5-21B-A3B-Thinking"
@@ -173,7 +173,7 @@ def test_extract_tool_calls(
 
 def stream_delta_message_generator(
     ernie45_tool_parser: Ernie45ToolParser,
-    ernie45_tokenizer: AnyTokenizer,
+    ernie45_tokenizer: TokenizerLike,
     model_output: str,
     request: ChatCompletionRequest | None = None,
 ) -> Generator[DeltaMessage, None, None]:

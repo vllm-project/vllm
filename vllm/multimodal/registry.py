@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 import torch.nn as nn
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
+from vllm.transformers_utils.tokenizer import (
+    TokenizerLike,
+    cached_tokenizer_from_config,
+)
 from vllm.utils.collection_utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
@@ -235,17 +238,20 @@ class MultiModalRegistry:
     def _create_processing_ctx(
         self,
         model_config: "ModelConfig",
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> InputProcessingContext:
-        if tokenizer is None and not model_config.skip_tokenizer_init:
+        if model_config.skip_tokenizer_init:
+            tokenizer = cast(TokenizerLike, object())
+        elif tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
+
         return InputProcessingContext(model_config, tokenizer)
 
     def _create_processing_info(
         self,
         model_config: "ModelConfig",
         *,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> BaseProcessingInfo:
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
@@ -256,7 +262,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """

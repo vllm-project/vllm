@@ -5,12 +5,13 @@ import contextlib
 import copy
 import importlib.util
 import os
+import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from typing_extensions import assert_never
 
 from vllm import envs
@@ -18,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.transformers_utils.tokenizer_base import TokenizerLike
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import (
     check_gguf_file,
@@ -28,18 +30,31 @@ from vllm.transformers_utils.utils import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.transformers_utils.tokenizer_base import TokenizerBase
 else:
     ModelConfig = Any
-    TokenizerBase = Any
 
 logger = init_logger(__name__)
 
-AnyTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast | TokenizerBase
+
+def __getattr__(name: str):
+    # TODO: Move AnyTokenizer into this file
+    # and move TokenizerRegistry into `registry.py` with a deprecation
+    if name == "AnyTokenizer":
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been renamed to "
+            "`vllm.transformers_utils.tokenizer.TokenizerLike`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return TokenizerLike
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def decode_tokens(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     token_ids: list[int],
     *,
     skip_special_tokens: bool | None = None,
@@ -58,7 +73,7 @@ def decode_tokens(
 
 
 def encode_tokens(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     text: str,
     *,
     truncation: bool | None = None,
@@ -86,7 +101,7 @@ def encode_tokens(
     return tokenizer.encode(text, **kw_args)
 
 
-def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
+def get_cached_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -96,7 +111,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_all_special_tokens_extended = tokenizer.all_special_tokens_extended
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -117,10 +131,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         @property
         def all_special_tokens(self) -> list[str]:
             return tokenizer_all_special_tokens
-
-        @property
-        def all_special_tokens_extended(self) -> list[str]:
-            return tokenizer_all_special_tokens_extended
 
         @property
         def max_token_id(self) -> int:
@@ -149,7 +159,7 @@ def get_tokenizer(
     revision: str | None = None,
     download_dir: str | None = None,
     **kwargs,
-) -> AnyTokenizer:
+) -> TokenizerLike:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
@@ -211,7 +221,7 @@ def get_tokenizer(
         if len(files_list) > 0:
             tokenizer_mode = "mistral"
 
-    tokenizer: AnyTokenizer
+    tokenizer: TokenizerLike
     if tokenizer_mode == "mistral":
         logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
@@ -265,12 +275,13 @@ def get_tokenizer(
         if isinstance(encoder_config, dict) and encoder_config.get(
             "do_lower_case", False
         ):
+            assert isinstance(tokenizer, PreTrainedTokenizerBase)
             special_tokens_map = {
                 k: v.lower() for k, v in tokenizer.special_tokens_map.items()
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        if not tokenizer.is_fast:
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
                 "slowdown. Consider using a fast tokenizer instead."

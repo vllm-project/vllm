@@ -13,7 +13,7 @@ from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.processor import Processor
 
@@ -85,7 +85,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_tokenizer(self) -> AnyTokenizer:
+    async def get_tokenizer(self) -> TokenizerLike:
         """Get the tokenizer"""
         ...
 

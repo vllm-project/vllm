@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer_base import TokenizerBase
+from vllm.transformers_utils.tokenizer_base import TokenizerLike
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
@@ -163,7 +163,7 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-class MistralTokenizer(TokenizerBase):
+class MistralTokenizer(TokenizerLike):
     def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
         from mistral_common.protocol.instruct.validator import ValidationMode
         from mistral_common.tokens.tokenizers.sentencepiece import (
@@ -255,10 +255,6 @@ class MistralTokenizer(TokenizerBase):
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
     @property
-    def all_special_tokens_extended(self) -> list[str]:
-        return self.all_special_tokens
-
-    @property
     def all_special_tokens(self) -> list[str]:
         return self._special_tokens
 
@@ -275,14 +271,6 @@ class MistralTokenizer(TokenizerBase):
         return self.tokenizer.eos_id
 
     @property
-    def sep_token(self) -> str:
-        raise NotImplementedError()
-
-    @property
-    def pad_token(self) -> str:
-        return self.transformers_tokenizer.pad_token
-
-    @property
     def is_fast(self) -> bool:
         return True
 
@@ -296,10 +284,13 @@ class MistralTokenizer(TokenizerBase):
 
     @property
     def truncation_side(self) -> str:
-        raise NotImplementedError()
+        return self.transformers_tokenizer.truncation_side
 
     def _is_special_token_id(self, token_id: int) -> bool:
         return token_id in self._special_token_ids_set
+
+    def __hash__(self) -> int:
+        return hash(id(self))
 
     def __len__(self) -> int:
         return self.vocab_size
@@ -344,17 +335,6 @@ class MistralTokenizer(TokenizerBase):
     def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
-
-    def encode_one(
-        self,
-        text: str,
-        truncation: bool = False,
-        max_length: int | None = None,
-    ) -> list[int]:
-        # Mistral Tokenizers should not add special tokens
-        return self.transformers_tokenizer.encode(
-            text, add_special_tokens=False, truncation=truncation, max_length=max_length
-        )
 
     def encode(
         self,

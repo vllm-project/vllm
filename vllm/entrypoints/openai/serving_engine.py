@@ -101,7 +101,7 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import MistralTokenizer, TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
@@ -227,7 +227,7 @@ class ServeContext(
     lora_request: LoRARequest | None = None
 
     # Shared across most requests
-    tokenizer: AnyTokenizer | None = None
+    tokenizer: TokenizerLike | None = None
 
     # `protected_namespaces` resolves Pydantic v2's warning
     # on conflict with protected namespace "model_"
@@ -281,7 +281,7 @@ class OpenAIServing:
             apply_mistral_chat_template, executor=self._tokenizer_executor
         )
 
-        self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
+        self._async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
         self.processor = self.models.processor
@@ -291,7 +291,7 @@ class OpenAIServing:
 
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
-    ) -> Callable[[AnyTokenizer], ToolParser] | None:
+    ) -> Callable[[TokenizerLike], ToolParser] | None:
         """Get the tool parser based on the name."""
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
@@ -317,7 +317,7 @@ class OpenAIServing:
     def _get_reasoning_parser(
         self,
         reasoning_parser_name: str,
-    ) -> Callable[[AnyTokenizer], ReasoningParser] | None:
+    ) -> Callable[[TokenizerLike], ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
         parser = None
         if not reasoning_parser_name:
@@ -547,7 +547,7 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _get_renderer(self, tokenizer: AnyTokenizer | None) -> BaseRenderer:
+    def _get_renderer(self, tokenizer: TokenizerLike | None) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
         Uses shared async tokenizer pool for efficiency.
@@ -877,7 +877,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         prompt: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
@@ -919,7 +919,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         prompt_ids: list[int],
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
     ) -> TextTokensPrompt:
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 
@@ -1015,7 +1015,7 @@ class OpenAIServing:
     async def _tokenize_prompt_input_async(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         prompt_input: str | list[int],
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
@@ -1034,7 +1034,7 @@ class OpenAIServing:
     async def _tokenize_prompt_inputs_async(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         prompt_inputs: Iterable[str | list[int]],
         add_special_tokens: bool = True,
     ) -> AsyncGenerator[TextTokensPrompt, None]:
@@ -1079,7 +1079,7 @@ class OpenAIServing:
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         messages: list[ChatCompletionMessageParam],
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -1088,7 +1088,7 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         documents: list[dict[str, str]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        tool_parser: Callable[[AnyTokenizer], ToolParser] | None = None,
+        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
     ) -> tuple[
         list[ConversationMessage],
@@ -1370,9 +1370,9 @@ class OpenAIServing:
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         enable_auto_tools: bool,
-        tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
+        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
@@ -1442,7 +1442,7 @@ class OpenAIServing:
     def _get_decoded_token(
         logprob: Logprob,
         token_id: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
     ) -> str:
         if return_as_token_id:
@@ -1450,6 +1450,12 @@ class OpenAIServing:
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token
+
+        if tokenizer is None:
+            raise ValueError(
+                "Unable to get tokenizer because skip_tokenizer_init is True"
+            )
+
         return tokenizer.decode(token_id)
 
     def _is_model_supported(self, model_name: str | None) -> bool:

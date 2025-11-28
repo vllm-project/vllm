@@ -260,7 +260,6 @@ class TestMistralTokenizer:
     def test_all_special_tokens(self, mistral_tokenizer: MistralTokenizer):
         attributes = [
             mistral_tokenizer.all_special_tokens,
-            mistral_tokenizer.all_special_tokens_extended,
         ]
 
         for attribute in attributes:
@@ -313,25 +312,6 @@ class TestMistralTokenizer:
 
     def test_get_added_vocab(self, mistral_tokenizer: MistralTokenizer):
         assert mistral_tokenizer.get_added_vocab() == {}
-
-    def test_encode_one(self, mistral_tokenizer: MistralTokenizer):
-        token_ids = (
-            [22177, 4304, 2662] if mistral_tokenizer.is_tekken else [23325, 2294, 1686]
-        )
-
-        assert mistral_tokenizer.encode_one("Hello world !") == token_ids
-        assert mistral_tokenizer.encode_one("Hello world !", max_length=1) == token_ids
-        assert (
-            mistral_tokenizer.encode_one("Hello world !", truncation=True, max_length=1)
-            == token_ids[:-2]
-        )
-        assert (
-            mistral_tokenizer.encode_one(
-                "Hello world !", truncation=False, max_length=1
-            )
-            == token_ids
-        )
-        assert mistral_tokenizer.encode_one("") == []
 
     def test_encode(self, mistral_tokenizer: MistralTokenizer):
         token_ids = (
