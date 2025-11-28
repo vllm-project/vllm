@@ -17,7 +17,7 @@ from vllm.model_executor.layers.hybrid_ssm_adapter import HybridSSMAdapter
 from vllm.v1.attention.backends.hybrid_attn import HybridAttentionImpl
 
 
-def test_hybrid_ssm_adapter_state_shape_and_dtype():
+def test_hybrid_ssm_adapter_state_shape_and_dtype(dist_init):
     """HybridSSMAdapter should match Mamba1 state shape and dtype helpers."""
     vllm_config = create_vllm_config(add_mock_model_methods=False)
     cache_config = vllm_config.cache_config
@@ -90,7 +90,7 @@ def test_hybrid_ssm_adapter_state_shape_and_dtype():
     assert decode_out.shape == hidden_states.shape
 
 
-def test_hybrid_ssm_adapter_prefix_sum_mode():
+def test_hybrid_ssm_adapter_prefix_sum_mode(dist_init):
     """HybridSSMAdapter should produce a simple prefix-sum history signal when enabled.
 
     This tests the lightweight, non-zero SSM rule used for experimentation:
