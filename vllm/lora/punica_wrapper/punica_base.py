@@ -173,7 +173,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         vocab_size: int,
     ):
         # NOTE We have remove lora extra vocab support for now. So we set
-        # extra_vocab_size alwayzs to 0, and extra_vocab_size will be removed.
+        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
 
         extra_vocab_size = 0
         (

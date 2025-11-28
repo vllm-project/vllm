@@ -238,9 +238,9 @@ class ParallelConfig:
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP or PCP.
     For `cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `cp_world_size = pcp_world_size * dcp_world_szie`.
+        and `cp_world_size = pcp_world_size * dcp_world_size`.
     store interleave_size tokens on cp_rank i,
-    then store next interleave_size tokens on taotal_cp_rank i+1.
+    then store next interleave_size tokens on cp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
         cp_rank `i % cp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are

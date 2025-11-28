@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import torch
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
@@ -226,9 +226,6 @@ class Platform:
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
-        # Import AttentionBackendEnum here to avoid circular import.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod

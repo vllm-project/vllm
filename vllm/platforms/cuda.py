@@ -15,6 +15,8 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -22,11 +24,9 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
 else:
-    AttentionBackendEnum = None
     VllmConfig = None
     CacheDType = None
 
@@ -48,8 +48,6 @@ def _get_backend_priorities(
     device_capability: DeviceCapability,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.attention.backends.registry import AttentionBackendEnum
-
     if use_mla:
         if device_capability.major == 10:
             return [
@@ -265,17 +263,16 @@ class CudaPlatformBase(Platform):
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         # Try FlashAttention first
-        try:
-            backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-            if backend_class.supports_head_size(
-                head_size
-            ) and backend_class.supports_dtype(dtype):
-                return AttentionBackendEnum.FLASH_ATTN
-        except ImportError:
-            pass
+        if (cc := cls.get_device_capability()) and cc.major >= 8:
+            try:
+                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
+                if backend_class.supports_head_size(
+                    head_size
+                ) and backend_class.supports_dtype(dtype):
+                    return AttentionBackendEnum.FLASH_ATTN
+            except ImportError:
+                pass
 
         return AttentionBackendEnum.TORCH_SDPA
 
@@ -335,8 +332,6 @@ class CudaPlatformBase(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.abstract import AttentionType
-
         if attn_type is None:
             attn_type = AttentionType.DECODER
 

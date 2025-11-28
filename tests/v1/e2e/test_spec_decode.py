@@ -286,6 +286,19 @@ def test_speculators_model_integration(
         pytest.param(
             (
                 "eagle3",
+                "Qwen/Qwen3-VL-8B-Instruct",
+                "taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+                1,
+            ),
+            False,
+            False,
+            marks=pytest.mark.skip(
+                reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
+            ),
+        ),
+        pytest.param(
+            (
+                "eagle3",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
                 "Rayzl/qwen2.5-vl-7b-eagle3-sgl",
                 1,
@@ -352,6 +365,7 @@ def test_speculators_model_integration(
     ],
     ids=[
         "qwen3_eagle3",
+        "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
         "llama3_eagle3",
