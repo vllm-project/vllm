@@ -197,7 +197,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, shard_id * shard_size, shard_size
         )
 
-        assert param_data.shape == loaded_weight.shape
+        assert param_data.shape == loaded_weight.shape, f"param shape: {param_data.shape} but got loaded weight shape: {loaded_weight.shape}"
         param_data.copy_(loaded_weight)
 
 

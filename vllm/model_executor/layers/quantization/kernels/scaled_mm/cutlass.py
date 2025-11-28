@@ -52,6 +52,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
+            # print("going into the input scheme convert")
             input_scale = getattr(layer, self.i_s_name)
 
             if self.config.input_symmetric:
@@ -82,6 +83,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 )
 
         else:
+            # print('skipping input scheme convert')
             setattr(layer, self.i_s_name, None)
             setattr(layer, self.i_zp_name, None)
 
@@ -91,6 +93,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
         if not self.config.input_symmetric:
+            # print("going into the input symmetric convert")
             weight = getattr(layer, self.w_q_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
             if self.config.is_static_input_scheme:
@@ -103,6 +106,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 torch.nn.Parameter(azp_adj, requires_grad=False),
             )
         else:
+            # print('skipping input symmetric convert')
             setattr(layer, self.azp_adj_name, None)
 
     def apply_weights(

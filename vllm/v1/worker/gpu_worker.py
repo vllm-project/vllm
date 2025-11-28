@@ -4,9 +4,10 @@
 
 import gc
 import os
+import time 
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, Optional
 
 import numpy as np
 import torch
@@ -54,6 +55,7 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+import ray
 
 logger = init_logger(__name__)
 
@@ -100,6 +102,11 @@ class Worker(WorkerBase):
             self.profiler = CudaProfilerWrapper()
         else:
             self.profiler = None
+        
+        from vllm.model_executor.layers.patch import patch_vllm_process_weights_after_loading, fanout_existing_imports
+        patch_vllm_process_weights_after_loading()
+        fanout_existing_imports()
+
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
@@ -163,6 +170,13 @@ class Worker(WorkerBase):
         if isinstance(device, torch.device) and device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            logger.info(f"{self.local_rank} came here in my code")
+            logger.info(f"{self.local_rank} torch device count: {torch.cuda.device_count()}")
+            logger.info(f"{self.local_rank} CUDA visible devices I can see: {os.environ.get('CUDA_VISIBLE_DEVICES', 'CANTSET')}")
+            logger.info(f"GPU ids available: {ray.get_gpu_ids()}")
+            logger.info(f"{self.local_rank} using device: {self.device}")
+            torch.cuda.set_device(self.device)
             if (
                 self.parallel_config.data_parallel_size > 1
                 and self.parallel_config.data_parallel_size_local > 0
@@ -258,6 +272,53 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CuMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.load_model()
+        
+        from vllm.model_executor.layers.patch import patch_load_weights
+        patch_load_weights(self)
+        # from transformers import AutoModelForCausalLM
+        # # # load the bf16 model
+        # # test_model = AutoModelForCausalLM.from_pretrained("Meta-Llama/Meta-Llama-3.1-8B-Instruct")
+        
+        # test_model = AutoModelForCausalLM.from_pretrained("RedHatAI/DeepSeek-R1-Distill-Qwen-14B-quantized.w8a8")
+        # weights_to_load = []
+        # from typing import Dict, List 
+
+        # module_to_params: Dict[str, List[str]] = {}
+        # for param_name, param in test_model.named_parameters():
+        #     module_name = ".".join(param_name.split(".")[:-2])
+        #     if module_name not in module_to_params:
+        #         module_to_params[module_name] = [param_name]
+        #     else:
+        #         module_to_params[module_name].append(param_name)
+        
+        # params = dict(test_model.named_parameters())
+        # weights = []
+        # for i, module in enumerate(module_to_params.keys()):
+        #     if i == 4:
+        #         break
+        #     for param_name in module_to_params[module]:
+        #         param = params[param_name]
+        #         weights.append((param_name, param))
+        # # print("dump params: ", [name for name, _ in weights])
+        # full_weights = [(name, param.to(self.device)) for name, param in weights]
+        # s = time.time()
+        # # breakpoint()
+        # self.model_runner.model.load_weights(
+        #     weights=full_weights
+        # )
+        # e = time.time()
+        # print("Total e2e time: ", e - s )
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)

@@ -170,7 +170,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     return method_to_config[quantization]
 
-
 __all__ = [
     "QuantizationConfig",
     "QuantizationMethods",
