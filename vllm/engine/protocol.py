@@ -15,7 +15,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 class EngineClient(ABC):
@@ -23,7 +23,7 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    processor: Processor
+    input_processor: InputProcessor
     io_processor: IOProcessor | None
 
     @property
