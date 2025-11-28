@@ -277,6 +277,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        close_streaming_session: bool | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -285,8 +286,12 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
+        # Reuse output collector for streaming session, create new otherwise.
+        existing_state = self.output_processor.request_states.get(request_id)
+        if existing_state and existing_state.queue:
+            queue = existing_state.queue
+        else:
+            queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -307,6 +312,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                close_streaming_session,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt
@@ -369,6 +375,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        close_streaming_session: bool | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -425,6 +432,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                close_streaming_session=close_streaming_session,
             )
 
             # The output_handler task pushes items into the queue.
@@ -439,16 +447,36 @@ class AsyncLLM(EngineClient):
                 # own request cleanup based on finished.
                 finished = out.finished
                 assert isinstance(out, RequestOutput)
+                if (
+                    len(out.outputs) > 0
+                    and out.outputs[0].stop_reason == "close_streaming_session"
+                ):
+                    return
                 yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
-        except (asyncio.CancelledError, GeneratorExit):
+        except asyncio.CancelledError:
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
+
+        except GeneratorExit:
+            if close_streaming_session is not None:
+                if self.log_requests:
+                    logger.info(
+                        "Request %s generator completed, session remains alive.",
+                        request_id,
+                    )
+                # For streaming sessions, generator completion is normal
+                return
+            else:
+                await self.abort(request_id)
+                if self.log_requests:
+                    logger.info("Request %s aborted.", request_id)
+                raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:

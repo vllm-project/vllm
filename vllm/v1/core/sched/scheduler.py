@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from vllm import envs
@@ -434,6 +434,18 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                # Streaming: skip request if still waiting for next streaming req.
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    if len(request.streaming_queue) > 0:
+                        close = self._update_session_request(request)
+                        if close:
+                            self.waiting.pop_request()
+                            continue
+                    else:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -669,7 +681,7 @@ class Scheduler(SchedulerInterface):
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
             scheduled_resumed_reqs = []
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
@@ -678,7 +690,7 @@ class Scheduler(SchedulerInterface):
             ]
         else:
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req, req_to_new_blocks[req.request_id].get_block_ids()
                 )
                 for req in scheduled_new_reqs
@@ -765,6 +777,17 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _update_session_request(self, session_request: Request) -> bool:
+        raise NotImplementedError("Use streaming scheduler")
+
+    def _make_new_request_data(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
+    ) -> NewRequestData:
+        return NewRequestData.from_request(request, block_ids, prefill_token_ids)
 
     def _make_cached_request_data(
         self,
@@ -1021,6 +1044,13 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+
+        def mark_running_stopped(req: Request) -> None:
+            stopped_running_reqs.add(req)
+
+        def mark_preempted_stopped(req: Request) -> None:
+            stopped_preempted_reqs.add(req)
+
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1081,11 +1111,19 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
-                kv_transfer_params = self._free_request(request)
-                if status_before_stop == RequestStatus.RUNNING:
-                    stopped_running_reqs.add(request)
-                else:
-                    stopped_preempted_reqs.add(request)
+                kv_transfer_params = self._handle_stopped(
+                    request,
+                    status_before_stop,
+                    mark_running_stopped,
+                    mark_preempted_stopped,
+                )
+            else:
+                self._handle_non_stopped(
+                    request,
+                    status_before_stop,
+                    mark_running_stopped,
+                    model_runner_output,
+                )
 
             # Extract sample logprobs if needed.
             if (
@@ -1122,11 +1160,14 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        close_streaming_session=request.close_streaming_session,
                     )
                 )
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+        self._handle_finished(scheduler_output.finished_req_ids, outputs)
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -1208,6 +1249,36 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _handle_stopped(
+        self,
+        request: Request,
+        status_before_stop: RequestStatus,
+        mark_running_stopped: Callable[[Request], None],
+        mark_preempted_stopped: Callable[[Request], None],
+    ) -> dict[str, Any] | None:
+        kv_transfer_params = self._free_request(request)
+        if status_before_stop == RequestStatus.RUNNING:
+            mark_running_stopped(request)
+        else:
+            mark_preempted_stopped(request)
+        return kv_transfer_params
+
+    def _handle_non_stopped(
+        self,
+        request: Request,
+        status_before_stop: RequestStatus,
+        mark_running_stopped: Callable[[Request], None],
+        model_runner_output: ModelRunnerOutput,
+    ) -> None:
+        pass
+
+    def _handle_finished(
+        self,
+        finished_req_ids: set[str],
+        outputs: dict[int, list[EngineCoreOutput]],
+    ) -> None:
+        pass
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(

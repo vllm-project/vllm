@@ -3,6 +3,7 @@
 
 import enum
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
@@ -44,6 +45,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        close_streaming_session: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -84,9 +86,6 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            prompt_token_ids, prompt_embeds
-        )
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -100,8 +99,6 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
-        self.num_encoder_inputs = len(self.mm_features)
-        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -131,6 +128,10 @@ class Request:
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+
+        # Used for streaming
+        self.close_streaming_session = close_streaming_session
+        self.streaming_queue: deque[Request] = deque()
 
     @classmethod
     def from_engine_core_request(
@@ -185,6 +186,20 @@ class Request:
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        return length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
+
+    @property
+    def num_encoder_inputs(self) -> int:
+        return len(self.mm_features)
+
+    @property
+    def has_encoder_inputs(self) -> bool:
+        return self.num_encoder_inputs > 0
+
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
             self.sampling_params is not None
@@ -229,6 +244,7 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -238,7 +254,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @staticmethod
@@ -259,4 +275,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
 }
