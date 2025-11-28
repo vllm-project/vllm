@@ -328,19 +328,17 @@ run_throughput_tests() {
 run_serving_tests() {
   # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
-  # $2: optional tier mode ("full" to enable full-tier tests)
   #
   # Supported JSON formats:
   # 1) Old format: top-level array
   #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
   #
-  # 2) New format: object with defaults + tests (+ optional tier)
+  # 2) New format: object with defaults + tests
   #    {
   #      "defaults": { ... },
   #      "tests": [
   #        {
   #          "test_name": "...",
-  #          "tier": "base" | "full",
   #          "server_parameters": {...},
   #          "client_parameters": {...},
   #          "server_environment_variables": {...},
@@ -353,15 +351,6 @@ run_serving_tests() {
 
   local serving_test_file
   serving_test_file=$1
-
-  # full-tier toggle:
-  # - env: RUN_FULL_TESTS=1
-  # - arg2: "full"
-  local tier_mode="${2:-}"
-  local run_full="${RUN_FULL_TESTS:-0}"
-  if [[ "$tier_mode" == "full" || "$tier_mode" == "FULL" ]]; then
-    run_full=1
-  fi
 
   # Iterate over serving tests
   jq -c '
@@ -392,13 +381,6 @@ run_serving_tests() {
     if [[ ! "$test_name" =~ ^serving_ ]]; then
       echo "In serving-test.json, test_name must start with \"serving_\"."
       exit 1
-    fi
-
-    # tier: base vs full; default to base so old files work
-    tier=$(echo "$params" | jq -r '.tier // "base"')
-    if [[ "$run_full" != "1" && "$tier" == "full" ]]; then
-      echo "Skip FULL test case $test_name (tier=$tier, RUN_FULL_TESTS!=1)."
-      continue
     fi
 
     # if TEST_SELECTOR is set, only run the test cases that match the selector
