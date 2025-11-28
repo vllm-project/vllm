@@ -826,7 +826,7 @@ class OpenAIServingChat(OpenAIServing):
                         elif cur_channel == "analysis":
                             if request.include_reasoning:
                                 delta_message = DeltaMessage(
-                                    reasoning_content=delta_text
+                                    reasoning=delta_text
                                 )
                             else:
                                 delta_message = None
