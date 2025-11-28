@@ -720,7 +720,8 @@ class VllmConfig:
             )
 
         if (
-            self.model_config.architecture == "WhisperForConditionalGeneration"
+            self.model_config
+            and self.model_config.architecture == "WhisperForConditionalGeneration"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):
             logger.warning(
