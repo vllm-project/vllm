@@ -37,7 +37,7 @@ class TokenizerLike(Protocol):
         /,
         *,
         revision: str | None = None,
-    ) -> "Self":
+    ) -> Self:
         raise NotImplementedError
 
     @property
