@@ -347,7 +347,7 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
+        self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
     def get_tokenizer(self) -> AnyTokenizer:
@@ -364,7 +364,7 @@ class LLM:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
@@ -1674,7 +1674,7 @@ class LLM:
             tokenization_kwargs,
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
