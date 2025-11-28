@@ -385,11 +385,7 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
 
-        use_v1 = envs.VLLM_USE_V1
-        use_aiter_rms_norm = (
-            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        )
-        use_aiter_linear = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enaled()
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
 
         if cache_config and cache_config.block_size is None:
@@ -405,11 +401,7 @@ class RocmPlatform(Platform):
         ):
             compilation_config.custom_ops.append("+rms_norm")
 
-        if (
-            use_v1
-            and use_aiter_linear
-            and "-quant_fp8" not in compilation_config.custom_ops
-        ):
+        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
 
     @classmethod

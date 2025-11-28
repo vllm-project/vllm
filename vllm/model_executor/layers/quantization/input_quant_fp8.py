@@ -5,11 +5,10 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
@@ -18,63 +17,6 @@ _FP8_FINFO = torch.finfo(_FP8_DTYPE)
 _FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
 _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
-
-
-if current_platform.is_rocm():
-
-    def rocm_aiter_per_tensor_quant_impl(
-        x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from aiter.ops.quant import per_tensor_quant_hip
-
-        return per_tensor_quant_hip(x, scale, dtype)
-
-    def rocm_aiter_per_tensor_quant_fake(
-        x: torch.Tensor, scale: torch.Tensor | None, dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.empty_like(x, dtype=dtype), torch.empty(
-            1, dtype=torch.float32, device=x.device
-        )
-
-    def rocm_aiter_per_token_quant_impl(
-        out: torch.Tensor,
-        x: torch.Tensor,
-        scale: torch.Tensor,
-    ) -> None:
-        from aiter.ops.quant import dynamic_per_token_scaled_quant
-
-        dynamic_per_token_scaled_quant(
-            out,
-            x,
-            scale,
-            scale_ub=None,
-            shuffle_scale=False,
-            num_rows=None,
-            num_rows_factor=1,
-        )
-
-    def rocm_aiter_per_token_quant_fake(
-        out: torch.Tensor,
-        x: torch.Tensor,
-        scale: torch.Tensor,
-    ) -> None:
-        pass
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_per_tensor_quant",
-        op_func=rocm_aiter_per_tensor_quant_impl,
-        mutates_args=[],
-        fake_impl=rocm_aiter_per_tensor_quant_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_per_token_quant",
-        op_func=rocm_aiter_per_token_quant_impl,
-        fake_impl=rocm_aiter_per_token_quant_fake,
-        mutates_args=["out", "scale"],
-        dispatch_key=current_platform.dispatch_key,
-    )
 
 
 @CustomOp.register("quant_fp8")
@@ -109,11 +51,7 @@ class QuantFP8(CustomOp):
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
 
-        self.use_aiter = (
-            envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_LINEAR
-            and current_platform.is_rocm()
-        )
+        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enaled()
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -178,16 +116,9 @@ class QuantFP8(CustomOp):
         )
 
         if use_aiter_per_tensor_quant:
-            return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, scale, _FP8_DTYPE)
+            return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
         if use_aiter_per_token_quant:
-            out_shape = x.shape
-            out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
-            if scale is None:
-                scale = torch.empty(
-                    (*out_shape[:-1], 1), dtype=torch.float32, device=x.device
-                )
-            torch.ops.vllm.rocm_aiter_per_token_quant(out, x, scale)
-            return out, scale
+            return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
