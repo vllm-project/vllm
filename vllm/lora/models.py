@@ -13,7 +13,7 @@ from torch import nn
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, FusedMoEWithLoRA, LoRAMapping
+from vllm.lora.layers import BaseLayerWithLoRA, FusedMoE3DWithLoRA, LoRAMapping
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -151,16 +151,13 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        for lora in loras.values():
-            lora.optimize()
-
         return cls(lora_model_id, peft_helper.r, loras)
 
     @classmethod
     def from_local_checkpoint(
         cls,
         lora_dir: str,
-        expected_lora_modules: list[str],
+        expected_lora_modules: set[str],
         peft_helper: PEFTHelper,
         *,
         lora_model_id: int | None = None,
@@ -190,10 +187,7 @@ class LoRAModel:
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
-        # new_embeddings_tensor_path = os.path.join(
-        #     lora_dir, "new_embeddings.safetensors"
-        # )
-        # new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
+
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[list[str] | str] = []
 
@@ -201,18 +195,19 @@ class LoRAModel:
             for lora_module in modules.keys():  # noqa
                 if is_base_embeddding_weights(lora_module):
                     continue
-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                # Handle FSDP file format where experts.base_layer is the
+                # Handle PEFT file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
                 if "base_layer" in lora_module:
                     continue
+                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Case for expert lora weights
                 if ".experts" in module_name:
-                    if not any(
-                        module_name.endswith(ele) for ele in expected_lora_modules
-                    ):
+                    expert_idx = module_name.find(".experts")
+                    expert_suffix = module_name[expert_idx + 1 :]
+                    if expert_suffix not in expected_lora_modules:
                         unexpected_modules.append(module_name)
-                elif module_name.split(".")[-1] not in expected_lora_modules:
+
+                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
                     unexpected_modules.append(module_name)
 
             if unexpected_modules:
@@ -358,9 +353,7 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
-        self._is_3d_moe_model = is_moe_model(self.model) and hasattr(
-            self.model, "is_3d_moe_weight"
-        )
+        self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
         self._create_lora_modules()
 
         self.model.lora_manager = self
@@ -411,7 +404,7 @@ class LoRAModelManager:
                 continue
             # Note (gnovack) - If MOE lora weights are not split into
             # num_experts chunks, we split them here
-            if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+            if isinstance(module, FusedMoE3DWithLoRA) and torch.is_tensor(
                 module_lora.lora_a
             ):
                 # Handle PEFT file format where experts.base_layer is the
@@ -679,7 +672,10 @@ class LoRAModelManager:
                         "cpu",
                     )
                     subloras.append(lora)
-                lora = PackedLoRALayerWeights.pack(subloras)
+                if module.__class__.__name__ == "FusedMoEWithLoRA":
+                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
+                else:
+                    lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
         return model
 
@@ -739,12 +735,20 @@ class LoRAModelManager:
                 replaced_module_name = module_name.replace("model.", "")
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
-            lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
-                replacement_loras
-            )
+            if module_name.endswith(".experts"):
+                lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
+                    replacement_loras, module_name
+                )
+            else:
+                lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
+                    replacement_loras
+                )
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
+
+        for lora in lora_model.loras.values():
+            lora.optimize()
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str

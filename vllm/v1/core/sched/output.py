@@ -126,12 +126,12 @@ class CachedRequestData:
         return len(self.req_ids)
 
     @cached_property
-    @deprecated("use resumed_req_ids field")
+    @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
     def resumed_from_preemption(self) -> list[bool]:
         return [req_id in self.resumed_req_ids for req_id in self.req_ids]
 
     @cached_property
-    @deprecated("use all_token_ids field")
+    @deprecated("This will be removed in v0.14, use `all_token_ids` instead.")
     def resumed_req_token_ids(self) -> list[list[int] | None]:
         return [
             self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
