@@ -15,10 +15,14 @@ from vllm.multimodal.processing import (
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
+    PromptUpdateDetails,
+    ResolvedPromptUpdate,
+    UpdateMode,
     _apply_matches,
     apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
+    flatten_2d_lists,
     iter_token_matches,
     replace_token_matches,
 )
@@ -1268,3 +1272,36 @@ class TestApplyMatchesPerformance:
         assert match_result["image"][0] == 0
         assert match_result["image"][1] == 0
         assert match_result["audio"][0] == 0
+
+    def test_insert_placeholder_not_at_start(self):
+        """
+        Reviewer's exact test case:
+
+        prompt = [0, image_token_id]
+        mm_prompt_updates = {"image": ResolvedPromptUpdate(
+            "image", 0, "insert", [image_token_id],
+            PromptUpdateDetails([image_token_id] * 10)
+        )}
+        """
+        mock_tokenizer = cast(AnyTokenizer, object())
+        image_token_id = 32000
+
+        prompt = [0, image_token_id]
+        mm_prompt_updates = {
+            "image": [
+                [
+                    ResolvedPromptUpdate(
+                        "image",
+                        0,
+                        UpdateMode.INSERT,
+                        [image_token_id],
+                        PromptUpdateDetails.from_seq([image_token_id] * 10),
+                    )
+                ]
+            ]
+        }
+
+        result, match_result = _apply_matches(prompt, mm_prompt_updates, mock_tokenizer)
+
+        assert flatten_2d_lists(result) == [0] + [image_token_id] * 11
+        assert match_result["image"][0] == 0
