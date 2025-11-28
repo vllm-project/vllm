@@ -539,7 +539,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         """Touch the item in shared memory cache to prevent eviction.
         Increments writer_flag on sender side."""
         if self._shm_cache.is_cached(mm_hash):
-            self._shm_cache.touch(mm_hash, is_writer=True)
+            self._shm_cache.touch(mm_hash)
 
     @override
     def clear_cache(self) -> None:
@@ -784,7 +784,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             address = cast(int, mm_item["address"].data)
             monotonic_id = cast(int, mm_item["monotonic_id"].data)
             self._shm_cache.touch(
-                mm_hash, address=address, monotonic_id=monotonic_id, is_writer=False
+                mm_hash, address=address, monotonic_id=monotonic_id
             )
 
     @override
