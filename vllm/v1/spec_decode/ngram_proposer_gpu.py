@@ -196,7 +196,7 @@ class NgramGPUKernel(nn.Module):
         results = torch.where(
             has_any_match.unsqueeze(1),
             extracted_sequences,
-            torch.zeros_like(extracted_sequences),
+            torch.full_like(extracted_sequences, 0),   # TODO:(patchy): Use -1 instead of 0.
         )
 
         return results
@@ -206,7 +206,7 @@ class NgramGPUKernel(nn.Module):
         num_tokens_no_spec: torch.Tensor,
         token_ids_gpu: torch.Tensor,
         combined_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for N-gram proposal using GPU tensor operations.
 
@@ -220,6 +220,7 @@ class NgramGPUKernel(nn.Module):
 
         Returns:
             draft_tokens: [batch_size, k] on GPU
+            is_empty_draft_tokens: [batch_size] bool on GPU
         """
 
         device = token_ids_gpu.device
@@ -230,8 +231,8 @@ class NgramGPUKernel(nn.Module):
         # Initialize output tensor - torch.compile will optimize this allocation
         # NOTE(patchy): Do NOT pre-allocate this as a buffer
         #               it would break torch.compile
-        draft_tokens = torch.zeros(
-            (actual_batch_size, self.k), dtype=torch.int32, device=device
+        draft_tokens = torch.full(
+            (actual_batch_size, self.k), -1, dtype=torch.int32, device=device
         )
 
         results = self._find_first_and_extract_all_n_parallel(
@@ -247,7 +248,9 @@ class NgramGPUKernel(nn.Module):
         mask = combined_mask.unsqueeze(1).expand(-1, self.k)
         draft_tokens = torch.where(mask, results, draft_tokens)
 
-        return draft_tokens
+        is_empty_draft_tokens = (draft_tokens == 0).all(dim=1)   # TODO:(patchy): Use -1 instead of 0.
+
+        return draft_tokens, is_empty_draft_tokens
 
     def load_model(self, *args, **kwargs):
         """No model to load for N-gram proposer."""
@@ -322,7 +325,7 @@ class NgramProposerGPU:
 
         for _ in range(3):
             with set_forward_context(None, self.vllm_config):
-                _ = self.kernel(num_tokens, token_ids, combined_mask)
+                _, _ = self.kernel(num_tokens, token_ids, combined_mask)
 
     def _generate_dummy_data(
         self,
@@ -390,7 +393,7 @@ class NgramProposerGPU:
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len] on GPU
         sampled_flags: torch.Tensor,  # [batch_size] bool on GPU
         valid_mask: torch.Tensor,  # [batch_size] bool on GPU
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
         assert sampled_flags.device == self.device
@@ -404,11 +407,13 @@ class NgramProposerGPU:
                 & (num_tokens_no_spec >= self.min_n)
             )
 
-            return self.kernel(
+            draft_tokens, is_empty_draft_tokens = self.kernel(
                 num_tokens_no_spec,
                 token_ids_gpu,
                 combined_mask,
             )
+
+            return draft_tokens, is_empty_draft_tokens
 
     def prepare_next_token_ids_cpu(
         self,

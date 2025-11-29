@@ -581,6 +581,8 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        # For ngram_gpu: indicates which requests have empty/invalid draft tokens
+        self._is_empty_draft_tokens: torch.Tensor | None = None
         self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -943,12 +945,37 @@ class GPUModelRunner(
             self.input_batch.spec_token_ids[req_index].clear()
             self.input_batch.spec_token_ids[req_index].extend(spec_token_ids)
 
-            # there are no draft tokens with async scheduling,
-            # we clear the spec_decoding info in scheduler_output and
-            # use normal sampling but rejection_sampling.
+            logger.info(f"[DEBUG-UPDATE-STATES] draft token ids ={self._draft_token_ids}")
+
+            # For async scheduling with speculative decoding:
+            # When draft tokens are invalid (e.g., ngram proposer returns all
+            # zeros), we skip the forward computation for those tokens to save
+            # resources. However, we must keep scheduled_spec_decode_tokens so
+            # that the Scheduler can correctly adjust num_computed_tokens and
+            # num_output_placeholders in update_from_output().
             if self.use_async_scheduling:
                 req_state.prev_num_draft_len = num_spec_tokens
-                if num_spec_tokens and self._draft_token_ids is None:
+                # Check if draft tokens are invalid:
+                # 1. _draft_token_ids is None (no draft tokens generated yet)
+                # 2. For ngram_gpu: _is_empty_draft_tokens indicates invalid
+                draft_tokens_invalid = self._draft_token_ids is None
+                if (
+                    not draft_tokens_invalid
+                    and self._is_empty_draft_tokens is not None
+                    and self.input_batch.prev_req_id_to_index is not None
+                ):
+                    # Use prev_req_id_to_index since _is_empty_draft_tokens was
+                    # generated in the previous step's batch order
+                    prev_idx = self.input_batch.prev_req_id_to_index.get(req_id)
+                    if (
+                        prev_idx is not None
+                        and prev_idx < self._is_empty_draft_tokens.shape[0]
+                    ):
+                        draft_tokens_invalid = self._is_empty_draft_tokens[
+                            prev_idx
+                        ].item()
+
+                if num_spec_tokens and draft_tokens_invalid:
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
                     scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
@@ -1346,6 +1373,7 @@ class GPUModelRunner(
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
         self._draft_token_ids = None
+        self._is_empty_draft_tokens = None
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -2915,6 +2943,7 @@ class GPUModelRunner(
             self.use_async_scheduling
             and self.num_spec_tokens
             and self._draft_token_ids is None
+            or self.speculative_config.method == "ngram_gpu"
         ):
             scheduler_output = deepcopy(scheduler_output)
 
@@ -3046,6 +3075,10 @@ class GPUModelRunner(
             cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
+
+        logger.info(f"[DEBUG-EXECUTE] positions ={positions}")
+        logger.info(f"[DEBUG-EXECUTE] input_ids ={input_ids}")
+        logger.info(f"[DEBUG-EXECUTE] scheduler_output ={scheduler_output}")
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -3351,6 +3384,7 @@ class GPUModelRunner(
         else:
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
+        self._is_empty_draft_tokens = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_valid_sampled_token_count(
@@ -3480,12 +3514,14 @@ class GPUModelRunner(
                 ).any(dim=1)
                 valid_mask = valid_mask & ~is_unsupported
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, is_empty_draft_tokens = self.drafter.propose(
                 self.input_batch.num_tokens_no_spec_gpu[:batch_size],
                 self.input_batch.token_ids_gpu_tensor[:batch_size],
                 sampled_flags,
                 valid_mask,
             )
+            # Cache is_empty_draft_tokens for filtering in _update_states
+            self._is_empty_draft_tokens = is_empty_draft_tokens
         elif spec_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)

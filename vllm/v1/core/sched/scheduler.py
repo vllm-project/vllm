@@ -693,6 +693,8 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # logger.info(f"In Scheduler Generate Scheduler Output")
+        # from fpdb import ForkedPdb; ForkedPdb().set_trace()
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -727,6 +729,8 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
+        # logger.info(f"In Scheduler Update After Schedule")
+        # from fpdb import ForkedPdb; ForkedPdb().set_trace()
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -745,8 +749,17 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            # DEBUG LOG: Track num_computed_tokens update in scheduler
+            spec_tokens = spec_decode_tokens.get(req_id, [])
+            logger.info(f"[DEBUG-SCHED] _update_after_schedule: "
+                       f"req_id={req_id}, "
+                       f"num_computed_tokens_before={request.num_computed_tokens}, "
+                       f"num_scheduled_token={num_scheduled_token}, "
+                       f"spec_decode_tokens={spec_tokens}, "
+                       f"num_computed_tokens_after={request.num_computed_tokens + num_scheduled_token}")
             request.num_computed_tokens += num_scheduled_token
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
@@ -1041,6 +1054,16 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
+                # DEBUG LOG: Track scheduler adjustment
+                logger.info(f"[DEBUG-SCHED] Adjusting in update_from_output: "
+                           f"req_id={req_id}, "
+                           f"scheduled_spec_token_ids={scheduled_spec_token_ids}, "
+                           f"num_draft_tokens={num_draft_tokens}, "
+                           f"generated_token_ids_len={len(generated_token_ids)}, "
+                           f"num_accepted={num_accepted}, "
+                           f"num_rejected={num_rejected}, "
+                           f"num_computed_tokens_before={request.num_computed_tokens}, "
+                           f"num_computed_tokens_after={request.num_computed_tokens - num_rejected if request.num_computed_tokens > 0 else request.num_computed_tokens}")
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1065,6 +1088,8 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
+            # logger.info(f"In Scheduler::_update_request_with_output inside loop")
+            # from fpdb import ForkedPdb; ForkedPdb().set_trace()
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
