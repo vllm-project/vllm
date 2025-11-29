@@ -71,7 +71,8 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         mock_get_s3_files_module,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.model_loader.weight_utils.SafetensorsStreamer", GLOBAL_PATCHER.create_mock_streamer
+        "vllm.model_executor.model_loader.weight_utils.SafetensorsStreamer",
+        GLOBAL_PATCHER.create_mock_streamer,
     )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
