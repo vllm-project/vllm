@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .protocol import TokenizerLike
+from .protocol import TokenizerLike
 
 
 class TokenizerRegistry:
