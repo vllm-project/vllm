@@ -692,7 +692,7 @@ class OpenAIServing:
     @staticmethod
     def _tokenize_prompt_input_or_inputs_proc_pool(
         request: AnyRequest,
-        request_prompt: Union[str, list[str], list[int], list[list[int]]],
+        request_prompt: str,
         add_special_tokens: bool = True,
     ) -> list[TextTokensPrompt]:
         global _process_tokenizer
@@ -1368,12 +1368,13 @@ class OpenAIServing:
         elif isinstance(request_prompt, str):
             if self.enable_tokenizer_proc_pool and \
                 len(request_prompt) >= self.process_pool_threshold:
-                    prompt_inputs = \
+                    result = \
                         await self._tokenize_prompt_input_or_inputs_async_proc_pool(
                         request,
                         request_prompt,
                         add_special_tokens=add_special_tokens,
-                    )[0]
+                    )
+                    prompt_inputs = result[0]
             else:
                 prompt_inputs = await self._tokenize_prompt_input_async(
                     request,
