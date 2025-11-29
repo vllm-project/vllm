@@ -156,7 +156,7 @@ In this guide, we demonstrate manual deployment using the [`rednote-hilab/dots.o
 
 ## Advanced Deployment Details
 
-With the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
+With the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
 
 Hugging Face Inference Endpoints provides a fully managed environment for serving models via vLLM. You can deploy models without configuring servers, installing dependencies, or managing clusters. Endpoints also support deployment across multiple cloud providers (AWS, Azure, GCP) without the need for separate accounts.
 
@@ -167,4 +167,4 @@ The platform integrates seamlessly with the Hugging Face Hub, allowing you to de
 - Explore the [Inference Endpoints](https://endpoints.huggingface.co/catalog) model catalog
 - Read the Inference Endpoints [documentation](https://huggingface.co/docs/inference-endpoints/en/index)
 - Learn about [Inference Endpoints engines](https://huggingface.co/docs/inference-endpoints/en/engines/vllm)
-- Understand the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html)
+- Understand the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html)

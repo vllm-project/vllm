@@ -36,8 +36,19 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 
 
 @functools.cache
+def has_flashinfer_cubin() -> bool:
+    """Return `True` if flashinfer-cubin package is available."""
+    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+        return True
+    if importlib.util.find_spec("flashinfer_cubin") is not None:
+        return True
+    logger.debug_once("flashinfer-cubin package was not found")
+    return False
+
+
+@functools.cache
 def has_flashinfer() -> bool:
-    """Return `True` if FlashInfer is available."""
+    """Return `True` if flashinfer-python package is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     if importlib.util.find_spec("flashinfer") is None:
@@ -45,7 +56,7 @@ def has_flashinfer() -> bool:
         return False
     # When not using flashinfer cubin,
     # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if not envs.VLLM_HAS_FLASHINFER_CUBIN and shutil.which("nvcc") is None:
+    if not has_flashinfer_cubin() and shutil.which("nvcc") is None:
         logger.debug_once(
             "FlashInfer unavailable since nvcc was not found "
             "and not using pre-downloaded cubins"
@@ -103,7 +114,17 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
+flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
+silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
+)
+scaled_fp4_grouped_quantize = _lazy_import_wrapper(
+    "flashinfer", "scaled_fp4_grouped_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -156,6 +177,14 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl() -> bool:
+    """Return ``True`` if FlashInfer cutedsl module is available."""
+    return (
+        has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
+    )
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -177,15 +206,34 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
+    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
+        ("flashinfer", "scaled_fp4_grouped_quantize"),
+        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
 def has_nvidia_artifactory() -> bool:
     """Return `True` if NVIDIA's artifactory is accessible.
 
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
-    # Since FLASHINFER_CUBIN_DIR defines the pre-downloaded cubins path, when
-    # it's true, we could assume the cubins are available.
-    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+    # If we have pre-downloaded cubins, we can assume the cubins are available.
+    if has_flashinfer_cubin():
         return True
 
     try:
@@ -208,9 +256,13 @@ def has_nvidia_artifactory() -> bool:
 @functools.cache
 def supports_trtllm_attention() -> bool:
     """
-    TRTLLM attention is supported if the platform is SM100 and
-    NVIDIA artifactory is accessible
+    TRTLLM attention is supported if the platform is SM100,
+    NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
+    # Batch-invariant mode disables TRTLLM attention
+    if vllm_is_batch_invariant():
+        return False
+
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
     return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
@@ -229,9 +281,6 @@ def force_use_trtllm_attention() -> bool | None:
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
-    if vllm_is_batch_invariant():
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is disabled for batch-invariant")
-        return False
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
 
@@ -248,6 +297,7 @@ def use_trtllm_attention(
     num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
+    dcp_world_size: int,
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
@@ -259,6 +309,14 @@ def use_trtllm_attention(
 
     # Environment variable is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
+        return False
+
+    # Decode context parallel is not supported
+    if dcp_world_size > 1:
+        logger.warning_once(
+            "Trtllm does not support returning LSE and as a result "
+            "does not support DCP, reverting to FlashInfer"
+        )
         return False
 
     # The platform is not supported
@@ -299,14 +357,12 @@ def use_trtllm_attention(
         # Environment variable not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            use_trtllm = kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = (
-                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-            )
+            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
@@ -454,7 +510,10 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
+    "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_fp4_quantize",
+    "silu_and_mul_scaled_nvfp4_experts_quantize",
+    "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -462,6 +521,7 @@ __all__ = [
     "has_flashinfer_comm",
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",

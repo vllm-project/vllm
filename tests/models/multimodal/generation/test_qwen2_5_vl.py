@@ -34,6 +34,7 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("use_bytecode_hook", [True, False])
 def test_qwen2_5_vl_evs_functionality(
     vllm_runner,
     video_assets,
@@ -42,10 +43,14 @@ def test_qwen2_5_vl_evs_functionality(
     num_frames: int,
     dtype: str,
     max_tokens: int,
+    use_bytecode_hook: bool,
+    monkeypatch,
 ) -> None:
     """Test EVS (Efficient Video Sampling) functionality with different
     pruning rates.
     """
+    # Set the environment variable for this test
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
 
     # Sample frames from video assets
     sampled_vids = [
@@ -61,10 +66,8 @@ def test_qwen2_5_vl_evs_functionality(
         model,
         runner="generate",
         max_model_len=4000,
-        max_num_seqs=1,
         dtype=dtype,
         limit_mm_per_prompt={"video": 1},
-        tensor_parallel_size=1,
         video_pruning_rate=video_pruning_rate,
     ) as vllm_model:
         # Generate output - this should not crash
@@ -88,6 +91,7 @@ def test_qwen2_5_vl_evs_functionality(
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("use_bytecode_hook", [True, False])
 def test_qwen2_5_vl_evs_batched_videos(
     vllm_runner,
     video_assets,
@@ -96,6 +100,8 @@ def test_qwen2_5_vl_evs_batched_videos(
     num_frames: int,
     dtype: str,
     max_tokens: int,
+    use_bytecode_hook: bool,
+    monkeypatch,
 ) -> None:
     """Test EVS functionality with batched videos.
 
@@ -104,6 +110,8 @@ def test_qwen2_5_vl_evs_batched_videos(
     2. Both pruning configurations work with multiple videos
     3. The model doesn't crash when processing multiple videos simultaneously
     """
+    # Set the environment variable for this test
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
     # Sample frames from video assets
     sampled_vids = [
         sample_frames_from_video(asset.np_ndarrays, num_frames)

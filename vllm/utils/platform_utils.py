@@ -24,6 +24,11 @@ def xpu_is_initialized() -> bool:
     return torch.xpu.is_initialized()
 
 
+def get_cu_count(device_id: int = 0) -> int:
+    """Returns the total number of compute units (CU) on single GPU."""
+    return torch.cuda.get_device_properties(device_id).multi_processor_count
+
+
 def cuda_get_device_properties(
     device, names: Sequence[str], init_cuda=False
 ) -> tuple[Any, ...]:

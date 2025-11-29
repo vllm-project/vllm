@@ -8,7 +8,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
+from vllm.distributed import (
+    get_dp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_rank,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
@@ -24,10 +28,11 @@ logger = init_logger(__name__)
 if has_triton_kernels():
     try:
         from triton_kernels.matmul_ogs import PrecisionConfig
-    except ImportError:
+    except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible."
+            "version is compatible. Error: %s",
+            e,
         )
 
 
@@ -684,9 +689,11 @@ FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 @dataclass
 class FusedMoEParallelConfig:
     tp_size: int
+    pcp_size: int
     dp_size: int
     ep_size: int
     tp_rank: int
+    pcp_rank: int
     dp_rank: int
     ep_rank: int
 
@@ -713,19 +720,22 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
-    def flatten_tp_across_dp(
-        tp_size: int, dp_size: int, dp_rank: int
+    def flatten_tp_across_dp_and_pcp(
+        tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
     ) -> tuple[int, int]:
         tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
-        # There are actually dp_size * tp_size devices. Update tp_size
-        # and tp_rank so we shard across all devices.
-        flatten_tp_size = dp_size * tp_size
-        flatten_tp_rank = dp_rank * tp_size + tp_rank
+        # There are actually dp_size * pcp_size * tp_size devices.
+        # Update tp_size and tp_rank so we shard across all devices.
+        flatten_tp_size = dp_size * pcp_size * tp_size
+        flatten_tp_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
         return flatten_tp_size, flatten_tp_rank
 
     @staticmethod
     def make(
-        tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
+        tp_size_: int,
+        pcp_size_: int,
+        dp_size_: int,
+        vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input `tp_size_`,
@@ -734,19 +744,22 @@ class FusedMoEParallelConfig:
 
         Args:
             tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
             dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
         Examples:
             When there is no parallelism requested,
-            i.e. `tp_size_` = `dp_size_` = 1, we simply return the sizes
+            i.e. `tp_size_` = `pcp_size_` = `dp_size_` = 1, we simply return the sizes
             unaltered and the ranks set to 0.
 
-            Expert Parallelism is considered only when either `dp_size_` or
+            Expert Parallelism is considered only when either `dp_size_`, `pcp_size_` or
             `tp_size_` is non trivial.
 
-            When TP = 2, DP = 1 and EP = False, the configuration on different
+            Note that PCP serves the same function as DP here.
+
+            When TP = 2, DP(PCP) = 1 and EP = False, the configuration on different
             devices:
 
             - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
@@ -754,7 +767,7 @@ class FusedMoEParallelConfig:
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-            When TP = 1, DP = 2 and EP = False, the configuration on different
+            When TP = 1, DP(PCP) = 2 and EP = False, the configuration on different
                 devices:
 
             - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
@@ -762,7 +775,7 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the tensors are sharded
                 across 2 decvices.
 
-            When TP = 2, DP = 2 and EP = False, the configuration on different
+            When TP = 2, DP(PCP) = 2 and EP = False, the configuration on different
                 devices:
 
             - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
@@ -772,14 +785,14 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the tensors are sharded
                 across 4 devices.
 
-            When, TP = 2, DP = 1 and EP = True, the configuration on different
+            When, TP = 2, DP(PCP) = 1 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-            When, TP = 1, DP = 2 and EP = True, the configuration on different
+            When, TP = 1, DP(PCP) = 2 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
@@ -787,7 +800,7 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the experts are split
                 between the 2 devices.
 
-            When TP = 2, DP = 2 and EP = True, the configuration on different
+            When TP = 2, DP(PCP) = 2 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
@@ -798,18 +811,25 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
+        use_ep = (
+            dp_size_ * pcp_size_ * tp_size_ > 1
+            and vllm_parallel_config.enable_expert_parallel
+        )
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
-            tp_size_, dp_size_, dp_rank
+        pcp_size = pcp_size_
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
         )
 
         if not use_ep:
             return FusedMoEParallelConfig(
                 tp_size=tp_size,
                 tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
                 dp_size=dp_size,
                 dp_rank=dp_rank,
                 ep_size=1,
@@ -826,6 +846,8 @@ class FusedMoEParallelConfig:
         return FusedMoEParallelConfig(
             tp_size=1,
             tp_rank=0,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
             dp_size=dp_size,
             dp_rank=dp_rank,
             ep_size=ep_size,

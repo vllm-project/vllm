@@ -34,6 +34,9 @@ class MockConversationContext(ConversationContext):
     def append_output(self, output) -> None:
         pass
 
+    def append_tool_output(self, output) -> None:
+        pass
+
     async def call_tool(self):
         return []
 
@@ -124,7 +127,7 @@ class TestInitializeToolSessions:
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
-        engine_client.processor = MagicMock()
+        engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
 
         models = MagicMock()
@@ -210,7 +213,7 @@ class TestValidateGeneratorInput:
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
-        engine_client.processor = MagicMock()
+        engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
 
         models = MagicMock()

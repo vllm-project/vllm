@@ -25,13 +25,11 @@
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
 
-from typing import Any
-
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -62,8 +60,6 @@ class MiniCPM3Attention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -84,7 +80,6 @@ class MiniCPM3Attention(nn.Module):
         self.num_local_heads = num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.q_a_proj = ReplicatedLinear(
@@ -127,8 +122,7 @@ class MiniCPM3Attention(nn.Module):
             self.qk_rope_head_dim,
             rotary_dim=self.qk_rope_head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_local_heads,
@@ -204,8 +198,6 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             v_head_dim=self.config.v_head_dim,
             q_lora_rank=self.config.q_lora_rank,
             kv_lora_rank=self.config.kv_lora_rank,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,

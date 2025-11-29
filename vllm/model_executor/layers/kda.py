@@ -5,7 +5,6 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.attention import AttentionBackend
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -44,7 +43,6 @@ def kda_attention(
     k_proj_states: torch.Tensor,
     v_proj_states: torch.Tensor,
     g1: torch.Tensor,
-    g2: torch.Tensor,
     beta: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: str,
@@ -56,7 +54,6 @@ def kda_attention(
         k_proj_states=k_proj_states,
         v_proj_states=v_proj_states,
         g1=g1,
-        g2=g2,
         beta=beta,
         core_attn_out=core_attn_out,
     )
@@ -67,7 +64,6 @@ def kda_attention_fake(
     k_proj_states: torch.Tensor,
     v_proj_states: torch.Tensor,
     g1: torch.Tensor,
-    g2: torch.Tensor,
     beta: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: str,
@@ -86,12 +82,7 @@ direct_register_custom_op(
 class KimiDeltaAttention(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
-        return "linear_attention"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
-
-        return GDNAttentionBackend
+        return "gdn_attention"
 
     def get_state_dtype(
         self,
@@ -284,7 +275,6 @@ class KimiDeltaAttention(nn.Module, MambaBase):
             k,
             v,
             g1,
-            g2,
             beta,
             core_attn_out,
             self.prefix,
@@ -299,7 +289,6 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         k_proj_states: torch.Tensor,
         v_proj_states: torch.Tensor,
         g1: torch.Tensor,
-        g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
@@ -316,7 +305,14 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         has_initial_state = attn_metadata.has_initial_state
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        num_actual_tokens = attn_metadata.num_actual_tokens
         constant_caches = self.kv_cache[forward_context.virtual_engine]
+
+        q_proj_states = q_proj_states[:num_actual_tokens]
+        k_proj_states = k_proj_states[:num_actual_tokens]
+        v_proj_states = v_proj_states[:num_actual_tokens]
+        g1 = g1[:num_actual_tokens]
+        beta = beta[:num_actual_tokens]
 
         (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
         # deal with strides
@@ -372,7 +368,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
             ).transpose(0, 1)
         else:
             decode_conv_indices = non_spec_state_indices_tensor[
-                : attn_metadata.num_decodes
+                : attn_metadata.num_actual_tokens
             ]
             q = causal_conv1d_update(
                 q_proj_states,
@@ -438,8 +434,9 @@ class KimiDeltaAttention(nn.Module, MambaBase):
                 beta=beta,
                 initial_state=recurrent_state,
                 use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                 ssm_state_indices=non_spec_state_indices_tensor,
             )
-        assert core_attn_out_non_spec.shape == core_attn_out.shape
-        core_attn_out[:] = core_attn_out_non_spec
+        core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+            0, :num_actual_tokens
+        ]

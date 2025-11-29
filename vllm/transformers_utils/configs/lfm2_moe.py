@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -35,8 +36,8 @@ class Lfm2MoeConfig(PretrainedConfig):
             End of stream token id.
         tie_word_embeddings (`bool`, *optional*, defaults to `True`):
             Whether to tie weight embeddings
-        rope_theta (`float`, *optional*, defaults to 1000000.0):
-            The base period of the RoPE embeddings.
+        rope_parameters (`dict`, *optional*):
+            The parameters of the RoPE embeddings.
         max_position_embeddings (`int`, *optional*, defaults to 128000):
             The maximum sequence length that this model might ever be used with.
         use_cache (`bool`, *optional*, defaults to `True`):
@@ -100,7 +101,7 @@ class Lfm2MoeConfig(PretrainedConfig):
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = True,
-        rope_theta: float = 1000000.0,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 128_000,
         use_cache: bool = True,
         norm_eps: float = 0.00001,
@@ -121,7 +122,10 @@ class Lfm2MoeConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
-        self.rope_theta = rope_theta
+        rope_theta = kwargs.pop("rope_theta", 1000000.0)
+        if rope_parameters is None:
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        self.rope_parameters = rope_parameters
         self.max_position_embeddings = max_position_embeddings
         self.use_cache = use_cache
         self.norm_eps = norm_eps

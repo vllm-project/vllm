@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -190,9 +189,7 @@ class KimiMLAAttention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int | None,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
         use_nope: bool = False,
-        rope_scaling: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -210,11 +207,9 @@ class KimiMLAAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.use_nope = use_nope
         assert self.use_nope is True
         assert self.q_lora_rank is None
-        assert rope_scaling is None
         assert num_heads % tp_size == 0
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -439,7 +434,7 @@ class KimiLinearModel(nn.Module):
             "num_attention_heads must be divisible by world_size"
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -454,7 +449,7 @@ class KimiLinearModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -504,8 +499,8 @@ class KimiLinearForCausalLM(
             self.config.vocab_size, scale=logit_scale
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

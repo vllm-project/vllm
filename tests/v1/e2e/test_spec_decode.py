@@ -75,6 +75,14 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
+@pytest.fixture(autouse=True)
+def reset_torch_dynamo():
+    """Reset torch dynamo cache before each test"""
+    yield
+    # Cleanup after test
+    torch._dynamo.reset()
+
+
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -272,9 +280,22 @@ def test_speculators_model_integration(
 
 
 @pytest.mark.parametrize(
-    ["model_setup", "mm_enabled", "chunked_prefill_enabled"],
+    ["model_setup", "mm_enabled", "enable_chunked_prefill"],
     [
         (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
+        pytest.param(
+            (
+                "eagle3",
+                "Qwen/Qwen3-VL-8B-Instruct",
+                "taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+                1,
+            ),
+            False,
+            False,
+            marks=pytest.mark.skip(
+                reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
+            ),
+        ),
         pytest.param(
             (
                 "eagle3",
@@ -344,6 +365,7 @@ def test_speculators_model_integration(
     ],
     ids=[
         "qwen3_eagle3",
+        "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
         "llama3_eagle3",
@@ -358,7 +380,7 @@ def test_eagle_correctness(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
-    chunked_prefill_enabled: bool,
+    enable_chunked_prefill: bool,
     attn_backend: str,
 ):
     if attn_backend == "TREE_ATTN":
@@ -396,9 +418,7 @@ def test_eagle_correctness(
 
         method, model_name, spec_model_name, tp_size = model_setup
         max_model_len = 2048
-        max_num_batched_tokens = max_model_len
-        if chunked_prefill_enabled:
-            max_num_batched_tokens = 128
+        max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
         ref_llm = LLM(
             model=model_name, max_model_len=max_model_len, tensor_parallel_size=tp_size
@@ -420,7 +440,7 @@ def test_eagle_correctness(
             },
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=chunked_prefill_enabled,
+            enable_chunked_prefill=enable_chunked_prefill,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0

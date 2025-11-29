@@ -128,7 +128,6 @@ class Zamba2Attention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.num_hybrid_layers = num_hybrid_layers
-        self.rope_theta = config.rope_theta
 
         self.attention_hidden_size = config.attention_hidden_size
         self.total_num_attention_heads = config.num_attention_heads
@@ -233,8 +232,7 @@ class Zamba2Attention(nn.Module):
                 head_size=self.attention_head_dim,
                 rotary_dim=self.attention_head_dim,
                 max_position=config.max_position_embeddings,
-                base=self.rope_theta,
-                rope_scaling=None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=True,
             )
 
@@ -567,11 +565,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Process through Mamba mixer
-        output = torch.empty_like(hidden_states)
-        self.mamba(
-            hidden_states,
-            output,
-        )
+        output = self.mamba(hidden_states)
 
         # residual connection after mamba
         hidden_states = residual + output
@@ -756,7 +750,7 @@ class Zamba2Model(nn.Module):
         # Final layer normalization
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
 
         Args:
@@ -786,7 +780,7 @@ class Zamba2Model(nn.Module):
         """
         # Handle pipeline parallelism for first rank
         if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds
 
         # Process through layers
@@ -930,14 +924,14 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
         # Initialize logits processing and sampling
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
         Args:
             input_ids: Tensor of input token IDs
         Returns:
             Embedded representation of the input tokens
         """
-        return self.model.get_input_embeddings(input_ids)
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

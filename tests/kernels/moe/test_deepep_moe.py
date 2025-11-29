@@ -294,7 +294,7 @@ def torch_moe_impl(
         # blockwise quant and de-quant.
         assert not per_act_token_quant
         a = test_tensors.rank_tokens
-        aq, aq_scale = per_token_group_quant_fp8(a, 128)
+        aq, aq_scale = per_token_group_quant_fp8(a, 128, use_ue8m0=False)
         a = (
             (aq.view(-1, 128).to(torch.float32) * aq_scale.view(-1, 1))
             .view(a.shape)

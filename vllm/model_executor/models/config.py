@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
@@ -46,8 +47,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
             "head_size": head_dim,
             "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -78,12 +78,13 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
+            set_default_rope_theta(config, default_theta=config.rotary_emb_base)
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": max_position,
-                "base": getattr(config, "rope_theta", config.rotary_emb_base),
-                "rope_scaling": getattr(config, "rope_scaling", None),
+                "rope_parameters": config.rope_parameters,
             }
 
 
@@ -117,18 +118,20 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
+
+        set_default_rope_theta(config, default_theta=config.rotary_emb_base)
+
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": rotary_emb_dim,
             "max_position": max_trained_positions,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
         # we ignore config.rotary_scaling_factor so that for datasets shorter
         # than max_trained_positions 2048, the results are consistent
         # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_scaling.
+        # The context extension uses vllm style rope_theta and rope_parameters.
         # See #17785 #18755
         if (
             not vllm_config.model_config.hf_overrides
@@ -172,7 +175,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             if hasattr(hf_text_config, "max_model_len"):
                 delattr(hf_text_config, "max_model_len")
             hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+            hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
@@ -246,8 +249,7 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
             "head_size": head_dim,
             "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -287,9 +289,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        if cache_config.mamba_block_size is None:
-            cache_config.mamba_block_size = model_config.max_model_len
-
         if cache_config.enable_prefix_caching:
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
@@ -297,12 +296,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
+                # By default, mamba block size will be set to max_model_len (see
+                # below). When enabling prefix caching, we align mamba block size
+                # to the block size as the basic granularity for prefix caching.
+                if cache_config.mamba_block_size is None:
+                    cache_config.mamba_block_size = cache_config.block_size
             else:
                 logger.info(
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
                 cache_config.enable_prefix_caching = False
+
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(

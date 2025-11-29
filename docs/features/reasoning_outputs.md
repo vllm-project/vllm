@@ -216,14 +216,13 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
     # import the required packages
 
     from vllm.reasoning import ReasoningParser, ReasoningParserManager
-    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                                DeltaMessage)
+    from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used
     # in --reasoning-parser.
     class ExampleParser(ReasoningParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         def extract_reasoning_streaming(

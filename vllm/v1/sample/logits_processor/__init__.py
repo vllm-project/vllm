@@ -41,7 +41,7 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supportedwhen speculative decoding is enabled."
+    "Custom logits processors are not supported when speculative decoding is enabled."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
@@ -313,7 +313,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
                 if (len(inspect.signature(req_lp).parameters) == 3)
                 else [output_ids]
             )
-            return partial(req_lp, *args)
+            return partial(req_lp, *args)  # type: ignore[misc]
         return None
 
     def update_state(self, batch_update: BatchUpdate | None):

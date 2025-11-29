@@ -12,6 +12,7 @@ from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -58,7 +59,7 @@ class AIMv2SwiGLUFFN(nn.Module):
 class AIMv2PatchEmbed(nn.Module):
     def __init__(self, config: AIMv2Config):
         super().__init__()
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             config.num_channels,
             config.hidden_size,
             kernel_size=(config.patch_size, config.patch_size),

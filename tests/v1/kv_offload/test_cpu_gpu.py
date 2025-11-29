@@ -103,8 +103,8 @@ def test_transfer(
         for i in range(gpu_blocks_per_cpu_block):
             cpu_blocks_in_gpu_block_size.append(i + base_block_id)
 
-    # maybe skip a GPU block to test writing to the middle of a CPU block
-    if gpu_to_cpu:
+    # maybe skip a GPU block to test reading from the middle of a CPU block
+    if not gpu_to_cpu:
         gpu_blocks = gpu_blocks[gpu_blocks_per_cpu_block - 1 :]
         cpu_blocks_in_gpu_block_size = cpu_blocks_in_gpu_block_size[
             gpu_blocks_per_cpu_block - 1 :

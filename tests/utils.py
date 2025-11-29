@@ -676,7 +676,7 @@ def compare_all_settings(
                 results += _test_image_text(
                     client,
                     model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
