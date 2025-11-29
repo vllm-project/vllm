@@ -18,9 +18,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.sampler import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
-from vllm.v1.worker.gpu.states import SamplingMetadata
 
 logger = init_logger(__name__)
 
