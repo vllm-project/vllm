@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# stop ruff from complaining about line length (in comments)
+# do not complain about line length (for docstring)
 # ruff: noqa: E501
+# this script should run with legacy python on buildkite agent
+# ruff: noqa: UP045
 
 import argparse
 import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import quote
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
@@ -27,11 +29,11 @@ INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 class WheelFileInfo:
     package_name: str
     version: str
-    build_tag: str | None
+    build_tag: Optional[str]
     python_tag: str
     abi_tag: str
     platform_tag: str
-    variant: str | None
+    variant: Optional[str]
     filename: str
 
 
@@ -123,8 +125,8 @@ def generate_index_and_metadata(
     whl_files: list[str],
     wheel_base_dir: Path,
     index_base_dir: Path,
-    default_variant: str | None = None,
-    alias_to_default: str | None = None,
+    default_variant: Optional[str] = None,
+    alias_to_default: Optional[str] = None,
 ):
     """
     Generate index for all wheel files.
