@@ -16,17 +16,21 @@ from vllm.platforms import current_platform
 
 
 def rms_norm(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_bias: float,
+    variance_epsilon: float,
 ) -> torch.Tensor:
     from vllm import _custom_ops as ops
 
     if vllm_is_batch_invariant():
         return rms_norm_batch_invariant(x, weight, variance_epsilon)
-    out = torch.empty_like(x)
+    out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     ops.rms_norm(
         out,
         x,
         weight,
+        weight_bias,
         variance_epsilon,
     )
     return out
@@ -36,6 +40,7 @@ def fused_add_rms_norm(
     x: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
+    weight_bias: float,
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
@@ -48,6 +53,7 @@ def fused_add_rms_norm(
         x,
         residual,
         weight,
+        weight_bias,
         variance_epsilon,
     )
     return x, residual
@@ -111,6 +117,7 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (
             None if var_hidden_size == hidden_size else var_hidden_size
         )
+        self.weight_bias = 0.0
         weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
         self.weight = torch.ones(hidden_size, dtype=weight_dtype)
@@ -202,10 +209,12 @@ class RMSNorm(CustomOp):
         add_residual = residual is not None
         if add_residual:
             return fused_add_rms_norm(
-                x, residual, self.weight.data, self.variance_epsilon
+                x, residual, self.weight.data, self.weight_bias, self.variance_epsilon
             )
         else:
-            return rms_norm(x, self.weight.data, self.variance_epsilon)
+            return rms_norm(
+                x, self.weight.data, self.weight_bias, self.variance_epsilon
+            )
 
     def forward_hip(
         self,
@@ -270,6 +279,7 @@ class GemmaRMSNorm(CustomOp):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
+        self.weight_bias = 1.0
 
     @staticmethod
     def forward_static(
@@ -313,12 +323,15 @@ class GemmaRMSNorm(CustomOp):
         if torch.compiler.is_compiling():
             return self.forward_native(x, residual)
 
-        if not getattr(self, "_is_compiled", False):
-            self.forward_static = torch.compile(  # type: ignore
-                self.forward_static
+        add_residual = residual is not None
+        if add_residual:
+            return fused_add_rms_norm(
+                x, residual, self.weight.data, self.weight_bias, self.variance_epsilon
             )
-            self._is_compiled = True
-        return self.forward_native(x, residual)
+        else:
+            return rms_norm(
+                x, self.weight.data, self.weight_bias, self.variance_epsilon
+            )
 
 
 @CustomOp.register("rms_norm_gated")

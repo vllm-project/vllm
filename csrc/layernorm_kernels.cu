@@ -20,7 +20,8 @@ __global__ void rms_norm_kernel(
     const int64_t input_shape_d2,         // input.size(-2)
     const int64_t input_shape_d3,         // input.size(-3)
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float weight_bias, const float epsilon, const int num_tokens,
+    const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
   const scalar_t* input_row;
@@ -77,7 +78,7 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      dst.val[j] = ((scalar_t)(x * s_variance)) * (weight_bias + src2.val[j]);
     }
     v_out[i] = dst;
   }
@@ -94,7 +95,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float weight_bias, const float epsilon, const int num_tokens,
+    const int hidden_size) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -135,8 +137,10 @@ fused_add_rms_norm_kernel(
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
+    _f16Vec<scalar_t, width> w_v = weight_v[idx];
     temp *= s_variance;
-    temp *= weight_v[idx];
+    w_v += weight_bias;
+    temp *= w_v;
     input_v[strided_id] = temp;
   }
 }
@@ -151,7 +155,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float weight_bias, const float epsilon, const int num_tokens,
+    const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -175,7 +180,7 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
     input[blockIdx.x * input_stride + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+        ((scalar_t)(x * s_variance)) * (weight_bias + weight[idx]);
   }
 }
 
@@ -184,7 +189,7 @@ fused_add_rms_norm_kernel(
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
-              double epsilon) {
+              double weight_bias, double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -220,7 +225,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
                 out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                 input_stride_d2, input_stride_d3, input_stride_d4,
                 input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
-                epsilon, num_tokens, hidden_size);
+                weight_bias, epsilon, num_tokens, hidden_size);
       });
     });
   });
@@ -233,13 +238,13 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
             <<<grid, block, 0, stream>>>(                                   \
                 input.data_ptr<scalar_t>(), input_stride,                   \
                 residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-                epsilon, num_tokens, hidden_size);                          \
+                weight_bias, epsilon, num_tokens, hidden_size);             \
       });
 
 void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
-                        double epsilon) {
+                        double weight_bias, double epsilon) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
