@@ -10,7 +10,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
@@ -141,7 +141,6 @@ async def test_tokenize_chat_with_tools(
     tokenizer_name: str,
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
-
     for add_generation in [False, True]:
         for add_special in [False, True]:
             conversation = [
@@ -168,7 +167,7 @@ async def test_tokenize_chat_with_tools(
                 if add_generation and continue_final:
                     continue
                 if continue_final:
-                    conversation.append({"role": "assistant", "content": "Sure,"})
+                    conversation.append({"role": "assistant", "content": ""})
 
                 prompt = tokenizer.apply_chat_template(
                     add_generation_prompt=add_generation,
