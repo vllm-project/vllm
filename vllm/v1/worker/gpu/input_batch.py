@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-import numba
 import numpy as np
 import torch
 
@@ -30,14 +29,11 @@ class InputBuffers:
         self.pin_memory = pin_memory
 
         self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
-        self.input_ids = self._make_buffer(max_num_tokens, dtype=torch.int32)
+        self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.cu_num_logits = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
-
-        # Spec decoding.
-        self.next_prefill_tokens = self._make_buffer(max_num_reqs, dtype=torch.int32)
 
         # Structured outputs.
         self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
@@ -120,7 +116,7 @@ class InputBatch:
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
-        input_ids = input_buffers.input_ids.copy_to_gpu(num_tokens)
+        input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
@@ -146,41 +142,63 @@ class InputBatch:
         )
 
 
-@numba.njit(cache=True)
-def _prepare_prefill_inputs(
-    idx_mapping: np.ndarray,  # [B]
-    query_lens: np.ndarray,  # [B]
-    query_start_loc: np.ndarray,  # [B + 1]
-    prefill_token_ids: np.ndarray,  # [N, max_model_len]
-    num_computed_prefill_tokens: np.ndarray,  # [N]
-    input_ids: np.ndarray,  # [num_input_tokens]
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    query_starts = query_start_loc[:num_reqs]
-    query_ends = query_start_loc[1 : num_reqs + 1]
-    starts = num_computed_prefill_tokens[idx_mapping]
-    ends = starts + query_lens
-    for i in range(num_reqs):
-        input_ids[query_starts[i] : query_ends[i]] = prefill_token_ids[
-            idx_mapping[i], starts[i] : ends[i]
-        ]
+@triton.jit
+def _prepare_prefill_inputs_kernel(
+    input_ids_ptr,
+    next_prefill_tokens_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    prefill_token_ids_ptr,
+    prefill_token_ids_stride,
+    prefill_lens_ptr,
+    num_computed_tokens_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    if num_computed >= prefill_len:
+        # Not prefill.
+        return
+
+    query_start = tl.load(query_start_loc_ptr + batch_idx)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    query_len = query_end - query_start
+
+    prefill_ptr = prefill_token_ids_ptr + req_state_idx * prefill_token_ids_stride
+    for i in range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        tokens = tl.load(prefill_ptr + num_computed + block, mask=mask)
+        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
+
+    next_pos = num_computed + query_len
+    if next_pos < prefill_len:
+        next_token = tl.load(prefill_ptr + next_pos)
+        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
 def prepare_prefill_inputs(
-    idx_mapping: np.ndarray,
-    num_scheduled_tokens: np.ndarray,
-    query_start_loc: np.ndarray,
-    prefill_token_ids: np.ndarray,
-    num_computed_prefill_tokens: np.ndarray,
-    input_ids: np.ndarray,
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
 ) -> None:
-    _prepare_prefill_inputs(
+    num_reqs = idx_mapping.shape[0]
+    _prepare_prefill_inputs_kernel[(num_reqs,)](
+        input_ids,
+        next_prefill_tokens,
         idx_mapping,
-        num_scheduled_tokens,
         query_start_loc,
         prefill_token_ids,
-        num_computed_prefill_tokens,
-        input_ids,
+        prefill_token_ids.stride(0),
+        prefill_len,
+        num_computed_tokens,
+        BLOCK_SIZE=1024,
     )
 
 
