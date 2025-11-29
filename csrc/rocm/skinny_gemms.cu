@@ -1356,8 +1356,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 
 
 
-
-#if defined(__HIP__GFX9__)  // TODO: Add NAVI support
+#if defined(__gfx950__) // TODO: Add NAVI support
 // This version targets big A[] cases, where it is much larger than LDS capacity
 
 __device__ inline int min__(int a, int b) {
@@ -1451,7 +1450,7 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
 
   scalar8 sum4[N/NTILE/GrpsShrB][1];
   //----------------------------------------------------
-  bigType bigB_[YTILE/2][UNRL];
+  bigType bigB_[YTILE/GrpsShrB][UNRL];
   bool noreloada = false;
   uint32_t rmnd = 0;//(WvPrGrp*YTILE)%((WvPrGrp*YTILE)-(M%(WvPrGrp*YTILE)));
   const uint32_t bLoader = (threadIdx.y % GrpsShrB);
@@ -1484,8 +1483,8 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
 
         const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
   #pragma unroll
-        for (uint32_t y = 0; y < YTILE/2; y++) {
-		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*2+bLoader+m, M-1) * K])));
+        for (uint32_t y = 0; y < YTILE/GrpsShrB; y++) {
+		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*GrpsShrB+bLoader+m, M-1) * K])));
 	}
       }
 
@@ -1532,11 +1531,11 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
         const bool oob_k = (k_ >= K);
         for (uint32_t d=0; d<2; d++)
           for (uint32_t j=0; j<2; j++)
-            for (uint32_t y=0; y<YTILE/2; y++) {
-              uint32_t idx = (threadIdx.x*YTILE+y*2+bLoader)*8+(d*2+j)*2;
+            for (uint32_t y=0; y<YTILE/GrpsShrB; y++) {
+              uint32_t idx = (threadIdx.x*YTILE+y*GrpsShrB+bLoader)*8+(d*2+j)*2;
               idx += ((uint32_t)(idx/BSTRD))*BPAD;
               //myStg[idx+(WVLDS/8)*(d*2+j)] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
-              myStg[idx/2] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
+              myStg[idx/2] = (oob_k || (y*GrpsShrB+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
             }
       }
 
@@ -1548,8 +1547,8 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
   #pragma unroll
-        for (uint32_t y = 0; y < YTILE/2; y++) {
-		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*2+bLoader+m, M-1) * K])));
+        for (uint32_t y = 0; y < YTILE/GrpsShrB; y++) {
+		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*GrpsShrB+bLoader+m, M-1) * K])));
 	}
       }
 
