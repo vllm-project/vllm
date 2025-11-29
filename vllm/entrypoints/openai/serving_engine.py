@@ -1373,8 +1373,7 @@ class OpenAIServing:
                         request,
                         request_prompt,
                         add_special_tokens=add_special_tokens,
-                    )
-                    prompt_inputs = prompt_inputs[0]
+                    )[0]
             else:
                 prompt_inputs = await self._tokenize_prompt_input_async(
                     request,
