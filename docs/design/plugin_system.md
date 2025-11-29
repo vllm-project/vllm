@@ -86,7 +86,7 @@ Every plugin has three parts:
         },
         ...
     )
-        ```
+    ```
 
     Please make sure `vllm_add_dummy_platform:register` is a callable function and returns the platform class's fully qualified name. for example:
 
