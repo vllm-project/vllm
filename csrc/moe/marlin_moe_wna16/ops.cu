@@ -313,9 +313,9 @@ exec_config_t determine_exec_config(
     int allow_count = min(device_max_reg_size / reg_size,
                           max_shared_mem / (cache_size + 1536));
     if (thread_m_blocks == 1)
-      allow_count = max(min(allow_count, 4), 1);
+      allow_count = max(min(allow_count, 1), 1);
     else
-      allow_count = max(min(allow_count, 2), 1);
+      allow_count = max(min(allow_count, 1), 1);
 
     if (prob_n / th_config.thread_n * prob_m * top_k * 4 < sms * allow_count) {
       allow_count =
@@ -475,6 +475,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
+
+// #define MARLIN_SHM_SIZE_DEBUG 1
+// #if defined(MARLIN_SHM_SIZE_DEBUG) && MARLIN_SHM_SIZE_DEBUG == 1
+  max_shared_mem = get_kernel_cache_size(
+      thread_tfg, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
+      num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
+      is_a_8bit);
+// #endif
 
   TORCH_CHECK(is_valid_config(thread_tfg, m_block_size_8, thread_m_blocks,
                               prob_m, prob_n, prob_k, num_bits, group_size,
