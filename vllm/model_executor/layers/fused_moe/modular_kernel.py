@@ -367,7 +367,7 @@ class FusedMoEPrepareAndFinalize(ABC):
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
-    above.
+        above.
     """
 
     def __init__(
@@ -501,6 +501,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
+
+    @property
+    def w1_chan_scale(self) -> torch.Tensor | None:
+        return self.quant_config.w1_chan_scale
+
+    @property
+    def w2_chan_scale(self) -> torch.Tensor | None:
+        return self.quant_config.w2_chan_scale
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod

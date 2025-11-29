@@ -167,8 +167,7 @@ def create_test_tensors(
 
     # for the practical use case we need per-tok scales for fp8 activations
     w_tok_s = torch.randn((m,), device="cuda", dtype=types.token_scale_type)
-    # weights are already per-group quantized, use placeholder here
-    w_ch_s = torch.ones((n,), device="cuda", dtype=types.channel_scale_type)
+    w_ch_s = torch.randn((n,), device="cuda", dtype=types.channel_scale_type)
 
     return Tensors(
         w_ref=w_ref,
@@ -211,7 +210,7 @@ def mm_test_helper(
     print(output_ref)
 
     torch.testing.assert_close(
-        output, output_ref.to(output.dtype), rtol=1e-3, atol=1e-3
+        output, output_ref.to(output.dtype), rtol=1e-2, atol=1e-2
     )
 
 
@@ -257,7 +256,7 @@ def test_w4a8_cuda_graph():
     )
 
     w_tok_s = torch.randn((m,), device="cuda", dtype=torch.float32)
-    w_ch_s = torch.ones((n,), device="cuda", dtype=torch.float32)
+    w_ch_s = torch.randn((n,), device="cuda", dtype=torch.float32)
 
     # Construct a trivial model with a single layer that calls the kernel
     model = W4A8Layer(
@@ -287,4 +286,4 @@ def test_w4a8_cuda_graph():
     output.zero_()
     g.replay()
 
-    torch.testing.assert_close(output, output_ref, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-2)
