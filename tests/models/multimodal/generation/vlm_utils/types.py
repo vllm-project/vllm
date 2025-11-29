@@ -14,7 +14,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
 from vllm.logprobs import SampleLogprobs
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 from .....conftest import (
     AUDIO_ASSETS,

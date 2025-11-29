@@ -22,7 +22,7 @@ from vllm.multimodal.processing import (
     replace_token_matches,
 )
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 from .utils import random_image
 

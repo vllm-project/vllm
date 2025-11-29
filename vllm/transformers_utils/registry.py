@@ -4,7 +4,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .tokenizer import TokenizerLike
+    from .tokenizers import TokenizerLike
 
 
 class TokenizerRegistry:

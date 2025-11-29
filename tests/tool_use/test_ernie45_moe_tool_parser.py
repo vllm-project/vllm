@@ -15,7 +15,8 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import TokenizerLike, get_tokenizer
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 # Use a common model that is likely to be available
 MODEL = "baidu/ERNIE-4.5-21B-A3B-Thinking"

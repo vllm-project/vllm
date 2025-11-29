@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
 )
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 

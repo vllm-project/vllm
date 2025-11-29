@@ -35,7 +35,7 @@ from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_image_processor_from_config
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 from .interfaces import (
     MultiModalEmbeddings,

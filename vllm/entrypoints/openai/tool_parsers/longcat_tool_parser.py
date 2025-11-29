@@ -4,7 +4,7 @@
 import regex as re
 
 from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):

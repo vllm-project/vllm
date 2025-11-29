@@ -8,11 +8,11 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from typing_extensions import Self, assert_never, runtime_checkable
+from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -25,7 +25,8 @@ from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+    from .tokenizers import TokenizerLike
 
 
 logger = init_logger(__name__)
@@ -33,9 +34,11 @@ logger = init_logger(__name__)
 
 def __getattr__(name: str):
     if name == "AnyTokenizer":
+        from .tokenizers import TokenizerLike
+
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been renamed to "
-            "`vllm.transformers_utils.tokenizer.TokenizerLike`. "
+            "`vllm.transformers_utils.tokenizers.TokenizerLike`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,
@@ -46,105 +49,8 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-@runtime_checkable
-class TokenizerLike(Protocol):
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        /,
-        *,
-        revision: str | None = None,
-    ) -> Self:
-        raise NotImplementedError
-
-    @property
-    def all_special_tokens(self) -> list[str]:
-        raise NotImplementedError
-
-    @property
-    def all_special_ids(self) -> list[int]:
-        raise NotImplementedError
-
-    @property
-    def bos_token_id(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def eos_token_id(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def is_fast(self) -> bool:
-        raise NotImplementedError
-
-    @property
-    def vocab_size(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def max_token_id(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def truncation_side(self) -> str:
-        raise NotImplementedError
-
-    def __hash__(self) -> int:
-        return hash(id(self))
-
-    def __len__(self) -> int:
-        return self.vocab_size
-
-    def __call__(
-        self,
-        text: str | list[str] | list[int],
-        text_pair: str | None = None,
-        add_special_tokens: bool = False,
-        truncation: bool = False,
-        max_length: int | None = None,
-    ):
-        raise NotImplementedError
-
-    def get_vocab(self) -> dict[str, int]:
-        raise NotImplementedError
-
-    def get_added_vocab(self) -> dict[str, int]:
-        raise NotImplementedError
-
-    def encode(
-        self,
-        text: str,
-        truncation: bool | None = None,
-        max_length: int | None = None,
-        add_special_tokens: bool | None = None,
-    ) -> list[int]:
-        raise NotImplementedError
-
-    def apply_chat_template(
-        self,
-        messages: list["ChatCompletionMessageParam"],
-        tools: list[dict[str, Any]] | None = None,
-        **kwargs,
-    ) -> list[int]:
-        raise NotImplementedError
-
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        raise NotImplementedError
-
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
-        raise NotImplementedError
-
-    def convert_ids_to_tokens(
-        self,
-        ids: list[int],
-        skip_special_tokens: bool = True,
-    ) -> list[str]:
-        raise NotImplementedError
-
-
 def decode_tokens(
-    tokenizer: TokenizerLike,
+    tokenizer: "TokenizerLike",
     token_ids: list[int],
     *,
     skip_special_tokens: bool | None = None,
@@ -163,7 +69,7 @@ def decode_tokens(
 
 
 def encode_tokens(
-    tokenizer: TokenizerLike,
+    tokenizer: "TokenizerLike",
     text: str,
     *,
     truncation: bool | None = None,
@@ -191,7 +97,7 @@ def encode_tokens(
     return tokenizer.encode(text, **kw_args)
 
 
-def get_cached_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
+def get_cached_tokenizer(tokenizer: "TokenizerLike") -> "TokenizerLike":
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -249,7 +155,7 @@ def get_tokenizer(
     revision: str | None = None,
     download_dir: str | None = None,
     **kwargs,
-) -> TokenizerLike:
+) -> "TokenizerLike":
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,

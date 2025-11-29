@@ -6,7 +6,8 @@ from copy import deepcopy
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.transformers_utils.tokenizer import TokenizerLike, get_cached_tokenizer
+from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 
 @pytest.mark.parametrize("model_id", ["gpt2", "zai-org/chatglm3-6b"])

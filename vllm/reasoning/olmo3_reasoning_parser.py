@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer import TokenizerLike
+    from vllm.transformers_utils.tokenizers import TokenizerLike
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,

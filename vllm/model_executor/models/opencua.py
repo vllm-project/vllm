@@ -31,7 +31,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.transformers_utils.tokenizers import TokenizerLike
 
 from .qwen2_5_vl import (
     Qwen2_5_VisionTransformer as OpenCUAVisionTransformer,

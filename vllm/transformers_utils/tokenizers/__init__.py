@@ -7,8 +7,10 @@ from .mistral import (
     truncate_tool_call_ids,
     validate_request_params,
 )
+from .protocol import TokenizerLike
 
 __all__ = [
+    "TokenizerLike",
     "MistralTokenizer",
     "maybe_serialize_tool_calls",
     "truncate_tool_call_ids",
