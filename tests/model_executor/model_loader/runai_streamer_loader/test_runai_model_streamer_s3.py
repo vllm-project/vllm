@@ -53,16 +53,17 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
                 ignore_pattern,
                 s3_credentials=credentials,
             )
-    monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_list_safetensors",
-        patcher.shim_list_safetensors,
-    )
+
     def mock_get_s3_files_module():
         return MockFilesModule()
 
     monkeypatch.setattr(
         "runai_model_streamer.s3_utils.s3_utils.get_s3_files_module",
         mock_get_s3_files_module,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.runai_utils.runai_list_safetensors",
+        patcher.shim_list_safetensors,
     )
     monkeypatch.setattr(
         "vllm.transformers_utils.runai_utils.runai_pull_safetensors",
