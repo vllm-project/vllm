@@ -1540,6 +1540,7 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
             }
       }
 
+      if (k1 + THRDS * A_CHUNK * UNRL < k_end)
       if (k1 + THRDS * A_CHUNK * UNRL < K)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
