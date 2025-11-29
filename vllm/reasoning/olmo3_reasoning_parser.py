@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -220,7 +220,7 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
-    def __init__(self, tokenizer: "AnyTokenizer", *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         self.think_start = r"<think>"

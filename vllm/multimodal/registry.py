@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
@@ -231,17 +232,20 @@ class MultiModalRegistry:
     def _create_processing_ctx(
         self,
         model_config: "ModelConfig",
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> InputProcessingContext:
-        if tokenizer is None and not model_config.skip_tokenizer_init:
+        if model_config.skip_tokenizer_init:
+            tokenizer = cast(TokenizerLike, object())
+        elif tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
+
         return InputProcessingContext(model_config, tokenizer)
 
     def _create_processing_info(
         self,
         model_config: "ModelConfig",
         *,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> BaseProcessingInfo:
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
@@ -252,7 +256,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
