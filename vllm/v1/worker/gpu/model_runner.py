@@ -47,13 +47,18 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.sampler import Sampler, compute_prompt_logprobs
+from vllm.v1.worker.gpu.sample.logprob import compute_prompt_logprobs
+from vllm.v1.worker.gpu.sample.metadata import (
+    SamplingMetadata,
+    expand_sampling_metadata,
+)
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
     get_num_rejected,
     rejection_sample,
 )
-from vllm.v1.worker.gpu.states import RequestState, SamplingMetadata
+from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -890,8 +895,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     input_batch.idx_mapping, input_batch.idx_mapping_np, pos
                 )
                 if input_batch.num_draft_tokens > 0:
-                    sampling_metadata = self.req_states.expand_sampling_metadata(
-                        sampling_metadata, input_batch.cu_num_logits
+                    sampling_metadata = expand_sampling_metadata(
+                        sampling_metadata,
+                        input_batch.cu_num_logits,
+                        max_expand_len=self.num_speculative_steps + 1,
                     )
 
                 if self.lora_config:
