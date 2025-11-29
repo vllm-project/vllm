@@ -24,11 +24,11 @@ class MediaWithBytes(Generic[_T]):
 
 class MediaIO(ABC, Generic[_T]):
     @abstractmethod
-    def load_bytes(self, data: bytes) -> _T | MediaWithBytes[_T]:
+    def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError
 
     @abstractmethod
-    def load_base64(self, media_type: str, data: str) -> _T | MediaWithBytes[_T]:
+    def load_base64(self, media_type: str, data: str) -> _T:
         """
         List of media types:
         https://www.iana.org/assignments/media-types/media-types.xhtml
@@ -36,5 +36,5 @@ class MediaIO(ABC, Generic[_T]):
         raise NotImplementedError
 
     @abstractmethod
-    def load_file(self, filepath: Path) -> _T | MediaWithBytes[_T]:
+    def load_file(self, filepath: Path) -> _T:
         raise NotImplementedError
