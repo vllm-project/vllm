@@ -19,11 +19,7 @@ from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import (
-    PreTrainedTokenizer,
-    PreTrainedTokenizerFast,
-    TokenizerLike,
-)
+from vllm.transformers_utils.tokenizer import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
     ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
@@ -45,7 +41,7 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
 
 def _cosine_similarity(
-    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    tokenizer: TokenizerLike,
     embed_1: list[PoolingRequestOutput],
     embed_2: list[PoolingRequestOutput],
 ) -> list[PoolingRequestOutput]:
@@ -56,7 +52,7 @@ def _cosine_similarity(
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
         padding = []
-        if (pad_token_id := getattr(tokenizer, "pad_token_id", None)) is not None:
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
         tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
@@ -118,12 +114,14 @@ def _parse_score_content(
     mm_tracker: BaseMultiModalItemTracker,
 ) -> _ContentPart | None:
     if isinstance(data, str):
-        data = ChatCompletionContentPartTextParam(type="text", text=data)
+        part = ChatCompletionContentPartTextParam(type="text", text=data)
+    else:
+        part = data
 
     mm_parser = mm_tracker.create_parser()
 
     parse_res = _parse_chat_message_content_part(
-        data,
+        part,
         mm_parser,
         wrap_dicts=False,
         interleave_strings=False,
