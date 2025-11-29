@@ -99,13 +99,14 @@ async def test_basic_audio_gemma(foscolo):
         out = json.loads(transcription)["text"]
         assert "da cui vergine nacque Venere" in out
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["openai/whisper-large-v3-turbo"])
 async def test_audio_with_timestamp(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
-    
+
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()  
+        client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
             model=model_name,
             file=mary_had_lamb,
@@ -113,6 +114,6 @@ async def test_audio_with_timestamp(mary_had_lamb, model_name):
             response_format="verbose_json",
             temperature=0.0,
         )
-        
+
         assert transcription.segments is not None
         assert len(transcription.segments) > 0
