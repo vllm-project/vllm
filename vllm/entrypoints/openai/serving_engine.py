@@ -617,7 +617,7 @@ class OpenAIServing:
             logger.info("Process pool initialized successfully")
             
         except concurrent.futures.process.BrokenProcessPool as e:
-            raise RuntimeError(f"Process pool initialization failed: {e}")
+            raise RuntimeError(f"Process pool initialization failed: {e}") from e
         except Exception as e:
             raise RuntimeError(
                 f"Unexpected error during process pool initialization: {e}"
