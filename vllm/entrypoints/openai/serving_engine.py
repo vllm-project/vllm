@@ -101,7 +101,7 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.transformers_utils.tokenizer import MistralTokenizer, TokenizerLike
+from vllm.transformers_utils.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,

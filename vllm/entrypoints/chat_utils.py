@@ -51,7 +51,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalU
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import MistralTokenizer, TokenizerLike
+from vllm.transformers_utils.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.func_utils import supports_kw
 
