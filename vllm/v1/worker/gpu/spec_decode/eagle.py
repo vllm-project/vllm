@@ -121,7 +121,7 @@ class EagleSpeculator:
             num_tokens_across_dp=num_tokens_across_dp,
         ):
             ret_hidden_states = self.model(
-                input_ids=self.input_buffers.input_ids.gpu[:num_tokens],
+                input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
@@ -139,7 +139,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
@@ -379,7 +379,7 @@ def prepare_eagle_inputs(
     )
     _prepare_eagle_inputs_kernel[(num_reqs,)](
         last_token_indices,
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         input_batch.input_ids,
         input_batch.positions,
@@ -482,7 +482,7 @@ def prepare_eagle_decode(
         last_token_indices,
         target_seq_lens,
         num_rejected,
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         input_hidden_states,
         input_hidden_states.stride(0),
@@ -550,7 +550,7 @@ def update_eagle_inputs(
 ):
     num_reqs, hidden_size = output_hidden_states.shape
     _update_eagle_inputs_kernel[(num_reqs,)](
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         hidden_states,
         hidden_states.stride(0),

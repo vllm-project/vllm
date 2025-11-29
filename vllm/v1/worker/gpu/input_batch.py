@@ -29,7 +29,7 @@ class InputBuffers:
         self.pin_memory = pin_memory
 
         self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
-        self.input_ids = self._make_buffer(max_num_tokens, dtype=torch.int32)
+        self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
@@ -116,7 +116,7 @@ class InputBatch:
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
-        input_ids = input_buffers.input_ids.copy_to_gpu(num_tokens)
+        input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1

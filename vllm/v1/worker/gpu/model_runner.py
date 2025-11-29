@@ -410,9 +410,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cu_num_new_blocks[i].append(x + len(block_ids))
                 new_block_ids[i].extend(block_ids)
             overwrite.append(True)
-        # Update the GPU tensors for request states.
-        if scheduler_output.scheduled_new_reqs:
-            self.req_states.prefill_len.copy_to_gpu()
 
         # Add new blocks for the existing requests.
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -507,7 +504,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Get prefill tokens.
         prepare_prefill_inputs(
-            self.input_buffers.input_ids.gpu,
+            self.input_buffers.input_ids,
             self.req_states.next_prefill_tokens,
             idx_mapping,
             query_start_loc_gpu,
@@ -529,7 +526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
-            self.input_buffers.input_ids.gpu,
+            self.input_buffers.input_ids,
             idx_mapping,
             self.req_states.last_sampled_tokens,
             query_start_loc_gpu,
@@ -570,7 +567,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
         )
 
-        input_ids = self.input_buffers.input_ids.gpu[:num_tokens_after_padding]
+        input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
         return InputBatch(
             req_ids=req_ids,
