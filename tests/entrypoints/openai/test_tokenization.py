@@ -141,6 +141,7 @@ async def test_tokenize_chat_with_tools(
     tokenizer_name: str,
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+
     for add_generation in [False, True]:
         for add_special in [False, True]:
             conversation = [
