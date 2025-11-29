@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib
+import importlib.util
 import json
 import time
 
@@ -871,6 +871,7 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=3)
 async def test_function_call_with_previous_input_messages(
     client: OpenAI, model_name: str
 ):

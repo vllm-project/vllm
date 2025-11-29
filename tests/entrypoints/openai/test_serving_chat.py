@@ -401,10 +401,15 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     processor: MagicMock = field(default_factory=MagicMock)
     io_processor: MagicMock = field(default_factory=MagicMock)
+    input_processor: MagicMock = field(default_factory=MagicMock)
 
 
 async def _async_serving_chat_init():
-    engine = MockEngine()
+    engine = MagicMock()
+    engine.model_config = MockModelConfig()
+    engine.processor = MagicMock()
+    engine.io_processor = MagicMock()
+    engine.input_processor = MagicMock()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
     serving_completion = OpenAIServingChat(
