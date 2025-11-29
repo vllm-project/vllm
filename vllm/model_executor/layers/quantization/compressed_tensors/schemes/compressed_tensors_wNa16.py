@@ -74,7 +74,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     @classmethod
     def get_min_capability(cls) -> int:
         # ampere and up
-        return 80
+        return 75
 
     def create_weights(
         self,
