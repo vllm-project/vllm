@@ -21,15 +21,12 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
-GLOBAL_PATCHER = StreamerPatcher("/dev/null_placeholder")
-
-
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
     vllm_runner,
     tmp_path: Path,
     monkeypatch,
 ):
-    GLOBAL_PATCHER.local_path = str(tmp_path)
+    patcher = StreamerPatcher(str(tmp_path))
 
     test_mock_s3_model = "s3://my-mock-bucket/gpt2/"
 
@@ -37,13 +34,9 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     mock_model_dir = f"{tmp_path}/gpt2"
     snapshot_download(repo_id=test_model, local_dir=mock_model_dir)
 
-    # Configure the Patcher to replace the S3 path with the local path
-    local_bucket_root = str(tmp_path)
-    GLOBAL_PATCHER.local_path = local_bucket_root
-
     class MockFilesModule:
         def glob(self, path: str, allow_pattern=None, credentials=None):
-            return GLOBAL_PATCHER.shim_list_safetensors(
+            return patcher.shim_list_safetensors(
                 path, s3_credentials=credentials
             )
 
@@ -55,7 +48,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
             ignore_pattern=None,
             credentials=None,
         ):
-            return GLOBAL_PATCHER.shim_pull_files(
+            return patcher.shim_pull_files(
                 model_path,
                 dst,
                 allow_pattern,
@@ -72,7 +65,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     )
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.weight_utils.SafetensorsStreamer",
-        GLOBAL_PATCHER.create_mock_streamer,
+        patcher.create_mock_streamer,
     )
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
