@@ -85,5 +85,4 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         assert accuracy >= MIN_ACCURACY, (
             f"DBO+DP+EP accuracy too low ({all2all_backend}): "
             f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
-            f"(correct: {results['num_correct']}/{results['num_questions']})"
         )
