@@ -93,7 +93,6 @@ ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
 class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
-    embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
