@@ -47,13 +47,13 @@ class MedusaProposer:
         # Shape: [batch_size, num_heads]
         draft_tokens = torch.stack([logit.argmax(dim=-1) for logit in logits], dim=1)
 
-        # Sanity check to catch any unexpected shape mismatch early
+        # Always validate shape (avoid assert being stripped by -O)
         batch_size = target_hidden_states.shape[0]
         num_heads = len(logits)
-        assert draft_tokens.shape == (
-            batch_size,
-            num_heads,
-        ), f"Expected shape ({batch_size}, {num_heads}), got {draft_tokens.shape}"
+        if draft_tokens.shape != (batch_size, num_heads):
+            raise ValueError(
+                f"Expected shape ({batch_size}, {num_heads}), got {draft_tokens.shape}"
+            )
 
         return draft_tokens
 
