@@ -39,7 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -293,7 +293,7 @@ def lora_path_on_disk(lora_path: str) -> str:
 
 
 # Global cache for LoRA tokenizers.
-lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 
 
 def process_image(image: Any) -> Mapping[str, Any]:

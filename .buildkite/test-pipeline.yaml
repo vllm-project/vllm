@@ -282,7 +282,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/engine
-  - tests/tokenization
+  - tests/tokenizers_
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
@@ -290,7 +290,7 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
+  - pytest -v -s tokenizers_
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45

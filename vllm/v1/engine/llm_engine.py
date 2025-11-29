@@ -23,8 +23,9 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -95,9 +96,10 @@ class LLMEngine:
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
+            self.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -350,17 +352,17 @@ class LLMEngine:
         return get_metrics_snapshot()
 
     @property
-    def tokenizer(self) -> AnyTokenizer | None:
+    def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
         self.input_processor.tokenizer = tokenizer
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
         return self.tokenizer

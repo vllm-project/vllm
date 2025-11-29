@@ -8,7 +8,7 @@ import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (
     FastIncrementalDetokenizer,

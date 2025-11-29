@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from .tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 
 def _replace_none_with_empty(tokens: list[str | None]):
@@ -12,7 +12,7 @@ def _replace_none_with_empty(tokens: list[str | None]):
 
 
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     output_tokens: list[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
@@ -57,7 +57,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 def convert_prompt_ids_to_tokens(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     prompt_ids: list[int],
     skip_special_tokens: bool = False,
 ) -> tuple[list[str], int, int]:
@@ -81,7 +81,7 @@ def convert_prompt_ids_to_tokens(
 
 
 def convert_ids_list_to_tokens(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     token_ids: list[int],
 ) -> list[str]:
     """Detokenize the input ids individually.
@@ -108,7 +108,7 @@ def convert_ids_list_to_tokens(
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     all_input_ids: list[int],
     prev_tokens: list[str] | None,
     prefix_offset: int,
