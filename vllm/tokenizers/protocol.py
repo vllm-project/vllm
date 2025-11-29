@@ -3,13 +3,12 @@
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from typing_extensions import Self, runtime_checkable
+from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
-@runtime_checkable
 class TokenizerLike(Protocol):
     @classmethod
     def from_pretrained(
