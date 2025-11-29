@@ -298,10 +298,13 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
-    assert len(log_matches) == 2, log_holder.text
+    # 2 for each compile range
+    # (global compile range can be split due to enable_fi_allreduce_fusion)
+    assert len(log_matches) == 2 * len(compilation_config.get_compile_ranges()), (
+        log_holder.text
+    )
 
-    assert int(log_matches[0]) == matches.attention_fusion
-    assert int(log_matches[1]) == matches.attention_fusion
+    assert all(int(log_match) == matches.attention_fusion for log_match in log_matches)
 
     log_matches = re.findall(
         r"collective_fusion.py:\d+] Replaced (\d+) patterns",
@@ -446,7 +449,6 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
     llm = LLM(
         model=model,
         compilation_config=compilation_config,
@@ -459,3 +461,9 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    # Get the compile ranges split points after vllm config post init
+    # in order to compute compile ranges correctly
+    compilation_config.compile_ranges_split_points = (
+        llm.llm_engine.vllm_config.compilation_config.compile_ranges_split_points
+    )

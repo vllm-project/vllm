@@ -66,6 +66,9 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
+from torch._inductor.utils import fresh_cache
+
+
 logger = init_logger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
@@ -1424,3 +1427,14 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture
+def use_fresh_inductor_cache():
+    """
+    Use a fresh inductor cache for the test.
+    This is useful to ensure that the test is not affected by the
+    previous test calls.
+    """
+    with fresh_cache():
+        yield

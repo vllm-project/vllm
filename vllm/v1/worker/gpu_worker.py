@@ -398,10 +398,24 @@ class Worker(WorkerBase):
         # e.g. for the max-num-batched token size in chunked prefill.
         compile_sizes = self.vllm_config.compilation_config.compile_sizes
         warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
-        if not self.model_config.enforce_eager:
-            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            if capture_sizes is not None:
-                warmup_sizes = [x for x in warmup_sizes if x not in capture_sizes]
+        capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+
+        if (
+            not self.model_config.enforce_eager
+            or self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ) and capture_sizes is not None:
+            warmup_sizes = [x for x in warmup_sizes if x not in capture_sizes]
+        compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
+
+        # For each compile_range, if none of the batch sizes
+        # in warmup_sizes or cudagraph_capture_sizes are in the range,
+        # add the end of the range to ensure compilation/warmup.
+        all_sizes = set(capture_sizes if capture_sizes is not None else [])
+        all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
+        for compile_range in compile_ranges:
+            if not any(x in compile_range for x in all_sizes):
+                warmup_sizes.append(compile_range.end)
+
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)

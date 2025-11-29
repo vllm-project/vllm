@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config
+from vllm.config.utils import Range, config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -148,6 +148,9 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        if world_size not in FI_SUPPORTED_WORLD_SIZES:
+            return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb
         if max_size_mb is None:
             max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
@@ -293,6 +296,8 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_split_points`]
+            [vllm.config.CompilationConfig.compile_ranges_split_points]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -405,6 +410,21 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+
+    compile_ranges_split_points: list[int] | None = None
+    """Split points that represent compile ranges for inductor.
+    The compile ranges are 
+    [1, split_points[0]], 
+    [split_points[0] + 1, split_points[1]], ..., 
+    [split_points[-1] + 1, max_num_batched_tokens].
+    Compile sizes are also used single element ranges,
+    the range is represented as [compile_sizes[i], compile_sizes[i]].
+    
+    If a range overlaps with the compile size, graph for compile size 
+    will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
+    graph for compile size 4 will be compiled and used instead of the graph
+    for range [1, 8].
+    """
 
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
@@ -1061,3 +1081,13 @@ class CompilationConfig:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
+
+    def get_compile_ranges(self) -> list[Range]:
+        """Get the compile ranges for the compilation config."""
+        if self.compile_ranges_split_points is None:
+            return []
+        split_points = sorted(set(self.compile_ranges_split_points))
+        return [
+            Range(start=s + 1, end=e)
+            for s, e in zip([0] + split_points[:-1], split_points)
+        ]
