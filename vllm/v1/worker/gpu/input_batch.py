@@ -341,6 +341,8 @@ def _post_update_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     last_sampled_tokens_ptr,
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
     sampled_tokens_ptr,
     sampled_tokens_stride,
     num_sampled_ptr,
@@ -356,6 +358,15 @@ def _post_update_kernel(
             sampled_tokens_ptr + req_id * sampled_tokens_stride + num_sampled - 1
         )
         tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
+
+    for i in range(num_sampled):
+        token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
+        token_ptr = (
+            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
+        )
+        count = tl.load(token_ptr)
+        count += 1
+        tl.store(token_ptr, count)
 
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -374,6 +385,8 @@ def post_update(
     num_computed_tokens: torch.Tensor,
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
+    # [max_num_reqs, vocab_size]
+    output_bin_counts: torch.Tensor,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
@@ -388,6 +401,8 @@ def post_update(
         idx_mapping,
         num_computed_tokens,
         last_sampled_tokens,
+        output_bin_counts,
+        output_bin_counts.stride(0),
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,
