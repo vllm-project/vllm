@@ -45,6 +45,8 @@ def _gumbel_sample_kernel(
 
         # Apply temperature.
         if APPLY_TEMPERATURE:
+            # NOTE(woosuk): Match the behavior of _penalties_and_temperature_kernel.
+            # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
             logits = logits / temp
 
         # Apply gumbel noise.
