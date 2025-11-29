@@ -44,7 +44,7 @@ aws s3 cp "$wheel" "s3://$BUCKET/$BUILDKITE_COMMIT/"
 # list all wheels in the commit directory
 echo "Existing wheels on S3:"
 aws s3 ls "s3://$BUCKET/$BUILDKITE_COMMIT/"
-obj_json="$(mktemp).json"
+obj_json="objects.json"
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$BUILDKITE_COMMIT/" --delimiter / --output json > "$obj_json"
 mkdir -p "$INDICES_OUTPUT_DIR"
 
@@ -57,7 +57,17 @@ if [[ ! -z "$DEFAULT_VARIANT_ALIAS" ]]; then
 else
     alias_arg=""
 fi
-python3 .buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
+
+# detect if python3.10+ is available
+has_new_python=$(python3 -c "print(1 if __import__('sys').version_info >= (3,10) else 0)")
+if [[ "$has_new_python" -eq 0 ]]; then
+    # use new python from docker
+    PYTHON="docker run --rm -v $(pwd):/app -w /app python:3-slim python3"
+else
+    PYTHON="python3"
+fi
+
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$BUILDKITE_COMMIT/"
