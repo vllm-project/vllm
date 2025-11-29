@@ -21,8 +21,8 @@ class TestTokenizer(TokenizerLike):
 def test_customized_tokenizer():
     TokenizerRegistry.register(
         "test_tokenizer",
-        "tests.tokenizers.test_registry",
-        "TestTokenizer",
+        __name__,
+        TestTokenizer.__name__,
     )
 
     tokenizer = TokenizerRegistry.get_tokenizer("test_tokenizer")
