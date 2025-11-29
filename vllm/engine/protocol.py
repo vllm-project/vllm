@@ -13,7 +13,7 @@ from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 

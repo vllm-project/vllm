@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from .tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 
 def _replace_none_with_empty(tokens: list[str | None]):

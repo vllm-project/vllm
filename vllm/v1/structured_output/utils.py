@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
     import xgrammar as xgr
 
-    from vllm.transformers_utils.tokenizers import TokenizerLike
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")

@@ -13,9 +13,9 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers.xlam_tool_parser import xLAMToolParser
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.cpu_test
 

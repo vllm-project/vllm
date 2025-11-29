@@ -19,7 +19,7 @@ if TYPE_CHECKING:
         DeltaMessage,
         ResponsesRequest,
     )
-    from vllm.transformers_utils.tokenizers import TokenizerLike
+    from vllm.tokenizers import TokenizerLike
 else:
     ChatCompletionRequest = Any
     DeltaMessage = Any

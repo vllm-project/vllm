@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 

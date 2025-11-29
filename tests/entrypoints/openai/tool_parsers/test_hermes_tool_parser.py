@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 from ....utils import RemoteOpenAIServer
 

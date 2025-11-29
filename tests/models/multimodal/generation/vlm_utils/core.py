@@ -9,7 +9,7 @@ import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS

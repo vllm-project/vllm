@@ -26,10 +26,10 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-from vllm.transformers_utils.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list

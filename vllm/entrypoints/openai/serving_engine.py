@@ -96,12 +96,12 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.transformers_utils.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,

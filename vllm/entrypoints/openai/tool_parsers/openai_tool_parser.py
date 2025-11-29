@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizers import TokenizerLike
+    from vllm.tokenizers import TokenizerLike
 else:
     TokenizerLike = object
 

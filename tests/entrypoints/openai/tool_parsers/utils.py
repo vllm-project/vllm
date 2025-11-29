@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 
 class StreamingToolReconstructor:

@@ -5,13 +5,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Self, runtime_checkable
 
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-
-
-logger = init_logger(__name__)
 
 
 @runtime_checkable

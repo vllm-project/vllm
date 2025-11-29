@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.tokenizers import TokenizerLike, TokenizerRegistry
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers import TokenizerLike, TokenizerRegistry
 
 
 class TestTokenizer(TokenizerLike):
@@ -21,7 +21,7 @@ class TestTokenizer(TokenizerLike):
 def test_customized_tokenizer():
     TokenizerRegistry.register(
         "test_tokenizer",
-        "tests.transformers_utils.test_tokenizer_registry",
+        "tests.tokenizers.test_registry",
         "TestTokenizer",
     )
 

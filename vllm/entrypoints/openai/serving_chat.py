@@ -62,8 +62,8 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizers import TokenizerLike
-from vllm.transformers_utils.tokenizers.mistral import (
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import (
     MistralTokenizer,
     maybe_serialize_tool_calls,
     truncate_tool_call_ids,

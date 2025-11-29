@@ -6,11 +6,11 @@ import warnings
 
 def __getattr__(name: str):
     if name == "TokenizerBase":
-        from .tokenizers import TokenizerLike
+        from vllm.tokenizers import TokenizerLike
 
         warnings.warn(
             "`vllm.transformers_utils.tokenizer_base.TokenizerBase` has been "
-            "moved to `vllm.transformers_utils.tokenizers.TokenizerLike`. "
+            "moved to `vllm.tokenizers.TokenizerLike`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,
@@ -18,11 +18,11 @@ def __getattr__(name: str):
 
         return TokenizerLike
     if name == "TokenizerRegistry":
-        from .tokenizers import TokenizerRegistry
+        from vllm.tokenizers import TokenizerRegistry
 
         warnings.warn(
             "`vllm.transformers_utils.tokenizer_base.TokenizerRegistry` has been "
-            "moved to `vllm.transformers_utils.tokenizers.TokenizerRegistry`. "
+            "moved to `vllm.tokenizers.TokenizerRegistry`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,

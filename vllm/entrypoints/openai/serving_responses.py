@@ -105,7 +105,7 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)

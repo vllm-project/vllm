@@ -4,7 +4,7 @@
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 
 @pytest.fixture(scope="function")

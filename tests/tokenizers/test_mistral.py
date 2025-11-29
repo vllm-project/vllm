@@ -7,7 +7,7 @@ import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.transformers_utils.tokenizers.mistral import (
+from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _prepare_apply_chat_template_tools_and_messages,
 )

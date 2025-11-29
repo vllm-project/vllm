@@ -16,11 +16,11 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike, TokenizerRegistry
 
 from .config import get_sentence_transformer_tokenizer_config
 from .gguf_utils import get_gguf_file_path_from_hf
 from .repo_utils import list_filtered_repo_files
-from .tokenizers import TokenizerLike, TokenizerRegistry
 from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
@@ -32,11 +32,9 @@ logger = init_logger(__name__)
 
 def __getattr__(name: str):
     if name == "AnyTokenizer":
-        from .tokenizers import TokenizerLike
-
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been moved to "
-            "`vllm.transformers_utils.tokenizers.TokenizerLike`. "
+            "`vllm.tokenizers.TokenizerLike`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,
@@ -217,7 +215,7 @@ def get_tokenizer(
 
     tokenizer: TokenizerLike
     if tokenizer_mode == "mistral":
-        from .tokenizers import MistralTokenizer
+        from vllm.tokenizers import MistralTokenizer
 
         logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(

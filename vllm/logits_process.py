@@ -5,7 +5,7 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 LogitsProcessor: TypeAlias = (
     Callable[[list[int], torch.Tensor], torch.Tensor]

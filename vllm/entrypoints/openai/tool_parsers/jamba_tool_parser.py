@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 
 logger = init_logger(__name__)
 

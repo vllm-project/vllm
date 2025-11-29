@@ -22,11 +22,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.tokenizers import MistralTokenizer
 from vllm.transformers_utils.tokenizer import (
     cached_tokenizer_from_config,
     encode_tokens,
 )
-from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (

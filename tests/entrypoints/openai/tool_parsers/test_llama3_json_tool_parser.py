@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
 from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 
 @pytest.fixture

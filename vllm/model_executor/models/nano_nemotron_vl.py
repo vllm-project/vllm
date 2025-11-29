@@ -73,12 +73,12 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import (
     cached_tokenizer_from_config,
     encode_tokens,
 )
-from vllm.transformers_utils.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings

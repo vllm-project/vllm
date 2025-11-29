@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.transformers_utils.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.protocol import (

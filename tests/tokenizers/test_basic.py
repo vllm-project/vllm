@@ -5,8 +5,8 @@ from typing import _get_protocol_attrs  # type: ignore
 import pytest
 from transformers import PreTrainedTokenizerBase
 
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers import TokenizerLike
 
 
 def _get_missing_attrs(obj: object, target: type):
@@ -14,22 +14,28 @@ def _get_missing_attrs(obj: object, target: type):
 
 
 def test_tokenizer_like_protocol():
-    assert isinstance(
-        tokenizer := get_tokenizer("gpt2", use_fast=False),
-        TokenizerLike,
-    ), f"Missing attrs: {_get_missing_attrs(tokenizer, TokenizerLike)}"
+    assert not (
+        missing_attrs := _get_missing_attrs(
+            get_tokenizer("gpt2", use_fast=False),
+            TokenizerLike,
+        )
+    ), f"Missing attrs: {missing_attrs}"
 
-    assert isinstance(
-        tokenizer := get_tokenizer("gpt2", use_fast=True),
-        TokenizerLike,
-    ), f"Missing attrs: {_get_missing_attrs(tokenizer, TokenizerLike)}"
+    assert not (
+        missing_attrs := _get_missing_attrs(
+            get_tokenizer("gpt2", use_fast=True),
+            TokenizerLike,
+        )
+    ), f"Missing attrs: {missing_attrs}"
 
-    assert isinstance(
-        tokenizer := get_tokenizer(
-            "mistralai/Mistral-7B-Instruct-v0.3", tokenizer_mode="mistral"
-        ),
-        TokenizerLike,
-    ), f"Missing attrs: {_get_missing_attrs(tokenizer, TokenizerLike)}"
+    assert not (
+        missing_attrs := _get_missing_attrs(
+            get_tokenizer(
+                "mistralai/Mistral-7B-Instruct-v0.3", tokenizer_mode="mistral"
+            ),
+            TokenizerLike,
+        )
+    ), f"Missing attrs: {missing_attrs}"
 
 
 @pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m", "gpt2"])

@@ -61,8 +61,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 10min
-  timeout_in_minutes: 15
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
+  timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -316,12 +316,15 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/engine
+  - tests/tokenizers
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+  # OOM in the CI unless we run this separately
+  - pytest -v -s tokenizers
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45

@@ -15,8 +15,8 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
-from vllm.transformers_utils.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
