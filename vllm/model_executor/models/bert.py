@@ -32,7 +32,7 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -432,7 +432,6 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-@default_pooling_type("ALL")
 class BertPoolingModel(BertModel):
     is_pooling_model = True
 
@@ -864,6 +863,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         )
 
 
+@attn_type("encoder_only")
 @default_pooling_type("ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
