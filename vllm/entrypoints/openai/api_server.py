@@ -131,6 +131,7 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
+FORCED_STOP_TOKENS = []  #可以改成 ["</s>", "\n\n", "User:", ...]
 
 _running_tasks: set[asyncio.Task] = set()
 
@@ -752,6 +753,9 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
     try:
+        if request.stop is None and  len(FORCED_STOP_TOKENS) > 0:
+            request.stop = FORCED_STOP_TOKENS 
+
         generator = await handler.create_chat_completion(request, raw_request)
     except Exception as e:
         raise HTTPException(
@@ -2168,7 +2172,18 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server."
     )
     parser = make_arg_parser(parser)
+
+    parser.add_argument(
+        "--default-stop",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Default stop tokens to apply to all requests"
+    )
     args = parser.parse_args()
+
+    FORCED_STOP_TOKENS = args.default_stop if 'args' in locals() else []
+
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
