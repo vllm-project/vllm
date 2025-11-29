@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import multiprocessing
 import os
 import types
 from importlib.util import find_spec
@@ -24,22 +25,43 @@ if HAS_TRITON:
             x.driver for x in backends.values() if x.driver and x.driver.is_active()
         ]
 
-        # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
-        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
+        # Check if we're in a distributed/subprocess environment where CUDA
+        # might not be initialized yet. Be lenient in these cases:
+        # 1. CUDA_VISIBLE_DEVICES="" (Ray sets this during actor init)
+        # 2. We're in a spawned subprocess (multiprocessing.spawn)
+        # 3. TRITON_LIBCUDA_PATH is set (explicit libcuda.so path configured)
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        is_distributed_env = (
-            cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
+        triton_libcuda_path = os.environ.get("TRITON_LIBCUDA_PATH")
+
+        is_ray_distributed_env = (
+            cuda_visible_devices is not None
+            and len(cuda_visible_devices.strip()) == 0
+        )
+        is_spawned_subprocess = (
+            multiprocessing.current_process().name != "MainProcess"
+        )
+        has_explicit_libcuda = (
+            triton_libcuda_path is not None
+            and len(triton_libcuda_path.strip()) > 0
         )
 
-        # Apply lenient driver check for distributed environments
-        if is_distributed_env and len(active_drivers) == 0:
-            # Allow 0 drivers in distributed environments - they may become
-            # active later when CUDA context is properly initialized
+        is_lenient_env = (
+            is_ray_distributed_env or is_spawned_subprocess or has_explicit_libcuda
+        )
+
+        # Apply lenient driver check for distributed/subprocess environments
+        if is_lenient_env and len(active_drivers) == 0:
+            # Allow 0 drivers - they may become active later when CUDA
+            # context is properly initialized
             logger.debug(
-                "Triton found 0 active drivers in distributed environment. "
-                "This is expected during initialization."
+                "Triton found 0 active drivers in distributed/subprocess "
+                "environment (ray_env=%s, subprocess=%s, explicit_libcuda=%s). "
+                "This is expected during initialization.",
+                is_ray_distributed_env,
+                is_spawned_subprocess,
+                has_explicit_libcuda,
             )
-        elif not is_distributed_env and len(active_drivers) != 1:
+        elif not is_lenient_env and len(active_drivers) != 1:
             # Strict check for non-distributed environments
             logger.info(
                 "Triton is installed but %d active driver(s) found "
