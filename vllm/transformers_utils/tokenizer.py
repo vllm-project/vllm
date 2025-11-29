@@ -19,14 +19,12 @@ from vllm.logger import init_logger
 
 from .config import get_sentence_transformer_tokenizer_config
 from .gguf_utils import get_gguf_file_path_from_hf
-from .registry import TokenizerRegistry
 from .repo_utils import list_filtered_repo_files
+from .tokenizers import TokenizerLike, TokenizerRegistry
 from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-
-    from .tokenizers import TokenizerLike
 
 
 logger = init_logger(__name__)
@@ -50,7 +48,7 @@ def __getattr__(name: str):
 
 
 def decode_tokens(
-    tokenizer: "TokenizerLike",
+    tokenizer: TokenizerLike,
     token_ids: list[int],
     *,
     skip_special_tokens: bool | None = None,
@@ -69,7 +67,7 @@ def decode_tokens(
 
 
 def encode_tokens(
-    tokenizer: "TokenizerLike",
+    tokenizer: TokenizerLike,
     text: str,
     *,
     truncation: bool | None = None,
@@ -97,7 +95,7 @@ def encode_tokens(
     return tokenizer.encode(text, **kw_args)
 
 
-def get_cached_tokenizer(tokenizer: "TokenizerLike") -> "TokenizerLike":
+def get_cached_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -155,7 +153,7 @@ def get_tokenizer(
     revision: str | None = None,
     download_dir: str | None = None,
     **kwargs,
-) -> "TokenizerLike":
+) -> TokenizerLike:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
