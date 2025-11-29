@@ -57,7 +57,7 @@ if [[ ! -z "$DEFAULT_VARIANT_ALIAS" ]]; then
 else
     alias_arg=""
 fi
-python3 .buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" "$alias_arg"
+python3 .buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$BUILDKITE_COMMIT/"
