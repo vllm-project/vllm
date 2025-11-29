@@ -476,14 +476,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
 
-// #define MARLIN_SHM_SIZE_DEBUG 1
-// #if defined(MARLIN_SHM_SIZE_DEBUG) && MARLIN_SHM_SIZE_DEBUG == 1
-  max_shared_mem = get_kernel_cache_size(
-      thread_tfg, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
-      num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
-      is_a_8bit);
-// #endif
-
   TORCH_CHECK(is_valid_config(thread_tfg, m_block_size_8, thread_m_blocks,
                               prob_m, prob_n, prob_k, num_bits, group_size,
                               has_act_order, is_k_full, has_zp, is_zp_float,
