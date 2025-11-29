@@ -45,8 +45,7 @@ def _gumbel_sample_kernel(
 
         # Apply temperature.
         if APPLY_TEMPERATURE:
-            # NOTE(woosuk): Use div_rn to match the behavior of torch.
-            logits = tl.div_rn(logits, temp)
+            logits = logits / temp
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
