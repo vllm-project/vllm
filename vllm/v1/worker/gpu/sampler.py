@@ -8,6 +8,7 @@ from vllm.config.model import LogprobsMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.penalties import apply_penalties
 from vllm.v1.worker.gpu.states import SamplingMetadata
 
 
@@ -65,6 +66,8 @@ class Sampler:
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )
+        # Apply penalties in place.
+        apply_penalties(logits, sampling_metadata)
 
         sampled = gumbel_sample(
             logits,
