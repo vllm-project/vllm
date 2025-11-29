@@ -59,10 +59,6 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-# Constants for RPC retry logic
-_MAX_RPC_RETRIES = 3
-_RPC_RETRY_BACKOFF_FACTOR_S = 0.1
-
 
 class FutureWrapper(Future):
     def __init__(
@@ -334,17 +330,17 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            max_retries = 3
 
             for mq in response_mqs:
+                dequeue_timeout = (
+                    None if deadline is None else (deadline - time.monotonic())
+                )
+
                 retry_count = 0
                 last_exception = None
 
-                while retry_count < _MAX_RPC_RETRIES:
-                    # Recompute timeout for each retry to respect the original deadline
-                    dequeue_timeout = (
-                        None if deadline is None else (deadline - time.monotonic())
-                    )
-
+                while retry_count < max_retries:
                     try:
                         status, result = mq.dequeue(
                             timeout=dequeue_timeout, cancel=shutdown_event
@@ -355,21 +351,20 @@ class MultiprocExecutor(Executor):
                             retry_count += 1
                             last_exception = e
                             logger.warning(
-                                "Spurious cancellation detected in worker "
-                                "communication, retrying (%d/%d)",
+                                "retrying (%d/%d)",
                                 retry_count,
-                                _MAX_RPC_RETRIES,
+                                max_retries,
                             )
-                            time.sleep(_RPC_RETRY_BACKOFF_FACTOR_S * retry_count)
+                            time.sleep(0.1 * retry_count)
                             continue
                         raise
                     except TimeoutError as e:
                         raise TimeoutError(f"RPC call to {method} timed out.") from e
 
-                if retry_count >= _MAX_RPC_RETRIES:
+                if retry_count >= max_retries:
                     raise RuntimeError(
-                        f"Worker communication failed after {_MAX_RPC_RETRIES} "
-                        f"retries. Last error: {last_exception}. "
+                        f"Worker communication failed after {max_retries} retries. "
+                        f"Last error: {last_exception}. "
                         "This may indicate worker process failure or severe system "
                         "overload. Try reducing --max-num-seqs or using "
                         "--tensor-parallel-size instead of --pipeline-parallel-size."
