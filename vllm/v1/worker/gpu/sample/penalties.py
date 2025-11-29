@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.states import SamplingMetadata
+from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 
 
 @triton.jit
@@ -81,5 +81,51 @@ def apply_penalties(logits: torch.Tensor, sampling_metadata: SamplingMetadata) -
         sampling_metadata.output_bin_counts,
         sampling_metadata.output_bin_counts.stride(0),
         vocab_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+@triton.jit(do_not_specialize=["prefill_len", "prompt_len"])
+def _bincount_kernel(
+    prefill_token_ids_ptr,
+    prefill_len,
+    prompt_len,
+    prompt_bin_counts_ptr,
+    output_bin_counts_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_idx = tl.program_id(0)
+    if block_idx * BLOCK_SIZE >= prefill_len:
+        return
+
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    if block_idx * BLOCK_SIZE < prompt_len:
+        mask = block < prompt_len
+        prefill_tokens = tl.load(prefill_token_ids_ptr + block, mask=mask)
+        tl.atomic_add(prompt_bin_counts_ptr + prefill_tokens, 1, mask=mask)
+    if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
+        mask = block < prefill_len
+        mask &= block >= prompt_len
+        prefill_tokens = tl.load(prefill_token_ids_ptr + block, mask=mask)
+        tl.atomic_add(output_bin_counts_ptr + prefill_tokens, 1, mask=mask)
+
+
+def bincount(
+    prefill_token_ids: torch.Tensor,
+    prefill_len: int,
+    prompt_len: int,
+    prompt_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    prompt_bin_counts.zero_()
+    output_bin_counts.zero_()
+    BLOCK_SIZE = 1024
+    num_blocks = triton.cdiv(prefill_len, BLOCK_SIZE)
+    _bincount_kernel[(num_blocks,)](
+        prefill_token_ids,
+        prefill_len,
+        prompt_len,
+        prompt_bin_counts,
+        output_bin_counts,
         BLOCK_SIZE=BLOCK_SIZE,
     )
