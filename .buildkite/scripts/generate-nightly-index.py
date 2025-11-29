@@ -218,10 +218,11 @@ def generate_index_and_metadata(
 
     if alias_to_default:
         if "default" not in variant_to_files:
-            raise ValueError(
-                "Alias to default variant specified, but no default variant found."
+            # e.g. only some wheels are uploaded to S3 currently
+            print(
+                "[WARN] Alias to default variant specified, but no default variant found."
             )
-        if alias_to_default in variant_to_files:
+        elif alias_to_default in variant_to_files:
             raise ValueError(
                 f"Alias variant name '{alias_to_default}' already exists among wheel files."
             )
