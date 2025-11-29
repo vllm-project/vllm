@@ -1261,6 +1261,11 @@ class Qwen3VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        if self.is_multimodal_pruning_enabled:
+            logger.debug(
+                "EVS (Efficient Video Sampling) enabled with pruning_rate=%.2f",
+                self.video_pruning_rate
+            )
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
@@ -1525,6 +1530,18 @@ class Qwen3VLForConditionalGeneration(
                 spatial_merge_size=self.visual.spatial_merge_size,
                 q=self.video_pruning_rate,
             )
+
+            # Debug logging for EVS pruning
+            logger.debug(
+                "EVS: Video tokens pruned from %d to %d (T=%d,H=%d,W=%d, "
+                "pruning_rate=%.2f, reduction=%.1f%%)",
+                emb.shape[0],
+                retention_mask.sum().item(),
+                size[0], size[1], size[2],
+                self.video_pruning_rate,
+                (1 - retention_mask.float().mean().item()) * 100
+            )
+
             positions = compute_mrope_for_media(
                 size,
                 merge_size,
