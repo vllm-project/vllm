@@ -16,7 +16,7 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike, TokenizerRegistry
+from vllm.tokenizers import MistralTokenizer, TokenizerLike, TokenizerRegistry
 
 from .config import get_sentence_transformer_tokenizer_config
 from .gguf_utils import get_gguf_file_path_from_hf
@@ -215,8 +215,6 @@ def get_tokenizer(
 
     tokenizer: TokenizerLike
     if tokenizer_mode == "mistral":
-        from vllm.tokenizers import MistralTokenizer
-
         logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
