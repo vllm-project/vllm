@@ -11,7 +11,7 @@ import concurrent
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, Annotated, \
-    Union, Optional
+    Union, Optional, cast
 
 import torch
 from fastapi import Request
@@ -81,8 +81,7 @@ from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
-    is_explicit_encoder_decoder_prompt,
-    parse_singleton_prompt
+    is_explicit_encoder_decoder_prompt
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -283,6 +282,14 @@ class OpenAIServing:
             apply_mistral_chat_template, executor=self._tokenizer_executor
         )
 
+        self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
+        self.log_error_stack = log_error_stack
+
+        self.processor = self.models.processor
+        self.io_processor = self.models.io_processor
+        self.model_config = self.models.model_config
+        self.max_model_len = self.model_config.max_model_len
+
         self.enable_tokenizer_proc_pool = \
             os.getenv("TOKENIZER_PROC_POOL", "0") == "1"
         self.tokenizer_worker_num = \
@@ -318,15 +325,6 @@ class OpenAIServing:
                 executor=self._tokenizer_proc_pool_executor
             )
             self._initialize_process_pool()
-
-
-        self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
-        self.log_error_stack = log_error_stack
-
-        self.processor = self.models.processor
-        self.io_processor = self.models.io_processor
-        self.model_config = self.models.model_config
-        self.max_model_len = self.model_config.max_model_len
 
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
@@ -631,14 +629,14 @@ class OpenAIServing:
         return
 
     @staticmethod
-    def _init_proc_tokenizer(
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        tokenizer_revision: str,
-        max_model_len: int,
-        do_lower_case: bool, 
-    ) -> None:
+    def _init_proc_tokenizer(*args: object) -> None:
+        if len(args) != 6:
+            raise TypeError("expected 6 init args")
+        tokenizer, tokenizer_mode, trust_remote_code, tokenizer_revision, \
+            max_model_len, do_lower_case = cast(
+                tuple[str, str, bool, str, int, bool], args
+            )
+
         global _process_tokenizer, _process_tokenizer_name, _process_tokenizer_mode
         global _process_trust_remote_code, _process_tokenizer_revision
         global _process_max_model_len, _process_do_lower_case
