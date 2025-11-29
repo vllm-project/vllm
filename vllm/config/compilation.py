@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config
+from vllm.config.utils import config, handle_deprecated
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -106,33 +106,33 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = Field(default=None)
+    fuse_norm_quant: bool = Field(default=False)
     """Whether to enable the custom RMSNorm+quant fusion pass."""
-    fuse_act_quant: bool = Field(default=None)
+    fuse_act_quant: bool = Field(default=False)
     """Whether to enable the custom SiluMul+quant fusion pass."""
-    fuse_attn_quant: bool = Field(default=None)
+    fuse_attn_quant: bool = Field(default=False)
     """Whether to enable the custom attention+quant fusion pass."""
-    eliminate_noops: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=False)
     """Whether to enable the custom no-op elimination pass."""
-    enable_sp: bool = Field(default=None)
+    enable_sp: bool = Field(default=False)
     """Whether to enable sequence parallelism."""
-    fuse_gemm_comms: bool = Field(default=None)
+    fuse_gemm_comms: bool = Field(default=False)
     """Whether to enable async TP."""
-    fuse_allreduce_rms: bool = Field(default=None)
+    fuse_allreduce_rms: bool = Field(default=False)
     """Whether to enable flashinfer allreduce fusion."""
 
     # Deprecated flags
-    enable_fusion: bool | Field(default=None)
+    enable_fusion: bool = Field(default=None)
     """Deprecated. Use fuse_norm_quant and fuse_act_quant instead."""
-    enable_attn_fusion: bool | Field(default=None)
+    enable_attn_fusion: bool = Field(default=None)
     """Deprecated. Use fuse_attn_quant instead."""
-    enable_noop: bool | Field(default=None)
+    enable_noop: bool = Field(default=None)
     """Deprecated. Use eliminate_noops instead."""
-    enable_sequence_parallelism: bool | Field(default=None)
+    enable_sequence_parallelism: bool = Field(default=None)
     """Deprecated. Use enable_sp instead."""
-    enable_async_tp: bool | Field(default=None)
+    enable_async_tp: bool = Field(default=None)
     """Deprecated. Use fuse_gemm_comms instead."""
-    enable_fi_allreduce_fusion: bool | Field(default=None)
+    enable_fi_allreduce_fusion: bool = Field(default=None)
     """Deprecated. Use fuse_allreduce_rms instead."""
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -192,12 +192,13 @@ class PassConfig:
         return InductorPass.hash_dict(asdict(self))
 
     @field_validator(
-        "enable_fusion",
-        "enable_attn_fusion",
-        "enable_noop",
-        "enable_sequence_parallelism",
-        "enable_async_tp",
-        "enable_fi_allreduce_fusion",
+        "fuse_norm_quant",
+        "fuse_act_quant",
+        "fuse_attn_quant",
+        "eliminate_noops",
+        "enable_sp",
+        "fuse_gemm_comms",
+        "fuse_allreduce_rms",
         mode="wrap",
     )
     @classmethod
@@ -209,55 +210,49 @@ class PassConfig:
 
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
-        if self.enable_fusion is not None:
-            logger.warning_once(
-                "enable_fusion is deprecated and will be removed in a future release. "
-                "Use fuse_norm_quant and fuse_act_quant instead."
-            )
-            if not self.fuse_norm_quant:
-                self.fuse_norm_quant = True
-            if not self.fuse_act_quant:
-                self.fuse_act_quant = True
 
-        if self.enable_attn_fusion is not None:
-            logger.warning_once(
-                "enable_attn_fusion is deprecated and will be removed in "
-                "a future release. Use fuse_attn_quant instead."
-            )
-            if not self.fuse_attn_quant:
-                self.fuse_attn_quant = True
+        # Map old flags to new flags and issue warnings
+        handle_deprecated(
+            self,
+            "enable_fusion",
+            ["fuse_norm_quant", "fuse_act_quant"],
+            "v0.13.0",
+        )
 
-        if self.enable_noop is not None:
-            logger.warning_once(
-                "enable_noop is deprecated and will be removed in a future release. "
-                "Use eliminate_noops instead."
-            )
-            if not self.eliminate_noops:
-                self.eliminate_noops = True
+        handle_deprecated(
+            self,
+            "enable_attn_fusion",
+            "fuse_attn_quant",
+            "v0.13.0",
+        )
 
-        if self.enable_sequence_parallelism is not None:
-            logger.warning_once(
-                "enable_sequence_parallelism is deprecated and will be "
-                "removed in a future release. Use enable_sp instead."
-            )
-            if not self.enable_sp:
-                self.enable_sp = True
+        handle_deprecated(
+            self,
+            "enable_sequence_parallelism",
+            "enable_sp",
+            "v0.13.0",
+        )
 
-        if self.enable_async_tp is not None:
-            logger.warning_once(
-                "enable_async_tp is deprecated and will be removed in "
-                "a future release. Use fuse_gemm_comms instead."
-            )
-            if not self.fuse_gemm_comms:
-                self.fuse_gemm_comms = True
+        handle_deprecated(
+            self,
+            "enable_async_tp",
+            "fuse_gemm_comms",
+            "v0.13.0",
+        )
 
-        if self.enable_fi_allreduce_fusion is not None:
-            logger.warning_once(
-                "enable_fi_allreduce_fusion is deprecated and will be "
-                "removed in a future release. Use fuse_allreduce_rms instead."
-            )
-            if not self.fuse_allreduce_rms:
-                self.fuse_allreduce_rms = True
+        handle_deprecated(
+            self,
+            "enable_fi_allreduce_fusion",
+            "fuse_allreduce_rms",
+            "v0.13.0",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_noop",
+            "eliminate_noops",
+            "v0.13.0",
+        )
 
         # Force old flags to None to ensure they are not used
         self.enable_fusion = None
