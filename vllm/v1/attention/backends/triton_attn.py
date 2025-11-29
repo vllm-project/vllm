@@ -56,10 +56,10 @@ class TritonAttentionMetadata:
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
-    num_decodes: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    num_decodes: int
     seq_threshold_3D: int
     split_launch: bool
 
@@ -107,7 +107,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         )
 
-        # Check if CUDA Graphs are enabled for prefill
+        # Check if CUDA Graphs are enabled for prefill.
         self.prefill_cudagraph_enabled = (
             self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
         )
@@ -125,27 +125,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
             capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            if not capture_sizes:
-                # If no CUDA Graph capture sizes are specified, the threshold
-                # is reset to zero, forcing the 2D kernel to be used.
-                self.seq_threshold_3D = 0
-            else:
-                # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-                # as threshold. This ensures that each captured graph covers the
-                # correct execution path.
-                upd_seq_threshold_3D = min(
-                    capture_sizes,
-                    key=lambda x: abs(x - self.seq_threshold_3D),
-                )
+            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
 
-                # If the updated threshold becomes significantly larger than the
-                # initial value, it is reset to zero. This enforces the use of the
-                # 2D kernel only and ensures that the size of the allocated
-                # intermediate structures remains bounded.
-                if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
-                    self.seq_threshold_3D = upd_seq_threshold_3D
-                else:
-                    self.seq_threshold_3D = 0
+            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
+            # as threshold. This ensures that each captured graph covers the
+            # correct execution path.
+            self.seq_threshold_3D = min(
+                capture_sizes,
+                key=lambda x: abs(x - self.seq_threshold_3D),
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -203,7 +191,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
-            num_decodes=num_decodes,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
@@ -212,6 +199,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            num_decodes=num_decodes,
             seq_threshold_3D=self.seq_threshold_3D,
             split_launch=self.split_launch,
         )
@@ -416,12 +404,12 @@ class TritonAttentionImpl(AttentionImpl):
             )
 
         cu_seqlens_q = attn_metadata.query_start_loc
-        num_decodes = attn_metadata.num_decodes
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        num_decodes = attn_metadata.num_decodes
         seq_threshold_3D = attn_metadata.seq_threshold_3D
         split_launch = attn_metadata.split_launch
 
@@ -434,7 +422,6 @@ class TritonAttentionImpl(AttentionImpl):
             out=output[:num_actual_tokens],
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
-            num_decodes=num_decodes,
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
@@ -446,6 +433,7 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            num_decodes=num_decodes,
             seq_threshold_3D=seq_threshold_3D,
             split_launch=split_launch,
             sinks=self.sinks,
