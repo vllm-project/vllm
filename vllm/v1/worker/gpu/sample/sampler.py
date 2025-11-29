@@ -9,7 +9,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu.sample.penalties import apply_penalties
+from vllm.v1.worker.gpu.sample.penalties import apply_penalties_and_temperature
 
 
 class Sampler:
@@ -26,22 +26,19 @@ class Sampler:
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
+        sampled, processed_logits = self.sample(logits, sampling_metadata)
         if sampling_metadata.max_num_logprobs is not None:
-            if self.logprobs_mode == "processed_logprobs":
-                sampled, logits = self.sample(
-                    logits, sampling_metadata, return_logits=True
-                )
-            else:
-                assert self.logprobs_mode == "raw_logprobs"
-                sampled, _ = self.sample(logits, sampling_metadata, return_logits=False)
-
+            logits = (
+                processed_logits
+                if self.logprobs_mode == "processed_logprobs"
+                else logits
+            )
             logprobs_tensors = compute_topk_logprobs(
                 logits,
                 sampling_metadata.max_num_logprobs,
                 sampled,
             )
         else:
-            sampled, _ = self.sample(logits, sampling_metadata, return_logits=False)
             logprobs_tensors = None
 
         # These are GPU tensors.
@@ -58,16 +55,15 @@ class Sampler:
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        return_logits: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        is_greedy = sampling_metadata.temperature == 0
-        temp = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-        logits = logits / temp.view(-1, 1)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Copy logits to a new FP32 tensor.
+        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+
+        # Apply penalties and temperature in place.
+        apply_penalties_and_temperature(logits, sampling_metadata)
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )
-        # Apply penalties in place.
-        apply_penalties(logits, sampling_metadata)
 
         sampled = gumbel_sample(
             logits,
@@ -76,4 +72,4 @@ class Sampler:
             sampling_metadata.pos,
             apply_temperature=False,
         )
-        return sampled, logits if return_logits else None
+        return sampled, logits
