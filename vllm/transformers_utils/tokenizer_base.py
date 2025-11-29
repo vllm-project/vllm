@@ -12,11 +12,6 @@ if TYPE_CHECKING:
 class TokenizerBase(ABC):
     @property
     @abstractmethod
-    def all_special_tokens_extended(self) -> list[str]:
-        raise NotImplementedError()
-
-    @property
-    @abstractmethod
     def all_special_tokens(self) -> list[str]:
         raise NotImplementedError()
 

@@ -8,6 +8,7 @@ from vllm.config.model import LogprobsMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.penalties import apply_penalties
 from vllm.v1.worker.gpu.states import SamplingMetadata
 
 
@@ -65,6 +66,8 @@ class Sampler:
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )
+        # Apply penalties in place.
+        apply_penalties(logits, sampling_metadata)
 
         sampled = gumbel_sample(
             logits,
@@ -100,8 +103,9 @@ def _gumbel_sample_kernel(
         mask=mask,
         other=float("-inf"),
     )
+    logits = logits.to(tl.float32)
 
-    temp = tl.load(temp_ptr + req_idx)
+    temp = tl.load(temp_ptr + req_idx).to(tl.float32)
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_idx)
@@ -116,7 +120,7 @@ def _gumbel_sample_kernel(
         # Apply temperature.
         if APPLY_TEMPERATURE:
             # NOTE(woosuk): Use div_rn to match the behavior of torch.
-            logits = tl.div_rn(logits, temp.to(tl.float32))
+            logits = tl.div_rn(logits, temp)
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
