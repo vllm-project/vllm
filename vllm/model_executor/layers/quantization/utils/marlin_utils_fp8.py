@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_scales,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -117,7 +118,7 @@ def prepare_fp8_layer_for_marlin(
         size_n=part_size_n,
         num_bits=8,
     )
-    layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
+    replace_parameter(layer, "weight", marlin_qweight)
 
     # WEIGHT SCALES
     # Permute scales
@@ -125,7 +126,6 @@ def prepare_fp8_layer_for_marlin(
         scales = layer.weight_scale.to(layer.orig_dtype)
     elif "weight_scale_inv" in dir(layer):
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
-        del layer.weight_scale_inv
 
     group_size = -1 if weight_block_size is None else weight_block_size[1]
 
@@ -163,12 +163,15 @@ def prepare_fp8_layer_for_marlin(
         s=scales, size_k=part_size_k, size_n=part_size_n, group_size=group_size
     )
     marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
-    layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
+    if "weight_scale" in dir(layer):
+        replace_parameter(layer, "weight_scale", marlin_scales)
+    elif "weight_scale_inv" in dir(layer):
+        replace_parameter(layer, "weight_scale_inv", marlin_scales)
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
         bias = marlin_permute_bias(layer.bias)
-        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+        replace_parameter(layer, "bias", bias)
 
 
 def prepare_moe_fp8_layer_for_marlin(
