@@ -221,7 +221,7 @@ class ServingClassification(ClassificationMixin):
 
     def _create_pooling_params(
         self,
-        ctx: ClassificationServeContext,
+        ctx: ServeContext[ClassificationRequest],
     ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):

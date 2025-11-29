@@ -91,7 +91,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1533,7 +1533,7 @@ class Tarsier2Processor(Qwen2VLProcessor):
     def __init__(
         self,
         vision_config: dict,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         **kwargs,
     ):
         self.image_processor = Tarsier2ImageProcessor(**vision_config)

@@ -16,7 +16,7 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
@@ -85,7 +85,7 @@ class BaseRenderer(ABC):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ):
         super().__init__()
         self.model_config = model_config
@@ -200,8 +200,8 @@ class CompletionRenderer(BaseRenderer):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None = None,
-        async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer]
+        tokenizer: TokenizerLike | None = None,
+        async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer]
         | None = None,
     ):
         super().__init__(model_config, tokenizer)
@@ -373,7 +373,7 @@ class CompletionRenderer(BaseRenderer):
             return async_tokenizer
 
         tokenizer = self.tokenizer
-        if self.tokenizer is None:
+        if tokenizer is None:
             raise ValueError("No tokenizer available for text input processing")
 
         if self.async_tokenizer_pool is None:

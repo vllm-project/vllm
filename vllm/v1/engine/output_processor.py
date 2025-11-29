@@ -15,8 +15,8 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -139,7 +139,7 @@ class RequestState:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
         prompt: str | None,
         parent_req: ParentRequest | None,
@@ -341,7 +341,10 @@ class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
     def __init__(
-        self, tokenizer: AnyTokenizer, log_stats: bool, stream_interval: int = 1
+        self,
+        tokenizer: TokenizerLike | None,
+        log_stats: bool,
+        stream_interval: int = 1,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer

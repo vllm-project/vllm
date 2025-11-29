@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
@@ -46,7 +46,7 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -59,7 +59,7 @@ class InputPreprocessor:
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
                 "You cannot pass text prompts when `skip_tokenizer_init` is True"
@@ -228,11 +228,11 @@ class InputPreprocessor:
 
         return tokenizer.encode(prompt, **tokenization_kwargs)
 
-    def _get_mm_tokenizer(self) -> AnyTokenizer:
+    def _get_mm_tokenizer(self) -> TokenizerLike:
         # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
         # while using also multi-modal input
         if not self.tokenizer:
-            return cast(AnyTokenizer, object())  # Dummy
+            return cast(TokenizerLike, object())  # Dummy
 
         tokenizer = self.get_tokenizer()
         return tokenizer

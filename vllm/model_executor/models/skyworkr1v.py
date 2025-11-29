@@ -47,7 +47,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -282,7 +282,7 @@ class SkyworkR1VProcessor:
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
