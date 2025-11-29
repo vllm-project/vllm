@@ -21,7 +21,6 @@ from .config import get_sentence_transformer_tokenizer_config
 from .gguf_utils import get_gguf_file_path_from_hf
 from .registry import TokenizerRegistry
 from .repo_utils import list_filtered_repo_files
-from .tokenizers import MistralTokenizer
 from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
@@ -314,6 +313,8 @@ def get_tokenizer(
 
     tokenizer: TokenizerLike
     if tokenizer_mode == "mistral":
+        from .tokenizers import MistralTokenizer
+
         logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
