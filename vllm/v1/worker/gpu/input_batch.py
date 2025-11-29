@@ -173,8 +173,10 @@ def _prepare_prefill_inputs_kernel(
         tokens = tl.load(prefill_ptr + num_computed + block, mask=mask)
         tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
 
-    next_token = tl.load(prefill_ptr + num_computed + query_len)
-    tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
+    next_pos = num_computed + query_len
+    if next_pos < prefill_len:
+        next_token = tl.load(prefill_ptr + next_pos)
+        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
 def prepare_prefill_inputs(
