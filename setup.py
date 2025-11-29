@@ -654,10 +654,10 @@ def _fetch_metadata_for_variant(variant: str | None) -> tuple[list[dict], str]:
     variant_dir = f"{variant}/" if variant is not None else ""
     repo_url = f"https://wheels.vllm.ai/{base_commit}/{variant_dir}vllm/"
     meta_url = repo_url + "metadata.json"
+    print(f"Trying to fetch metadata from {meta_url}")
     from urllib.request import urlopen
-
     with urlopen(meta_url) as resp:
-        assert resp.status == 200, f"Failed to fetch metadata from {meta_url}"
+        # urlopen raises HTTPError on unexpected status code
         wheels = json.loads(resp.read().decode("utf-8"))
     return wheels, repo_url
 
@@ -674,15 +674,18 @@ if envs.VLLM_USE_PRECOMPILED:
         arch = platform.machine()
         # try to fetch the wheel metadata from the nightly wheel repo
         variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        try_default = False
         try:
             wheels, repo_url = _fetch_metadata_for_variant(variant)
         except Exception as e:
             print(
                 f"Failed to fetch precompiled wheel metadata for variant {variant}: {e}"
             )
+            try_default = True # try outside handler to keep the stacktrace simple
+        if try_default:
             print("Warning: Trying the default nightly wheel variant.")
             wheels, repo_url = _fetch_metadata_for_variant(None)
-            # if this also fails, then we have nothing more to try
+            # if this also fails, then we have nothing more to try / cache
 
         # The metadata.json has the following format:
         # see .buildkite/scripts/generate-nightly-index.py for details
