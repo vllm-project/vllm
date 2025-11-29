@@ -788,6 +788,10 @@ def unified_attention(
     head_size = q.shape[2]
 
     # Assign the following variables if they are not assigned in the attention metadata.
+    # This ensures backward compatibility with callers using an earlier version of this
+    # function. However, it is recommended to include these assignments in the
+    # attention metadata itself, as performing them here may negatively impact
+    # performance.
     if (
         BLOCK_M is None
         or BLOCK_Q is None
