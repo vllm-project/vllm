@@ -41,7 +41,6 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
-from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -51,6 +50,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
+from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
     supports_custom_op,
@@ -329,7 +329,8 @@ class GroupCoordinator:
             )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            with suppress_stdout():
+                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1076,15 +1077,6 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
-@deprecated(
-    "`get_tensor_model_parallel_group` has been replaced with "
-    "`get_tp_group` and may be removed after v0.12. Please use "
-    "`get_tp_group` instead."
-)
-def get_tensor_model_parallel_group():
-    return get_tp_group()
-
-
 _DCP: GroupCoordinator | None = None
 
 
@@ -1126,15 +1118,6 @@ _PCP: GroupCoordinator | None = None
 def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
-
-
-@deprecated(
-    "`get_pipeline_model_parallel_group` has been replaced with "
-    "`get_pp_group` and may be removed in v0.12. Please use "
-    "`get_pp_group` instead."
-)
-def get_pipeline_model_parallel_group():
-    return get_pp_group()
 
 
 @contextmanager
@@ -1600,7 +1583,7 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
-    # Ensure all objects are not freezed before cleanup
+    # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 
     destroy_model_parallel()

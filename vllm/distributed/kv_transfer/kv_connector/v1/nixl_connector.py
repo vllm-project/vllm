@@ -4,7 +4,6 @@ import contextlib
 import copy
 import logging
 import math
-import os
 import queue
 import threading
 import time
@@ -21,7 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
@@ -52,7 +51,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -290,7 +288,7 @@ class NixlConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return NixlPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -309,7 +307,7 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """NixlConnector does not save explicitly."""
@@ -810,9 +808,6 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        # TODO temporary, once nixl allows for telemetry flag in config
-        # (next release), we can remove this env var.
-        os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -828,10 +823,11 @@ class NixlConnectorWorker:
         if nixl_agent_config is None:
             config = None
         else:
+            # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends)
+                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads)
+                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
@@ -1042,10 +1038,12 @@ class NixlConnectorWorker:
         NOT directly supported by NIXL (e.g., tpu)
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
+        inv_order = [0, 1, 3, 2, 4]
         try:
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
+                permute_shape = False
                 if (
                     self.kv_cache_layout == "NHD"
                     and self.vllm_config.kv_transfer_config is not None
@@ -1059,10 +1057,20 @@ class NixlConnectorWorker:
                     # Since NHD will not support Decode/Prefill TP_ratio > 1,
                     # we can leverage host_buffer for permute
                     self.host_buffer_kv_cache_layout = "HND"
-                    kv_shape = tuple(kv_shape[i] for i in [0, 1, 3, 2, 4])
+                    kv_shape = (
+                        tuple(kv_shape[i] for i in inv_order)
+                        if not self.use_mla
+                        else kv_shape
+                    )
+                    permute_shape = not self.use_mla
+
                 xfer_buffers[layer_name] = torch.empty(
                     kv_shape, dtype=kv_dtype, device="cpu"
                 )
+                if permute_shape:
+                    xfer_buffers[layer_name] = xfer_buffers[layer_name].permute(
+                        inv_order
+                    )
         except MemoryError as e:
             logger.error("NIXLConnectorWorker gets %s.", e)
             raise
@@ -1823,34 +1831,54 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
-                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                if xfer_state == "DONE":
-                    # Get telemetry from NIXL
-                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                    self.xfer_stats.record_transfer(res)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                elif xfer_state == "PROC":
-                    in_progress = True
-                    continue
-                else:
-                    # transfer failed - mark blocks as invalid
-                    logger.error(
-                        "NIXL transfer failed for request %s with state %s. "
+            for handle, xfer_start_time in handles:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    if xfer_state == "DONE":
+                        # Get telemetry from NIXL
+                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.xfer_stats.record_transfer(res)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    elif xfer_state == "PROC":
+                        in_progress = True
+                        continue
+                    else:
+                        logger.error(
+                            "NIXL transfer failed for request %s with state "
+                            "%s. Marking blocks as invalid.",
+                            req_id,
+                            xfer_state,
+                        )
+                        self._handle_failed_transfer(req_id, handle)
+                        in_progress = False
+                except Exception:
+                    logger.exception(
+                        "NIXL transfer exception for request %s. "
                         "Marking blocks as invalid.",
                         req_id,
-                        xfer_state,
                     )
-                    # mark all (logical)blocks for this request as invalid
-                    if meta := self._recving_metadata.pop(req_id, None):
-                        self._invalid_block_ids.update(meta.local_block_ids)
-                    self._recving_metadata.pop(req_id, None)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                    self.xfer_stats.record_failed_transfer()
+                    self._handle_failed_transfer(req_id, handle)
+                    in_progress = False
+
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
+
+    def _handle_failed_transfer(self, req_id: str, handle: int):
+        """
+        Handle a failed transfer by marking all (logical) blocks as invalid and
+        recording the failure.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+        """
+        if meta := self._recving_metadata.pop(req_id, None):
+            self._invalid_block_ids.update(meta.local_block_ids)
+        self._recving_metadata.pop(req_id, None)
+        self.nixl_wrapper.release_xfer_handle(handle)
+        self.xfer_stats.record_failed_transfer()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -2317,9 +2345,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         return {
             "Num successful transfers": n,
             "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
-            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
-            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
             "Throughput (MB/s)": round(throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
@@ -2336,7 +2364,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 

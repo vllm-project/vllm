@@ -183,9 +183,6 @@ async def test_metrics_counts(
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
-    "vllm:gpu_cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries",
-    "vllm:gpu_prefix_cache_hits",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",

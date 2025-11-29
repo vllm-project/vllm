@@ -284,7 +284,7 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-        self.processor = self.models.processor
+        self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
@@ -296,11 +296,7 @@ class OpenAIServing:
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
-        logger.info(
-            '"auto" tool choice has been enabled please note that while'
-            " the parallel_tool_calls client option is preset for "
-            "compatibility reasons, it will be ignored."
-        )
+        logger.info('"auto" tool choice has been enabled.')
 
         try:
             if tool_parser_name == "pythonic" and self.model_config.model.startswith(
@@ -334,7 +330,7 @@ class OpenAIServing:
         return parser
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         await self.engine_client.reset_mm_cache()
 
     async def beam_search(
@@ -352,8 +348,8 @@ class OpenAIServing:
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        processor = self.processor
-        tokenizer = processor.tokenizer
+        input_processor = self.input_processor
+        tokenizer = input_processor.tokenizer
         if tokenizer is None:
             raise ValueError(
                 "You cannot use beam search when `skip_tokenizer_init` is True"
@@ -1218,7 +1214,7 @@ class OpenAIServing:
             self.max_model_len, params.truncate_prompt_tokens, tokenization_kwargs
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
@@ -1242,16 +1238,19 @@ class OpenAIServing:
     ):
         prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
+        sub_request = 0
         while True:
+            # Ensure that each sub-request has a unique request id.
+            sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
-                request_id,
+                sub_request_id,
                 request_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
             engine_request, tokenization_kwargs = await self._process_inputs(
-                request_id,
+                sub_request_id,
                 engine_prompt,
                 sampling_params,
                 lora_request=lora_request,
@@ -1262,7 +1261,7 @@ class OpenAIServing:
             generator = self.engine_client.generate(
                 engine_request,
                 sampling_params,
-                request_id,
+                sub_request_id,
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
@@ -1295,6 +1294,7 @@ class OpenAIServing:
             sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
             # OPTIMIZATION
             priority = orig_priority - 1
+            sub_request += 1
 
     def _get_prompt_components(
         self,
@@ -1345,11 +1345,12 @@ class OpenAIServing:
         raw_request: Request | None, default: str | None = None
     ) -> str | None:
         """Pulls the request id to use from a header, if provided"""
-        default = default or random_uuid()
-        if raw_request is None:
-            return default
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            return req_id
 
-        return raw_request.headers.get("X-Request-Id", default)
+        return random_uuid() if default is None else default
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:

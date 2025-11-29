@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -31,14 +32,13 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.processor import Processor
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -113,7 +113,7 @@ class AsyncLLM(EngineClient):
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -194,13 +194,15 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
-    @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=(
-            "This argument will have no effect. Use `enable_log_requests` instead."
-        ),
+    @property
+    @deprecated(
+        "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
+        "The old name will be removed in v0.13."
     )
+    def processor(self):
+        return self.input_processor
+
+    @classmethod
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
@@ -213,7 +215,6 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -301,11 +302,7 @@ class AsyncLLM(EngineClient):
             request = prompt
         else:
             assert prompt_text is None
-            logger.warning_once(
-                "Processor has been moved under OpenAIServing and will "
-                "be removed from AsyncLLM in v0.13."
-            )
-            request = self.processor.process_inputs(
+            request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -321,14 +318,15 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, parent_params)
@@ -488,7 +486,7 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
-        processor = self.processor
+        input_processor = self.input_processor
 
         async def output_handler():
             try:
@@ -539,7 +537,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=processor.stat_mm_cache(),
+                            mm_cache_stats=input_processor.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -706,11 +704,11 @@ class AsyncLLM(EngineClient):
 
     @property
     def tokenizer(self) -> AnyTokenizer | None:
-        return self.processor.tokenizer
+        return self.input_processor.tokenizer
 
     @tokenizer.setter
     def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
-        self.processor.tokenizer = tokenizer
+        self.input_processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -745,7 +743,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self) -> None:

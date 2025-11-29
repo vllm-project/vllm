@@ -173,7 +173,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         vocab_size: int,
     ):
         # NOTE We have remove lora extra vocab support for now. So we set
-        # extra_vocab_size alwayzs to 0, and extra_vocab_size will be removed.
+        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
 
         extra_vocab_size = 0
         (
@@ -470,8 +470,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: list[torch.Tensor],
-        lora_b_stacked: list[torch.Tensor],
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
         sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,
