@@ -14,7 +14,7 @@ This document details the current state of FlashInfer integration in vLLM, inclu
 
 | Issue | FlashInfer 0.5.2 | FlashInfer 0.5.3 | Fixed? |
 |-------|------------------|------------------|--------|
-| AllReduce Fusion JIT (`std::optional` bug) | ❌ Broken | ❌ Broken | **No** |
+| AllReduce Fusion JIT (`std::optional` bug) | ❌ Broken | ❌ Broken | **✅ Yes (Nov 2025)** |
 | FP8 MoE CUDA Version (needs 12.7+) | ❌ Broken | ❌ Broken | **No** |
 | MXFP4 MoE on SM90 | ❌ Broken | ❌ Broken | **No** |
 | Attention Sinks on Hopper | ❌ Not supported | ❌ Not supported | **No** |
@@ -51,7 +51,7 @@ vLLM integrates FlashInfer for multiple operators:
 | MoE FP16/BF16 | `VLLM_USE_FLASHINFER_MOE_FP16` | ✅ Works | ✅ Works |
 | MoE FP8 | `VLLM_USE_FLASHINFER_MOE_FP8` | ❌ CUDA version issue | ✅ Works |
 | MoE MXFP4 | `VLLM_USE_FLASHINFER_MOE_MXFP4_BF16` | ❌ Broken | ✅ Works |
-| AllReduce Fusion | `VLLM_USE_FLASHINFER_ALLREDUCE` | ❌ JIT failure | ❌ JIT failure |
+| AllReduce Fusion | `VLLM_USE_FLASHINFER_ALLREDUCE` | ✅ Works (with fix) | ✅ Works (with fix) |
 | All2All | `VLLM_ALL2ALL_BACKEND=flashinfer_all2allv` | ✅ Works | ✅ Works |
 
 ---
@@ -186,7 +186,104 @@ vLLM does NOT auto-enable this feature even when `VLLM_USE_FLASHINFER=1` is set:
 
 **Note:** Running vLLM in eager mode (`enforce_eager=True`) does NOT help avoid this issue. The `enable_fi_allreduce_fusion` pass modifies the model's forward pass in a way that expects torch.compile to perform the actual fusion. Without compilation, the modified code path breaks.
 
-#### Fix Required in FlashInfer
+#### Fix Applied (November 2025)
+
+**Status:** ✅ **FIXED** - Patch available
+
+The bug has been fixed by changing all occurrences of `std::optional` and `std::nullopt` to their CUDA namespace equivalents.
+
+**Complete Patch:**
+
+```diff
+--- a/data/include/flashinfer/comm/trtllm_allreduce_fusion.cuh
++++ b/data/include/flashinfer/comm/trtllm_allreduce_fusion.cuh
+@@ -443,8 +443,8 @@ inline int getSMRegisters() {
+   return regs_per_block;
+ }
+ 
+-inline __device__ int64_t get_sf_out_offset_128x4(std::optional<int> batchIdx, int mIdx, int kIdx,
+-                                                  std::optional<int> numRows, int numCols) {
++inline __device__ int64_t get_sf_out_offset_128x4(cuda::std::optional<int> batchIdx, int mIdx, int kIdx,
++                                                  cuda::std::optional<int> numRows, int numCols) {
+   // SF layout [numMTiles, numKTiles, 32 (mTile), 4 (mTile), 4(kTile)]
+   // --> index [mTileIdx, kTileIdx, outerMIdx, innerMIdx, innerKIdx]
+ 
+@@ -484,8 +484,8 @@ inline __device__ int64_t get_sf_out_offset_128x4(std::optional<int> batchIdx, i
+ }
+ 
+ template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
+-__device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(std::optional<int> batchIdx, int rowIdx,
+-                                                       int colIdx, std::optional<int> numRows,
++__device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(cuda::std::optional<int> batchIdx, int rowIdx,
++                                                       int colIdx, cuda::std::optional<int> numRows,
+                                                        int numCols, SFType* SFout,
+                                                        QuantizationSFLayout layout) {
+ #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+@@ -949,7 +949,7 @@
+     if constexpr (GetQuantType<Pattern> == QuantType::kFP4) {
+       // NOTE(Yingyi): might update later
+       auto sf_out = utils::cvt_quant_to_fp4_get_sf_out_offset<uint32_t, 2>(
+-          std::nullopt /* batchIdx */, token_id, m_access_id_in_token, std::nullopt /* numRows */,
++          cuda::std::nullopt /* batchIdx */, token_id, m_access_id_in_token, cuda::std::nullopt /* numRows */,
+           m_params.hidden_dim, reinterpret_cast<uint32_t*>(m_params.scale_out), m_params.layout);
+       reinterpret_cast<uint32_t*>(m_params.quant_out)[m_access_id] =
+           utils::cvt_warp_fp16_to_fp4<T, VEC_SIZE>(val, m_scale_factor, sf_out);
+```
+
+**Installation Script:**
+
+An automated installation script is available that installs FlashInfer 0.5.2 from PyPI and applies the fix:
+
+```bash
+#!/bin/bash
+# install_flashinfer_with_fix.sh
+# Installs FlashInfer 0.5.2 with AllReduce Fusion fix applied
+
+pip install flashinfer-python==0.5.2
+
+# Find installation path
+FLASHINFER_PATH=$(python -c "import flashinfer, os; print(os.path.dirname(flashinfer.__file__))")
+TARGET_FILE="$FLASHINFER_PATH/data/include/flashinfer/comm/trtllm_allreduce_fusion.cuh"
+
+# Apply fixes
+sed -i 's/\bstd::optional<int> batchIdx/cuda::std::optional<int> batchIdx/g' "$TARGET_FILE"
+sed -i 's/\bstd::optional<int> numRows/cuda::std::optional<int> numRows/g' "$TARGET_FILE"
+sed -i 's/std::nullopt /cuda::std::nullopt /g' "$TARGET_FILE"
+
+echo "✓ Fix applied successfully"
+```
+
+**Locations Fixed:**
+- Line 446-447: Function `get_sf_out_offset_128x4` signature
+- Line 487-488: Function `cvt_quant_to_fp4_get_sf_out_offset` signature  
+- Line 952: Function call with `nullopt` arguments
+
+**Verification:**
+
+```python
+# Test that the fix works
+from flashinfer.comm import trtllm_allreduce_fusion
+print("✓ AllReduce fusion module imports successfully")
+
+# Run with vLLM
+from vllm.config import CompilationConfig, PassConfig
+pass_config = PassConfig(enable_fi_allreduce_fusion=True)
+compilation_config = CompilationConfig(pass_config=pass_config)
+# JIT compilation will now succeed
+```
+
+**Testing:**
+
+```bash
+# Test with AllReduce fusion enabled (automatically enabled for TP >= 2)
+VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py \
+    --model qwen --tp 2
+
+# Verify the fix was applied
+python tests/kernels/test_allreduce_fusion_fix.py
+```
+
+#### Fix Required in FlashInfer (Upstream)
 
 **Option A (Preferred):** Change `std::optional` to `cuda::std::optional` in the header:
 
@@ -430,7 +527,7 @@ The test runs but uses fallback backends:
 | `VLLM_USE_FLASHINFER_MOE_FP4` | FP4 MoE (NVFP4) | Yes | |
 | `VLLM_USE_FLASHINFER_MOE_MXFP4_BF16` | MXFP4 MoE with BF16 activation | Yes | **Broken on SM90** |
 | `VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8` | MXFP4 MoE with MXFP8 activation | Yes | SM100 only |
-| `VLLM_USE_FLASHINFER_ALLREDUCE` | AllReduce fusion | **No** | JIT compilation broken |
+| `VLLM_USE_FLASHINFER_ALLREDUCE` | AllReduce fusion | **Yes (auto-enabled for TP≥2)** | ✅ **Fixed (Nov 2025)** |
 | `VLLM_ALL2ALL_BACKEND` | All2All communication backend | Yes → `flashinfer_all2allv` | |
 
 ---
@@ -474,7 +571,7 @@ For vLLM to use FlashInfer as a **complete backend** without relying on vLLM's c
 
 | Kernel | Current Status | Notes |
 |--------|---------------|-------|
-| **AllReduce** | ⚠️ JIT broken | `flashinfer.comm.trtllm_allreduce_fusion` exists but has C++ bugs |
+| **AllReduce** | ✅ **Fixed (Nov 2025)** | `flashinfer.comm.trtllm_allreduce_fusion` - patch applied |
 | **All2All** | ✅ Available | `flashinfer_all2allv` backend works |
 | **Custom AllReduce (one-shot)** | ⚠️ Partial | FlashInfer has `trtllm_custom_all_reduce` |
 | **Quick AllReduce** | ❌ Not available | vLLM's `quick_all_reduce` is separate |
@@ -516,7 +613,7 @@ To run vLLM entirely on FlashInfer kernels (no vLLM custom ops), FlashInfer woul
 4. **Mamba/SSM kernels** for state-space models
 5. **LoRA kernels** (Punica BGMV/SGMV) for multi-adapter inference
 6. **KV cache block copy/swap** kernels
-7. **Fix AllReduce fusion JIT bugs** (high priority)
+7. ~~**Fix AllReduce fusion JIT bugs**~~ ✅ **FIXED (Nov 2025)**
 
 **Note:** Many of these are specialized kernels that may not make sense for FlashInfer's scope. The goal is not necessarily to replace everything, but to identify gaps for users who want maximum FlashInfer utilization.
 
@@ -524,22 +621,11 @@ To run vLLM entirely on FlashInfer kernels (no vLLM custom ops), FlashInfer woul
 
 ## Recommendations for FlashInfer Team
 
-### Priority 1: Fix AllReduce Fusion JIT (C++ Namespace Bug)
+### Priority 1: ~~Fix AllReduce Fusion JIT (C++ Namespace Bug)~~ ✅ FIXED
 
-The `trtllm_allreduce_fusion` kernel is a critical feature for multi-GPU performance. The JIT compilation failure affects all GPU architectures.
+**Status:** ✅ **FIXED (November 2025)** - Patch available above in Issue 1 section.
 
-**Bug:** `std::optional` vs `cuda::std::optional` namespace mismatch in CUDA header.
-
-**File to fix:** `flashinfer/data/include/flashinfer/comm/trtllm_allreduce_fusion.cuh`
-
-**Specific lines to fix:**
-- Line 487: `std::optional<int> batchIdx` → `cuda::std::optional<int> batchIdx`
-- Line 489: `std::optional<int> numRows` → `cuda::std::optional<int> numRows`
-
-**Or add at the top of the file (after includes):**
-```cpp
-namespace std { using cuda::std::optional; }
-```
+The `trtllm_allreduce_fusion` kernel JIT compilation failure has been fixed. See the complete patch and installation instructions in the [Issue 1](#issue-1-allreduce-fusion-jit-compilation-failure) section above.
 
 ### Priority 2: MXFP4 MoE SM90 Support
 
@@ -566,24 +652,33 @@ Consider implementing attention sink support that doesn't require TRTLLM, enabli
 
 ## Test Script
 
-A test script is available at `tests/kernels/run_flashinfer_test.py` to verify FlashInfer integration:
+A test script is available at `tests/kernels/run_flashinfer_test.py` to verify FlashInfer integration.
+
+**Note:** The test script automatically sets `VLLM_USE_FLASHINFER=1` and enables AllReduce fusion for TP >= 2.
 
 ```bash
-# Test all FlashInfer features
-VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model all
+# Test all FlashInfer features (FlashInfer automatically enabled)
+python tests/kernels/run_flashinfer_test.py --model all
 
 # Test specific model
-VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model qwen
-VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model llama
-VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model gpt-oss
+python tests/kernels/run_flashinfer_test.py --model qwen
+python tests/kernels/run_flashinfer_test.py --model llama
+python tests/kernels/run_flashinfer_test.py --model gpt-oss
 
 # Test with FP8 quantization
-VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model llama --fp8
+python tests/kernels/run_flashinfer_test.py --model llama --fp8
+
+# Test with specific TP size (AllReduce auto-enabled for TP >= 2)
+python tests/kernels/run_flashinfer_test.py --model qwen --tp 2
 ```
 
 ---
 
-*Document last updated: November 28, 2024*  
-*vLLM version: 0.8.3rc2.dev6045*  
+*Document last updated: November 29, 2025*  
+*vLLM version: 0.8.3rc2.dev6048*  
 *FlashInfer versions tested: 0.5.2, 0.5.3*
+
+**Updates:**
+- **November 29, 2025**: AllReduce Fusion bug fixed - patch and installation script added
+- **November 28, 2025**: Initial document created
 

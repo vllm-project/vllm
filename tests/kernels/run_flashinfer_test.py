@@ -7,24 +7,30 @@ Simple standalone script to test FlashInfer integration with vLLM.
 This script verifies that FlashInfer is properly integrated and used for
 all supported operators when running inference.
 
+Note: VLLM_USE_FLASHINFER is automatically set to 1 by this script.
+      AllReduce fusion is automatically enabled for TP >= 2.
+
 Usage:
     # Test with a smaller model (Qwen3 MoE - fits on fewer GPUs)
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model qwen
+    python tests/kernels/run_flashinfer_test.py --model qwen
 
     # Test with Llama-70B (requires 4+ GPUs)
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model llama
+    python tests/kernels/run_flashinfer_test.py --model llama
 
     # Test with GPT-OSS-120B (OpenAI's open-source model with MXFP4 quantization)
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model gpt-oss
+    python tests/kernels/run_flashinfer_test.py --model gpt-oss
 
     # Test all models
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model all
+    python tests/kernels/run_flashinfer_test.py --model all
 
     # Test with FP8 quantization
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model qwen --fp8
+    python tests/kernels/run_flashinfer_test.py --model qwen --fp8
 
     # Specify tensor parallel size
-    VLLM_USE_FLASHINFER=1 python tests/kernels/run_flashinfer_test.py --model qwen --tp 2
+    python tests/kernels/run_flashinfer_test.py --model qwen --tp 2
+    
+    # Disable AllReduce fusion (if needed)
+    VLLM_USE_FLASHINFER_ALLREDUCE=0 python tests/kernels/run_flashinfer_test.py --model qwen --tp 2
 """
 
 import argparse
@@ -32,8 +38,8 @@ import os
 import sys
 import time
 
-# Set VLLM_USE_FLASHINFER before importing vllm
-os.environ.setdefault("VLLM_USE_FLASHINFER", "1")
+# This script is for testing FlashInfer - always enable it
+os.environ["VLLM_USE_FLASHINFER"] = "1"
 
 # Set logging level to see FlashInfer activation messages
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "INFO")
@@ -146,6 +152,7 @@ def run_inference_test(
     model_id: str,
     tp_size: int,
     quantization: str | None = None,
+    enable_allreduce: bool = False,
 ):
     """Run inference test with the specified model.
     
@@ -162,6 +169,7 @@ def run_inference_test(
     print(f"Model: {model_id}")
     print(f"Tensor Parallel Size: {tp_size}")
     print(f"Quantization: {quantization or 'None'}")
+    print(f"AllReduce Fusion: {'ENABLED' if enable_allreduce else 'DISABLED'}")
     print("=" * 70)
     
     # Test prompts
@@ -185,6 +193,16 @@ def run_inference_test(
     
     if quantization:
         llm_kwargs["quantization"] = quantization
+    
+    # Add AllReduce fusion if requested
+    if enable_allreduce and tp_size >= 2:
+        from vllm.config import CompilationConfig, PassConfig
+        pass_config = PassConfig(
+            enable_fi_allreduce_fusion=True,
+            enable_noop=True,
+        )
+        llm_kwargs["compilation_config"] = CompilationConfig(pass_config=pass_config)
+        print("✓ AllReduce fusion compilation config enabled")
     
     try:
         llm = LLM(**llm_kwargs)
@@ -291,6 +309,11 @@ def main():
         "--skip-prereq",
         action="store_true",
         help="Skip prerequisite checks"
+    )
+    parser.add_argument(
+        "--enable-allreduce",
+        action="store_true",
+        help="Force enable AllReduce fusion (enabled by default for TP >= 2)"
     )
     
     args = parser.parse_args()
@@ -401,6 +424,19 @@ def main():
         else:
             tp_size = min(gpu_count, config["recommended_tp"])
         
+        # Enable AllReduce by default if TP >= 2, unless explicitly disabled
+        if args.enable_allreduce or (tp_size >= 2 and os.getenv("VLLM_USE_FLASHINFER_ALLREDUCE") != "0"):
+            enable_allreduce = True
+            os.environ["VLLM_USE_FLASHINFER_ALLREDUCE"] = "1"
+            if tp_size >= 2:
+                print(f"\n✓ AllReduce Fusion ENABLED for {model_name} (TP={tp_size})")
+                if not args.enable_allreduce:
+                    print("  (automatically enabled for TP >= 2, set VLLM_USE_FLASHINFER_ALLREDUCE=0 to disable)")
+        else:
+            enable_allreduce = False
+            if tp_size >= 2:
+                print(f"\n○ AllReduce Fusion DISABLED for {model_name} (set VLLM_USE_FLASHINFER_ALLREDUCE=1 to enable)")
+        
         # Check if we have enough GPUs
         if gpu_count < config["min_tp"]:
             print(f"\n⚠ Skipping {model_name}: requires {config['min_tp']} GPUs, "
@@ -477,7 +513,7 @@ def main():
             print(f"  Note: Using FlashInfer attention with TRTLLM (supports sinks on Blackwell)")
         
         # Run test
-        result, skip_reason = run_inference_test(model_id, tp_size, quantization)
+        result, skip_reason = run_inference_test(model_id, tp_size, quantization, enable_allreduce)
         
         # Restore attention backend for next test
         if original_attn_backend is not None:
