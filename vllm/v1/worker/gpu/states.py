@@ -117,8 +117,7 @@ class RequestState:
         self.prefill_token_ids = UvaBuffer(
             self.max_num_reqs, self.max_model_len, dtype=torch.int32
         )
-        self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-
+        self.prefill_len = UvaBuffer(self.max_num_reqs, dtype=torch.int32)
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = torch.zeros(
@@ -139,6 +138,9 @@ class RequestState:
             self.num_speculative_steps,
             dtype=torch.int64,
             device=device,
+        )
+        self.next_prefill_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
 
         # LoRA.
@@ -380,13 +382,13 @@ def _expand_sampling_metadata_kernel(
     expanded_top_p_ptr,
     top_k_ptr,
     expanded_top_k_ptr,
-    seeds_ptr,
     rep_penalty_ptr,
     expanded_rep_penalty_ptr,
     freq_penalty_ptr,
     expanded_freq_penalty_ptr,
     pres_penalty_ptr,
     expanded_pres_penalty_ptr,
+    seeds_ptr,
     expanded_seeds_ptr,
     cu_num_logits_ptr,
     BLOCK_SIZE: tl.constexpr,

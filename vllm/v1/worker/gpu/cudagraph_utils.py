@@ -78,7 +78,7 @@ class CudaGraphManager:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
-        input_ids = input_buffers.input_ids.gpu[:num_tokens]
+        input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
