@@ -185,7 +185,7 @@ def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RequestProcessingMixin:
     """
     Mixin for request processing,
@@ -196,7 +196,7 @@ class RequestProcessingMixin:
     engine_prompts: list[EngineTokensPrompt] | None = field(default_factory=list)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ResponseGenerationMixin:
     """
     Mixin for response generation,
@@ -213,6 +213,7 @@ class ResponseGenerationMixin:
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+@dataclass(kw_only=True)
 class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[RequestT]):
     # Shared across all requests
     request: RequestT
@@ -226,9 +227,12 @@ class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[Requ
     tokenizer: TokenizerLike | None = None
 
 
-ClassificationServeContext = ServeContext[ClassificationRequest]
+@dataclass(kw_only=True)
+class ClassificationServeContext(ServeContext[ClassificationRequest]):
+    pass
 
 
+@dataclass(kw_only=True)
 class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption
