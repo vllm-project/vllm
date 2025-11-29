@@ -36,9 +36,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
 
     class MockFilesModule:
         def glob(self, path: str, allow_pattern=None, credentials=None):
-            return patcher.shim_list_safetensors(
-                path, s3_credentials=credentials
-            )
+            return patcher.shim_list_safetensors(path, s3_credentials=credentials)
 
         def pull_files(
             self,
