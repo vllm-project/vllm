@@ -34,12 +34,10 @@ class WorkerLoRAManager:
         vllm_config: VllmConfig,
         device: torch.device,
         embedding_modules: dict[str, str],
-        embedding_padding_modules: list[str],
         lora_model_cls: type[LoRAModel] = LoRAModel,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
-        self.embedding_padding_modules = embedding_padding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
@@ -88,15 +86,15 @@ class WorkerLoRAManager:
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_modules: list[str] = []
+            expected_lora_lst: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_lora_lst.extend(packed_modules_mapping[module])
                 else:
-                    expected_lora_modules.append(module)
+                    expected_lora_lst.append(module)
                 if module == "experts":
-                    expected_lora_modules.append(module)
-            expected_lora_modules = list(set(expected_lora_modules))
+                    expected_lora_lst.append(module)
+            expected_lora_modules = set(expected_lora_lst)
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
@@ -121,9 +119,7 @@ class WorkerLoRAManager:
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size,
-                embedding_modules=self.embedding_modules,
-                embedding_padding_modules=self.embedding_padding_modules,
+                model_vocab_size=self.vocab_size,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
             )

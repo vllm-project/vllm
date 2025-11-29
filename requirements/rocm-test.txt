@@ -1,51 +1,85 @@
 # Common dependencies
 -r common.txt
-tblib==3.1.0
-bm25s==0.2.13
-pystemmer==3.0.0
 
-# Entrypoints test
-# librosa==0.10.2.post1 # required by audio tests in entrypoints/openai
+# Test infrastructure
+tblib==3.1.0
+pytest==8.3.5
+pytest-asyncio==0.24.0
+pytest-timeout==2.3.1
+pytest-cov==6.3.0
+pytest-forked==1.6.0
+pytest-rerunfailures==14.0
+pytest-shard==0.1.2
+
+# Async/HTTP dependencies
+anyio==4.6.2.post1
+    # via httpx, starlette
+aiohttp==3.13.0
+    # via gpt-oss
+httpx==0.27.2
+    # HTTP testing
+
+# Audio processing dependencies
 audioread==3.0.1
+    # via librosa
 cffi==1.17.1
+    # via soundfile
 decorator==5.2.1
+    # via librosa
 lazy-loader==0.4
+    # via librosa
 platformdirs==4.3.6
+    # via pooch
 pooch==1.8.2
-#pycparse==2.22
+    # via librosa
 soundfile==0.13.1
+    # via librosa
 soxr==0.5.0.post1
+    # via librosa
 librosa==0.10.2.post1
 
-# Entrypoints test
-#vllm[video] # required by entrypoints/openai/test_video.py
-decord==0.6.0
+# Retrieval and search
+bm25s==0.2.13
+    # via mteb
+pystemmer==3.0.0
+    # via mteb
 
-# Entrypoints test
-#sentence-transformers # required by entrypoints/openai/test_score.py
-sentence-transformers==3.4.1
-
-# Basic Models Test
-matplotlib==3.10.3
-
-# Multi-Modal Models Test (Extended) 3
+# Multi-modal processing
 blobfile==3.0.0
+    # Multi-Modal Models Test
+decord==0.6.0
+    # video processing, required by entrypoints/openai/test_video.py
 
-# Required for openai schema test.
+# OpenAI compatibility and testing
+gpt-oss==0.0.8
+    # OpenAI compatibility tests
 schemathesis==3.39.15
+    # OpenAI schema test
 
-# Required for mteb test
-mteb[bm25s]>=1.38.11, <2
-
-# Required for eval tests
+# Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
 
-# Required for multiprocessed tests that use spawn method
+# Required for multiprocessed tests that use spawn method, Datasets and Evaluate Test
 multiprocess==0.70.16
 
 # Plugins test
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
 torchgeo==0.7.0
+    # via terratorch
+# MTEB Benchmark Test
+mteb==2.1.2
+
+# Data processing
+xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@eafd4db51b78acc64b3f0764ef27dfd206c28628
+    # Test async scheduling
+
+# Utilities
+num2words==0.5.14
+    # via lm-eval
+pqdm==0.2.0
+    # via lm-eval
 
 # Required for suffix decoding test
 arctic-inference == 0.1.1
+# Required for Nemotron test
+open-clip-torch==2.32.0

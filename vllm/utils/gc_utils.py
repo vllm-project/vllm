@@ -17,7 +17,7 @@ class GCDebugConfig:
     """
     Config for GC Debugger.
     - 0: disable GC debugger
-    - 1: enable GC debugger with gc.collect elpased times
+    - 1: enable GC debugger with gc.collect elapsed times
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 

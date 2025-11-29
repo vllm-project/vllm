@@ -51,8 +51,6 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder and encoder-only attention."""
-        from vllm.attention.backends.abstract import AttentionType
-
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,

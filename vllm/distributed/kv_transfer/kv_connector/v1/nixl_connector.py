@@ -20,7 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
@@ -51,7 +51,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -289,7 +288,7 @@ class NixlConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return NixlPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -308,7 +307,7 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """NixlConnector does not save explicitly."""
@@ -1832,34 +1831,54 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
-                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                if xfer_state == "DONE":
-                    # Get telemetry from NIXL
-                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                    self.xfer_stats.record_transfer(res)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                elif xfer_state == "PROC":
-                    in_progress = True
-                    continue
-                else:
-                    # transfer failed - mark blocks as invalid
-                    logger.error(
-                        "NIXL transfer failed for request %s with state %s. "
+            for handle, xfer_start_time in handles:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    if xfer_state == "DONE":
+                        # Get telemetry from NIXL
+                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.xfer_stats.record_transfer(res)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    elif xfer_state == "PROC":
+                        in_progress = True
+                        continue
+                    else:
+                        logger.error(
+                            "NIXL transfer failed for request %s with state "
+                            "%s. Marking blocks as invalid.",
+                            req_id,
+                            xfer_state,
+                        )
+                        self._handle_failed_transfer(req_id, handle)
+                        in_progress = False
+                except Exception:
+                    logger.exception(
+                        "NIXL transfer exception for request %s. "
                         "Marking blocks as invalid.",
                         req_id,
-                        xfer_state,
                     )
-                    # mark all (logical)blocks for this request as invalid
-                    if meta := self._recving_metadata.pop(req_id, None):
-                        self._invalid_block_ids.update(meta.local_block_ids)
-                    self._recving_metadata.pop(req_id, None)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                    self.xfer_stats.record_failed_transfer()
+                    self._handle_failed_transfer(req_id, handle)
+                    in_progress = False
+
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
+
+    def _handle_failed_transfer(self, req_id: str, handle: int):
+        """
+        Handle a failed transfer by marking all (logical) blocks as invalid and
+        recording the failure.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+        """
+        if meta := self._recving_metadata.pop(req_id, None):
+            self._invalid_block_ids.update(meta.local_block_ids)
+        self._recving_metadata.pop(req_id, None)
+        self.nixl_wrapper.release_xfer_handle(handle)
+        self.xfer_stats.record_failed_transfer()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -2326,9 +2345,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         return {
             "Num successful transfers": n,
             "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
-            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
-            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
             "Throughput (MB/s)": round(throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
@@ -2345,7 +2364,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 

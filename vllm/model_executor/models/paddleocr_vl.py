@@ -33,7 +33,6 @@ from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.attention.ops.vit_attn_wrappers import (
@@ -582,7 +581,6 @@ class SiglipAttention(nn.Module):
         prefix: str = "",
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
         attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
 
@@ -612,11 +610,9 @@ class SiglipAttention(nn.Module):
         )
 
         self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
@@ -680,7 +676,6 @@ class SiglipAttention(nn.Module):
                 max_seqlen,
                 batch_size,
                 self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             outputs = []
@@ -783,7 +778,6 @@ class SiglipEncoderLayer(nn.Module):
         *,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
         attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -796,7 +790,6 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_backend=attn_backend,
             attn_backend_override=attn_backend_override,
-            use_upstream_fa=use_upstream_fa,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -852,13 +845,6 @@ class SiglipEncoder(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        } and check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
-            self.use_upstream_fa = True
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
@@ -875,7 +861,6 @@ class SiglipEncoder(nn.Module):
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_backend=self.attn_backend,
                     attn_backend_override=attn_backend_override,
-                    use_upstream_fa=self.use_upstream_fa,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]

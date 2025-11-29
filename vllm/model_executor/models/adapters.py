@@ -14,9 +14,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
-    get_hf_file_bytes,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -428,7 +428,7 @@ def load_weights_using_from_2_way_softmax(
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
-        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens
@@ -486,7 +486,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
-        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens

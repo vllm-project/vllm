@@ -84,8 +84,6 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """FlashAttention supports all attention types."""
-        from vllm.attention.backends.abstract import AttentionType
-
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,

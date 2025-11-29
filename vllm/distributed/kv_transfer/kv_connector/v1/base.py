@@ -42,12 +42,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -239,7 +239,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         """
         Initialize with a single KV cache tensor used by all layers.
@@ -565,7 +565,7 @@ class KVConnectorBase_V1(ABC):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> Optional["KVConnectorPromMetrics"]:
         """
         Create a KVConnectorPromMetrics subclass which should register
