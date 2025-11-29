@@ -866,12 +866,6 @@ class Glm4vVisionTransformer(nn.Module):
 
 
 class Glm4vProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_tokenizer(self):
-        return self.ctx.tokenizer
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
 
