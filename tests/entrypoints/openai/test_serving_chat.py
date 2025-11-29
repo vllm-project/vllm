@@ -399,7 +399,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 @dataclass
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
-    processor: MagicMock = field(default_factory=MagicMock)
+    input_processor: MagicMock = field(default_factory=MagicMock)
     io_processor: MagicMock = field(default_factory=MagicMock)
 
 
