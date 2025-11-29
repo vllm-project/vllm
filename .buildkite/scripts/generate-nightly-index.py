@@ -4,16 +4,18 @@
 
 # do not complain about line length (for docstring)
 # ruff: noqa: E501
-# this script should run with legacy python on buildkite agent
-# ruff: noqa: UP045
 
 import argparse
 import json
 import re
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import quote
+
+if not sys.version_info >= (3, 10):
+    raise RuntimeError("This script requires Python 3.10 or higher.")
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -29,11 +31,11 @@ INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 class WheelFileInfo:
     package_name: str
     version: str
-    build_tag: Optional[str]
+    build_tag: str | None
     python_tag: str
     abi_tag: str
     platform_tag: str
-    variant: Optional[str]
+    variant: str | None
     filename: str
 
 
@@ -125,8 +127,8 @@ def generate_index_and_metadata(
     whl_files: list[str],
     wheel_base_dir: Path,
     index_base_dir: Path,
-    default_variant: Optional[str] = None,
-    alias_to_default: Optional[str] = None,
+    default_variant: str | None = None,
+    alias_to_default: str | None = None,
 ):
     """
     Generate index for all wheel files.
