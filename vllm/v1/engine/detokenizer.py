@@ -9,7 +9,7 @@ from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.detokenizer_utils import (
+from vllm.tokenizers.detokenizer_utils import (
     TokenizerLike,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
