@@ -234,9 +234,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         tokenizer: TokenizerLike | None = None,
     ) -> InputProcessingContext:
-        if model_config.skip_tokenizer_init:
-            tokenizer = cast(TokenizerLike, object())
-        elif tokenizer is None:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
 
         return InputProcessingContext(model_config, tokenizer)

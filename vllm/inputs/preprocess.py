@@ -62,7 +62,7 @@ class InputPreprocessor:
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
-                "You cannot pass text prompts when `skip_tokenizer_init` is True"
+                "You cannot pass text prompts when `skip_tokenizer_init=True`"
             )
 
         return self.tokenizer
@@ -228,22 +228,11 @@ class InputPreprocessor:
 
         return tokenizer.encode(prompt, **tokenization_kwargs)
 
-    def _get_mm_tokenizer(self) -> TokenizerLike:
-        # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
-        # while using also multi-modal input
-        if not self.tokenizer:
-            return cast(TokenizerLike, object())  # Dummy
-
-        tokenizer = self.get_tokenizer()
-        return tokenizer
-
     def _get_mm_processor(self) -> BaseMultiModalProcessor:
         if not hasattr(self, "_mm_processor"):
-            tokenizer = self._get_mm_tokenizer()
-
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
-                tokenizer=tokenizer,
+                tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
 
