@@ -8,13 +8,15 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
+
 
 @config
 @dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
-    pooling_type: str | None = None
+    pooling_type: PoolingTypeStr | None = None
     """
     The pooling method of the pooling model. This should be a key in
     [`vllm.model_executor.layers.pooler.PoolingType`][].
