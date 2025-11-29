@@ -970,12 +970,18 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_seq_len = max_pixels // (unit * unit)
 
         def closest_factor_pair(n: int) -> tuple[int, int]:
+            # left <= right
             for d in range(math.isqrt(n), 0, -1):
                 if n % d == 0:
                     return d, n // d
             return 1, n
 
-        height_factor, width_factor = closest_factor_pair(max_seq_len)
+        height_factor, width_factor = 1, max_seq_len
+        for seq_len in range(max_seq_len, 0, -1):
+            height_factor, width_factor = closest_factor_pair(seq_len)
+            if width_factor / height_factor <= 200:
+                break
+
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def get_max_image_tokens(self) -> int:

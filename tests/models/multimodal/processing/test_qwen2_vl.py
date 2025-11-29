@@ -56,13 +56,15 @@ def test_processor_override(
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+@pytest.mark.parametrize("max_pixels", [1280 * 28 * 28, 1283 * 28 * 28])
 def test_get_image_size_with_most_features(
     image_assets: ImageTestAssets,
     model_id: str,
+    max_pixels: int,
 ):
     ctx = build_model_context(
         model_id,
-        mm_processor_kwargs={"max_pixels": 1280 * 28 * 28},
+        mm_processor_kwargs={"max_pixels": max_pixels},
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
