@@ -1122,6 +1122,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
+    # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
+    # only supported on Blackwell GPUs and with
+    # https://github.com/deepseek-ai/DeepEP/pull/341
+    "VLLM_DEEPEPLL_NVFP4_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_DEEPEPLL_NVFP4_DISPATCH", "0"))
+    ),
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
