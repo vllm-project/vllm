@@ -150,7 +150,7 @@ class OpenAIServingModels:
                 lora_request.base_model_name = base_model_name
 
             # Validate that the adapter can be loaded into the engine
-            # This will also pre-load it for incoming requests
+            # This will also preload it for incoming requests
             try:
                 await self.engine_client.add_lora(lora_request)
             except Exception as e:
