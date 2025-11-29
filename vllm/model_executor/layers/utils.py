@@ -140,7 +140,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
-        and ((n==32 and k == 2880 and (m == 640 or m == 128)) or (n==32 and k == 512 and m == 2880))
+        and (n==32 and k == 2880 and (m == 640 or m == 128)) # or (n==32 and k == 512 and m == 2880))
     )
     if use_skinny_race is True:
         cu_count = get_cu_count()
@@ -150,7 +150,6 @@ def rocm_unquantized_gemm_impl(
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
         return gemm_a16w16(x, weight, bias)
 
     use_skinny = (

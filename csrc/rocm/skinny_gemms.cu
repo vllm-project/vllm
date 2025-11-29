@@ -1377,9 +1377,10 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
                      const scalar_t* __restrict__ B, const scalar_t* __restrict__ A,
                      const scalar_t* __restrict__ BIAS,
 		     float* glbl,
-		     int* cntr,
+		     //int* cntr,
                      scalar_t* C,
                      const int CuCount) {
+  int* cntr = (int*)(&glbl[M*N]);
 
   constexpr int GrpsShrB = 2;
   constexpr int NTILE = 16;
@@ -1458,7 +1459,7 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
   if (k_str >= K) return;
   while (m < Mmod + rmnd) {
 
-#if 1
+#if 0
     if (m + (threadIdx.x%16) < M)
     if (doRdc)
     if (k_str == 0) {
@@ -1707,7 +1708,7 @@ __global__ void wvSplitKrc_(const int K, const int M, const int Bx,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS,
 				 float* glbl,
-				 int* cntr,
+				 //int* cntr,
 				 scalar_t* C,
                                  const int CuCount) {
   UNREACHABLE_CODE
@@ -1739,12 +1740,12 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
-  auto axl_glbl = torch::empty(
-      {N_in, M_in},
+  auto axl_glbl = torch::zeros(
+      {N_in, M_in*2},
       torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
-  auto axl_cntr = torch::empty(
+  /*auto axl_cntr = torch::zeros(
       {N_in, M_in},
-      torch::TensorOptions().dtype(torch::kInt).device(in_b.device()));
+      torch::TensorOptions().dtype(torch::kInt).device(in_b.device()));*/
 
   dim3 grid(CuCount);
 
@@ -1757,7 +1758,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
     dim3 block(64, _WvPrGrp);                                                 \
     wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N>                   \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
-                                       biasf4, glbl, cntr, c, CuCount);       \
+                                       biasf4, glbl, c, CuCount);       \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitKrc", [&] {
@@ -1770,7 +1771,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     auto glbl = axl_glbl.data_ptr<float>();
-    auto cntr = axl_cntr.data_ptr<int>();
+    //auto cntr = axl_cntr.data_ptr<int>();
     switch (N_in) {
       case 32:
         WVSPLITKrc(4, 16, 1, 32)
