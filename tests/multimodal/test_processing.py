@@ -15,6 +15,7 @@ from vllm.multimodal.processing import (
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
+    _apply_matches,
     apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
@@ -1075,3 +1076,38 @@ def test_hf_processor_call_kwargs(
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
+
+
+def test_apply_matches_no_match_exits_quickly():
+    """
+    Test that _apply_matches exits quickly when no matches are found.
+
+    Previously, _apply_matches had O(n²) behavior when no match was found
+    because it would increment start_idx by 1 each iteration while
+    re-scanning the entire prompt from prev_end_idx=0.
+
+    With the fix, it should exit immediately when no match is found.
+    """
+    import time
+
+    mock_tokenizer = cast(AnyTokenizer, object())
+
+    # Create a long prompt with no placeholder
+    long_prompt = "x" * 10000
+
+    # Create update looking for a placeholder that doesn't exist
+    mm_prompt_updates = {
+        "image": [[PromptReplacement("image", "<image>", "REPLACED").resolve(0)]]
+    }
+
+    start = time.perf_counter()
+    result, _ = _apply_matches(
+        long_prompt,
+        mm_prompt_updates,
+        mock_tokenizer,
+    )
+    elapsed = time.perf_counter() - start
+
+    # Should complete in < 100ms (was taking seconds before the fix)
+    assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
+    assert "".join(result) == long_prompt
