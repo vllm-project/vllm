@@ -191,3 +191,34 @@ class TestKVCacheMetricsCollector:
         events = c.drain_events()
         assert len(events) == 1
         assert events[0].lifetime_seconds > 0
+
+
+def test_kv_cache_metrics_collector_smoke() -> None:
+    """Simple smoke test for KVCacheMetricsCollector on CPU."""
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    block = KVCacheBlock(block_id=123)
+
+    # Allocate at t = 1.0s.
+    with patch("time.monotonic_ns", return_value=1_000_000_000):
+        collector.on_block_allocated(block)
+
+    # Access at t = 2.0s and t = 3.0s.
+    with patch("time.monotonic_ns", return_value=2_000_000_000):
+        collector.on_block_accessed(block)
+    with patch("time.monotonic_ns", return_value=3_000_000_000):
+        collector.on_block_accessed(block)
+
+    # Evict at t = 4.0s.
+    with patch("time.monotonic_ns", return_value=4_000_000_000):
+        collector.on_block_evicted(block)
+
+    events = collector.drain_events()
+    assert len(events) == 1
+
+    event = events[0]
+    # Lifetime: 1.0s → 4.0s.
+    assert abs(event.lifetime_seconds - 3.0) < 1e-6
+    # Idle: last access at 3.0s, evicted at 4.0s.
+    assert abs(event.idle_seconds - 1.0) < 1e-6
+    # One reuse gap between the two accesses.
+    assert event.reuse_gaps_seconds == (1.0,)

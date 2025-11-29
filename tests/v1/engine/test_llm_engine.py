@@ -4,7 +4,6 @@ import random
 from typing import TYPE_CHECKING
 
 import pytest
-import torch
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -211,64 +210,6 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)
         assert len(num_accepted_tokens_per_pos[0].values) == 5
-
-
-def test_kv_cache_metrics_surface_in_llm_get_metrics(vllm_runner):
-    if not torch.cuda.is_available():
-        pytest.skip("KV cache residency metrics smoke test requires CUDA")
-
-    with vllm_runner(
-        MODEL,
-        disable_log_stats=False,
-        kv_cache_metrics=True,
-        kv_cache_metrics_sample=1.0,
-        enable_prefix_caching=True,
-        gpu_memory_utilization=0.1,
-        max_model_len=128,
-    ) as vllm_model:
-        llm: LLM = vllm_model.llm
-        sampling_params = SamplingParams(temperature=0.0, max_tokens=50)
-
-        # Create a long prompt that will fill multiple complete blocks
-        long_prompt = "Create a long prompt to fill multiple complete blocks. " * 20
-
-        # Generate first request - this will allocate blocks and cache them when full
-        outputs1 = llm.generate([long_prompt], sampling_params)
-        assert outputs1
-        # Drain stats after first request to ensure blocks are cached
-        llm.llm_engine.do_log_stats()
-
-        # Generate multiple requests with completely different prefixes
-        # With a small cache, these will force evictions of cached blocks
-        for i in range(8):
-            # Each prompt is unique to avoid cache hits
-            unique_prompt = (
-                f"This is a completely unique prompt number {i} "
-                f"with different content that will not match any previous prompt. " * 20
-            )
-            outputs = llm.generate([unique_prompt], sampling_params)
-            assert outputs
-            # Periodically drain stats to ensure events are recorded
-            if i % 2 == 0:
-                llm.llm_engine.do_log_stats()
-
-        # Final call to drain any remaining events and record metrics
-        llm.llm_engine.do_log_stats()
-
-        metrics = llm.get_metrics()
-        histograms = {
-            metric.name: metric for metric in metrics if isinstance(metric, Histogram)
-        }
-
-        lifetime_hist = histograms.get("vllm:kv_block_lifetime_seconds")
-        idle_hist = histograms.get("vllm:kv_block_idle_before_evict_seconds")
-
-        assert lifetime_hist is not None
-        assert idle_hist is not None
-        assert lifetime_hist.count > 0
-        assert idle_hist.count > 0
-
-        assert "vllm:kv_block_reuse_gap_seconds" in histograms
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
