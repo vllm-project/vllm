@@ -117,7 +117,10 @@ class RequestState:
         self.prefill_token_ids = UvaBuffer(
             self.max_num_reqs, self.max_model_len, dtype=torch.int32
         )
-        self.prefill_len = UvaBuffer(self.max_num_reqs, dtype=torch.int32)
+        # NOTE(woosuk): We don't use UVA for prefill_len because its GPU view
+        # can be used outside of update_states and prepare_inputs.
+        # Without async barrier, using UVA can cause race conditions.
+        self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = torch.zeros(
