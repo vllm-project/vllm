@@ -167,7 +167,7 @@ async def test_tokenize_chat_with_tools(
                 if add_generation and continue_final:
                     continue
                 if continue_final:
-                    conversation.append({"role": "assistant", "content": ""})
+                    conversation.append({"role": "assistant", "content": "Sure,"})
 
                 prompt = tokenizer.apply_chat_template(
                     add_generation_prompt=add_generation,
