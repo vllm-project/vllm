@@ -8,7 +8,7 @@ import pybase64
 import torch
 from PIL import Image
 
-from .base import MediaIO
+from .base import MediaIO, MediaWithBytes
 
 
 def rescale_image_size(
@@ -83,20 +83,18 @@ class ImageMediaIO(MediaIO[Image.Image]):
         else:
             return convert_image_mode(image, self.image_mode)
 
-    def load_bytes(self, data: bytes) -> Image.Image:
+    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         image = Image.open(BytesIO(data))
-        image._image_bytes = data  # Store original bytes for hashing
-        return self._convert_image_mode(image)
+        return MediaWithBytes(self._convert_image_mode(image), data)
 
-    def load_base64(self, media_type: str, data: str) -> Image.Image:
+    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path) -> Image.Image:
+    def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
         with open(filepath, "rb") as f:
             data = f.read()
         image = Image.open(BytesIO(data))
-        image._image_bytes = data  # Store original bytes for hashing
-        return self._convert_image_mode(image)
+        return MediaWithBytes(self._convert_image_mode(image), data)
 
     def encode_base64(
         self,
