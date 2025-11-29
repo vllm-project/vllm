@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from contextlib import nullcontext
 from typing import cast
 
@@ -1088,9 +1089,7 @@ def test_apply_matches_no_match_exits_quickly():
 
     With the fix, it should exit immediately when no match is found.
     """
-    import time
-
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     # Create a long prompt with no placeholder
     long_prompt = "x" * 10000
