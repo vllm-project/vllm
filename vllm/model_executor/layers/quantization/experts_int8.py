@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
@@ -140,23 +139,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -172,10 +154,10 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
         )
 
