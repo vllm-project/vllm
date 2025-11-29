@@ -10,7 +10,8 @@ from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequenc
 import concurrent
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, Annotated
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, Annotated, \
+    Union, Optional
 
 import torch
 from fastapi import Request
@@ -246,6 +247,13 @@ ServeContext.model_rebuild()
 ClassificationServeContext.model_rebuild()
 EmbeddingServeContext.model_rebuild()
 
+_process_tokenizer_name: Optional[str] = None
+_process_tokenizer_mode: Optional[str] = None
+_process_trust_remote_code: Optional[bool] = None
+_process_tokenizer_revision: Optional[str] = None
+_process_max_model_len: Optional[int] = None
+_process_do_lower_case: Optional[bool] = None
+_process_tokenizer: Optional[Any] = None
 
 class OpenAIServing:
     request_id_prefix: ClassVar[str] = """
