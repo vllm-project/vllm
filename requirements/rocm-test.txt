@@ -20,6 +20,7 @@ librosa==0.10.2.post1
 # Entrypoints test
 #vllm[video] # required by entrypoints/openai/test_video.py
 decord==0.6.0
+rapidfuzz==3.12.1
 
 # Entrypoints test
 #sentence-transformers # required by entrypoints/openai/test_score.py
