@@ -11,7 +11,7 @@ from tests.entrypoints.openai.tool_parsers.utils import (
 )
 from vllm.entrypoints.openai.protocol import FunctionCall
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"
@@ -61,7 +61,7 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, default_tokenizer: AnyTokenizer):
+def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer
     )
@@ -168,7 +168,7 @@ def test_tool_call(
     streaming: bool,
     model_output: str,
     expected_tool_calls: list[FunctionCall],
-    default_tokenizer: AnyTokenizer,
+    default_tokenizer: TokenizerLike,
 ):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer
@@ -185,7 +185,7 @@ def test_tool_call(
         assert actual.function == expected
 
 
-def test_streaming_tool_call_with_large_steps(default_tokenizer: AnyTokenizer):
+def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer
     )
@@ -208,7 +208,7 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: AnyTokenizer):
 
 
 @pytest.mark.parametrize("streaming", [False])
-def test_regex_timeout_handling(streaming: bool, default_tokenizer: AnyTokenizer):
+def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """test regex timeout is handled gracefully"""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         default_tokenizer

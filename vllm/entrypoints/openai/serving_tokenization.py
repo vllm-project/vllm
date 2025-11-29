@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -170,7 +170,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
 @dataclass
 class TokenizerInfo:
-    tokenizer: AnyTokenizer
+    tokenizer: TokenizerLike
     chat_template: str | None
 
     def to_dict(self) -> dict[str, Any]:

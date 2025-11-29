@@ -105,7 +105,7 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -492,7 +492,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ):
         if request.tools is None or (
             request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
@@ -563,7 +563,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
     ) -> ErrorResponse | ResponsesResponse:
@@ -675,7 +675,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         logprobs: dict[int, SampleLogprob],
         top_logprobs: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ) -> list[LogprobTopLogprob]:
         """Returns the top-k logprobs from the logprobs dictionary."""
         out = []
@@ -700,7 +700,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         token_ids: Sequence[int],
         logprobs: SampleLogprobs | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         top_logprobs: int | None = None,
     ) -> list[Logprob]:
         assert logprobs is not None, "logprobs must be provided"
@@ -736,7 +736,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         token_ids: Sequence[int],
         logprobs: SampleLogprobs | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         top_logprobs: int | None = None,
     ) -> list[response_text_delta_event.Logprob]:
         lgs = self._create_response_logprobs(
@@ -763,7 +763,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         final_output: CompletionOutput,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
         if self.reasoning_parser:
             try:
@@ -1135,7 +1135,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int,
         _increment_sequence_number_and_return: Callable[
@@ -1438,7 +1438,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int,
         _increment_sequence_number_and_return: Callable[
@@ -1891,7 +1891,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:

@@ -10,8 +10,9 @@ from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.entrypoints.openai.tool_parsers.jamba_tool_parser import JambaToolParser
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -44,7 +45,9 @@ def assert_tool_calls(
 
 
 def stream_delta_message_generator(
-    jamba_tool_parser: JambaToolParser, jamba_tokenizer: AnyTokenizer, model_output: str
+    jamba_tool_parser: JambaToolParser,
+    jamba_tokenizer: TokenizerLike,
+    model_output: str,
 ) -> Generator[DeltaMessage, None, None]:
     all_token_ids = jamba_tokenizer.encode(model_output, add_special_tokens=False)
 

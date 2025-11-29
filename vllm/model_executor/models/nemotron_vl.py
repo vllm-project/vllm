@@ -34,8 +34,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_image_processor_from_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -203,7 +203,7 @@ class NemotronVLProcessor(InternVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         image_processor: BaseImageProcessorFast,
         *,
         min_dynamic_patch: int | None = None,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from contextlib import nullcontext
 from typing import cast
 
@@ -23,7 +24,7 @@ from vllm.multimodal.processing import (
     replace_token_matches,
 )
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .utils import random_image
 
@@ -238,7 +239,7 @@ def test_find_token_matches(
     update_type,
 ):
     # Should not be used since there is nothing to convert to token IDs
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
@@ -385,7 +386,7 @@ def test_find_text_matches(
     update_type,
 ):
     # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
@@ -545,7 +546,7 @@ def test_find_update_text(
     expected_by_update_type_mm_count,
 ):
     # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     for (
         update_type,
@@ -750,7 +751,7 @@ def test_find_update_tokens(
     expected_by_update_type_mm_count,
 ):
     # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     for (
         update_type,
@@ -900,7 +901,7 @@ def test_find_mm_placeholders(
     update_type,
 ):
     # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     mm_prompt_updates = {
         key: [[update_type(key, [], repl).resolve(i)] for i in range(3)]
@@ -1029,7 +1030,7 @@ def test_hf_processor_init_kwargs(
     expected_kwargs,
 ):
     # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
@@ -1065,7 +1066,7 @@ def test_hf_processor_call_kwargs(
     expected_kwargs,
 ):
     # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
@@ -1088,9 +1089,7 @@ def test_apply_matches_no_match_exits_quickly():
 
     With the fix, it should exit immediately when no match is found.
     """
-    import time
-
-    mock_tokenizer = cast(AnyTokenizer, object())
+    mock_tokenizer = cast(TokenizerLike, object())
 
     # Create a long prompt with no placeholder
     long_prompt = "x" * 10000
