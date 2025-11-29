@@ -129,8 +129,12 @@ class LoRAModel:
                 )
 
             if is_lora_a:
-                if "lora_embedding_A" in tensor_name and model_vocab_size is not None:
-                    assert model_vocab_size == tensor.shape[1], (
+                if (
+                    "lora_embedding_A" in tensor_name
+                    and model_vocab_size is not None
+                    and model_vocab_size != tensor.shape[1]
+                ):
+                    raise RuntimeError(
                         f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
                         f" with the base model's vocabulary size({model_vocab_size})."
                     )
