@@ -625,7 +625,7 @@ def marlin_moe_generate_valid_test_cases():
         for sub_case in inner_combinations:
             if (
                 sub_case[0] == scalar_types.float8_e4m3fn
-                and not current_platform.has_device_capability(89)
+                and current_platform.get_device_capability() not in [89, 120]
             ):
                 continue
             args = sub_case + (m, n, k) + case[4:]
