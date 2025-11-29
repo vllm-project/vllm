@@ -56,7 +56,11 @@ class Sampler:
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = apply_penalties_and_temperature(logits, sampling_metadata)
+        # Copy logits to a new FP32 tensor.
+        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+
+        # Apply penalties and temperature in place.
+        apply_penalties_and_temperature(logits, sampling_metadata)
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )

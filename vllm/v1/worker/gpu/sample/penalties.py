@@ -8,8 +8,6 @@ from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 
 @triton.jit
 def _penalties_and_temperature_kernel(
-    out_logits_ptr,
-    out_logits_stride,
     logits_ptr,
     logits_stride,
     repetition_penalty_ptr,
@@ -25,20 +23,28 @@ def _penalties_and_temperature_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
+    rep_penalty = tl.load(repetition_penalty_ptr + batch_idx)
+    freq_penalty = tl.load(frequency_penalty_ptr + batch_idx)
+    pres_penalty = tl.load(presence_penalty_ptr + batch_idx)
+    temperature = tl.load(temperature_ptr + batch_idx)
+    temperature = tl.where(temperature == 0.0, 1.0, temperature)
+
+    use_rep_penalty = rep_penalty != 1.0
+    use_freq_penalty = freq_penalty != 0.0
+    use_pres_penalty = pres_penalty != 0.0
+    use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
+    use_temperature = temperature != 1.0
+    if not (use_penalty or use_temperature):
+        # Early return to avoid loading logits.
+        return
+
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
     logits = tl.load(logits_ptr + batch_idx * logits_stride + block, mask=mask)
     logits = logits.to(tl.float32)
 
-    rep_penalty = tl.load(repetition_penalty_ptr + batch_idx)
-    freq_penalty = tl.load(frequency_penalty_ptr + batch_idx)
-    pres_penalty = tl.load(presence_penalty_ptr + batch_idx)
-
-    use_rep_penalty = rep_penalty != 1.0
-    use_freq_penalty = freq_penalty != 0.0
-    use_pres_penalty = pres_penalty != 0.0
-    if use_rep_penalty or use_freq_penalty or use_pres_penalty:
+    if use_penalty:
         req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
         output_bin_counts = tl.load(
             output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
@@ -66,26 +72,20 @@ def _penalties_and_temperature_kernel(
         logits -= pres_penalty * output_bin_mask
 
     # Apply temperature.
-    temperature = tl.load(temperature_ptr + batch_idx).to(tl.float32)
-    temperature = tl.where(temperature == 0.0, 1.0, temperature)
     logits = logits / temperature
 
-    # Store in output logits.
-    tl.store(out_logits_ptr + batch_idx * out_logits_stride + block, logits, mask=mask)
+    # Store back to logits.
+    tl.store(logits_ptr + batch_idx * logits_stride + block, logits, mask=mask)
 
 
 def apply_penalties_and_temperature(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
+) -> None:
     num_reqs, vocab_size = logits.shape
-    out_logits = torch.empty_like(logits, dtype=torch.float32)
-
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _penalties_and_temperature_kernel[(num_reqs, num_blocks)](
-        out_logits,
-        out_logits.stride(0),
         logits,
         logits.stride(0),
         sampling_metadata.repetition_penalty,
@@ -100,7 +100,6 @@ def apply_penalties_and_temperature(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
-    return out_logits
 
 
 @triton.jit(do_not_specialize=["prefill_len", "prompt_len"])
