@@ -1,30 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import enum
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
-
-logger = init_logger(__name__)
-
-
-class Device(enum.Enum):
-    GPU = enum.auto()
-    CPU = enum.auto()
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 class EngineClient(ABC):
@@ -32,7 +23,7 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    processor: Processor
+    input_processor: InputProcessor
     io_processor: IOProcessor | None
 
     @property
@@ -94,7 +85,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_tokenizer(self) -> AnyTokenizer:
+    async def get_tokenizer(self) -> TokenizerLike:
         """Get the tokenizer"""
         ...
 
@@ -147,6 +138,33 @@ class EngineClient(ABC):
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        ...
+
+    @abstractmethod
+    async def pause_generation(
+        self,
+        *,
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """Pause new generation/encoding requests.
+
+        Args:
+            wait_for_inflight_requests: When ``True`` waits for in-flight requests
+                to finish before pausing. When ``False`` (default), aborts in-flight
+                requests immediately.
+            clear_cache: Whether to clear KV and prefix caches after draining.
+        """
+        ...
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume accepting generation/encoding requests."""
+        ...
+
+    @abstractmethod
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
         ...
 
     async def scale_elastic_ep(

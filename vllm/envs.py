@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -116,7 +116,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
-    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -145,6 +145,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -231,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_USE_V2_MODEL_RUNNER: bool = False
 
 
 def get_default_cache_root():
@@ -639,7 +641,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Example options:
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
-    # - "XFORMERS": use XFormers
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
@@ -784,7 +785,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE": lambda: int(
-        os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")
+        os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(16 * 1024))
     ),
     # Control whether to use fused MoE activation chunking. Current chunking
     # logic is incompatible with torch.compile and causes IMA. See issue
@@ -969,9 +970,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     # Whether to use aiter fusion shared experts ops.
-    # By default is enabled.
+    # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -1121,6 +1122,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
+    ),
+    # The activation dtype for marlin kernel
+    "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
+        "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
     ),
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
@@ -1521,6 +1526,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Allows viewing and setting breakpoints in Inductor's code output files.
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
+    ),
+    # Flag to enable v2 model runner.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
+        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
 }
 

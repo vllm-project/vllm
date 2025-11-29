@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
@@ -179,14 +180,16 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=bool(self.cache_config.enable_prefix_caching),
+            enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            hash_block_size=self.block_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -231,11 +234,15 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
-            # Make sure the input position does not exceed the max model len or
-            # request's max_tokens.
-            # This is necessary when using spec decoding and/or async scheduling.
+            num_spec_placeholders = max(0, request.num_output_placeholders - 1)
             max_total_tokens = min(
-                request.num_prompt_tokens + request.max_tokens, self.max_model_len
+                # Avoid scheduling tokens that we're sure won't will be needed based on
+                # request.max_tokens. For this calculation we assume placeholder
+                # speculated output tokens are rejected.
+                request.num_prompt_tokens + request.max_tokens + num_spec_placeholders,
+                # Make sure the input position does not exceed the max model len.
+                # This is necessary when using spec decoding.
+                self.max_model_len,
             )
             num_new_tokens = min(
                 num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
@@ -468,6 +475,7 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
+                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                     # Total computed tokens (local + external).
@@ -505,9 +513,9 @@ class Scheduler(SchedulerInterface):
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
-                        self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
-                        continue
+                        # If chunked_prefill is disabled,
+                        # we can stop the scheduling here.
+                        break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
@@ -574,9 +582,6 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
-                    self._update_connector_prefix_cache_stats(
-                        request, num_external_computed_tokens
-                    )
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -587,6 +592,8 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
+
+                self._update_connector_prefix_cache_stats(request)
 
                 req_index += 1
                 self.running.append(request)
@@ -658,12 +665,25 @@ class Scheduler(SchedulerInterface):
                 )
 
         # Construct the scheduler output.
-        new_reqs_data = [
-            NewRequestData.from_request(
-                req, req_to_new_blocks[req.request_id].get_block_ids()
-            )
-            for req in scheduled_new_reqs
-        ]
+        if self.use_v2_model_runner:
+            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
+            scheduled_resumed_reqs = []
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    req._all_token_ids,
+                )
+                for req in scheduled_new_reqs
+            ]
+        else:
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req, req_to_new_blocks[req.request_id].get_block_ids()
+                )
+                for req in scheduled_new_reqs
+            ]
+
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs,
@@ -685,6 +705,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
+            preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -1013,8 +1034,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids: list[int] = (
-                sampled_token_ids[req_index].tolist() if sampled_token_ids else []
+            generated_token_ids = (
+                sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
             scheduled_spec_token_ids = (
@@ -1072,9 +1093,7 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.logprobs is not None
                 and logprobs
             ):
-                # NOTE: once we support N tokens per step (spec decode),
-                # the outer lists can be of length > 1.
-                new_logprobs = logprobs.slice(req_index, req_index + 1)
+                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
@@ -1364,15 +1383,13 @@ class Scheduler(SchedulerInterface):
     # KV Connector Related Methods
     ########################################################################
 
-    def _update_connector_prefix_cache_stats(
-        self, request: Request, num_external_tokens: int
-    ) -> None:
+    def _update_connector_prefix_cache_stats(self, request: Request) -> None:
         if self.connector_prefix_cache_stats is None:
             return
 
         self.connector_prefix_cache_stats.record(
             num_tokens=request.num_tokens,
-            num_hits=num_external_tokens,
+            num_hits=request.num_external_computed_tokens,
             preempted=request.num_preemptions > 0,
         )
 
@@ -1555,9 +1572,11 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
-                total_affected_tokens += (
+                num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
+                total_affected_tokens += num_affected_tokens
+                request.num_external_computed_tokens -= num_affected_tokens
 
             if is_affected:
                 if not marked_invalid_block:

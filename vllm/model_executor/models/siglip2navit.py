@@ -191,7 +191,7 @@ def apply_rotary_pos_emb(
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
     if is_flash_attn_backend and not current_platform.is_xpu():
-        from flash_attn.layers.rotary import apply_rotary_emb
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         apply_rotary_emb_func = apply_rotary_emb
     else:
@@ -255,12 +255,10 @@ class Siglip2Attention(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
 
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
