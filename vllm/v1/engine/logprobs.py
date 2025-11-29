@@ -12,7 +12,7 @@ from vllm.logprobs import (
     create_prompt_logprobs,
     create_sample_logprobs,
 )
-from vllm.transformers_utils.detokenizer_utils import (
+from vllm.tokenizers.detokenizer_utils import (
     TokenizerLike,
     convert_ids_list_to_tokens,
 )

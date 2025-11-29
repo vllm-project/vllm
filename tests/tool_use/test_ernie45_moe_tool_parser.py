@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # Use a common model that is likely to be available
