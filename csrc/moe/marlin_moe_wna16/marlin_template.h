@@ -629,7 +629,7 @@ __global__ void Marlin(
       sh_rd_block_sorted_ids[threadIdx.x] = idx / top_k;
 
       if (mul_topk_weights) {
-        idx = threadIdx.x < block_num_valid_tokens ? idx : 0;
+        idx = idx < prob_m_top_k ? idx : 0;
         c_scalar_t2 topk_weight_val =
             Cdtype::num2num2(Cdtype::float2num(topk_weights_ptr[idx]));
         if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
