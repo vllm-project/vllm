@@ -249,7 +249,13 @@ class DynamicShapesConfig:
       backed/unbacked.
     """
 
-    # TODO add a debug mode to fail
+    evaluate_guards: bool = False
+    """
+    A debug mode to detect and fail if Dynamo ever specializes a dynamic shape by
+    guarding on it. When True, dynamic shape guards are not dropped from Dynamo.
+    And a failure will be triggered if recompilation ever happens due to that.
+    Enabling this allow observing the dynamic shapes guards in the tl-parse artifact.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -358,8 +364,8 @@ class CompilationConfig:
     We use string to avoid serialization issues when using compilation in a
     distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation mode is 3, the backend supports both whole graph and piecewise 
-    compilation, available backends include eager, inductor, and custom backends, 
+    compilation mode is 3, the backend supports both whole graph and piecewise
+    compilation, available backends include eager, inductor, and custom backends,
     the latter of which can be defined via `get_compile_backend`. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
