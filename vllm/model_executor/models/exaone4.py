@@ -450,7 +450,6 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

@@ -193,8 +193,8 @@ class VllmConfig:
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, one can append compilation arguments via 
-    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    As a shorthand, one can append compilation arguments via
+    -cc.parameter=argument such as `-cc.mode=3` (same as `-cc='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`

@@ -26,8 +26,9 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.repo_utils import (
+
+from .config_parser_base import ConfigParserBase
+from .repo_utils import (
     _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
@@ -35,7 +36,7 @@ from vllm.transformers_utils.repo_utils import (
     try_get_local_file,
     with_retry,
 )
-from vllm.transformers_utils.utils import (
+from .utils import (
     check_gguf_file,
     is_gguf,
     is_remote_gguf,
