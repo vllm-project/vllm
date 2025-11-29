@@ -186,6 +186,7 @@ def get_tokenizer(
             *args,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            download_dir=download_dir,
             **kwargs,
         )
     elif tokenizer_mode == "custom":
@@ -205,6 +206,7 @@ def get_tokenizer(
             *args,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            download_dir=download_dir,
             **kwargs,
         )
 
