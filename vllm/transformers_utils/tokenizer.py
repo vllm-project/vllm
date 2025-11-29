@@ -37,7 +37,7 @@ def __getattr__(name: str):
         from .tokenizers import TokenizerLike
 
         warnings.warn(
-            "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been renamed to "
+            "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been moved to "
             "`vllm.transformers_utils.tokenizers.TokenizerLike`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
