@@ -66,8 +66,8 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         patcher.shim_list_safetensors,
     )
     monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_pull_safetensors",
-        patcher.shim_pull_safetensors,
+        "vllm.transformers_utils.runai_utils.runai_pull_files",
+        patcher.shim_pull_files,
     )
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.runai_streamer_loader.list_safetensors",
