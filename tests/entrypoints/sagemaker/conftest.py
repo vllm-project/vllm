@@ -9,7 +9,6 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # Model name constants used across tests
-MODEL_NAME_ZEPHYR = "Qwen/Qwen3-0.6B"
 MODEL_NAME_SMOLLM = "HuggingFaceTB/SmolLM2-135M-Instruct"
 LORA_ADAPTER_NAME_SMOLLM = "jekunz/smollm-135m-lora-fineweb-faroese"
 
