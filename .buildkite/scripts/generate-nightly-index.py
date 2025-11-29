@@ -365,4 +365,4 @@ if __name__ == "__main__":
         default_variant=None,
         alias_to_default=args.alias_to_default,
     )
-    print(f"Index and metadata generated in {output_dir}")
+    print(f"Successfully generated index and metadata in {output_dir}")
