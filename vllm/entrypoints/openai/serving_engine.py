@@ -337,7 +337,7 @@ class OpenAIServing:
         tokenizer = input_processor.tokenizer
         if tokenizer is None:
             raise ValueError(
-                "You cannot use beam search when `skip_tokenizer_init` is True"
+                "You cannot use beam search when `skip_tokenizer_init=True`"
             )
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore

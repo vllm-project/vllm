@@ -3,7 +3,6 @@
 
 import time
 from contextlib import nullcontext
-from typing import cast
 
 import numpy as np
 import pytest
@@ -24,7 +23,6 @@ from vllm.multimodal.processing import (
     replace_token_matches,
 )
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.tokenizers import TokenizerLike
 
 from .utils import random_image
 
@@ -238,15 +236,12 @@ def test_find_token_matches(
     expected_by_key,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to token IDs
-    mock_tokenizer = cast(TokenizerLike, object())
-
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
     }
     result = {
-        key: list(update.iter_token_matches(prompt, mock_tokenizer))
+        key: list(update.iter_token_matches(prompt, tokenizer=None))
         for key, update in prompt_updates.items()
     }
 
@@ -385,15 +380,12 @@ def test_find_text_matches(
     expected_by_key,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(TokenizerLike, object())
-
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
     }
     result = {
-        key: list(update.iter_text_matches(prompt, mock_tokenizer))
+        key: list(update.iter_text_matches(prompt, tokenizer=None))
         for key, update in prompt_updates.items()
     }
 
@@ -545,9 +537,6 @@ def test_find_update_text(
     repl_by_key,
     expected_by_update_type_mm_count,
 ):
-    # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(TokenizerLike, object())
-
     for (
         update_type,
         expected_by_mm_count,
@@ -564,7 +553,7 @@ def test_find_update_text(
             new_prompt, result = apply_text_matches(
                 prompt,
                 mm_prompt_updates,
-                mock_tokenizer,
+                tokenizer=None,
             )
 
             # Only displayed on error
@@ -750,9 +739,6 @@ def test_find_update_tokens(
     repl_by_key,
     expected_by_update_type_mm_count,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(TokenizerLike, object())
-
     for (
         update_type,
         expected_by_mm_count,
@@ -769,7 +755,7 @@ def test_find_update_tokens(
             new_prompt, result = apply_token_matches(
                 prompt,
                 mm_prompt_updates,
-                mock_tokenizer,
+                tokenizer=None,
             )
 
             # Only displayed on error
@@ -900,15 +886,12 @@ def test_find_mm_placeholders(
     expected,
     update_type,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(TokenizerLike, object())
-
     mm_prompt_updates = {
         key: [[update_type(key, [], repl).resolve(i)] for i in range(3)]
         for key, repl in repl_by_key.items()
     }
 
-    result = find_mm_placeholders(prompt, mm_prompt_updates, mock_tokenizer)
+    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
 
     # Only displayed on error
     print("result:", result)
@@ -1029,12 +1012,9 @@ def test_hf_processor_init_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(TokenizerLike, object())
-
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(
@@ -1065,12 +1045,9 @@ def test_hf_processor_call_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    # Should not be used since there is nothing to convert to tokens
-    mock_tokenizer = cast(TokenizerLike, object())
-
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
-        tokenizer=mock_tokenizer,
+        tokenizer=None,
     )
 
     processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
@@ -1089,8 +1066,6 @@ def test_apply_matches_no_match_exits_quickly():
 
     With the fix, it should exit immediately when no match is found.
     """
-    mock_tokenizer = cast(TokenizerLike, object())
-
     # Create a long prompt with no placeholder
     long_prompt = "x" * 10000
 
@@ -1103,7 +1078,7 @@ def test_apply_matches_no_match_exits_quickly():
     result, _ = _apply_matches(
         long_prompt,
         mm_prompt_updates,
-        mock_tokenizer,
+        tokenizer=None,
     )
     elapsed = time.perf_counter() - start
 
