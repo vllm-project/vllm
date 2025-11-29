@@ -846,7 +846,8 @@ class GPUModelRunner(
             # Update the block IDs.
             if not resumed_from_preemption:
                 if new_block_ids is not None:
-                    if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                    if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                        and self.speculative_config):
                         for kv_cache_gid, kv_cache_group in enumerate(
                             self.kv_cache_config.kv_cache_groups
                         ):
