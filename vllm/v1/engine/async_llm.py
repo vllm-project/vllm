@@ -715,7 +715,7 @@ class AsyncLLM(EngineClient):
     async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
         return self.tokenizer

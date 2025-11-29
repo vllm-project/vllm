@@ -1097,7 +1097,7 @@ class OpenAIServing:
     ]:
         if tokenizer is None:
             raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
         model_config = self.model_config
@@ -1458,7 +1458,7 @@ class OpenAIServing:
 
         if tokenizer is None:
             raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
         return tokenizer.decode(token_id)

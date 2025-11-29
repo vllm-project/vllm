@@ -647,8 +647,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     if tokenizer is None:
                         raise ValueError(
-                            "Unable to get tokenizer because "
-                            "skip_tokenizer_init is True"
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
                         )
 
                     token = tokenizer.decode(token_id)
