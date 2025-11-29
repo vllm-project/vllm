@@ -247,6 +247,16 @@ class WorkerWrapperBase:
         )
         self.vllm_config.enable_trace_function_call_for_thread()
 
+        # Initialize FlashInfer-Bench tracing/adapters if environment variables are set
+        # This must happen early to patch flashinfer functions before they're imported
+        if os.environ.get("FIB_ENABLE_TRACING") or os.environ.get("FIB_ENABLE_APPLY"):
+            try:
+                import flashinfer_bench  # noqa: F401
+                import logging
+                logger.info(f"[FLASHINFER-BENCH] Initialized in worker process PID={os.getpid()}")
+            except ImportError:
+                pass  # flashinfer-bench not installed
+
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()

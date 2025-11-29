@@ -648,6 +648,31 @@ Consider shipping multiple wheel variants for different CUDA versions.
 
 Consider implementing attention sink support that doesn't require TRTLLM, enabling FlashInfer attention for models like GPT-OSS on Hopper hardware.
 
+### Priority 5: FlashInfer-Bench Tracing with torch.compile
+
+**Status:** ❌ Not working - requires `enforce_eager=True`
+
+FlashInfer-Bench tracing currently only works when vLLM runs in eager mode (`enforce_eager=True`). When torch.compile is enabled:
+
+1. vLLM uses `custom_ops: ['none']` by default, which disables custom ops and uses `forward_native` (pure PyTorch) instead of `forward_cuda` (which calls FlashInfer)
+2. Even if custom ops are enabled, the FlashInfer-Bench adapter wrappers are traced by torch.compile
+3. During tracing, lazy imports trigger `find_spec` which torch.dynamo marks as "skipped"
+4. This causes `torch._dynamo.exc.Unsupported` errors
+
+**Workaround:** Use `enforce_eager=True` when generating traces:
+
+```python
+llm = LLM(
+    model="...",
+    enforce_eager=True,  # Required for FlashInfer-Bench tracing
+)
+```
+
+**Suggested actions for FlashInfer-Bench team:**
+- Investigate using `torch.compiler.allow_in_graph` or custom graph break handling
+- Consider tracing at the CUDA kernel level rather than Python wrapper level
+- Add support for torch.compile by pre-importing all dependencies at module load time
+
 ---
 
 ## Test Script

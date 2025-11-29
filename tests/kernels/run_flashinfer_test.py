@@ -31,6 +31,13 @@ Usage:
     
     # Disable AllReduce fusion (if needed)
     VLLM_USE_FLASHINFER_ALLREDUCE=0 python tests/kernels/run_flashinfer_test.py --model qwen --tp 2
+
+Related scripts:
+    # Generate FlashInfer-Bench traces for kernel optimization
+    python tests/kernels/generate_flashinfer_traces.py --model qwen
+    
+    # NOTE: Tracing requires enforce_eager=True (not compatible with torch.compile)
+    # See docs/source/design/flashinfer_integration_issues.md for details
 """
 
 import argparse
