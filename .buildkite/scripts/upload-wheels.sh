@@ -42,9 +42,10 @@ echo "Pure version (without variant): $pure_version"
 aws s3 cp "$wheel" "s3://$BUCKET/$BUILDKITE_COMMIT/"
 
 # list all wheels in the commit directory
+echo "Existing wheels on S3:"
+aws s3 ls "s3://$BUCKET/$BUILDKITE_COMMIT/"
 obj_json="$(mktemp).json"
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$BUILDKITE_COMMIT/" --delimiter / --output json > "$obj_json"
-
 mkdir -p "$INDICES_OUTPUT_DIR"
 
 # call script to generate indicies for all existing wheels
@@ -56,7 +57,7 @@ if [[ ! -z "$DEFAULT_VARIANT_ALIAS" ]]; then
 else
     alias_arg=""
 fi
-python3 ./buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" "$alias_arg"
+python3 .buildkite/scripts/generate-nightly-index.py --version "$BUILDKITE_COMMIT" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" "$alias_arg"
 
 # copy indices to /<commit>/ unconditionally
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$BUILDKITE_COMMIT/"
