@@ -7,13 +7,14 @@ import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import numpy as np
 import torch
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
@@ -184,19 +185,19 @@ def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
-class RequestProcessingMixin(BaseModel):
+@dataclass
+class RequestProcessingMixin:
     """
     Mixin for request processing,
     handling prompt preparation and engine input.
     """
 
-    request_prompts: Sequence[RequestPrompt] | None = []
-    engine_prompts: list[EngineTokensPrompt] | None = []
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    request_prompts: Sequence[RequestPrompt] | None = field(default_factory=list)
+    engine_prompts: list[EngineTokensPrompt] | None = field(default_factory=list)
 
 
-class ResponseGenerationMixin(BaseModel):
+@dataclass
+class ResponseGenerationMixin:
     """
     Mixin for response generation,
     managing result generators and final batch results.
@@ -205,36 +206,24 @@ class ResponseGenerationMixin(BaseModel):
     result_generator: (
         AsyncGenerator[tuple[int, RequestOutput | PoolingRequestOutput], None] | None
     ) = None
-    final_res_batch: list[RequestOutput | PoolingRequestOutput] = Field(
+    final_res_batch: list[RequestOutput | PoolingRequestOutput] = field(
         default_factory=list
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class ServeContext(
-    RequestProcessingMixin,
-    ResponseGenerationMixin,
-    BaseModel,
-    Generic[RequestT],
-):
+class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[RequestT]):
     # Shared across all requests
     request: RequestT
     raw_request: Request | None = None
     model_name: str
     request_id: str
-    created_time: int = Field(default_factory=lambda: int(time.time()))
+    created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
 
     # Shared across most requests
     tokenizer: TokenizerLike | None = None
-
-    # `protected_namespaces` resolves Pydantic v2's warning
-    # on conflict with protected namespace "model_"
-    model_config = ConfigDict(
-        protected_namespaces=(),
-        arbitrary_types_allowed=True,
-    )
 
 
 ClassificationServeContext = ServeContext[ClassificationRequest]
@@ -243,14 +232,6 @@ ClassificationServeContext = ServeContext[ClassificationRequest]
 class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption
-
-
-# Used to resolve the Pydantic error related to
-# forward reference of MultiModalDataDict in TokensPrompt
-RequestProcessingMixin.model_rebuild()
-ServeContext.model_rebuild()
-ClassificationServeContext.model_rebuild()
-EmbeddingServeContext.model_rebuild()
 
 
 class OpenAIServing:
