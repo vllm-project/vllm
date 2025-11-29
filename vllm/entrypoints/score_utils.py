@@ -52,7 +52,7 @@ def _cosine_similarity(
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
         padding = []
-        if (pad_token_id := tokenizer.pad_token_id) is not None:
+        if (pad_token_id := getattr(tokenizer, "pad_token_id", None)) is not None:
             padding = [pad_token_id]
 
         tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
