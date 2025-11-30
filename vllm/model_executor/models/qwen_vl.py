@@ -555,7 +555,7 @@ class QwenVLProcessor:
 
 class QwenVLProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self.ctx.get_tokenizer()
         assert isinstance(tokenizer, PreTrainedTokenizer)
 
         return _get_tokenizer_without_image_pad(tokenizer)
