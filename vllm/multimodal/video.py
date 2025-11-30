@@ -63,12 +63,160 @@ class VideoLoader:
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
+    @classmethod
+    def _load_frames_with_seeking(
+        cls,
+        cap,
+        frame_indices: list[int],
+        recovery_offset: int,
+        existing_frames: dict[int, npt.NDArray] | None = None,
+    ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
+        """
+        Optimized Recovery Logic:
+        1. Cache Check (Zero I/O): Reuse frames from sequential read if close enough.
+        2. Forward Scan (Low I/O): Seek once to target+1, grab forward (handles gaps).
+        3. Backward Scan (Med I/O): Seek to target-offset, grab forward (truncation).
+        """
+        import cv2
+
+        if existing_frames is None:
+            existing_frames = {}
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        frames_list = []
+        loaded_indices = []
+        recovered_frames = {}
+
+        for target_idx in frame_indices:
+            # 1. Attempt direct seek to the target
+            # Direct seek might work if sequential failed due to buffering.
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+            ret, frame = cap.read()
+
+            if ret:
+                frames_list.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                loaded_indices.append(target_idx)
+                continue
+
+            # 2. Primary Load Failed. Start Recovery.
+            if recovery_offset <= 0:
+                logger.warning("Frame %d failed, no recovery enabled.", target_idx)
+                continue
+
+            logger.warning(
+                "Frame %d failed, attempting recovery (offset=%d)",
+                target_idx,
+                recovery_offset,
+            )
+
+            found_recovery = False
+
+            # --- Strategy A: Check Cache (History) ---
+            # Fastest: Zero I/O. Reuse sequential frames we already hold.
+            for i in range(1, recovery_offset + 1):
+                recovery_idx = target_idx - i
+                if recovery_idx in existing_frames:
+                    # Found valid frame in history
+                    frames_list.append(existing_frames[recovery_idx])  # Already RGB
+                    loaded_indices.append(target_idx)
+                    recovered_frames[target_idx] = recovery_idx
+
+                    logger.warning(
+                        "Recovered frame %d using cached frame %d (Zero-Seek)",
+                        target_idx,
+                        recovery_idx,
+                    )
+                    found_recovery = True
+                    break
+
+            if found_recovery:
+                continue
+
+            # --- Strategy B: Check Future (Forward Scan) ---
+            # Optimization: Seek ONCE to (target+1), then grab() forward.
+            # Handles "Corruption Gaps" where a few frames are broken.
+            start_forward_scan = target_idx + 1
+            if start_forward_scan < total_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_forward_scan)
+                for i in range(1, recovery_offset + 1):
+                    recovery_idx = target_idx + i
+                    if recovery_idx >= total_frames:
+                        break
+
+                    # Stop if we hit any target frame (missing or existing).
+                    if (recovery_idx in frame_indices) or (
+                        recovery_idx in existing_frames
+                    ):
+                        break
+
+                    ret_rec, frame_rec = cap.read()
+
+                    if ret_rec:
+                        frames_list.append(cv2.cvtColor(frame_rec, cv2.COLOR_BGR2RGB))
+                        loaded_indices.append(target_idx)
+                        recovered_frames[target_idx] = recovery_idx
+                        found_recovery = True
+                        logger.warning(
+                            "Recovered frame %d using future frame %d (Forward Scan)",
+                            target_idx,
+                            recovery_idx,
+                        )
+                        break
+
+            if found_recovery:
+                continue
+
+            # --- Strategy C: Check Past (Backward Scan) ---
+            # Optimization: Seek ONCE to (target-offset), then read forward.
+            # Handles "Truncation" where file ends early. We find the LAST valid frame.
+            start_back_scan = max(0, target_idx - recovery_offset)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_back_scan)
+
+            last_valid_frame = None
+            last_valid_idx = None
+
+            # Scan from start_back up to target
+            frames_to_check = target_idx - start_back_scan
+            for i in range(frames_to_check):
+                curr_check = start_back_scan + i
+                ret_rec, frame_rec = cap.read()
+                if ret_rec:
+                    last_valid_frame = frame_rec
+                    last_valid_idx = curr_check
+
+            if last_valid_frame is not None and last_valid_idx is not None:
+                frames_list.append(cv2.cvtColor(last_valid_frame, cv2.COLOR_BGR2RGB))
+                loaded_indices.append(target_idx)
+                recovered_frames[target_idx] = last_valid_idx
+                found_recovery = True
+                logger.warning(
+                    "Recovered frame %d using past frame %d (Backward Scan)",
+                    target_idx,
+                    last_valid_idx,
+                )
+
+            if not found_recovery:
+                logger.warning(
+                    "Frame %d failed to load after all recovery attempts", target_idx
+                )
+
+        if frames_list:
+            frames = np.stack(frames_list)
+        else:
+            frames = np.empty((0, height, width, 3), dtype=np.uint8)
+
+        return frames, loaded_indices, recovered_frames
+
     @staticmethod
     def _read_frames(
         cap,
         frame_indices: set[int],
         num_expected_frames: int,
         max_frame_idx: int,
+        warn_on_failure: bool = True,
     ) -> tuple[npt.NDArray, int, list[int]]:
         import cv2
 
@@ -81,10 +229,10 @@ class VideoLoader:
         for idx in range(max_frame_idx + 1):
             ok = cap.grab()
             if not ok:
-                # Frame is broken/unreadable, log warning
-                if idx in frame_indices:
+                # Frame is broken/unreadable
+                if idx in frame_indices and warn_on_failure:
                     logger.warning(
-                        "Failed to grab frame %d during video loading. "
+                        "Failed to grab frame %d during video loading."
                         "This frame will be skipped.",
                         idx,
                     )
@@ -97,14 +245,15 @@ class VideoLoader:
                     i += 1
                 else:
                     # retrieve() failed even though grab() succeeded
-                    logger.warning(
-                        "Failed to retrieve frame %d during video loading. "
-                        "This frame will be skipped.",
-                        idx,
-                    )
+                    if warn_on_failure:
+                        logger.warning(
+                            "Failed to retrieve frame %d during video loading."
+                            "This frame will be skipped.",
+                            idx,
+                        )
 
         valid_num_frames = len(valid_frame_indices)
-        if valid_num_frames < num_expected_frames:
+        if valid_num_frames < num_expected_frames and warn_on_failure:
             logger.warning(
                 "Video loading completed with %d broken/unreadable frames. "
                 "Expected %d frames but only loaded %d frames.",
@@ -142,12 +291,19 @@ class OpenCVVideoBackend(VideoLoader):
         data: bytes,
         num_frames: int = -1,
         fps: int = -1,
+        max_duration: int = 300,
+        recovery_offset: int = 0,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        if recovery_offset < 0:
+            raise ValueError(
+                f"recovery_offset must be non-negative, got {recovery_offset}"
+            )
         import cv2
 
         backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        stream = BytesIO(data)
+        cap = cv2.VideoCapture(stream, backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
@@ -162,7 +318,7 @@ class OpenCVVideoBackend(VideoLoader):
             num_frames_to_sample = min(num_frames, total_frames_num)
         if fps > 0:
             num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
-        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
+        num_frames_to_sample = max(1, num_frames_to_sample)
 
         if num_frames_to_sample == total_frames_num:
             frame_idx = list(range(0, num_frames_to_sample))
@@ -174,9 +330,66 @@ class OpenCVVideoBackend(VideoLoader):
 
         # Convert to set for O(1) lookup performance
         frame_idx_set = set(frame_idx)
+
+        # Only warn in sequential read if we are NOT going to try recovery
+        should_warn = recovery_offset == 0
+
         frames, valid_num_frames, valid_frame_indices = cls._read_frames(
-            cap, frame_idx_set, num_frames_to_sample, max(frame_idx)
+            cap,
+            frame_idx_set,
+            num_frames_to_sample,
+            max(frame_idx),
+            warn_on_failure=should_warn,
         )
+
+        # Recovery Logic
+        if valid_num_frames < len(frame_idx) and recovery_offset > 0:
+            missing_indices = sorted(list(frame_idx_set - set(valid_frame_indices)))
+
+            logger.warning(
+                "Sequential loading missing %d frames. Attempting recovery...",
+                len(missing_indices),
+            )
+
+            # Build Cache from successfully loaded frames
+            existing_frames_map = {
+                idx: frames[i] for i, idx in enumerate(valid_frame_indices)
+            }
+
+            cap.release()
+            recovery_stream = BytesIO(data)
+            cap = cv2.VideoCapture(recovery_stream, backend, [])
+
+            frames_seek, loaded_indices_seek, recovered_map = (
+                cls._load_frames_with_seeking(
+                    cap,
+                    missing_indices,
+                    recovery_offset,
+                    existing_frames=existing_frames_map,
+                )
+            )
+
+            if len(loaded_indices_seek) > 0:
+                # 1. Concatenate un-ordered
+                frames = np.concatenate((frames, frames_seek), axis=0)
+                valid_frame_indices.extend(loaded_indices_seek)
+                valid_num_frames += len(loaded_indices_seek)
+
+                # 2. Sort by index to restore Temporal Order
+                sorted_order = np.argsort(valid_frame_indices)
+                frames = frames[sorted_order]
+                valid_frame_indices = [valid_frame_indices[i] for i in sorted_order]
+
+            remaining_missing = len(frame_idx) - valid_num_frames
+            if remaining_missing == 0:
+                logger.warning(
+                    "Recovery successful. All %d frames loaded.", len(frame_idx)
+                )
+            else:
+                logger.warning(
+                    "Recovery finished but video is still missing %d frames.",
+                    remaining_missing,
+                )
 
         # Use transformers transformers.video_utils.VideoMetadata format
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
@@ -204,12 +417,18 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         num_frames: int = -1,
         fps: int = 2,
         max_duration: int = 300,
+        recovery_offset: int = 0,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        if recovery_offset < 0:
+            raise ValueError(
+                f"recovery_offset must be non-negative, got {recovery_offset}"
+            )
         import cv2
 
         backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        stream = BytesIO(data)
+        cap = cv2.VideoCapture(stream, backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
@@ -247,12 +466,67 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         # Convert to set for O(1) lookup performance
         frame_indices_set = set(frame_indices_list)
+
+        # Only warn in sequential read if we are NOT going to try recovery
+        should_warn = recovery_offset == 0
+
         frames, valid_num_frames, valid_frame_indices = cls._read_frames(
             cap,
             frame_indices_set,
             len(frame_indices_list),
             total_frames_num - 1,
+            warn_on_failure=should_warn,
         )
+
+        # Recovery Logic
+        if valid_num_frames < len(frame_indices_list) and recovery_offset > 0:
+            missing_indices = sorted(list(frame_indices_set - set(valid_frame_indices)))
+
+            logger.warning(
+                "Sequential loading missing %d frames. Attempting recovery...",
+                len(missing_indices),
+            )
+
+            # Build Cache from successfully loaded frames
+            existing_frames_map = {
+                idx: frames[i] for i, idx in enumerate(valid_frame_indices)
+            }
+
+            cap.release()
+            recovery_stream = BytesIO(data)
+            cap = cv2.VideoCapture(recovery_stream, backend, [])
+
+            frames_seek, loaded_indices_seek, recovered_map = (
+                cls._load_frames_with_seeking(
+                    cap,
+                    missing_indices,
+                    recovery_offset,
+                    existing_frames=existing_frames_map,
+                )
+            )
+
+            if len(loaded_indices_seek) > 0:
+                # 1. Concatenate un-ordered
+                frames = np.concatenate((frames, frames_seek), axis=0)
+                valid_frame_indices.extend(loaded_indices_seek)
+                valid_num_frames += len(loaded_indices_seek)
+
+                # 2. Sort by index to restore Temporal Order
+                sorted_order = np.argsort(valid_frame_indices)
+                frames = frames[sorted_order]
+                valid_frame_indices = [valid_frame_indices[i] for i in sorted_order]
+
+            remaining_missing = len(frame_indices_list) - valid_num_frames
+            if remaining_missing == 0:
+                logger.warning(
+                    "Recovery successful. All %d frames loaded.",
+                    len(frame_indices_list),
+                )
+            else:
+                logger.warning(
+                    "Recovery finished but video is still missing %d frames.",
+                    remaining_missing,
+                )
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
