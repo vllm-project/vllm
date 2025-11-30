@@ -70,13 +70,12 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         patcher.shim_pull_files,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.model_loader.runai_streamer_loader.list_safetensors",
-        patcher.shim_list_safetensors,
-    )
-    monkeypatch.setattr(
         "vllm.model_executor.model_loader.weight_utils.SafetensorsStreamer",
         patcher.create_mock_streamer,
     )
+
+    # fork is needed for the worker to see the patch
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")   
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
