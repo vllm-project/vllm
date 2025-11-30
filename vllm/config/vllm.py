@@ -690,10 +690,9 @@ class VllmConfig:
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-            # disable cudagraph when enforce eager execution or mirage backend is used
+            # disable cudagraph when enforce eager execution
             disable_cuda_graph = (
                 (self.model_config is not None and self.model_config.enforce_eager)
-                or (self.compilation_config.backend == "mirage_byname")
             )
             if disable_cuda_graph:
                 logger.info("Cudagraph is disabled under eager mode")
