@@ -1752,12 +1752,15 @@ class Qwen3VLForConditionalGeneration(
         ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
+            if text_len > 0:
+                llm_pos_ids_list.append(
+                    np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+                )
+                # Update st_idx for video frame positions
+                st_idx += text_len
 
             grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
-            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            llm_pos_ids_list.append(grid_indices + st_idx)
             st = offset + llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
