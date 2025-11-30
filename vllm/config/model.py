@@ -353,7 +353,6 @@ class ModelConfig:
             "hf_token",
             "hf_overrides",
             "logits_processor_pattern",
-            "enable_sleep_mode",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
@@ -1202,6 +1201,16 @@ class ModelConfig:
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
+
+    def get_inputs_embeds_size(self) -> int:
+        # The size of inputs_embeds is usually identical to the size
+        # of the hidden states, however there are exceptions, such as
+        # embedding models like CLIP and SigLIP
+        for target_attr in ("projection_dim", "projection_size"):
+            if hasattr(self.hf_text_config, target_attr):
+                return getattr(self.hf_text_config, target_attr)
+
+        return self.get_hidden_size()
 
     @property
     def is_deepseek_mla(self) -> bool:
