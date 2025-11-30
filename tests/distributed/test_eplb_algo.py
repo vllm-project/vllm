@@ -4,7 +4,10 @@
 import pytest
 import torch
 
-from vllm.distributed.eplb.rebalance_algo import rebalance_experts
+from vllm.distributed.eplb.rebalance_algo import (
+    preserve_intragpu_slots,
+    rebalance_experts,
+)
 
 
 def test_basic_rebalance():
@@ -306,3 +309,136 @@ if __name__ == "__main__":
     print(phy2log)
 
     test_basic_rebalance()
+
+
+def _make_phyrank_from_phy2log(phy2log: torch.Tensor) -> torch.Tensor:
+    """Create phyrank from phy2log"""
+    pr = torch.zeros_like(phy2log)
+    for layer in range(phy2log.shape[0]):
+        seen: dict[int, int] = {}
+        row = phy2log[layer].tolist()
+        for i, expert in enumerate(row):
+            r = seen.get(expert, 0)
+            pr[layer, i] = r
+            seen[expert] = r + 1
+    return pr
+
+
+def _validate_intragpu_rearrangement(
+    old_global_expert_indices: torch.Tensor,
+    new_phy2log: torch.Tensor,
+    new_phyrank: torch.Tensor,
+    post_phy2log: torch.Tensor,
+    post_phyrank: torch.Tensor,
+    num_gpus: int,
+    slots_per_gpu: int,
+):
+    # Per-GPU checks
+    for gpu_idx in range(num_gpus):
+        start = gpu_idx * slots_per_gpu
+        end = start + slots_per_gpu
+        old_seg = old_global_expert_indices[0, start:end]
+        new_seg = new_phy2log[0, start:end]
+        new_rnk = new_phyrank[0, start:end]
+        post_seg = post_phy2log[0, start:end]
+        post_rnk = post_phyrank[0, start:end]
+
+        # Pairwise equality for (expert, rank) pairs to ensure nothing is lost
+        def sorted_pairs(seg: torch.Tensor, rnk: torch.Tensor):
+            pairs = list(zip(seg.tolist(), rnk.tolist()))
+            pairs.sort()
+            return pairs
+
+        assert sorted_pairs(post_seg, post_rnk) == sorted_pairs(new_seg, new_rnk), (
+            f"Per-GPU pairs of (expert,rank) must match new mapping for GPU {gpu_idx}"
+        )
+
+        # For experts that remain on the same GPU, the old slot is preserved
+        # for at least one occurrence; rank at that slot must be valid for that expert
+        old_list = old_seg.tolist()
+        new_list = new_seg.tolist()
+        post_list = post_seg.tolist()
+        remained = set(old_list) & set(new_list)
+        new_ranks_for_expert: dict[int, list[int]] = {}
+        for v, r in zip(new_list, new_rnk.tolist()):
+            new_ranks_for_expert.setdefault(v, []).append(r)
+        for expert in remained:
+            old_pos = old_list.index(expert)
+            assert post_list[old_pos] == expert, (
+                f"Expert {expert} on GPU {gpu_idx} should stay at old slot {old_pos}"
+            )
+            # Rank at preserved slot must be one of the ranks
+            # the expert has in new mapping
+            assert post_rnk.tolist()[old_pos] in new_ranks_for_expert[expert], (
+                f"Rank for expert {expert} at preserved slot on GPU {gpu_idx} "
+                "must come from new mapping"
+            )
+
+
+def test_preserve_intragpu_slots_simple():
+    """Experts that stay on a GPU keep their old slots; incoming not lost."""
+    # Setup: 2 GPUs, 4 slots each, 1 layer
+    num_gpus = 2
+    slots_per_gpu = 4
+    # Old mapping: GPU0 -> [0,1,2,3], GPU1 -> [4,5,6,7]
+    old_global_expert_indices = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
+    # New mapping shuffles within GPU0 and brings 4,5 into GPU0.
+    # GPU0 new -> [1,5,0,4] (0 and 1 remain on GPU0 but at different slots)
+    # GPU1 new -> [6,2,7,3] (6 and 7 remain on GPU1, 2 and 3 move in)
+    phy2log = torch.tensor([[1, 5, 0, 4, 6, 2, 7, 3]])
+    # Derive phyrank from replica occurrence order per expert
+    phyrank = _make_phyrank_from_phy2log(phy2log)
+
+    post_phy2log, post_phyrank = preserve_intragpu_slots(
+        phy2log, phyrank, num_gpus, old_global_expert_indices
+    )
+
+    # Shapes preserved
+    assert post_phy2log.shape == phy2log.shape
+    assert post_phyrank.shape == phyrank.shape
+
+    _validate_intragpu_rearrangement(
+        old_global_expert_indices,
+        phy2log,
+        phyrank,
+        post_phy2log,
+        post_phyrank,
+        num_gpus,
+        slots_per_gpu,
+    )
+
+
+def test_preserve_intragpu_slots_with_duplicates():
+    """Test preserve intragpu slots with duplicates"""
+    # Setup: 2 GPUs, 5 slots each (total 10 physical experts), 1 layer
+    num_gpus = 2
+    slots_per_gpu = 5
+    # Old mapping:
+    #   GPU0 -> [0, 1, 0, 2, 3]  (expert 0 duplicated)
+    #   GPU1 -> [4, 5, 6, 1, 2]
+    old_global_expert_indices = torch.tensor([[0, 1, 0, 2, 3, 4, 5, 6, 1, 2]])
+    # New mapping reorders within GPUs and moves some experts across GPUs,
+    # while still including duplicates:
+    #   GPU0 new -> [0, 5, 4, 0, 1]  (expert 0 duplicated, 4/5 incoming)
+    #   GPU1 new -> [6, 2, 3, 1, 2]  (expert 2 duplicated)
+    phy2log = torch.tensor([[0, 5, 4, 0, 1, 6, 2, 3, 1, 2]])
+    # Derive ranks so duplicates have ranks [0,1,...] by occurrence
+    phyrank = _make_phyrank_from_phy2log(phy2log)
+
+    post_phy2log, post_phyrank = preserve_intragpu_slots(
+        phy2log, phyrank, num_gpus, old_global_expert_indices
+    )
+
+    # Shapes preserved
+    assert post_phy2log.shape == phy2log.shape
+    assert post_phyrank.shape == phyrank.shape
+
+    _validate_intragpu_rearrangement(
+        old_global_expert_indices,
+        phy2log,
+        phyrank,
+        post_phy2log,
+        post_phyrank,
+        num_gpus,
+        slots_per_gpu,
+    )
