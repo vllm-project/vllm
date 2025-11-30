@@ -98,28 +98,39 @@ def kernel_unified_attention_2d(
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
+    block_q_seq_boundaries_ptr,  # [num_seqs+1]
+    only_decode,  # bool
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
+    if only_decode:
+        seq_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
-    )
+        q_block_local_idx = 0
+        cur_batch_in_all_start_index = seq_idx
+        cur_batch_query_len = 1
 
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
+    else:
+        q_block_global_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
 
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
+        seq_idx = find_seq_idx(
+            block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False
+        )
 
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
+        q_block_start_idx = tl.load(block_q_seq_boundaries_ptr + seq_idx)
 
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
+        q_block_local_idx = q_block_global_idx - q_block_start_idx
 
-    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
-        return
+        cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
+        cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
+
+        cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
+
+        if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
+            return
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
@@ -749,6 +760,11 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    BLOCK_M=None,
+    BLOCK_Q=None,
+    num_q_blocks=None,
+    block_q_seq_boundaries_tensor=None,
+    seq_threshold_3D=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -771,33 +787,49 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
+    # Assign the following variables if they are not assigned in the attention metadata.
+    # This ensures backward compatibility with callers using an earlier version of this
+    # function. However, it is recommended to include these assignments in the
+    # attention metadata itself, as performing them here may negatively impact
+    # performance.
+    if (
+        BLOCK_M is None
+        or BLOCK_Q is None
+        or num_q_blocks is None
+        or block_q_seq_boundaries_tensor is None
+        or seq_threshold_3D is None
+    ):
+        BLOCK_M = (
+            16
+            if num_queries_per_kv <= 16
+            else triton.next_power_of_2(num_queries_per_kv)
+        )
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
 
-    # Ideally we would launch with kernel with:
-    # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
-    # However, it is slow to realize the query_lens on cpu.
-    # Instead we use upper-bound:
-    # \sum_i[ceil(query_len[i] / BLOCK_Q)]
-    #   <= \sum_i[floor(query_len[i] / BLOCK_Q) + 1]
-    #    = \sum_i[floor(query_len[i] / BLOCK_Q)] + num_seqs
-    #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
-    #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
-    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+        block_q_seq_boundaries_tensor = torch.empty(
+            num_seqs + 1, dtype=torch.int32, device=cu_seqlens_q.device
+        )
+        block_q_seq_boundaries_tensor[0] = 0
+        block_q_seq_boundaries_tensor[1:].copy_(cu_seqlens_q[1:])
+        block_q_seq_boundaries_tensor[1:].sub_(cu_seqlens_q[:-1])
+        block_q_seq_boundaries_tensor[1:].add_(BLOCK_Q - 1)
+        block_q_seq_boundaries_tensor[1:].floor_divide_(BLOCK_Q)
+        block_q_seq_boundaries_tensor.cumsum_(dim=0)
+        num_q_blocks = block_q_seq_boundaries_tensor[-1]
+        seq_threshold_3D = 128 // num_kv_heads
 
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
     # and at least 16 for all other data types.
-    TILE_SIZE_PREFILL = 32
-    TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
+    TILE_SIZE_2D_PREFILL = 32
+    TILE_SIZE_2D_DECODE = 32
+    TILE_SIZE_3D_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
+    if max_seqlen_q > 1:
         kernel_unified_attention_2d[
             (
-                total_num_q_blocks,
+                num_q_blocks,
                 num_kv_heads,
             )
         ](
@@ -824,7 +856,7 @@ def unified_attention(
             output_stride_1=out.stride(1),
             qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
             BLOCK_SIZE=block_size,
-            TILE_SIZE=TILE_SIZE_PREFILL,
+            TILE_SIZE=TILE_SIZE_2D_PREFILL,
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
@@ -844,98 +876,160 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            block_q_seq_boundaries_ptr=block_q_seq_boundaries_tensor,
+            only_decode=False,
             USE_FP8=output_scale is not None,
         )
     else:
-        # for initial version, NUM_SEGMENTS = 16 is chosen as a default
-        # value that showed good performance in tests
-        NUM_SEGMENTS = 16
+        # if the number of sequences is larger than threshold
+        if num_seqs > seq_threshold_3D:
+            kernel_unified_attention_2d[
+                (
+                    num_seqs,
+                    num_kv_heads,
+                )
+            ](
+                output_ptr=out,
+                query_ptr=q,
+                key_cache_ptr=k,
+                value_cache_ptr=v,
+                sink_ptr=sinks,
+                block_tables_ptr=block_table,
+                seq_lens_ptr=seqused_k,
+                alibi_slopes_ptr=alibi_slopes,
+                qq_bias_ptr=qq_bias,
+                scale=softmax_scale,
+                k_scale=k_descale,
+                v_scale=v_descale,
+                out_scale=1 / output_scale if output_scale is not None else 1.0,
+                softcap=softcap,
+                num_query_heads=num_query_heads,
+                num_queries_per_kv=num_queries_per_kv,
+                block_table_stride=block_table.stride(0),
+                query_stride_0=q.stride(0),
+                query_stride_1=q.stride(1),
+                output_stride_0=out.stride(0),
+                output_stride_1=out.stride(1),
+                qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
+                BLOCK_SIZE=block_size,
+                TILE_SIZE=TILE_SIZE_2D_DECODE,
+                HEAD_SIZE=head_size,
+                HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+                USE_ALIBI_SLOPES=use_alibi_slopes,
+                USE_QQ_BIAS=use_qq_bias,
+                USE_SOFTCAP=(softcap > 0),
+                USE_SINKS=(sinks is not None),
+                SLIDING_WINDOW=(1 + window_size[0]),
+                stride_k_cache_0=k.stride(0),
+                stride_k_cache_1=k.stride(1),
+                stride_k_cache_2=k.stride(2),
+                stride_k_cache_3=k.stride(3),
+                stride_v_cache_0=v.stride(0),
+                stride_v_cache_1=v.stride(1),
+                stride_v_cache_2=v.stride(2),
+                stride_v_cache_3=v.stride(3),
+                query_start_len_ptr=cu_seqlens_q,
+                BLOCK_Q=BLOCK_Q,
+                num_seqs=num_seqs,
+                BLOCK_M=BLOCK_M,
+                block_q_seq_boundaries_ptr=block_q_seq_boundaries_tensor,
+                only_decode=True,
+                USE_FP8=output_scale is not None,
+            )
+        else:
+            total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-        segm_output = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            triton.next_power_of_2(head_size),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_max = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_expsum = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
+            # for initial version, NUM_SEGMENTS = 16 is chosen as a default
+            # value that showed good performance in tests
+            NUM_SEGMENTS = 16
 
-        kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)](
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
-            query_ptr=q,
-            key_cache_ptr=k,
-            value_cache_ptr=v,
-            sink_ptr=sinks,
-            block_tables_ptr=block_table,
-            seq_lens_ptr=seqused_k,
-            alibi_slopes_ptr=alibi_slopes,
-            qq_bias_ptr=qq_bias,
-            scale=softmax_scale,
-            k_scale=k_descale,
-            v_scale=v_descale,
-            softcap=softcap,
-            num_query_heads=num_query_heads,
-            num_queries_per_kv=num_queries_per_kv,
-            block_table_stride=block_table.stride(0),
-            query_stride_0=q.stride(0),
-            query_stride_1=q.stride(1),
-            qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
-            BLOCK_SIZE=block_size,
-            TILE_SIZE=TILE_SIZE_DECODE,
-            HEAD_SIZE=head_size,
-            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-            USE_ALIBI_SLOPES=use_alibi_slopes,
-            USE_QQ_BIAS=use_qq_bias,
-            USE_SOFTCAP=(softcap > 0),
-            USE_SINKS=(sinks is not None),
-            SLIDING_WINDOW=(1 + window_size[0]),
-            stride_k_cache_0=k.stride(0),
-            stride_k_cache_1=k.stride(1),
-            stride_k_cache_2=k.stride(2),
-            stride_k_cache_3=k.stride(3),
-            stride_v_cache_0=v.stride(0),
-            stride_v_cache_1=v.stride(1),
-            stride_v_cache_2=v.stride(2),
-            stride_v_cache_3=v.stride(3),
-            query_start_len_ptr=cu_seqlens_q,
-            BLOCK_Q=BLOCK_Q,
-            num_seqs=num_seqs,
-            BLOCK_M=BLOCK_M,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-        )
-        reduce_segments[(q.shape[0], num_query_heads)](
-            output_ptr=out,
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
-            seq_lens_ptr=seqused_k,
-            num_seqs=num_seqs,
-            num_query_heads=num_query_heads,
-            out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
-            output_stride_0=out.stride(0),
-            output_stride_1=out.stride(1),
-            block_table_stride=block_table.stride(0),
-            TILE_SIZE=TILE_SIZE_DECODE,
-            HEAD_SIZE=head_size,
-            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-            query_start_len_ptr=cu_seqlens_q,
-            BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-            USE_FP8=output_scale is not None,
-        )
+            segm_output = torch.empty(
+                q.shape[0],
+                num_query_heads,
+                NUM_SEGMENTS,
+                triton.next_power_of_2(head_size),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            segm_max = torch.empty(
+                q.shape[0],
+                num_query_heads,
+                NUM_SEGMENTS,
+                dtype=torch.float32,
+                device=q.device,
+            )
+            segm_expsum = torch.empty(
+                q.shape[0],
+                num_query_heads,
+                NUM_SEGMENTS,
+                dtype=torch.float32,
+                device=q.device,
+            )
+
+            kernel_unified_attention_3d[
+                (total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)
+            ](
+                segm_output_ptr=segm_output,
+                segm_max_ptr=segm_max,
+                segm_expsum_ptr=segm_expsum,
+                query_ptr=q,
+                key_cache_ptr=k,
+                value_cache_ptr=v,
+                sink_ptr=sinks,
+                block_tables_ptr=block_table,
+                seq_lens_ptr=seqused_k,
+                alibi_slopes_ptr=alibi_slopes,
+                qq_bias_ptr=qq_bias,
+                scale=softmax_scale,
+                k_scale=k_descale,
+                v_scale=v_descale,
+                softcap=softcap,
+                num_query_heads=num_query_heads,
+                num_queries_per_kv=num_queries_per_kv,
+                block_table_stride=block_table.stride(0),
+                query_stride_0=q.stride(0),
+                query_stride_1=q.stride(1),
+                qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
+                BLOCK_SIZE=block_size,
+                TILE_SIZE=TILE_SIZE_3D_DECODE,
+                HEAD_SIZE=head_size,
+                HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+                USE_ALIBI_SLOPES=use_alibi_slopes,
+                USE_QQ_BIAS=use_qq_bias,
+                USE_SOFTCAP=(softcap > 0),
+                USE_SINKS=(sinks is not None),
+                SLIDING_WINDOW=(1 + window_size[0]),
+                stride_k_cache_0=k.stride(0),
+                stride_k_cache_1=k.stride(1),
+                stride_k_cache_2=k.stride(2),
+                stride_k_cache_3=k.stride(3),
+                stride_v_cache_0=v.stride(0),
+                stride_v_cache_1=v.stride(1),
+                stride_v_cache_2=v.stride(2),
+                stride_v_cache_3=v.stride(3),
+                query_start_len_ptr=cu_seqlens_q,
+                BLOCK_Q=BLOCK_Q,
+                num_seqs=num_seqs,
+                BLOCK_M=BLOCK_M,
+                NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            )
+            reduce_segments[(q.shape[0], num_query_heads)](
+                output_ptr=out,
+                segm_output_ptr=segm_output,
+                segm_max_ptr=segm_max,
+                segm_expsum_ptr=segm_expsum,
+                seq_lens_ptr=seqused_k,
+                num_seqs=num_seqs,
+                num_query_heads=num_query_heads,
+                out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
+                output_stride_0=out.stride(0),
+                output_stride_1=out.stride(1),
+                block_table_stride=block_table.stride(0),
+                TILE_SIZE=TILE_SIZE_3D_DECODE,
+                HEAD_SIZE=head_size,
+                HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+                query_start_len_ptr=cu_seqlens_q,
+                BLOCK_Q=BLOCK_Q,
+                NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                USE_FP8=output_scale is not None,
+            )
