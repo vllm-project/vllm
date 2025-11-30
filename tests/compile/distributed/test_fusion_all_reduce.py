@@ -36,12 +36,29 @@ from vllm.utils.system_utils import update_environment_variables
 from ...utils import has_module_attribute, multi_gpu_test
 from ..backend import TestBackend
 
+# Check if Helion torch.ops are available
+try:
+    from vllm.compilation.helion.allreduce_add_rmsnorm import (
+        AllReduceAddRMSNormHelion,
+    )
+
+    # Check if the op is available - this will be True if Helion is installed and enabled
+    HELION_OP_AVAILABLE = AllReduceAddRMSNormHelion.is_helion_available()
+    # Try to access the torch.ops to verify it's registered
+    if HELION_OP_AVAILABLE:
+        import torch
+
+        _ = torch.ops.my_helion_lib.allreduce_add_rmsnorm  # Will raise if not registered
+except (ImportError, AttributeError):
+    HELION_OP_AVAILABLE = False
+
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6, use_helion=False):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.use_helion = use_helion
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
         self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
 
@@ -71,14 +88,17 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
+        if self.use_helion:
+            return [torch.ops.my_helion_lib.allreduce_add_rmsnorm.default]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6, use_helion=False):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.use_helion = use_helion
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         self.w = [
@@ -123,6 +143,8 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         return y4
 
     def ops_in_model_after(self):
+        if self.use_helion:
+            return [torch.ops.my_helion_lib.allreduce_add_rmsnorm.default]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
     def ops_in_model_before(self):
@@ -135,10 +157,11 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6, use_helion=False):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.use_helion = use_helion  # Not used for FP4 model, but accept for consistency
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
 
         self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
@@ -183,6 +206,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         return y4
 
     def ops_in_model_after(self):
+        # FP4 model always uses FlashInfer (no Helion FP4 variant)
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
     def ops_in_model_before(self):
@@ -194,12 +218,15 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_model, enable_quant_fp8_custom_op",
+    "test_model, enable_quant_fp8_custom_op, use_helion",
     [
-        (TestAllReduceRMSNormModel, False),
-        (TestAllReduceRMSNormStaticQuantFP8Model, True),
-        (TestAllReduceRMSNormStaticQuantFP8Model, False),
-        (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
+        (TestAllReduceRMSNormModel, False, False),
+        (TestAllReduceRMSNormModel, False, True),
+        (TestAllReduceRMSNormStaticQuantFP8Model, True, False),
+        (TestAllReduceRMSNormStaticQuantFP8Model, True, True),
+        (TestAllReduceRMSNormStaticQuantFP8Model, False, False),
+        (TestAllReduceRMSNormStaticQuantFP8Model, False, True),
+        (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False, False),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
@@ -222,6 +249,7 @@ def test_all_reduce_fusion_pass_replace(
     dtype: torch.dtype,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
+    use_helion,
 ):
     num_processes = 2
     if (
@@ -232,6 +260,9 @@ def test_all_reduce_fusion_pass_replace(
             "Skip as nvfp4 is only supported on "
             "devices with compute capability 10.0 (Blackwell)"
         )
+
+    if use_helion and not HELION_OP_AVAILABLE:
+        pytest.skip("Helion CustomOp not available")
 
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(
@@ -245,6 +276,7 @@ def test_all_reduce_fusion_pass_replace(
                 dtype,
                 enable_rms_norm_custom_op,
                 enable_quant_fp8_custom_op,
+                use_helion,
             ),
             nprocs=nprocs,
         )
@@ -262,6 +294,7 @@ def all_reduce_fusion_pass_on_test_model(
     dtype: torch.dtype,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
+    use_helion,
 ):
     current_platform.seed_everything(0)
 
@@ -288,6 +321,9 @@ def all_reduce_fusion_pass_on_test_model(
         custom_ops.append("+rms_norm")
     if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
+    # Enable Helion op if requested
+    if use_helion:
+        custom_ops.append("+allreduce_add_rmsnorm_helion")
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
@@ -317,7 +353,7 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(hidden_size, token_num)
+        model = test_model_cls(hidden_size, token_num, use_helion=use_helion)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 

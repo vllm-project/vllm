@@ -38,6 +38,19 @@ from vllm.platforms import current_platform
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
 
+# Check if Helion torch.ops are available
+try:
+    from vllm.compilation.helion.silu_mul_fp8 import SiluMulFp8Helion
+
+    # Check if the op is available - this will be True if Helion is installed and enabled
+    HELION_OP_AVAILABLE = SiluMulFp8Helion.is_helion_available()
+    # Try to access the torch.ops to verify it's registered
+    if HELION_OP_AVAILABLE:
+        import torch
+        _ = torch.ops.my_helion_lib.silu_mul_fp8  # Will raise if not registered
+except (ImportError, AttributeError):
+    HELION_OP_AVAILABLE = False
+
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
@@ -47,11 +60,18 @@ def is_nvfp4_supported():
 
 
 class TestSiluMulFp8QuantModel(torch.nn.Module):
-    def __init__(self, hidden_size: int, cuda_force_torch: bool, **kwargs):
+    def __init__(
+        self,
+        hidden_size: int,
+        cuda_force_torch: bool,
+        use_helion: bool = False,
+        **kwargs,
+    ):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
         self.wscale = torch.rand(1, dtype=torch.float32)
         self.scale = torch.rand(1, dtype=torch.float32)
+        self.use_helion = use_helion
 
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
@@ -79,6 +99,8 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         ]
 
     def ops_in_model_after(self):
+        if self.use_helion:
+            return [torch.ops.my_helion_lib.silu_mul_fp8]
         return [FUSED_OPS[kFp8StaticTensorSym]]
 
 
@@ -131,9 +153,11 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
 @pytest.mark.parametrize(
-    "model_class, enable_quant_fp8_custom_op, cuda_force_torch",
-    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
-    + [(TestSiluMulNvfp4QuantModel, False, False)],
+    "model_class, enable_quant_fp8_custom_op, cuda_force_torch, use_helion",
+    # Test FP8 model with both Helion and non-Helion
+    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False], [False, True]))
+    # Test NVFP4 model only without Helion (use_helion must be False)
+    + [(TestSiluMulNvfp4QuantModel, False, False, False)],
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
@@ -148,9 +172,13 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     cuda_force_torch: bool,
+    use_helion: bool,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
+
+    if use_helion and not HELION_OP_AVAILABLE:
+        pytest.skip("Helion CustomOp not available")
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -164,6 +192,9 @@ def test_fusion_silu_and_mul_quant(
         custom_ops.append("+silu_and_mul")
     if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
+    # Enable Helion op if requested
+    if use_helion:
+        custom_ops.append("+silu_mul_fp8_helion")
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -178,7 +209,7 @@ def test_fusion_silu_and_mul_quant(
         passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
         backend = TestBackend(*passes)
         model = model_class(
-            hidden_size=hidden_size, cuda_force_torch=cuda_force_torch, x=x
+            hidden_size=hidden_size, cuda_force_torch=cuda_force_torch, x=x, use_helion=use_helion
         )
 
         # First dimension dynamic
