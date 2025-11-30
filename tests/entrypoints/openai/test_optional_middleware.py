@@ -12,10 +12,8 @@ import requests
 
 from ...utils import RemoteOpenAIServer
 
-# Use a small embeddings model for faster startup and smaller memory footprint.
-# Since we are not testing any chat functionality,
-# using a chat capable model is overkill.
-MODEL_NAME = "intfloat/multilingual-e5-small"
+# Use a small model for faster startup and smaller memory footprint.
+MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope="module")
@@ -27,8 +25,6 @@ def server(request: pytest.FixtureRequest):
         passed_params = [passed_params]
 
     args = [
-        "--runner",
-        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
@@ -99,9 +95,14 @@ async def test_not_v1_api_token(server: RemoteOpenAIServer):
 )
 @pytest.mark.asyncio
 async def test_enable_request_id_header(server: RemoteOpenAIServer):
-    response = requests.get(server.url_for("health"))
+    response = requests.post(
+        server.url_for("v1/completions"),
+        json={"model": MODEL_NAME, "prompt": "Hi", "max_tokens": 1},
+    )
     assert "X-Request-Id" in response.headers
-    assert len(response.headers.get("X-Request-Id", "")) == 32
+    request_id = response.headers["X-Request-id"]
+    assert request_id.startswith("cmpl-")
+    assert len(request_id[5:]) == 32
 
 
 @pytest.mark.parametrize(
@@ -111,8 +112,12 @@ async def test_enable_request_id_header(server: RemoteOpenAIServer):
 )
 @pytest.mark.asyncio
 async def test_custom_request_id_header(server: RemoteOpenAIServer):
-    response = requests.get(
-        server.url_for("health"), headers={"X-Request-Id": "Custom"}
+    response = requests.post(
+        server.url_for("v1/completions"),
+        json={"model": MODEL_NAME, "prompt": "Hi", "max_tokens": 1},
+        headers={"X-Request-Id": "Custom"},
     )
     assert "X-Request-Id" in response.headers
-    assert response.headers.get("X-Request-Id") == "Custom"
+    request_id = response.headers["X-Request-id"]
+    assert request_id.startswith("cmpl-")
+    assert "Custom" in request_id

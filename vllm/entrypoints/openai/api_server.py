@@ -12,7 +12,6 @@ import secrets
 import signal
 import socket
 import tempfile
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -71,6 +70,7 @@ from vllm.entrypoints.openai.protocol import (
     PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
+    RequestResponseMetadata,
     RerankRequest,
     RerankResponse,
     ResponsesRequest,
@@ -1434,9 +1434,10 @@ class AuthenticationMiddleware:
 
 class XRequestIdMiddleware:
     """
-    Middleware the set's the X-Request-Id header for each response
-    to a random uuid4 (hex) value if the header isn't already
-    present in the request, otherwise use the provided request id.
+    Middleware the sets the X-Request-Id header for each response
+    to the request ID used internally and included log messages.
+    If the header is present in the request, the provided request
+    ID will be included in this internal request ID.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -1446,18 +1447,23 @@ class XRequestIdMiddleware:
         if scope["type"] not in ("http", "websocket"):
             return self.app(scope, receive, send)
 
-        # Extract the request headers.
-        request_headers = Headers(scope=scope)
-
         async def send_with_request_id(message: Message) -> None:
             """
             Custom send function to mutate the response headers
             and append X-Request-Id to it.
+
+            The internal request_id is obtained from RequestResponseMetadata
+            in scope state.
             """
-            if message["type"] == "http.response.start":
+            if (
+                message["type"] == "http.response.start"
+                and "state" in scope
+                and "request_metadata" in scope["state"]
+            ):
+                metadata = scope["state"]["request_metadata"]
+                assert isinstance(metadata, RequestResponseMetadata)
                 response_headers = MutableHeaders(raw=message["headers"])
-                request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
-                response_headers.append("X-Request-Id", request_id)
+                response_headers.append("X-Request-Id", metadata.request_id)
             await send(message)
 
         return self.app(scope, receive, send_with_request_id)
