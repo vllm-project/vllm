@@ -76,6 +76,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    MIRAGE = "vllm.v1.attention.backends.mirage.MirageBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""
 
