@@ -191,7 +191,7 @@ def test_splitting_ops_dynamic():
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -206,7 +206,7 @@ def test_splitting_ops_dynamic():
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
+                pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 # work around for accessing all attntion ops
@@ -219,7 +219,7 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -227,7 +227,7 @@ def test_splitting_ops_dynamic():
     # With inductor graph partition, attn_fusion and splitting_ops
     # work together. Default splitting_ops include attention ops.
     assert config.compilation_config.splitting_ops_contain_attention()
-    # enable_attn_fusion is directly supported under
+    # fuse_attn_quant is directly supported under
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
@@ -301,7 +301,7 @@ def test_should_split():
         "cudagraph_capture_sizes",
         "max_cudagraph_capture_size",
         "tp_size",
-        "enable_sequence_parallelism",
+        "enable_sp",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
@@ -339,7 +339,7 @@ def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
     max_cudagraph_capture_size,
     tp_size,
-    enable_sequence_parallelism,
+    enable_sp,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
@@ -356,9 +356,10 @@ def test_cudagraph_sizes_post_init(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
             pass_config={
-                "enable_sequence_parallelism": enable_sequence_parallelism,
-                "enable_fusion": True,
-                "enable_noop": True,
+                "enable_sp": enable_sp,
+                "fuse_norm_quant": True,
+                "fuse_act_quant": True,
+                "eliminate_noops": True,
             },
             cudagraph_mode=cudagraph_mode,
         )
