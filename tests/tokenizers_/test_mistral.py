@@ -356,8 +356,8 @@ class TestMistralTokenizer:
         )
         attn_mask = [1 for _ in range(len(token_ids))]
 
-        # Test 1: default
-        assert mistral_tokenizer("Hello world !") == {
+        # Test 1: no special tokens
+        assert mistral_tokenizer("Hello world !", add_special_tokens=False) == {
             "attention_mask": attn_mask[1:],
             "input_ids": token_ids[1:],
         }
@@ -381,7 +381,7 @@ class TestMistralTokenizer:
             "input_ids": token_ids,
         }
         # Test 5: empty string
-        assert mistral_tokenizer("") == {
+        assert mistral_tokenizer("", add_special_tokens=False) == {
             "attention_mask": [],
             "input_ids": [],
         }
