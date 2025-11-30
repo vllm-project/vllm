@@ -2061,7 +2061,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     attn_out,
                     lse,
                     get_dcp_group(),
-                    is_lse_base_on_e=not self._use_fi_prefill,
+                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
                 )
 
             # v_up projection
