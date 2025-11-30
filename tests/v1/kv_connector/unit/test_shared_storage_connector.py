@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import asdict
+from pathlib import Path
 from typing import NamedTuple
 
+import pytest
 from PIL import Image
 
 from vllm import LLM, EngineArgs, SamplingParams
@@ -108,40 +110,42 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         print("-" * 50)
 
 
-def test_shared_storage_connector_hashes(tmp_path):
-    """
-    Tests that SharedStorageConnector saves KV to the storage locations
-    with proper hashes; that are unique for inputs with identical text but
-    different images (same size), or same multiple images but different orders.
-    """
-    # Using tmp_path as the storage path to store KV
-    print(f"KV storage path at: {str(tmp_path)}")
+def build_llm_instance(shared_storage_path: Path):
+    """Create the LLM instance with SharedStorageConnector configuration."""
+    print(f"KV storage path at: {str(shared_storage_path)}")
 
     # Configure the SharedStorageConnector
     kv_transfer_config = KVTransferConfig(
         kv_connector="SharedStorageConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        kv_connector_extra_config={"shared_storage_path": str(shared_storage_path)},
     )
 
     engine_args = EngineArgs(
         model=MODEL_NAME,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=1,
         gpu_memory_utilization=0.4,
-        enforce_eager=True,
+        enforce_eager=False,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
+        hf_overrides={"num_hidden_layers": 4},
     )
 
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoProcessor  # noqa: F401
+    # Create the LLM instance
+    engine_args_dict = asdict(engine_args)
+    return LLM(**engine_args_dict)
 
-    # Create processor to handle the chat prompt
-    processor = AutoProcessor.from_pretrained(MODEL_NAME)
 
-    # Prepare images for the tests
+@pytest.fixture(scope="function")
+def shared_storage_path(tmp_path_factory):
+    """Create a shared storage path for all tests in this session."""
+    return tmp_path_factory.mktemp("kv_storage")
+
+
+@pytest.fixture(scope="session")
+def test_images():
+    """Prepare images for the tests."""
     # Resize to the same size to check hashes correctness
     image_1 = ImageAsset("stop_sign").pil_image.resize((1280, 720))
     image_2 = ImageAsset("cherry_blossom").pil_image.resize((1280, 720))
@@ -149,12 +153,26 @@ def test_shared_storage_connector_hashes(tmp_path):
     # Make sure that they are not the same picture
     assert image_1 != image_2, "The images should not be identical"
 
-    # Create the LLM instance
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    return {"image_1": image_1, "image_2": image_2}
 
-    # Prepare the input cases
-    input_cases = [
+
+@pytest.fixture(scope="session")
+def processor():
+    """Create processor to handle the chat prompt."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoProcessor  # noqa: F401
+
+    return AutoProcessor.from_pretrained(MODEL_NAME)
+
+
+@pytest.fixture(scope="session")
+def input_cases(test_images):
+    """Prepare the input cases for testing."""
+    image_1 = test_images["image_1"]
+    image_2 = test_images["image_2"]
+
+    return [
         InputCase(
             text=TEXT_PROMPTS[0],
             img=[image_1],
@@ -239,9 +257,30 @@ def test_shared_storage_connector_hashes(tmp_path):
         ),
     ]
 
-    # Run tests
+
+def test_shared_storage_connector_hashes(
+    shared_storage_path,
+    processor,
+    input_cases,
+):
+    """
+    Tests that SharedStorageConnector saves KV to the storage locations
+    with proper hashes; that are unique for inputs with identical text but
+    different images (same size), or same multiple images but different orders.
+
+    Note: These tests are stateful and must run in order (case_id 0 to 10).
+    Each test depends on the cumulative state from previous tests.
+    """
+    llm_instance = build_llm_instance(shared_storage_path=shared_storage_path)
+
     for case_id, (text, img, expected_len, info) in enumerate(input_cases):
         print("\n", "=" * 25, f"Below running input case: {case_id}", "=" * 25)
-        run_test(tmp_path, processor, llm, text, img, expected_len, info)
-
-    print("All tests passed successfully!")
+        run_test(
+            shared_storage_path,
+            processor,
+            llm_instance,
+            text,
+            img,
+            expected_len,
+            info,
+        )
