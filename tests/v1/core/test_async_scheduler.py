@@ -38,11 +38,11 @@ def test_stop_by_max_tokens(max_tokens: int):
     sched_outputs: deque[SchedulerOutput] = deque()
     scheduler.add_request(req0)
     sched_outputs.append(scheduler.schedule())
-    expected_total_num_scheduled_tokens += req0.num_prompt_tokens + max_tokens - 1
+    expected_total_num_scheduled_tokens += req0.num_prompt_tokens + max_tokens
 
     scheduler.add_request(req1)
     sched_outputs.append(scheduler.schedule())
-    expected_total_num_scheduled_tokens += req1.num_prompt_tokens + max_tokens - 1
+    expected_total_num_scheduled_tokens += req1.num_prompt_tokens + max_tokens
 
     total_num_scheduled_tokens = 0
     while sched_outputs:
