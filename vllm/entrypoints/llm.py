@@ -72,7 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter

@@ -17,20 +17,26 @@ class TestTokenizer(TokenizerLike):
     def eos_token_id(self) -> int:
         return 1
 
+    @property
+    def pad_token_id(self) -> int:
+        return 2
+
+    @property
+    def is_fast(self) -> bool:
+        return True
+
 
 def test_customized_tokenizer():
-    TokenizerRegistry.register(
-        "test_tokenizer",
-        __name__,
-        TestTokenizer.__name__,
-    )
+    TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 
     tokenizer = TokenizerRegistry.get_tokenizer("test_tokenizer")
     assert isinstance(tokenizer, TestTokenizer)
     assert tokenizer.bos_token_id == 0
     assert tokenizer.eos_token_id == 1
+    assert tokenizer.pad_token_id == 2
 
     tokenizer = get_tokenizer("test_tokenizer", tokenizer_mode="custom")
     assert isinstance(tokenizer, TestTokenizer)
     assert tokenizer.bos_token_id == 0
     assert tokenizer.eos_token_id == 1
+    assert tokenizer.pad_token_id == 2
