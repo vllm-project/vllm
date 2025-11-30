@@ -31,7 +31,6 @@ class Mamba1AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    num_padded_decodes: int
 
     block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor  # shape: [batch,]
@@ -68,7 +67,6 @@ class Mamba1AttentionMetadataBuilder(
 
         has_initial_states_p = None
         query_start_loc_p = None
-        padded_decodes = num_decodes
         num_computed_tokens, num_computed_tokens_p = None, None
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
@@ -157,7 +155,6 @@ class Mamba1AttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_padded_decodes=padded_decodes,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
