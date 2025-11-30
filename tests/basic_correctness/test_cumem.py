@@ -246,11 +246,10 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-def test_deep_sleep_fp8():
+def test_deep_sleep_fp8_kvcache():
     GiB_bytes = 1 << 30
     model = "Qwen/Qwen2-0.5B"
-    free, total = torch.cuda.mem_get_info()
-    used_bytes_baseline = total - free
+    used_bytes_baseline = current_platform.get_current_memory_usage()
 
     llm = LLM(model, enable_sleep_mode=True, kv_cache_dtype="fp8")
     prompt = "How are you?"
@@ -260,14 +259,13 @@ def test_deep_sleep_fp8():
     # Put the engine to deep sleep
     llm.sleep(level=2)
 
-    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
-    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
     assert used_bytes < 3 * GiB_bytes
 
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
-    free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
-    used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
+
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
     assert used_bytes < 4 * GiB_bytes
 
     # now allocate kv cache and cuda graph memory
