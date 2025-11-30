@@ -30,7 +30,14 @@ async def lifespan(app: FastAPI):
         prefiller_base_url = f"http://{host}:{port}/v1"
         app.state.prefill_clients.append(
             {
-                "client": httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+                "client": httpx.AsyncClient(
+                    timeout=None,
+                    base_url=prefiller_base_url,
+                    limits=httpx.Limits(
+                        max_connections=None,
+                        max_keepalive_connections=None,
+                    ),
+                ),
                 "host": host,
                 "port": port,
                 "id": i,
@@ -42,7 +49,14 @@ async def lifespan(app: FastAPI):
         decoder_base_url = f"http://{host}:{port}/v1"
         app.state.decode_clients.append(
             {
-                "client": httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+                "client": httpx.AsyncClient(
+                    timeout=None,
+                    base_url=decoder_base_url,
+                    limits=httpx.Limits(
+                        max_connections=None,
+                        max_keepalive_connections=None,
+                    ),
+                ),
                 "host": host,
                 "port": port,
                 "id": i,
@@ -169,6 +183,10 @@ async def send_request_to_service(
     )
     response.raise_for_status()
 
+    # read/consume the response body to release the connection
+    # otherwise, it would http.ReadError
+    await response.aread()
+
     return response
 
 
@@ -206,6 +224,7 @@ async def _handle_completions(api: str, request: Request):
 
         # Extract the needed fields
         response_json = response.json()
+        await response.aclose()  # CRITICAL: Release connection back to pool
         kv_transfer_params = response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
