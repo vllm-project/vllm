@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
     if tool_name not in TOOL_NAME_TO_TYPE_MAP:
         available_tools = ", ".join(TOOL_NAME_TO_TYPE_MAP.keys())
