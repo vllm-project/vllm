@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-
+from vllm.distributed import cpx_model_parallel_all_gather, get_starscream_parallel_world_size
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -56,6 +56,14 @@ def find_seq_idx(
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
+    starscream_meta_out_ptr,
+    cpx_size,
+    enable_starscream,
+    ss_meta_stride_0,
+    ss_meta_stride_1,
+    ss_meta_stride_2,
+    slice_idx,
+    starscream_rank,
     query_ptr,  # [num_tokens, num_query_heads, head_size]
     key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
     value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
@@ -179,12 +187,26 @@ def kernel_unified_attention_2d(
 
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
+    if (cur_batch_query_len == 1) or (not enable_starscream):
+        slice_idx = 0
+
+    q_block_local_idx_adjusted = q_block_local_idx - (slice_idx // BLOCK_Q)
+
     max_seq_prefix_len = (
         context_len
-        + q_block_local_idx * BLOCK_Q
+        + q_block_local_idx_adjusted * BLOCK_Q
         + (BLOCK_M - 1) // num_queries_per_kv
         + 1
     )
+
+    if enable_starscream:
+        if (q_block_local_idx_adjusted < 0):
+            max_seq_prefix_len = 0
+
+        base_ctx = seq_len // cpx_size
+        remainder_ctx = seq_len % cpx_size
+        seq_len = base_ctx + (starscream_rank < remainder_ctx)
+        context_len = tl.where(context_len == 0, context_len, seq_len - cur_batch_query_len)
 
     # adjust for potential padding in the last q_block by considering the
     # actual sequence length
@@ -270,7 +292,10 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1 - slice_idx
+        if enable_starscream:
+            seq_mask2 = seq_offset[None, :] < max_seq_prefix_len
+            seq_mask = seq_mask & seq_mask2
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -333,8 +358,19 @@ def kernel_unified_attention_2d(
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         acc += tl.dot(P.to(V.dtype), V)
 
-    # epilogue
-    acc = acc / L[:, None]
+    if enable_starscream:
+        ss_batch_offset = ( query_offset_0[:, None] * ss_meta_stride_0 + query_offset_1[:, None] * ss_meta_stride_1)
+        ss_output_offset = ss_batch_offset + offs_d[None, :]
+        ss_exp_sum_offset = ss_batch_offset + HEAD_SIZE_PADDED
+        ss_max_logit_offset = ss_batch_offset + HEAD_SIZE_PADDED + 1
+
+        tl.store(starscream_meta_out_ptr + ss_output_offset, acc, mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None])
+        tl.store(starscream_meta_out_ptr + ss_exp_sum_offset, L[:, None], mask=query_mask_0[:, None] & query_mask_1[:, None])
+        tl.store(starscream_meta_out_ptr + ss_max_logit_offset, M[:, None], mask=query_mask_0[:, None] & query_mask_1[:, None])
+    else:
+        # epilogue
+        acc = acc / L[:, None]
+
     if USE_FP8:
         acc = acc * tl.load(out_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
@@ -358,6 +394,9 @@ def kernel_unified_attention_3d(
     # [num_tokens, num_query_heads, num_segments, head_size]
     segm_max_ptr,  # [num_tokens, num_query_heads, num_segments]
     segm_expsum_ptr,  # [num_tokens, num_query_heads, num_segments]
+    starscream_rank,
+    cpx_size,
+    enable_starscream,
     query_ptr,  # [num_tokens, num_query_heads, head_size]
     key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
     value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
@@ -421,6 +460,10 @@ def kernel_unified_attention_3d(
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if enable_starscream:
+        base_ctx = seq_len // cpx_size
+        remainder_ctx = seq_len % cpx_size
+        seq_len = base_ctx + (starscream_rank < remainder_ctx)
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
@@ -645,12 +688,20 @@ def kernel_unified_attention_3d(
 @triton.jit
 def reduce_segments(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
+    starscream_meta_out_ptr,
+    ss_meta_stride_0,
+    ss_meta_stride_1,
+    ss_meta_stride_2,
+    starscream_rank,
+    cpx_size,
+    enable_starscream,
     segm_output_ptr,
     # [num_tokens, num_query_heads, max_num_segments, head_size]
     segm_max_ptr,  # [num_tokens, num_query_heads, max_num_segments]
     segm_expsum_ptr,  # [num_tokens, num_query_heads, max_num_segments]
     seq_lens_ptr,  # [num_seqs]
     num_seqs,  # int
+    starscream_flag, # bool
     num_query_heads: tl.constexpr,  # int
     out_scale_inv,  # float32
     output_stride_0: tl.int64,  # int
@@ -675,49 +726,106 @@ def reduce_segments(
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if (enable_starscream):
+        base_ctx = seq_len // cpx_size
+        remainder_ctx = seq_len % cpx_size
+        seq_len = base_ctx + (starscream_rank < remainder_ctx)
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
     tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    if not starscream_flag:
+        act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    else:
+        act_num_segments = NUM_SEGMENTS_PER_SEQ
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
     dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
 
-    # load segment maxima
-    segm_offset = (
-        query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-        + query_head_idx * NUM_SEGMENTS_PER_SEQ
-        + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
-    )
-    segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
-    overall_max = tl.max(segm_max)
+    if not starscream_flag:
+        # load segment maxima
+        segm_offset = (query_token_idx.to(tl.int64) *
+                       (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
+                       query_head_idx * NUM_SEGMENTS_PER_SEQ +
+                       tl.arange(0, NUM_SEGMENTS_PER_SEQ))
+        segm_max = tl.load(segm_max_ptr + segm_offset,
+                           mask=segm_mask,
+                           other=float("-inf"))
 
-    # load and rescale segment exp sums
-    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
+        # load and rescale segment exp sums
+        segm_expsum = tl.load(segm_expsum_ptr + segm_offset,
+                              mask=segm_mask,
+                              other=0.0)
+        segm_output_offset = (query_token_idx.to(tl.int64) * 
+                              (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) + 
+                              query_head_idx * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) + 
+                              tl.arange(0, NUM_SEGMENTS_PER_SEQ)[:, None] * HEAD_SIZE_PADDED + 
+                              tl.arange(0, HEAD_SIZE_PADDED)[None, :])
+
+        segm_output = tl.load(segm_output_ptr + segm_output_offset, mask=segm_mask[:, None] & dim_mask[None, :], other=0.0)
+
+    else: 
+        HEAD_SIZE_EXTENDED = HEAD_SIZE_PADDED + 2 
+
+        base_offset = (query_token_idx.to(tl.int64) * 
+                       (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_EXTENDED) + 
+                       query_head_idx * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_EXTENDED) + 
+                       tl.arange(0, NUM_SEGMENTS_PER_SEQ) * HEAD_SIZE_EXTENDED) 
+        segm_output_ptr_local = segm_output_ptr + base_offset[:, None] + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
+        segm_exp_ptr_local    = segm_output_ptr + base_offset + HEAD_SIZE_PADDED
+        segm_logit_ptr_local  = segm_output_ptr + base_offset + HEAD_SIZE_PADDED + 1
+
+        segm_output = tl.load(segm_output_ptr_local, mask=segm_mask[:, None] & dim_mask[None, :], other=0.0)
+
+        segm_expsum = tl.load(segm_exp_ptr_local, mask=segm_mask, other=0.0)
+
+        segm_max = tl.load(segm_logit_ptr_local, mask=segm_mask, other=float("-inf"))
+
+    overall_max = tl.max(segm_max)
     segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
     overall_expsum = tl.sum(segm_expsum)
 
-    # load, rescale, and add segment attention outputs
-    segm_output_offset = (
-        query_token_idx.to(tl.int64)
-        * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + query_head_idx * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + tl.arange(0, NUM_SEGMENTS_PER_SEQ)[:, None] * HEAD_SIZE_PADDED
-        + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
-    )
-    segm_output = tl.load(
-        segm_output_ptr + segm_output_offset,
-        mask=segm_mask[:, None] & dim_mask[None, :],
-        other=0.0,
-    )
     segm_output *= tl.exp(segm_max - overall_max)[:, None]
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
-    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
+    if (not starscream_flag) and enable_starscream:
+        acc = acc_sum
+
+        ss_output_offset = (query_token_idx * ss_meta_stride_0 +
+                         query_head_idx * ss_meta_stride_1 +
+                         0 * ss_meta_stride_2 +
+                         tl.arange(0, HEAD_SIZE_PADDED))
+        tl.store(starscream_meta_out_ptr + ss_output_offset, acc, mask=dim_mask)
+
+        ss_exp_sum_offset = (query_token_idx * ss_meta_stride_0 +
+                         query_head_idx * ss_meta_stride_1 +
+                         0 * ss_meta_stride_2 +
+                         HEAD_SIZE_PADDED)
+        tl.store(starscream_meta_out_ptr + ss_exp_sum_offset, overall_expsum)
+
+        ss_max_logit_offset = (query_token_idx * ss_meta_stride_0 +
+                         query_head_idx * ss_meta_stride_1 +
+                         0 * ss_meta_stride_2 +
+                         HEAD_SIZE_PADDED + 1)
+        tl.store(starscream_meta_out_ptr + ss_max_logit_offset, overall_max)
+
+    else:
+        acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
+
+    if enable_starscream and starscream_flag:
+        chunk_size = num_query_heads // cpx_size
+        chunk_start = starscream_rank * chunk_size
+        chunk_end = chunk_start + chunk_size
+        in_rank_mask = (query_head_idx >= chunk_start) & (query_head_idx < chunk_end)
+        local_head_idx = query_head_idx - chunk_start
+        output_mask = (dim_mask & in_rank_mask)
+        q_head_idx = local_head_idx
+    else:
+        output_mask = dim_mask
+        q_head_idx = query_head_idx
 
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
@@ -726,10 +834,10 @@ def reduce_segments(
     # write result
     output_offset = (
         query_token_idx * output_stride_0
-        + query_head_idx * output_stride_1
+        + q_head_idx * output_stride_1
         + tl.arange(0, HEAD_SIZE_PADDED)
     )
-    tl.store(output_ptr + output_offset, acc, mask=dim_mask)
+    tl.store(output_ptr + output_offset, acc, mask=output_mask)
 
 
 def unified_attention(
@@ -737,6 +845,8 @@ def unified_attention(
     k,
     v,
     out,
+    slice_idx,
+    starscream_rank,
     cu_seqlens_q,
     max_seqlen_q,
     seqused_k,
@@ -754,6 +864,8 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
+    cpx_size=1,
+    enable_starscream=False,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -771,10 +883,35 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
+    xcd_exp_sum = torch.empty( q.shape[0], num_query_heads, dtype=torch.float32, device=q.device,)
+    xcd_max_logit = torch.empty(q.shape[0], num_query_heads, dtype=torch.float32, device=q.device,)
+
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
     BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    if enable_starscream:
+        outd = torch.empty(
+            q.shape[0],
+            num_query_heads,
+            triton.next_power_of_2(head_size),
+            #out.shape[2],
+            dtype=torch.float32,
+            #dtype=out.dtype,
+            device=q.device,
+        )
+    else:
+        outd = out
+
+    starscream_meta_out = torch.empty(
+        q.shape[0],
+        num_query_heads,
+        1,
+        triton.next_power_of_2(head_size) + 2,
+        dtype=torch.float32,
+        device=q.device,
+    )
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -801,7 +938,15 @@ def unified_attention(
                 num_kv_heads,
             )
         ](
-            output_ptr=out,
+            output_ptr=outd,
+            starscream_meta_out_ptr=starscream_meta_out,
+            cpx_size=cpx_size,
+            enable_starscream=enable_starscream,
+            ss_meta_stride_0=starscream_meta_out.stride(0),
+            ss_meta_stride_1=starscream_meta_out.stride(1),
+            ss_meta_stride_2=starscream_meta_out.stride(2),
+            slice_idx=slice_idx,
+            starscream_rank=starscream_rank,
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
@@ -820,8 +965,8 @@ def unified_attention(
             block_table_stride=block_table.stride(0),
             query_stride_0=q.stride(0),
             query_stride_1=q.stride(1),
-            output_stride_0=out.stride(0),
-            output_stride_1=out.stride(1),
+            output_stride_0=outd.stride(0),
+            output_stride_1=outd.stride(1),
             qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
             BLOCK_SIZE=block_size,
             TILE_SIZE=TILE_SIZE_PREFILL,
@@ -874,10 +1019,15 @@ def unified_attention(
             device=q.device,
         )
 
+        starscream_flag = False
+
         kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)](
             segm_output_ptr=segm_output,
             segm_max_ptr=segm_max,
             segm_expsum_ptr=segm_expsum,
+            starscream_rank=starscream_rank,
+            cpx_size=cpx_size,
+            enable_starscream=enable_starscream,
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
@@ -920,12 +1070,53 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
-            output_ptr=out,
+            output_ptr=outd,
+            starscream_meta_out_ptr=starscream_meta_out,
+            ss_meta_stride_0=starscream_meta_out.stride(0),
+            ss_meta_stride_1=starscream_meta_out.stride(1),
+            ss_meta_stride_2=starscream_meta_out.stride(2),
+            starscream_rank=starscream_rank,
+            cpx_size=cpx_size,
+            enable_starscream=enable_starscream,
             segm_output_ptr=segm_output,
             segm_max_ptr=segm_max,
             segm_expsum_ptr=segm_expsum,
             seq_lens_ptr=seqused_k,
             num_seqs=num_seqs,
+            starscream_flag=starscream_flag,
+            num_query_heads=num_query_heads,
+            out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
+            output_stride_0=outd.stride(0),
+            output_stride_1=outd.stride(1),
+            block_table_stride=block_table.stride(0),
+            TILE_SIZE=TILE_SIZE_DECODE,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=BLOCK_Q,
+            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            USE_FP8=output_scale is not None,
+        )
+
+    if cpx_size > 1 and enable_starscream:
+        starscream_metadata = cpx_model_parallel_all_gather(starscream_meta_out.contiguous(), dim=-2).contiguous()
+        starscream_flag = True
+
+        reduce_segments[(q.shape[0], num_query_heads)](
+            output_ptr=out,
+            starscream_meta_out_ptr=starscream_meta_out,
+            ss_meta_stride_0=starscream_meta_out.stride(0),
+            ss_meta_stride_1=starscream_meta_out.stride(1),
+            ss_meta_stride_2=starscream_meta_out.stride(2),
+            starscream_rank=starscream_rank,
+            cpx_size=cpx_size,
+            enable_starscream=enable_starscream,
+            segm_output_ptr=starscream_metadata,
+            segm_max_ptr=xcd_max_logit,
+            segm_expsum_ptr=xcd_exp_sum,
+            seq_lens_ptr=seqused_k,
+            num_seqs=num_seqs,
+            starscream_flag=starscream_flag,
             num_query_heads=num_query_heads,
             out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
             output_stride_0=out.stride(0),
@@ -936,6 +1127,6 @@ def unified_attention(
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            NUM_SEGMENTS_PER_SEQ=cpx_size,
             USE_FP8=output_scale is not None,
         )
