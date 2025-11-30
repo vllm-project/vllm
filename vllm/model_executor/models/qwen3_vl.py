@@ -79,6 +79,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    PlaceholderRange,
     VideoItem,
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
@@ -1577,6 +1578,20 @@ class Qwen3VLForConditionalGeneration(
     def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int]]:
+        """
+        Iterate over multimodal features and yield grid information.
+
+        For videos with EVS (Efficient Video Sampling) enabled, this function
+        computes the offset based on the pruned token count rather than relying
+        on input_tokens.index(), which would fail when tokens are pruned.
+
+        Args:
+            input_tokens: List of token IDs in the prompt
+            mm_features: List of multimodal feature specifications
+
+        Yields:
+            Tuple of (offset, grid_h, grid_w) for each frame/image
+        """
         video_token_id = self.config.video_token_id
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
@@ -1589,12 +1604,84 @@ class Qwen3VLForConditionalGeneration(
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
-                for _ in range(t):
-                    offset = input_tokens.index(video_token_id, offset)
-                    yield offset, llm_grid_h, llm_grid_w
-                    offset += llm_grid_h * llm_grid_w
+
+                # Check if EVS (Efficient Video Sampling) is enabled
+                is_evs_enabled = (
+                    hasattr(self, 'video_pruning_rate')
+                    and self.video_pruning_rate is not None
+                    and self.video_pruning_rate > 0.0
+                )
+
+                if is_evs_enabled:
+                    frame_offsets = self._extract_frame_offsets_from_mask(
+                        mm_feature.mm_position, t
+                    )
+                    if frame_offsets is not None:
+                        for rel_offset in frame_offsets:
+                            yield offset + rel_offset, llm_grid_h, llm_grid_w
+                        continue
+
+                    # Fallback: distribute offsets uniformly when mask is missing
+                    tokens_per_frame_original = llm_grid_h * llm_grid_w
+                    total_retained_tokens = compute_retained_tokens_count(
+                        tokens_per_frame_original,
+                        t,
+                        self.video_pruning_rate
+                    )
+                    tokens_per_frame = (
+                        total_retained_tokens // t if t > 0 else tokens_per_frame_original
+                    )
+                    for _ in range(t):
+                        yield offset, llm_grid_h, llm_grid_w
+                        offset += tokens_per_frame
+                else:
+                    # Non-EVS mode: Use original logic with input_tokens.index()
+                    for _ in range(t):
+                        offset = input_tokens.index(video_token_id, offset)
+                        yield offset, llm_grid_h, llm_grid_w
+                        offset += llm_grid_h * llm_grid_w
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
+    def _extract_frame_offsets_from_mask(
+        self, mm_position: PlaceholderRange, expected_frames: int
+    ) -> list[int] | None:
+        """Return relative offsets for each EVS-retained frame.
+
+        The prompt processor stores a boolean mask inside ``mm_position`` that
+        marks which placeholder locations should be populated with video
+        embeddings. By splitting that mask into contiguous runs we can recover
+        the start of every retained frame without probing ``input_tokens``.
+        """
+
+        is_embed_mask = getattr(mm_position, "is_embed", None)
+        if is_embed_mask is None:
+            return None
+
+        mask_tensor = torch.as_tensor(is_embed_mask, dtype=torch.bool).view(-1)
+        true_indices = torch.nonzero(mask_tensor, as_tuple=False).flatten()
+        if true_indices.numel() == 0:
+            return None
+
+        if true_indices.numel() == 1:
+            segments = [true_indices]
+        else:
+            diffs = torch.diff(true_indices)
+            split_points = torch.nonzero(diffs != 1, as_tuple=False).flatten()
+            if split_points.numel() == 0:
+                segments = [true_indices]
+            else:
+                segments = torch.tensor_split(true_indices, split_points.add(1).tolist())
+
+        if len(segments) < expected_frames:
+            logger.debug(
+                "EVS mask segments (%d) do not match total frames (%d)",
+                len(segments),
+                expected_frames,
+            )
+            return None
+
+        return [int(segment[0].item()) for segment in segments[:expected_frames]]
 
     def recompute_mrope_positions(
         self,
