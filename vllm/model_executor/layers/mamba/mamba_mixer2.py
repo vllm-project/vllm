@@ -910,10 +910,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
-            has_spec_decode = (
-                spec_sequence_masks is not None and spec_sequence_masks.any()
-            )  # should be revisit towards cuda graph support
-
             # Prepare SSM parameters (shared by all decode paths)
             n_groups = self.n_groups // self.tp_size
             A_d = (
@@ -924,71 +920,54 @@ class MambaMixer2(MambaBase, CustomOp):
             dt_bias_expanded = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
 
-            if has_spec_decode:
-                if num_spec_decode_tokens > 0:
-                    if num_spec_decodes > 1:
-                        max_spec_len = int(
-                            (spec_query_start_loc[1:] - spec_query_start_loc[:-1])
-                            .max()
-                            .item()
-                        )
-                    else:
-                        max_spec_len = int(spec_query_start_loc[-1].item())
-                    # 2a. Convolution with spec decode support
+            if num_spec_decode_tokens > 0:
+                # 2a. Convolution with spec decode support
+                hidden_states_B_C_d_spec = causal_conv1d_update(
+                    hidden_states_B_C_d_spec,
+                    conv_state,
+                    self.conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=spec_state_indices_tensor[:, 0][
+                        :num_spec_decodes
+                    ],
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc,
+                    max_query_len=spec_state_indices_tensor.size(-1),
+                    validate_data=False,
+                )
 
-                    hidden_states_B_C_d_spec = causal_conv1d_update(
-                        hidden_states_B_C_d_spec,
-                        conv_state,
-                        self.conv_weights,
-                        self.conv1d.bias,
-                        self.activation,
-                        conv_state_indices=spec_state_indices_tensor[:, 0][
-                            :num_spec_decodes
-                        ],
-                        num_accepted_tokens=num_accepted_tokens,
-                        query_start_loc=spec_query_start_loc,
-                        max_query_len=max_spec_len,
-                        validate_data=False,
-                    )
+                hidden_states_d_spec, B_d_spec, C_d_spec = (
+                    self.split_hidden_states_B_C_fn(hidden_states_B_C_d_spec)
+                )
 
-                    hidden_states_d_spec, B_d_spec, C_d_spec = (
-                        self.split_hidden_states_B_C_fn(hidden_states_B_C_d_spec)
-                    )
+                # 3a. SSM with spec decode support
+                dt_d_spec = dt_d_spec[:, :, None].expand(-1, -1, self.head_dim)
+                B_d_spec = B_d_spec.view(-1, n_groups, B_d_spec.shape[1] // n_groups)
+                C_d_spec = C_d_spec.view(-1, n_groups, C_d_spec.shape[1] // n_groups)
+                hidden_states_d_spec = hidden_states_d_spec.view(
+                    -1, self.num_heads // self.tp_size, self.head_dim
+                )
 
-                    # 3a. SSM with spec decode support
-                    dt_d_spec = dt_d_spec[:, :, None].expand(-1, -1, self.head_dim)
-                    B_d_spec = B_d_spec.view(
-                        -1, n_groups, B_d_spec.shape[1] // n_groups
-                    )
-                    C_d_spec = C_d_spec.view(
-                        -1, n_groups, C_d_spec.shape[1] // n_groups
-                    )
-                    hidden_states_d_spec = hidden_states_d_spec.view(
-                        -1, self.num_heads // self.tp_size, self.head_dim
-                    )
-                    tokens_per_seq = num_spec_decode_tokens // num_spec_decodes
-
-                    selective_state_update(
-                        ssm_state,
-                        hidden_states_d_spec,
-                        dt_d_spec,
-                        A_d,
-                        B_d_spec,
-                        C_d_spec,
-                        D_d,
-                        z=None,
-                        dt_bias=dt_bias_expanded,
-                        dt_softplus=True,
-                        state_batch_indices=spec_state_indices_tensor[
-                            :num_spec_decodes, :max_spec_len
-                        ],
-                        out=preallocated_ssm_out_d_spec.view(
-                            num_spec_decode_tokens, -1, self.head_dim
-                        ),
-                        inplace_final_state=True,
-                        num_accepted_tokens=num_accepted_tokens,
-                        cu_seqlens=spec_query_start_loc,
-                    )
+                selective_state_update(
+                    ssm_state,
+                    hidden_states_d_spec,
+                    dt_d_spec,
+                    A_d,
+                    B_d_spec,
+                    C_d_spec,
+                    D_d,
+                    z=None,
+                    dt_bias=dt_bias_expanded,
+                    dt_softplus=True,
+                    state_batch_indices=spec_state_indices_tensor,
+                    out=preallocated_ssm_out_d_spec.view(
+                        num_spec_decode_tokens, -1, self.head_dim
+                    ),
+                    inplace_final_state=True,
+                    num_accepted_tokens=num_accepted_tokens,
+                    cu_seqlens=spec_query_start_loc,
+                )
 
             if num_non_spec_decode_tokens > 0:
                 hidden_states_B_C_d = causal_conv1d_update(
