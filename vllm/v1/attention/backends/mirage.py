@@ -300,8 +300,8 @@ class MirageAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        return output
+        else:
+            raise NotImplementedError("MirageAttentionImpl is never meant to be used directly.")
 
 
 @triton.jit

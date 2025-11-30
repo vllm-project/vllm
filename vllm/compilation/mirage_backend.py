@@ -293,15 +293,7 @@ class MirageBackend:
         def compile_or_call(*args):
             dumb_run_called = (get_forward_context().attn_metadata is None)
             if dumb_run_called:
-                model_config = self.vllm_config.model_config
-                dtype = model_config.dtype
-                hidden_size = model_config.get_hidden_size()
-                # # TODO(Jianan Ji): We'll want to run graph(*args) instead of doing nothing
-                output_tensor = torch.zeros(2, hidden_size, device='cuda', dtype=dtype)
-                # logger.info(f"[Mirage] Calling dumb_run_called, returning dummy output tensor with shape [{output_tensor.shape}]......!")
-
-                return (output_tensor,)
-                # return graph(*args)
+                return graph(*args)
             
             if not self.compiled:
                 # Compile only at the first call -- when we get real tensors
@@ -318,7 +310,8 @@ class MirageBackend:
                 
                 self.compiled = True
                 
-            result_hidden_states = self.mpk()
+            default_stream = torch.cuda.current_stream()
+            result_hidden_states = self.mpk(default_stream = default_stream)
             
             return (result_hidden_states,)
         
