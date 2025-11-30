@@ -175,6 +175,7 @@ class MLPBlock(torch.nn.Module):
             has_bias=True,
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
+            is_weights_interleaved=True,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
