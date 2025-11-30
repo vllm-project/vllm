@@ -702,7 +702,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             return
 
         logger.info(
-            f"Padding intermediate size from {intermediate} to {padded_intermediate} for up/down projection weights."
+            "Padding intermediate size from %d to %d for up/down projection weights.",
+            intermediate,
+            padded_intermediate,
         )
 
         up_mult = 2 if self.moe.is_act_and_mul else 1
