@@ -650,6 +650,13 @@ class Platform:
         """
         return max_model_len
 
+    @classmethod
+    def has_optimized_grouped_topk(cls) -> bool:
+        """
+        Return if current platform has optimized grouped_topk op.
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

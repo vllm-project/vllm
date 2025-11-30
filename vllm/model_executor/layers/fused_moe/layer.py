@@ -1575,7 +1575,9 @@ class FusedMoE(CustomOp):
         elif self.use_grouped_topk:
             assert self.topk_group is not None
             assert self.num_expert_group is not None
-            if rocm_aiter_ops.is_fused_moe_enabled():
+            if current_platform.has_optimized_grouped_topk():
+                grouped_topk_impl = current_platform.grouped_topk
+            elif rocm_aiter_ops.is_fused_moe_enabled():
                 if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                     assert self.num_fused_shared_experts == 0
                 grouped_topk_impl = partial(
