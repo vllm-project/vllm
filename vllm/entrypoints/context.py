@@ -17,6 +17,9 @@ from vllm.entrypoints.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.openai.protocol import (
+    ResponseRawMessageAndToken,
+)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -137,6 +140,8 @@ def _create_json_parse_error_messages(
 
 
 class SimpleContext(ConversationContext):
+    """This is a context that cannot handle MCP tool calls"""
+
     def __init__(self):
         self.last_output = None
         self.num_prompt_tokens = 0
@@ -147,6 +152,9 @@ class SimpleContext(ConversationContext):
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
+        self.input_messages: list[ResponseRawMessageAndToken] = []
+        self.output_messages: list[ResponseRawMessageAndToken] = []
+
     def append_output(self, output) -> None:
         self.last_output = output
         if not isinstance(output, RequestOutput):
@@ -154,6 +162,22 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+
+        if len(self.input_messages) == 0:
+            output_prompt = output.prompt or ""
+            output_prompt_token_ids = output.prompt_token_ids or []
+            self.input_messages.append(
+                ResponseRawMessageAndToken(
+                    message=output_prompt,
+                    tokens=output_prompt_token_ids,
+                )
+            )
+        self.output_messages.append(
+            ResponseRawMessageAndToken(
+                message=output.outputs[0].text,
+                tokens=output.outputs[0].token_ids,
+            )
+        )
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")
