@@ -6,7 +6,8 @@ from copy import deepcopy
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_cached_tokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 
 
 @pytest.mark.parametrize("model_id", ["gpt2", "zai-org/chatglm3-6b"])
@@ -25,7 +26,7 @@ def test_cached_tokenizer(model_id: str):
     _check_consistency(unpickled_tokenizer, reference_tokenizer)
 
 
-def _check_consistency(target: AnyTokenizer, expected: AnyTokenizer):
+def _check_consistency(target: TokenizerLike, expected: TokenizerLike):
     assert isinstance(target, type(expected))
 
     # Cached attributes

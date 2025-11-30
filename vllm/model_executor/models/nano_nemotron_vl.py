@@ -73,9 +73,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
     cached_tokenizer_from_config,
     encode_tokens,
 )
@@ -284,7 +284,7 @@ class BaseNanoNemotronVLProcessor(ABC):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *args,
         max_num_tiles: int | None = None,
         **kwargs,
@@ -434,7 +434,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *,
         max_num_tiles: int | None = None,
         min_dynamic_patch: int | None = None,
@@ -645,7 +645,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         tokens_per_frame: list[int],
         frames_indices: list[int],
         frame_duration_ms: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         img_start_token_ids: list[int],
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
@@ -670,7 +670,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             tokens_per_frame (list[int]): number of tokens per frame
             frames_indices (list[int]): frame indices
             frame_duration_ms (int): duration of each frame in milliseconds
-            tokenizer (AnyTokenizer): tokenizer to use for tokenizing frame separators
+            tokenizer (TokenizerLike): tokenizer to use for tokenizing frame separators
             img_start_token_ids (list[int]): pre-tokenized IMG_START tokens
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
