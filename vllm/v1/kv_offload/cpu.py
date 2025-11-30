@@ -27,6 +27,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "num_cpu_blocks must be specified in kv_connector_extra_config"
             )
         self.num_cpu_blocks: int = num_cpu_blocks
+        self.vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
