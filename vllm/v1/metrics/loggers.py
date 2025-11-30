@@ -537,6 +537,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_mm_cache_hits, engine_indexes, model_name
         )
 
+        counter_num_tokens_preempted = self._counter_cls(
+            name="vllm:num_tokens_preempted",
+            documentation="Number of tokens from preempted requests",
+            labelnames=labelnames)
+        self.counter_num_tokens_preempted = make_per_engine(
+            counter_num_tokens_preempted, engine_indexes, model_name)
+
         #
         # Counters
         #
@@ -961,6 +968,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
             self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
+
+            self.counter_num_tokens_preempted[engine_idx].inc(
+                scheduler_stats.num_tokens_preempted)
 
         if iteration_stats is None:
             return
