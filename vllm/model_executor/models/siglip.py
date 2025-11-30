@@ -1159,10 +1159,10 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-        # NOTE: inputs_embeds in model runner has size
-        # text_config.projection_size to accommodate image embeddings
+        # NOTE: inputs_embeds in model runner has size text_config.projection_size
+        # (instead of text_config.hidden_size) to accommodate image embeddings
         inputs_embeds_size = self.text_projection_size
-        if inputs_embeds.shape[1] != inputs_embeds_size:
+        if inputs_embeds.shape[1] < inputs_embeds_size:
             inputs_embeds = torch.cat(
                 [
                     inputs_embeds,
@@ -1173,6 +1173,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 ],
                 dim=1,
             )
+        elif inputs_embeds.shape[1] > inputs_embeds_size:
+            # No need to handle this case for now
+            raise NotImplementedError
 
         return inputs_embeds
 
@@ -1221,11 +1224,14 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # NOTE: inputs_embeds in model runner has size
-        # text_config.projection_size to accommodate image embeddings
+        # NOTE: inputs_embeds in model runner has size text_config.projection_size
+        # (instead of text_config.hidden_size) to accommodate image embeddings
         hidden_size = self.text_embed_dim
-        if inputs_embeds.shape[1] != hidden_size:
+        if inputs_embeds.shape[1] > hidden_size:
             inputs_embeds = inputs_embeds[:, :hidden_size]
+        elif inputs_embeds.shape[1] < hidden_size:
+            # No need to handle this case for now
+            raise NotImplementedError
 
         return self.get_text_features(input_ids, positions, inputs_embeds)
 
