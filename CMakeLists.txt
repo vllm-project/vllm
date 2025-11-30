@@ -22,6 +22,11 @@ set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
+if(DEFINED ENV{PYTORCH_ROCM_ARCH})
+    set(PYTORCH_ROCM_ARCH_VAL $ENV{PYTORCH_ROCM_ARCH})
+    set(GPU_TARGETS "${PYTORCH_ROCM_ARCH_VAL}")
+endif()
+
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
 # Suppress potential warnings about unused manually-specified variables
