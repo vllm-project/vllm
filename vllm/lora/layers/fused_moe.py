@@ -123,6 +123,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
+        if quant_config is None:
+            from vllm.model_executor.layers.fused_moe.config import (
+                FUSED_MOE_UNQUANTIZED_CONFIG,
+            )
+
+            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+        m_fused_moe_fn = (
+            modular_triton_fused_moe(
+                quant_config, shared_experts=self.base_layer.shared_experts
         prepare_finalize = MoEPrepareAndFinalizeNoEP()
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
