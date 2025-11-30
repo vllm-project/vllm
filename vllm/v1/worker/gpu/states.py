@@ -7,6 +7,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.outputs import LogprobsTensors
@@ -97,11 +98,14 @@ class RequestState:
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
         # Statistics for penalties.
-        # TODO(woosuk): These tensors are rarely used but can be extremely large.
-        # Optimize the memory usage.
-        self.prompt_bin_counts = torch.zeros(
-            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+        self.prompt_bin_mask = torch.zeros(
+            self.max_num_reqs,
+            cdiv(self.vocab_size, 32),
+            dtype=torch.int32,
+            device=self.device,
         )
+        # TODO(woosuk): This tensor is rarely used but can be extremely large.
+        # Optimize the memory usage.
         self.output_bin_counts = torch.zeros(
             self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
@@ -167,7 +171,7 @@ class RequestState:
                 self.prefill_token_ids.gpu[req_idx],
                 prefill_len,
                 prompt_len,
-                self.prompt_bin_counts[req_idx],
+                self.prompt_bin_mask[req_idx],
                 self.output_bin_counts[req_idx],
             )
 
@@ -239,7 +243,7 @@ class RequestState:
             pos=pos,
             max_num_logprobs=max_num_logprobs,
             idx_mapping=idx_mapping,
-            prompt_bin_counts=self.prompt_bin_counts,
+            prompt_bin_mask=self.prompt_bin_mask,
             output_bin_counts=self.output_bin_counts,
         )
 
