@@ -304,6 +304,10 @@ class MultiGroupBlockTable:
             BlockTable(
                 block_size,
                 max_num_reqs,
+                # TODO: when prefix-caching and sps are both enable for 
+                #       mamba hybrid model, it will need 
+                #       `cdiv(max_model_len, block_size * total_cp_world_size) + num_speculative_tokens`
+                #       blocks for mamba groups
                 max(
                     cdiv(max_model_len, block_size * total_cp_world_size),
                     1 + num_speculative_tokens,
