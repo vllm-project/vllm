@@ -198,8 +198,16 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
         lora_a_output_size_per_partition = (
             lora_config.max_lora_rank
-            if not lora_config.fully_sharded_loras
+            if not (
+                lora_config.fully_sharded_loras
+                or lora_config.block_diagonal_sharded_loras
+            )
             else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+        lora_b_input_size_per_partition = (
+            lora_a_output_size_per_partition
+            if lora_config.block_diagonal_sharded_loras
+            else lora_config.max_lora_rank
         )
 
         self.lora_a_stacked = tuple(
@@ -218,7 +226,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 max_loras,
                 1,
                 output_size,
-                lora_config.max_lora_rank,
+                lora_b_input_size_per_partition,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
