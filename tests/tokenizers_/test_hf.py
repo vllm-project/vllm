@@ -7,7 +7,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 
 @pytest.mark.parametrize("model_id", ["gpt2", "zai-org/chatglm3-6b"])
