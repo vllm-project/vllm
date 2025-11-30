@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Simple harness to reason about EVS placeholder offsets.
 
 The real implementation in ``iter_mm_grid_hw`` now relies on the
@@ -10,8 +12,8 @@ frame fully kept, other frames pruned unevenly) are still handled.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import torch
 
@@ -71,7 +73,9 @@ def extract_frame_offsets(
             f"Expected {expected_frames} frame segments, got {len(segments)}"
         )
 
-    offsets = [offset_start + int(segment[0].item()) for segment in segments[:expected_frames]]
+    offsets = [
+        offset_start + int(segment[0].item()) for segment in segments[:expected_frames]
+    ]
     lengths = [int(segment.numel()) for segment in segments[:expected_frames]]
     return offsets, lengths
 
@@ -79,13 +83,16 @@ def extract_frame_offsets(
 def test_sparse_distribution() -> None:
     print("\n=== 测试场景 1: 稀疏分布 (真实 EVS 行为) ===")
     per_frame = [50176, 15000, 12000, 10000, 8000, 145668, 5000, 5000]
-    cfg = MaskSimulationConfig(tokens_per_frame=per_frame, prefix_tokens=3, suffix_tokens=2)
+    cfg = MaskSimulationConfig(
+        tokens_per_frame=per_frame, prefix_tokens=3, suffix_tokens=2
+    )
     mask = build_is_embed_mask(cfg)
     offsets, lengths = extract_frame_offsets(128, mask, len(per_frame))
 
     for idx, (off, size, expected) in enumerate(zip(offsets, lengths, per_frame), 1):
         print(
-            f"Frame {idx:02d}: offset={off:6d}, retained={size:6d} tokens (expected {expected})"
+            f"Frame {idx:02d}: offset={off:6d}, retained={size:6d} tokens "
+            f"(expected {expected})"
         )
         assert size == expected
 
@@ -95,7 +102,9 @@ def test_sparse_distribution() -> None:
 def test_uniform_distribution() -> None:
     print("\n=== 测试场景 2: 均匀分布 (处理器当前实现) ===")
     per_frame = [784 for _ in range(4)]
-    cfg = MaskSimulationConfig(tokens_per_frame=per_frame, prefix_tokens=2, suffix_tokens=1)
+    cfg = MaskSimulationConfig(
+        tokens_per_frame=per_frame, prefix_tokens=2, suffix_tokens=1
+    )
     mask = build_is_embed_mask(cfg)
     offsets, lengths = extract_frame_offsets(42, mask, len(per_frame))
 
@@ -109,9 +118,7 @@ def test_uniform_distribution() -> None:
     for idx, (off, size, expected_offset) in enumerate(
         zip(offsets, lengths, expected_offsets), 1
     ):
-        print(
-            f"Frame {idx:02d}: offset={off:5d}, retained={size:4d} tokens"
-        )
+        print(f"Frame {idx:02d}: offset={off:5d}, retained={size:4d} tokens")
         assert size == per_frame[idx - 1]
         assert off == expected_offset
 

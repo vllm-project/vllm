@@ -1276,7 +1276,7 @@ class Qwen3VLForConditionalGeneration(
         if self.is_multimodal_pruning_enabled:
             logger.debug(
                 "EVS (Efficient Video Sampling) enabled with pruning_rate=%.2f",
-                self.video_pruning_rate
+                self.video_pruning_rate,
             )
         if not multimodal_config.get_limit_per_prompt(
             "image"
@@ -1527,9 +1527,7 @@ class Qwen3VLForConditionalGeneration(
             second_per_grid_ts = torch.ones(len(grid_thw_list), dtype=torch.long)
         else:
             second_per_grid_ts = second_per_grid_ts.long()
-        tokens_per_second = getattr(
-            self.config.vision_config, "tokens_per_second", 1.0
-        )
+        tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
 
         video_embeds_out = []
         for emb, size, video_second_per_grid_t in zip(
@@ -1549,9 +1547,11 @@ class Qwen3VLForConditionalGeneration(
                 "pruning_rate=%.2f, reduction=%.1f%%)",
                 emb.shape[0],
                 retention_mask.sum().item(),
-                size[0], size[1], size[2],
+                size[0],
+                size[1],
+                size[2],
                 self.video_pruning_rate,
-                (1 - retention_mask.float().mean().item()) * 100
+                (1 - retention_mask.float().mean().item()) * 100,
             )
 
             positions = compute_mrope_for_media(
@@ -1618,7 +1618,7 @@ class Qwen3VLForConditionalGeneration(
 
                 # Check if EVS (Efficient Video Sampling) is enabled
                 is_evs_enabled = (
-                    hasattr(self, 'video_pruning_rate')
+                    hasattr(self, "video_pruning_rate")
                     and self.video_pruning_rate is not None
                     and self.video_pruning_rate > 0.0
                 )
@@ -1635,12 +1635,12 @@ class Qwen3VLForConditionalGeneration(
                     # Fallback: distribute offsets uniformly when mask is missing
                     tokens_per_frame_original = llm_grid_h * llm_grid_w
                     total_retained_tokens = compute_retained_tokens_count(
-                        tokens_per_frame_original,
-                        t,
-                        self.video_pruning_rate
+                        tokens_per_frame_original, t, self.video_pruning_rate
                     )
                     tokens_per_frame = (
-                        total_retained_tokens // t if t > 0 else tokens_per_frame_original
+                        total_retained_tokens // t
+                        if t > 0
+                        else tokens_per_frame_original
                     )
                     for _ in range(t):
                         yield offset, llm_grid_h, llm_grid_w
@@ -1682,7 +1682,9 @@ class Qwen3VLForConditionalGeneration(
             if split_points.numel() == 0:
                 segments = [true_indices]
             else:
-                segments = torch.tensor_split(true_indices, split_points.add(1).tolist())
+                segments = torch.tensor_split(
+                    true_indices, split_points.add(1).tolist()
+                )
 
         if len(segments) < expected_frames:
             logger.debug(
