@@ -8,6 +8,7 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -33,6 +34,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -41,6 +43,8 @@ strategy_to_parameter_type = {
     QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,
 }
+
+logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
@@ -61,7 +65,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
 
         if self.weight_block_size is not None:
             assert not self.is_static_input_scheme
@@ -174,6 +178,34 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         if self.strategy == QuantizationStrategy.BLOCK:
             maybe_post_process_fp8_weight_block(layer)
+
+            if (
+                current_platform.is_rocm()
+                and rocm_aiter_ops.is_linear_fp8_enabled()
+                and current_platform.is_fp8_fnuz()
+            ):
+                try:
+                    from aiter.ops.shuffle import shuffle_weight
+
+                    # shuffle_weight will throw assertion error
+                    # if the shape cannot be shuffled by the given layout
+                    weight = shuffle_weight(layer.weight, layout=(16, 16))
+                    layer.weight = Parameter(weight.data, requires_grad=False)
+
+                    # Override the W8A8BlockFp8LinearOp as now we know
+                    # the weight is shuffled
+                    self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                        weight_group_shape=GroupShape(*self.weight_block_size),
+                        act_quant_group_shape=self.act_q_group_shape,
+                        cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                        use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+                        is_weight_swizzled=True,
+                    )
+                except Exception as e:
+                    logger.info_once(
+                        f"[AITER] Shape {layer.weight.shape} cannot be shuffled. "
+                        f"{e}. Fallback to unshuffled gemm. "
+                    )
 
     def apply_weights(
         self,

@@ -208,12 +208,18 @@ class W8A8BlockFp8LinearOp:
         act_quant_group_shape: GroupShape,
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
         use_aiter_and_is_supported: bool = False,
+        is_weight_swizzled: bool = False,
     ):
         self.weight_group_shape = weight_group_shape
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
+        # At the moment, we only support swizzled weights for ROCm.
+        # the condition is set loosely without checking aiter flag to
+        # make the parameters more generic. If there are other functions
+        # that uses swizzled weights on ROCm, this parameter can be used directly.
+        self.is_weight_swizzled = is_weight_swizzled and current_platform.is_rocm()
 
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
@@ -327,6 +333,8 @@ class W8A8BlockFp8LinearOp:
 
         if use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
+        elif self.is_weight_swizzled:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.bpreshuffle_gemm_a8w8_blockscale
         else:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
@@ -342,7 +350,9 @@ class W8A8BlockFp8LinearOp:
             )
         # MI300 uses tuned AITER ASM/C++ kernel
         else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
+                input_2d, transpose_scale=self.is_weight_swizzled
+            )
 
         return gemm_a8w8_blockscale_op(
             q_input,
