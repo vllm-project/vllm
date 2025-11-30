@@ -14,6 +14,10 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -203,6 +207,12 @@ class CUDAGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}"
             )
+
+        # Ensure all async KV cache loads are complete before replaying.
+        # During replay, the per-layer wait_for_layer_load() calls in the
+        # attention layer decorator are bypassed, so we must sync here.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_load()
 
         entry.cudagraph.replay()
         return entry.output
