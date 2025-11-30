@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -18,8 +19,18 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.collection_utils import LazyDict
+from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
+
+
+def _use_flashinfer_activation() -> bool:
+    """Check if FlashInfer activation should be used."""
+    return (
+        envs.VLLM_USE_FLASHINFER_ACTIVATION
+        and has_flashinfer()
+        and current_platform.is_cuda()
+    )
 
 
 @CustomOp.register("fatrelu_and_mul")
@@ -71,7 +82,10 @@ class SiluAndMul(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike():
+        self._use_flashinfer = _use_flashinfer_activation()
+        if self._use_flashinfer:
+            logger.info_once("Using FlashInfer silu_and_mul activation.")
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
@@ -87,6 +101,11 @@ class SiluAndMul(CustomOp):
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        if self._use_flashinfer:
+            from flashinfer.activation import silu_and_mul
+
+            return silu_and_mul(x)
+
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -204,7 +223,10 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        self._use_flashinfer = _use_flashinfer_activation()
+        if self._use_flashinfer:
+            logger.info_once("Using FlashInfer gelu_and_mul activation.")
+        elif current_platform.is_cuda_alike() or current_platform.is_cpu():
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
             elif approximate == "tanh":
@@ -223,6 +245,16 @@ class GeluAndMul(CustomOp):
         return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        if self._use_flashinfer:
+            if self.approximate == "tanh":
+                from flashinfer.activation import gelu_tanh_and_mul
+
+                return gelu_tanh_and_mul(x)
+            else:
+                from flashinfer.activation import gelu_and_mul
+
+                return gelu_and_mul(x)
+
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
