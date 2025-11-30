@@ -791,8 +791,11 @@ def main(args: argparse.Namespace):
             "elapsed_time": elapsed_time,
             "num_requests": len(requests),
             "total_num_tokens": total_num_tokens,
+            "total_input_tokens": total_prompt_tokens,
+            "total_output_tokens": total_output_tokens,
             "requests_per_second": len(requests) / elapsed_time,
             "tokens_per_second": total_num_tokens / elapsed_time,
+            "output_tokens_per_second": total_output_tokens / elapsed_time,
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
