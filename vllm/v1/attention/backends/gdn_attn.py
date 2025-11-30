@@ -163,7 +163,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                                                       self.kv_cache_spec.block_size,
                                                       1 + self.num_spec)
             if is_global_first_rank():
-                logger.info(f"block_table_tensor: {block_table_tensor=}")
+                logger.info(f"{block_table_tensor=}")
         else:
             block_table_tensor = m.block_table_tensor
 
