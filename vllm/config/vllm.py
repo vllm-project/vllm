@@ -508,13 +508,6 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
-        executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
-        )
-
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             if self.parallel_config.pipeline_parallel_size > 1:
@@ -538,12 +531,6 @@ class VllmConfig:
                         "this situation now. please set "
                         "disable_padded_drafter_batch=Fasle"
                     )
-            if not executor_supports_async_sched:
-                raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
-                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             # NOTE: we won't reach here until async scheduling is enabled by default.
@@ -554,14 +541,6 @@ class VllmConfig:
                 logger.warning(
                     "Async scheduling is not yet supported with speculative decoding "
                     " or pipeline_parallel_size > 1 and will be disabled."
-                )
-                self.scheduler_config.async_scheduling = False
-            elif not executor_supports_async_sched:
-                logger.warning(
-                    "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
-                    executor_backend,
                 )
                 self.scheduler_config.async_scheduling = False
             else:
