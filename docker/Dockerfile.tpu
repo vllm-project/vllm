@@ -33,4 +33,12 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e .
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
 
+WORKDIR /workspace/tpu_inference
+ARG TPU_INFERENCE_REPO=https://github.com/vllm-project/tpu-inference.git
+RUN git clone $TPU_INFERENCE_REPO /workspace/tpu_inference
+RUN pip install -r requirements.txt --retries 3
+RUN pip install -e .
+
+WORKDIR /workspace/vllm
+
 CMD ["/bin/bash"]
