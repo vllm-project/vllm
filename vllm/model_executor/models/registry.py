@@ -327,6 +327,10 @@ _MULTIMODAL_MODELS = {
         "KeyeVL1_5ForConditionalGeneration",
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
+    "Kosmos2_5ForConditionalGeneration": (
+        "kosmos2_5",
+        "Kosmos2_5ForConditionalGeneration",
+    ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
