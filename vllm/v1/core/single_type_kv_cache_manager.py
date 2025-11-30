@@ -764,6 +764,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def save_new_computed_blocks(
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
+        # TODO(hhy): remove when prefix-caching is ready
         assert isinstance(self.kv_cache_spec, MambaSpec)
         self.print(f'Mamba.save_computed: {request_id=}, new_computed_blocks={format_blocks(new_computed_blocks)}')
         super().save_new_computed_blocks(request_id, new_computed_blocks)
@@ -795,6 +796,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 # first prefill chunk
                 # TODO: for mamba num_cached_block including null-blocks
                 new_blocks = []
+                reuse_blocks = []
                 if request_id not in self._allocated_reqs:
                     self._allocated_reqs.add(request_id)
                     num_new_alloc_blocks = 1 + self.num_speculative_blocks
@@ -805,17 +807,17 @@ class MambaManager(SingleTypeKVCacheManager):
                     num_new_alloc_blocks = 1
                     new_blocks.extend([self._null_block for _ in range(num_new_blocks - num_new_alloc_blocks)])
                     if self.num_speculative_blocks > 0:
-                        # step i:            [0, 0, 0, a, sps_i_0, sps_i_1]
-                        # step i+1(i.e. j):  [0, 0, 0, a, 0, 0, 0, b, sps_j_0, sps_j_1]
-                        # reuse blocks sps_i_0 and sps_i_1 as b and sps_j_0
-                        # new_alloc_blocks: [sps_j_1]
-                        # new_blocks: [0, 0, 0, b, sps_j_0, sps_j_1]
+                        # step i:            [0, 0, 0, a, sps_0, sps_1]
+                        # step i+1(i.e. j):  [0, 0, 0, a, 0, 0, 0, b, sps_0, sps_1]
+                        # reuse blocks sps_0 and sps_1
+                        # new_alloc_blocks: b
+                        # new_blocks: [0, 0, 0, b, sps_0, sps_1]
                         # TODO: reuse blocks. if we need clean? especially in decode
                         reuse_blocks = req_blocks[-self.num_speculative_blocks:]
                         del req_blocks[-self.num_speculative_blocks:]
-                        new_blocks.extend(reuse_blocks)
                 new_alloc_blocks = self.block_pool.get_new_blocks(num_new_alloc_blocks)
                 new_blocks.extend(new_alloc_blocks)
+                new_blocks.extend(reuse_blocks)
                 req_blocks.extend(new_blocks)
                 self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks={format_blocks(new_blocks)}')
                 # self.print(f'Mamba.alloc_blks: {request_id=}, {len(req_blocks)=}, {len(self.req_to_blocks[request_id])=}, req_blocks={format_blocks(req_blocks)}')
