@@ -153,7 +153,10 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     }
 
     tp_size = os.getenv("VLLM_TP_SIZE", "1")
-    server_args: list[str] = []
+    server_args: list[str] = [
+        "--max-model-len=8192",
+        "--max-num-seqs=32",
+    ]
     if tp_size:
         server_args += ["-tp", tp_size]
 
