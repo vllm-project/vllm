@@ -854,7 +854,9 @@ class GPUModelRunner(
                             kv_cache_spec = kv_cache_group.kv_cache_spec
                             # NOTE(hhy): pop the last num_speculative_blocks (reuse blocks).
                             #            maybe have better way to help copy blocks?
-                            if isinstance(kv_cache_spec, MambaSpec):
+                            if (isinstance(kv_cache_spec, MambaSpec)
+                                and new_block_ids[kv_cache_gid]
+                            ):
                                 block_ids = req_state.block_ids[kv_cache_gid]
                                 del block_ids[-kv_cache_spec.num_speculative_blocks:]
                                 if is_global_first_rank():
@@ -892,7 +894,9 @@ class GPUModelRunner(
                     and self.speculative_config):
                     num_poped_blocks = []
                     for kv_cache_group in self.kv_cache_config.kv_cache_groups:
-                        if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                        if (isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+                            and new_block_ids[kv_cache_gid]
+                        ):
                             num_poped_blocks.append(
                                 kv_cache_group.kv_cache_spec.num_speculative_blocks
                             )
