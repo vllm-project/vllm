@@ -971,28 +971,13 @@ class SiglipTextEmbeddings(nn.Module):
         position_ids: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        config = self.config
-
         if inputs_embeds is None:
             inputs_embeds = self.token_embedding(input_ids)
-        else:
-            # NOTE: inputs_embeds has size config.projection_size
-            # to accommodate image embeddings
-            inputs_embeds = inputs_embeds[:, : config.hidden_size]
 
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
 
-        # NOTE: Need to match config.projection_size
-        return torch.cat(
-            [
-                embeddings,
-                embeddings.new_empty(
-                    len(embeddings), config.projection_size - embeddings.shape[1]
-                ),
-            ],
-            dim=1,
-        )
+        return embeddings
 
 
 # Assume EOS token corresponds to CLS token in text model
@@ -1174,13 +1159,26 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         )
 
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().embed_input_ids(input_ids)
+            embeddings = super().embed_input_ids(input_ids)
+        else:
+            embeddings = super().embed_input_ids(
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+                handle_oov_mm_token=handle_oov_mm_token,
+            )
 
-        return super().embed_input_ids(
-            input_ids,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
+        # NOTE: inputs_embeds has size text_config.projection_size
+        # to accommodate image embeddings
+        text_config = self.config.text_config
+        return torch.cat(
+            [
+                embeddings,
+                embeddings.new_empty(
+                    len(embeddings), text_config.projection_size - embeddings.shape[1]
+                ),
+            ],
+            dim=1,
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
@@ -1205,6 +1203,11 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         # Multimodal inputs (image embeddings)
         if not self._is_text_input:
             return inputs_embeds
+
+        # NOTE: inputs_embeds has size text_config.projection_size
+        # to accommodate image embeddings
+        text_config = self.config.text_config
+        inputs_embeds = inputs_embeds[:, : text_config.hidden_size]
 
         return self.get_text_features(input_ids, positions, inputs_embeds)
 
