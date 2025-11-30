@@ -1202,6 +1202,16 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
 
+    def get_inputs_embeds_size(self) -> int:
+        # in most cases the size of inputs_embeds is identical to the size
+        # of the hidden states, however there are exceptions, for example for
+        # embedding models like CLIP and SigLIP
+        for target_attr in ("inputs_embeds_size", "projection_dim", "projection_size"):
+            if hasattr(self.hf_text_config, target_attr):
+                return getattr(self.hf_text_config, target_attr)
+
+        return self.get_hidden_size()
+
     @property
     def is_deepseek_mla(self) -> bool:
         if not hasattr(self.hf_text_config, "model_type"):

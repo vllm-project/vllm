@@ -98,7 +98,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.hidden_size = self.model_config.get_hidden_size()
+        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
@@ -134,7 +134,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            hidden_size=self.hidden_size,
+            inputs_embeds_size=self.inputs_embeds_size,
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=self.device,
