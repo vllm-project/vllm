@@ -982,7 +982,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             return inputs_embeds
 
         # NOTE: inputs_embeds in model runner has size
-        # text_config.projection_size to accommodate image embeddings
+        # text_config.projection_dim to accommodate image embeddings
         hidden_size = self.text_embed_dim
         if inputs_embeds.shape[1] != hidden_size:
             inputs_embeds = inputs_embeds[:, :hidden_size]
