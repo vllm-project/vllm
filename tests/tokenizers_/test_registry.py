@@ -21,6 +21,10 @@ class TestTokenizer(TokenizerLike):
     def pad_token_id(self) -> int:
         return 2
 
+    @property
+    def is_fast(self) -> bool:
+        return True
+
 
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
