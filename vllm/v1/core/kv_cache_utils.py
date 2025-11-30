@@ -1070,9 +1070,11 @@ def get_kv_cache_config_from_groups(
             num_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
+            kv_bytes_per_block=0,
         )
 
     # Determine how model runners should initialize the KV cache tensors.
+    kv_bytes_per_block = 0
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
@@ -1084,13 +1086,14 @@ def get_kv_cache_config_from_groups(
         )
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
-                shared_by=[layer_name],
+
+        kv_cache_tensors = []
+        for layer_name in kv_cache_groups[0].layer_names:
+            page_size_bytes = per_layer_specs[layer_name].page_size_bytes
+            kv_bytes_per_block += page_size_bytes
+            kv_cache_tensors.append(
+                KVCacheTensor(size=page_size_bytes * num_blocks, shared_by=[layer_name])
             )
-            for layer_name in kv_cache_groups[0].layer_names
-        ]
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
@@ -1118,11 +1121,13 @@ def get_kv_cache_config_from_groups(
             kv_cache_tensors.append(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
             )
+            kv_bytes_per_block += page_size * len(shared_by)
 
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        kv_bytes_per_block=kv_bytes_per_block,
     )
 
 

@@ -61,6 +61,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
         ],
+        kv_bytes_per_block=attn_spec.page_size_bytes,
     )
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(

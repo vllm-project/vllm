@@ -88,42 +88,36 @@ def make_request(
 
 
 def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
+    spec = FullAttentionSpec(block_size, 1, 1, torch.float32, False)
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
-            )
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        kv_bytes_per_block=spec.page_size_bytes,
     )
 
 
 def make_kv_cache_config_hybrid_model(
     block_size: int, num_blocks: int
 ) -> KVCacheConfig:
+    layer1_spec = FullAttentionSpec(block_size, 1, 1, torch.float32, False)
+    layer2_spec = SlidingWindowSpec(
+        block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+    )
+    layer3_spec = SlidingWindowSpec(
+        block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer1"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
-            ),
-            KVCacheGroupSpec(
-                ["layer2"],
-                SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["layer3"],
-                SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
-                ),
-            ),
+            KVCacheGroupSpec(["layer1"], layer1_spec),
+            KVCacheGroupSpec(["layer2"], layer2_spec),
+            KVCacheGroupSpec(["layer3"], layer3_spec),
         ],
+        kv_bytes_per_block=layer1_spec.page_size_bytes
+        + layer2_spec.page_size_bytes
+        + layer3_spec.page_size_bytes,
     )
 
 
@@ -1492,6 +1486,7 @@ def test_eagle_with_sliding_window():
             num_blocks=10,
             kv_cache_tensors=[],
             kv_cache_groups=[KVCacheGroupSpec(["layer"], sliding_window_spec)],
+            kv_bytes_per_block=sliding_window_spec.page_size_bytes,
         ),
         max_model_len=8192,
         enable_caching=True,
