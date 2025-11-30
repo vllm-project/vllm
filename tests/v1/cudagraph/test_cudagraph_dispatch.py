@@ -184,13 +184,16 @@ class TestCUDAGraphWrapper:
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
         )
         batch_descriptor = BatchDescriptor(num_tokens=10)
-
+        stream = torch.cuda.Stream()
         # 0. global warmup
-        with set_forward_context(
-            attn_metadata=None,
-            vllm_config=self.vllm_config,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            batch_descriptor=None,
+        with (
+            set_forward_context(
+                attn_metadata=None,
+                vllm_config=self.vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=None,
+            ),
+            torch.cuda.stream(stream),
         ):
             wrapper(self.input_tensor)
 
@@ -203,6 +206,7 @@ class TestCUDAGraphWrapper:
                 batch_descriptor=batch_descriptor,
             ),
             patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
+            torch.cuda.stream(stream),
         ):
             output1 = wrapper(self.input_tensor)
             # capturing phase should generate a zero output
