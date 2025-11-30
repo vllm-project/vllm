@@ -17,7 +17,7 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        hidden_size: int,
+        inputs_embeds_size: int,
         vocab_size: int,
         dtype: torch.dtype,
         device: torch.device,
