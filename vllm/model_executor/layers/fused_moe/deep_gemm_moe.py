@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
+    per_token_group_quant_fp8_packed_for_deepgemm,
 )
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
@@ -287,10 +287,11 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: torch.Tensor | None = None
-        a2q, a2q_scale = per_token_group_quant_fp8(
-            act_out, self.block_shape[1], column_major_scales=True, out_q=quant_out
+        a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+            act_out,
+            self.block_shape[1],
+            out_q=quant_out,
         )
-
         m_grouped_fp8_gemm_nt_contiguous(
             (a2q, a2q_scale), (w2, self.w2_scale), mm2_out, expert_ids
         )
