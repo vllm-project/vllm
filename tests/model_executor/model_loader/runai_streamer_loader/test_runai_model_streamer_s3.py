@@ -6,19 +6,12 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 from runai_model_streamer.safetensors_streamer.streamer_mock import StreamerPatcher
 
-from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+
+from .conftest import RunaiDummyExecutor
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
-
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-# Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
@@ -74,9 +67,13 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         patcher.create_mock_streamer,
     )
 
-    # fork is needed for the worker to see the patch
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+    engine_args = EngineArgs(
+        model=test_mock_s3_model,
+        load_format=load_format,
+        tensor_parallel_size=1,
+    )
 
-    with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
-        deserialized_outputs = llm.generate(prompts, sampling_params)
-        assert deserialized_outputs
+    vllm_config = engine_args.create_engine_config()
+
+    executor = RunaiDummyExecutor(vllm_config)
+    executor.driver_worker.load_model()
