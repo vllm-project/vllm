@@ -127,7 +127,19 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     llm: LLM = vllm_model.llm
-    outputs = llm.generate(example_prompts, sampling_params_list)
+
+    for i in range(len(example_prompts)):
+        llm.llm_engine.add_request(str(i), example_prompts[i], 
+                                   sampling_params_list[i])
+    
+    outputs = []
+    while llm.llm_engine.has_unfinished_requests():
+        step_outputs = llm.llm_engine.step()
+        for output in step_outputs:
+            if output.finished:
+                outputs.append(output)
+
+    outputs = sorted(outputs, key=lambda x: int(x.request_id))
 
     # Validate each request response
     for out, n in zip(outputs, n_list):
