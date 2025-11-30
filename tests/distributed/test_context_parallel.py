@@ -232,6 +232,10 @@ CP_TEXT_GENERATION_MODELS = {
     "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(
+            attn_backend="FLASHINFER", cp_kv_cache_interleave_size=16
+        ),
     ],
 }
 
