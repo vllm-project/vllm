@@ -41,10 +41,11 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>(.*?)(?:\\n|\n)(.*)</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
+            r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>",
+            re.DOTALL,
         )
         if not self.model_tokenizer:
             raise ValueError(
@@ -84,6 +85,14 @@ class Glm4MoeModelToolParser(ToolParser):
         def _deserialize(value: str) -> Any:
             try:
                 return json.loads(value)
+            except Exception:
+                pass
+
+            try:
+                # Wrap the value as a JSON string field
+                wrapped = json.loads('{"tmp": "' + value + '"}')
+                # parse the unescaped value
+                return json.loads(wrapped["tmp"])
             except Exception:
                 pass
 
