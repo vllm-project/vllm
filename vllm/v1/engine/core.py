@@ -119,11 +119,12 @@ class EngineCore:
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        if len(kv_cache_config.kv_cache_groups) == 0:
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
-            logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.enable_chunked_prefill = False
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
@@ -206,6 +207,8 @@ class EngineCore:
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -644,9 +647,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)

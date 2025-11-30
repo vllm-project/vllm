@@ -94,7 +94,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
-    construct_chat_message_with_tool_call,
+    construct_input_messages,
     convert_tool_responses_to_completions_format,
     extract_tool_types,
 )
@@ -105,7 +105,7 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -492,7 +492,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ):
         if request.tools is None or (
             request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
@@ -504,7 +504,12 @@ class OpenAIServingResponses(OpenAIServing):
                 for tool in request.tools
             ]
         # Construct the input messages.
-        messages = self._construct_input_messages(request, prev_response)
+        messages = construct_input_messages(
+            request_instructions=request.instructions,
+            request_input=request.input,
+            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
+            prev_response_output=prev_response.output if prev_response else None,
+        )
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
@@ -558,7 +563,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
     ) -> ErrorResponse | ResponsesResponse:
@@ -670,7 +675,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         logprobs: dict[int, SampleLogprob],
         top_logprobs: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ) -> list[LogprobTopLogprob]:
         """Returns the top-k logprobs from the logprobs dictionary."""
         out = []
@@ -695,7 +700,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         token_ids: Sequence[int],
         logprobs: SampleLogprobs | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         top_logprobs: int | None = None,
     ) -> list[Logprob]:
         assert logprobs is not None, "logprobs must be provided"
@@ -731,7 +736,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         token_ids: Sequence[int],
         logprobs: SampleLogprobs | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         top_logprobs: int | None = None,
     ) -> list[response_text_delta_event.Logprob]:
         lgs = self._create_response_logprobs(
@@ -758,7 +763,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         final_output: CompletionOutput,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
         if self.reasoning_parser:
             try:
@@ -868,47 +873,6 @@ class OpenAIServingResponses(OpenAIServing):
         if last_items:
             output_items.extend(last_items)
         return output_items
-
-    def _construct_input_messages(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None = None,
-    ) -> list[ChatCompletionMessageParam]:
-        messages: list[ChatCompletionMessageParam] = []
-        if request.instructions:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": request.instructions,
-                }
-            )
-
-        # Prepend the conversation history.
-        if prev_response is not None:
-            # Add the previous messages.
-            prev_msg = self.msg_store[prev_response.id]
-            messages.extend(prev_msg)
-
-            # Add the previous output.
-            for output_item in prev_response.output:
-                # NOTE: We skip the reasoning output.
-                if isinstance(output_item, ResponseOutputMessage):
-                    for content in output_item.content:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": content.text,
-                            }
-                        )
-
-        # Append the new input.
-        # Responses API supports simple text inputs without chat format.
-        if isinstance(request.input, str):
-            messages.append({"role": "user", "content": request.input})
-        else:
-            for item in request.input:
-                messages.append(construct_chat_message_with_tool_call(item))
-        return messages
 
     def _construct_harmony_system_input_message(
         self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
@@ -1171,7 +1135,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int,
         _increment_sequence_number_and_return: Callable[
@@ -1474,7 +1438,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int,
         _increment_sequence_number_and_return: Callable[
@@ -1927,7 +1891,7 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:

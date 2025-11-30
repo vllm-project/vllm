@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -479,54 +478,6 @@ def _merge_multimodal_embeddings(
         raise ValueError("Error during masked scatter operation") from e
 
     return inputs_embeds
-
-
-@deprecated(
-    "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.embed_input_ids` and will be "
-    "removed in v0.12."
-)
-def merge_multimodal_embeddings(
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int | list[int],
-) -> torch.Tensor:
-    """
-    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
-    positions in `inputs_embeds` corresponding to placeholder tokens in
-    `input_ids`.
-
-    `placeholder_token_id` can be a list of token ids (e.g, token ids
-    of img_start, img_break, and img_end tokens) when needed: This means
-    the order of these tokens in the `input_ids` MUST MATCH the order of
-    their embeddings in `multimodal_embeddings` since we need to
-    slice-merge instead of individually scattering.
-
-    For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
-    - T is text token
-    - S is image start token
-    - I is image embedding token
-    - B is image break token
-    - E is image end token.
-
-    Then the image embeddings (that correspond to I's) from vision encoder
-    must be padded with embeddings of S, B, and E in the same order of
-    input_ids for a correct embedding merge.
-
-    Note:
-        This updates `inputs_embeds` in place.
-    """
-    if isinstance(placeholder_token_id, list):
-        is_multimodal = isin_list(input_ids, placeholder_token_id)
-    else:
-        is_multimodal = input_ids == placeholder_token_id
-
-    return _merge_multimodal_embeddings(
-        inputs_embeds,
-        multimodal_embeddings=multimodal_embeddings,
-        is_multimodal=is_multimodal,
-    )
 
 
 def isin_list(
