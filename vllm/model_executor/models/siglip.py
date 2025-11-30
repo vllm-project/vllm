@@ -976,14 +976,14 @@ class SiglipTextEmbeddings(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.token_embedding(input_ids)
         else:
-            # NOTE: inputs_embeds has size self.config.projection_size
+            # NOTE: inputs_embeds has size config.projection_size
             # to accommodate image embeddings
             inputs_embeds = inputs_embeds[:, : config.hidden_size]
 
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
 
-        # NOTE: Need to match self.config.projection_size
+        # NOTE: Need to match config.projection_size
         return torch.cat(
             [
                 embeddings,
