@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
