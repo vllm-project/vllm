@@ -50,11 +50,13 @@ class CPUAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """CPU attention supports decoder and encoder-only attention."""
+        """CPU attention supports decoder,
+        encoder-only and encoder-decoder attention."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
         )
 
     @staticmethod
@@ -172,21 +174,19 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             block_table_tensor = block_table_tensor[:num_decodes]
 
         sheduler_metadata = None
-        if causal:
-            # for decode batch, use the custom kernel
-            sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
-                num_reqs=num_reqs,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                seq_lens=seq_lens,
-                dtype=self.dtype,
-                query_start_loc=query_start_loc,
-                causal=causal,
-                sliding_window_size=self.window_size,
-                isa=self.isa,
-                enable_kv_split=True,
-            )
+        sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+            num_reqs=num_reqs,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            seq_lens=seq_lens,
+            dtype=self.dtype,
+            query_start_loc=query_start_loc,
+            causal=causal,
+            sliding_window_size=self.window_size,
+            isa=self.isa,
+            enable_kv_split=True,
+        )
 
         attn_metadata = CPUAttentionMetadata(
             isa=self.isa,

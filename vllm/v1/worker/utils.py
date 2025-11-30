@@ -305,6 +305,7 @@ def bind_kv_cache(
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
+
         if len(layer_names) > 1:
             # One typical case is encoder-decoder model, e.g., bart.
             # The cross attention and self attention in the same decoder layer
@@ -313,13 +314,12 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                # We know that the GPU runner is not impacted by this
-                # case. Some test code depends on runner_kv_caches, but
-                # not in a way that's impacted by ignoring this.
-                pass
-            else:
-                raise NotImplementedError
+
+            # We know that the GPU / CPU runner is not impacted by this
+            # case. Some test code depends on runner_kv_caches, but
+            # not in a way that's impacted by ignoring this.
+            pass
+
         layer_name = layer_names[0]
         runner_kv_caches.append(kv_caches[layer_name])
 

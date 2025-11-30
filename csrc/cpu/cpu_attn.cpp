@@ -117,7 +117,6 @@ torch::Tensor get_scheduler_metadata(
   input.casual = casual;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
-  TORCH_CHECK(casual, "Only supports casual mask for now.");
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
