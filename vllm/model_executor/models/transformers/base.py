@@ -18,6 +18,7 @@
 
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
+import types
 
 import regex as re
 import torch
@@ -274,6 +275,52 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
 
+        def _shim_vllm_forward(module):
+            """
+            Shim the forward method of vLLM layers to handle 3D inputs from HF Transformers.
+            vLLM kernels typically expect flattened 2D inputs (Tokens, Hidden), but 
+            Transformers backend acts on (Batch, Seq, Hidden).
+            """
+            if not hasattr(module, "forward"):
+                return
+
+            orig_forward = module.forward
+
+            def forward_shim(self, x, *args, **kwargs):
+                # Only activate shim if primary input is a 3D Tensor
+                if not (isinstance(x, torch.Tensor) and x.ndim == 3):
+                    return orig_forward(x, *args, **kwargs)
+
+                b, s = x.shape[:2]
+
+                def flatten(t):
+                    # Flatten any 3D tensor that matches the current batch/seq context
+                    if isinstance(t, torch.Tensor) and t.ndim == 3 and t.shape[:2] == (b, s):
+                        return t.view(-1, t.shape[-1])
+                    return t
+
+                def unflatten(t):
+                    # Unflatten 2D tensors back to 3D. 
+                    # Implicitly handles (Output, Bias) tuples safely (Bias is 1D).
+                    if isinstance(t, torch.Tensor) and t.ndim == 2 and t.shape[0] == b * s:
+                        return t.view(b, s, -1)
+                    return t
+
+                # Flatten inputs (x, args, kwargs)
+                x_flat = x.view(-1, x.shape[-1])
+                args_flat = tuple(flatten(a) for a in args)
+                kwargs_flat = {k: flatten(v) for k, v in kwargs.items()}
+
+                # Execute wrapped kernel
+                out = orig_forward(x_flat, *args_flat, **kwargs_flat)
+
+                # Unflatten Output (Robustly handle Tuples)
+                if isinstance(out, tuple):
+                    return tuple(unflatten(o) for o in out)
+                return unflatten(out)
+
+            module.forward = types.MethodType(forward_shim, module)
+
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 new_module = child_module
@@ -296,6 +343,10 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
                     _recursive_replace(child_module, prefix=qual_name)
 
                 if new_module is not child_module:
+                    # Any module replaced by vLLM (Linear, RMSNorm, MoE, etc.)
+                    # is forced to accommodate the Transformers 3D tensor shape.
+                    _shim_vllm_forward(new_module)
+                    
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
 
