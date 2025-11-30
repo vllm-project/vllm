@@ -40,7 +40,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 
 @dataclass
@@ -196,6 +202,20 @@ register_experts(
     supports_expert_map=True,
 )
 
+if has_aiter():
+    from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+        AiterExperts,
+    )
+
+    register_experts(
+        AiterExperts,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+    )
+
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
@@ -232,6 +252,19 @@ if has_pplx():
         common_float_and_int_types,
         blocked_quantization_support=True,
         backend="pplx",
+    )
+
+if has_mori():
+    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+        MoriPrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        MoriPrepareAndFinalize,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        backend="mori",
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
@@ -449,34 +482,35 @@ def make_fused_experts(
 
     torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
 
-    if fused_experts_type == BatchedDeepGemmExperts:
+    if fused_experts_type.__name__ == "BatchedDeepGemmExperts":
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedDeepGemmExperts {kwargs} ...")
         experts = BatchedDeepGemmExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonExperts:
+    elif fused_experts_type.__name__ == "BatchedTritonExperts":
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedTritonExperts {kwargs} ...")
         experts = BatchedTritonExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonOrDeepGemmExperts:
+    elif fused_experts_type.__name__ == "BatchedTritonOrDeepGemmExperts":
         kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
         print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
         experts = BatchedTritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == DeepGemmExperts:
+    elif fused_experts_type.__name__ == "DeepGemmExperts":
         print(f"Making DeepGemmExperts {quant_config} ...")
         experts = DeepGemmExperts(quant_config)
-    elif fused_experts_type == TritonExperts:
+    elif fused_experts_type.__name__ == "TritonExperts":
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
         experts = TritonExperts(**kwargs)
-    elif fused_experts_type == TritonOrDeepGemmExperts:
+    elif fused_experts_type.__name__ == "TritonOrDeepGemmExperts":
         kwargs = quant_kwargs | deepgemm_kwargs
         print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
         experts = TritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == NaiveBatchedExperts:
+    elif fused_experts_type.__name__ == "NaiveBatchedExperts":
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making NaiveBatchedExperts {kwargs} ...")
         experts = NaiveBatchedExperts(**kwargs)
-    elif fused_experts_type == CutlassExpertsFp8:
+    elif fused_experts_type.__name__ == "CutlassExpertsFp8":
+        assert cutlass_fp8_supported(), "CutlassExpertsFp8 requires CUTLASS FP8 support"
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "out_dtype": moe.in_dtype,
@@ -487,7 +521,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
-    elif fused_experts_type == CutlassBatchedExpertsFp8:
+    elif fused_experts_type.__name__ == "CutlassBatchedExpertsFp8":
+        assert cutlass_fp8_supported(), (
+            "CutlassBatchedExpertsFp8 requires CUTLASS FP8 support"
+        )
         strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
@@ -500,7 +537,8 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
         experts = CutlassBatchedExpertsFp8(**kwargs)
-    elif fused_experts_type == CutlassExpertsFp4:
+    elif fused_experts_type.__name__ == "CutlassExpertsFp4":
+        assert cutlass_fp4_supported(), "CutlassExpertsFp4 requires CUTLASS FP4 support"
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
             "num_dispatchers": num_dispatchers,
@@ -508,7 +546,10 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
-    elif fused_experts_type == FlashInferExperts:
+    elif fused_experts_type.__name__ == "FlashInferExperts":
+        assert has_flashinfer_cutlass_fused_moe(), (
+            "FlashInferExperts requires FlashInfer CUTLASS fused MoE support"
+        )
         kwargs = {
             "out_dtype": moe.in_dtype,
             "ep_rank": moe.ep_rank,
@@ -518,6 +559,11 @@ def make_fused_experts(
         } | quant_kwargs
         print(f"Making FlashInferExperts {kwargs} ...")
         experts = FlashInferExperts(**kwargs)
+    elif fused_experts_type.__name__ == "AiterExperts":
+        assert has_aiter(), "AiterExperts requires AITER package"
+        kwargs = quant_kwargs
+        print(f"Making AiterExperts {kwargs} ...")
+        experts = AiterExperts(**kwargs)
     else:
         raise RuntimeError(f"Unknown fused experts type: {fused_experts_type}")
 

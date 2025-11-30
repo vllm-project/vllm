@@ -1010,7 +1010,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.use_marlin or self.rocm_aiter_moe_enabled:
+        if self.use_marlin:
             return None
         else:
             return super().maybe_make_prepare_finalize(routing_tables)
@@ -1072,7 +1072,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.rocm_aiter_moe_enabled and not self.use_marlin
+        assert not self.use_marlin
 
         if (
             prepare_finalize.activation_format
@@ -1089,6 +1089,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 allow_deep_gemm=(
                     envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
                 ),
+            )
+        elif self.rocm_aiter_moe_enabled:
+            # aiter path
+            from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+                AiterExperts,
+            )
+
+            logger.debug(
+                "AiterExperts(%s): per_act_token=%s",
+                self.__class__.__name__,
+                True,
+            )
+            return AiterExperts(
+                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
