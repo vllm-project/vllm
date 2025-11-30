@@ -19,6 +19,52 @@ from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
+def compute_input_signature_hash(example_inputs: list[Any]) -> str:
+    """
+    Compute a hash based on the input signature (counts, shapes, types, dtypes).
+    This provides a more stable and semantic way to distinguish graphs than
+    using graph code strings, which can vary due to variable naming.
+
+    Args:
+        example_inputs: List of example inputs to the graph
+
+    Returns:
+        A 16-character hex string representing the input signature
+    """
+    signature_parts = []
+
+    # 1. Number of inputs
+    signature_parts.append(f"num_inputs:{len(example_inputs)}")
+
+    # 2. For each input, capture type and shape information
+    for i, inp in enumerate(example_inputs):
+        if isinstance(inp, torch.Tensor):
+            # Capture dtype
+            signature_parts.append(f"input_{i}:tensor:dtype={inp.dtype}")
+            # Capture shape, including symbolic dimensions
+            shape_str = []
+            for dim in inp.shape:
+                if isinstance(dim, int):
+                    shape_str.append(str(dim))
+                elif isinstance(dim, torch.SymInt):
+                    # Use the symbolic expression string for symbolic shapes
+                    shape_str.append(f"sym:{dim}")
+                else:
+                    shape_str.append(str(dim))
+            signature_parts.append(f"shape=[{','.join(shape_str)}]")
+        elif isinstance(inp, torch.SymInt):
+            signature_parts.append(f"input_{i}:symint:{inp}")
+        elif isinstance(inp, (int, float, bool)):
+            signature_parts.append(f"input_{i}:{type(inp).__name__}:{inp}")
+        else:
+            # For other types, just record the type name
+            signature_parts.append(f"input_{i}:{type(inp).__name__}")
+
+    # Join all parts and hash
+    signature_str = "|".join(signature_parts)
+    return hashlib.md5(signature_str.encode(), usedforsecurity=False).hexdigest()[:16]
+
+
 class CompilerInterface:
     """
     The interface for a compiler that can be used by vLLM.
