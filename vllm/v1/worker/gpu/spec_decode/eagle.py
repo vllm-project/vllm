@@ -44,6 +44,7 @@ class EagleSpeculator:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.pin_memory = is_pin_memory_available()
         self.dtype = vllm_config.model_config.dtype
@@ -51,7 +52,7 @@ class EagleSpeculator:
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            hidden_size=self.hidden_size,
+            inputs_embeds_size=self.inputs_embeds_size,
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=device,
