@@ -291,6 +291,7 @@ class BlockPool:
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
+                # TODO(hhy): when LPS is enabled, parent_block maybe a null block
                 parent_block = blocks[num_cached_blocks - 1]
                 assert parent_block.block_hash is not None
                 parent_block_hash = maybe_convert_block_hash(
