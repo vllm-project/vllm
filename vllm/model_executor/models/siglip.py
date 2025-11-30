@@ -971,16 +971,27 @@ class SiglipTextEmbeddings(nn.Module):
         position_ids: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        config = self.config
+
         if inputs_embeds is None:
             inputs_embeds = self.token_embedding(input_ids)
         else:
             # NOTE: inputs_embeds has size self.config.projection_size
             # to accommodate image embeddings
-            inputs_embeds = inputs_embeds[:, : self.config.hidden_size]
+            inputs_embeds = inputs_embeds[:, : config.hidden_size]
 
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
-        return embeddings
+
+        # NOTE: Need to match self.config.projection_size
+        return torch.cat(
+            [
+                embeddings,
+                embeddings.new_empty(
+                    len(embeddings), config.projection_size - embeddings.shape[1]
+                ),
+            ]
+        )
 
 
 # Assume EOS token corresponds to CLS token in text model
