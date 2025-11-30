@@ -1046,5 +1046,8 @@ def cascade_attention(
         num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
+    prefix_lse = prefix_lse.contiguous()
+    suffix_lse = suffix_lse.contiguous()
+
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
