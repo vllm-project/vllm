@@ -1422,7 +1422,7 @@ class FusedMoE(CustomOp):
                 # do nothing.
                 return p
 
-            # Do not update the layer paramater as the layer's MoE operations would
+            # Do not update the layer parameter as the layer's MoE operations would
             # expect the parameter's tensor to the same shape / stride. Instead,
             # make a new torch.nn.Parameter that is used just in the context of
             # EPLB.
