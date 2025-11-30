@@ -600,12 +600,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         Only supports pre-quantized checkpoints with FP8 weights and scales.
         """
 
-        if self.flashinfer_moe_backend is not None:    
+        if self.flashinfer_moe_backend is not None:
             self._maybe_pad_intermediate_for_flashinfer(layer)
 
         layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
-        
+
         from vllm._custom_ops import scaled_fp8_quant
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             per_tensor_dequantize,
@@ -700,8 +700,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         if padded_intermediate == intermediate:
             return
-        
-        logger.info(f"Padding intermediate size from {intermediate} to {padded_intermediate} for up/down projection weights.")
+
+        logger.info(
+            f"Padding intermediate size from {intermediate} to {padded_intermediate} for up/down projection weights."
+        )
 
         up_mult = 2 if self.moe.is_act_and_mul else 1
         padded_gate_up_dim = up_mult * padded_intermediate
