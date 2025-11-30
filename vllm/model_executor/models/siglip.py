@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Implementation of SiglipVisionModel intended to be only used
-within a vision language model."""
 
 import math
 from collections.abc import Iterable, Mapping
@@ -1168,8 +1166,8 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 handle_oov_mm_token=handle_oov_mm_token,
             )
 
-        # NOTE: inputs_embeds has size text_config.projection_size
-        # to accommodate image embeddings
+        # NOTE: inputs_embeds in model runner has hidden dimension
+        # text_config.projection_size to accommodate image embeddings
         text_config = self.config.text_config
         return torch.cat(
             [
@@ -1204,8 +1202,8 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # NOTE: inputs_embeds has size text_config.projection_size
-        # to accommodate image embeddings
+        # NOTE: inputs_embeds in model runner has hidden dimension
+        # text_config.projection_size to accommodate image embeddings
         text_config = self.config.text_config
         inputs_embeds = inputs_embeds[:, : text_config.hidden_size]
 
