@@ -1632,19 +1632,14 @@ class Qwen3VLForConditionalGeneration(
                             yield offset + rel_offset, llm_grid_h, llm_grid_w
                         continue
 
-                    # Fallback: distribute offsets uniformly when mask is missing
-                    tokens_per_frame_original = llm_grid_h * llm_grid_w
-                    total_retained_tokens = compute_retained_tokens_count(
-                        tokens_per_frame_original, t, self.video_pruning_rate
+                    # If EVS is enabled but mask is missing, this indicates a bug
+                    # in the prompt processing pipeline. The is_embed mask should
+                    # always be present when video_pruning_rate > 0.
+                    raise RuntimeError(
+                        f"EVS is enabled (pruning_rate={self.video_pruning_rate}) "
+                        "but is_embed mask is missing from mm_position. "
+                        "This indicates a bug in prompt processing."
                     )
-                    tokens_per_frame = (
-                        total_retained_tokens // t
-                        if t > 0
-                        else tokens_per_frame_original
-                    )
-                    for _ in range(t):
-                        yield offset, llm_grid_h, llm_grid_w
-                        offset += tokens_per_frame
                 else:
                     # Non-EVS mode: Use original logic with input_tokens.index()
                     for _ in range(t):
