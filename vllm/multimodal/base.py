@@ -2,10 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, TypeVar
 
 _T = TypeVar("_T")
+
+
+@dataclass
+class MediaWithBytes(Generic[_T]):
+    """
+    Wrapper that couples a media object with its original encoded bytes.
+
+    This ensures the raw bytes and media object remain synchronized,
+    preventing cache corruption from in-place modifications.
+    """
+
+    media: _T
+    original_bytes: bytes
 
 
 class MediaIO(ABC, Generic[_T]):
