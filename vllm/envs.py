@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal[
         "naive",
         "pplx",
+        "pplx_garden",
         "deepep_high_throughput",
         "deepep_low_latency",
         "allgather_reducescatter",
@@ -1254,6 +1255,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         [
             "naive",
             "pplx",
+            "pplx_garden",
             "deepep_high_throughput",
             "deepep_low_latency",
             "allgather_reducescatter",
