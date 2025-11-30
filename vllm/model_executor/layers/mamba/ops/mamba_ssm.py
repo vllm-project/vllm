@@ -340,7 +340,11 @@ def selective_state_update(
     batch = x.shape[0]
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
-        max_seqlen = state_batch_indices.size(-1)
+        # Only used to verify the shape of
+        # state_batch_indices and dst_state_batch_indices
+        max_seqlen = (
+            state_batch_indices.size(-1) if state_batch_indices is not None else 1
+        )
     else:
         N = batch
         max_seqlen = 1
