@@ -612,7 +612,7 @@ class HunYuanModel(nn.Module):
                 self.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
-            )
+                prefix=maybe_prefix(prefix, "embed_tokens"))
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
