@@ -27,6 +27,8 @@ The class provides the following primitives:
     the Connector based on the metadata.
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
+        wait_for_load() - blocks until all layer loads are done
+            (used before CUDA graph replay to ensure sync)
 
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
@@ -293,6 +295,19 @@ class KVConnectorBase_V1(ABC):
             layer_name: the name of that layer
         """
         pass
+
+    def wait_for_load(self) -> None:
+        """
+        Block until all KV cache loads are complete. This is called before
+        model forward when CUDA graphs are enabled, because CUDA graph
+        replay bypasses the per-layer wait_for_layer_load() calls that
+        normally happen inside the attention layer decorator.
+
+        The default implementation is a no-op. Connectors that perform
+        asynchronous layer-by-layer loading should override this method
+        to ensure all loads are complete before CUDA graph replay.
+        """
+        return
 
     @abstractmethod
     def save_kv_layer(
