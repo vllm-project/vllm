@@ -55,10 +55,12 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    CustomChatCompletionMessageParam,
 )
 from vllm.entrypoints.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
 )
@@ -269,6 +271,9 @@ class OpenAIServingResponses(OpenAIServing):
         | ErrorResponse
     ):
         error_check_ret = await self._check_model(request)
+        import fbvscode
+
+        fbvscode.set_trace()
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
@@ -368,12 +373,22 @@ class OpenAIServingResponses(OpenAIServing):
 
                 context: ConversationContext
                 if self.use_harmony:
+                    # note: in harmomy, the system message is included
                     if request.stream:
                         context = StreamingHarmonyContext(messages, available_tools)
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is an feature in development for parsing tokens during generation
+                        # instead of at the end
+                        context = ParsableContext(
+                            sentences=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser=self.reasoning_parser,
+                        )
+                    else:
+                        context = SimpleContext()
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -602,6 +617,22 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "cancelled"
             else:
                 status = "incomplete"
+        elif isinstance(context, ParsableContext):
+            chat_completion_messages = context.parser.chat_completion_messages
+            output = self._make_response_output_items_from_parsable_context(
+                request, chat_completion_messages
+            )
+
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently only supported for gpt-oss"
+                )
+
+            # TODO: Calculate usage.
+            # assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -621,7 +652,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -758,6 +789,55 @@ class OpenAIServingResponses(OpenAIServing):
             )
             for lg in lgs
         ]
+
+    def _make_response_output_items_from_parsable_context(
+        self,
+        request: ResponsesRequest,
+        chat_completion_messages: list[CustomChatCompletionMessageParam],
+    ) -> list[ResponseOutputItem]:
+        """Given a list of sentences, construct ResponseOutput Items.
+
+        For now, a sentence can have multiple textContents. the textContents we support right now are only
+        - if current_channel = think, then it's a ResponseReasoningItem
+        - if current_channel = final, then it's a ResponseOutputMessage
+        DO NOT implement tool call parsing for now. We will implement it later.
+        """
+        output_items: list[ResponseOutputItem] = []
+
+        for sentence in chat_completion_messages:
+            for text_content in sentence["content"]:
+                if isinstance(text_content, ResponseReasoningTextContent):
+                    # Reasoning content
+                    reasoning_item = ResponseReasoningItem(
+                        id=f"rs_{random_uuid()}",
+                        summary=[],
+                        type="reasoning",
+                        content=[text_content],
+                        status="completed",
+                    )
+                    output_items.append(reasoning_item)
+                elif (
+                    isinstance(text_content, dict)
+                    and text_content.get("type") == "text"
+                ):
+                    # Final output content
+                    output_text = ResponseOutputText(
+                        text=text_content["text"],
+                        annotations=[],
+                        type="output_text",
+                        logprobs=None,  # Not available from parser
+                    )
+                    message_item = ResponseOutputMessage(
+                        id=f"msg_{random_uuid()}",
+                        content=[output_text],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                    output_items.append(message_item)
+                # Ignore other channels for now (e.g., "tool", "commentary")
+
+        return output_items
 
     def _make_response_output_items(
         self,
