@@ -1204,7 +1204,7 @@ class ModelConfig:
 
     def get_inputs_embeds_size(self) -> int:
         # in most cases the size of inputs_embeds is identical to the size
-        # of the hidden states, however there are exceptions, for example for
+        # of the hidden states, however there are exceptions, for example
         # embedding models like CLIP and SigLIP
         for target_attr in ("inputs_embeds_size", "projection_dim", "projection_size"):
             if hasattr(self.hf_text_config, target_attr):
