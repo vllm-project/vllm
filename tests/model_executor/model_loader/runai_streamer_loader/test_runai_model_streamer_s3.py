@@ -75,7 +75,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     )
 
     # fork is needed for the worker to see the patch
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")   
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     with vllm_runner(test_mock_s3_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
