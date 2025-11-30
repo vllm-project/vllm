@@ -911,6 +911,55 @@ class LMCacheConnectorV1Impl:
         return
 
     @_lmcache_nvtx_annotate
+    def wait_for_load(self) -> None:
+        """Block until all KV cache loads are complete.
+
+        This is called before model forward when CUDA graphs are enabled,
+        because CUDA graph replay bypasses the per-layer wait_for_layer_load()
+        calls that normally happen inside the attention layer decorator.
+
+        This method drains all remaining layers from the layerwise retrievers.
+        """
+        if not self.layerwise_retrievers:
+            return
+
+        # Drain all remaining layers from all retrievers
+        remaining_layers = self.num_layers - self.current_layer
+        logger.debug(
+            "wait_for_load: draining %d remaining layers from %d retrievers",
+            remaining_layers,
+            len(self.layerwise_retrievers),
+        )
+
+        for _ in range(remaining_layers):
+            try:
+                for layerwise_retriever in self.layerwise_retrievers:
+                    ret_token_mask = next(layerwise_retriever)
+
+                    # Log on last layer
+                    if (
+                        self.current_layer == self.num_layers - 1
+                        and ret_token_mask is not None
+                    ):
+                        num_retrieved_tokens = ret_token_mask.sum().item()
+                        logger.info("Retrieved %s tokens", num_retrieved_tokens)
+            except StopIteration:
+                # One retriever exhausted early - stop to keep them synchronized
+                logger.debug(
+                    "wait_for_load: retriever exhausted early at layer %d",
+                    self.current_layer,
+                )
+                break
+
+            self.current_layer += 1
+
+        # Reset for any subsequent operations. Resetting current_layer is
+        # important because save_kv_layer checks if current_layer == 0 to
+        # determine if it's the first layer and needs to set up storers.
+        self.layerwise_retrievers = []
+        self.current_layer = 0
+
+    @_lmcache_nvtx_annotate
     def save_kv_layer(
         self,
         layer_name: str,

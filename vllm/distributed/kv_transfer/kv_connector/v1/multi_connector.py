@@ -212,6 +212,10 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_layer_load(layer_name)
 
+    def wait_for_load(self) -> None:
+        for c in self._connectors:
+            c.wait_for_load()
+
     def save_kv_layer(
         self,
         layer_name: str,

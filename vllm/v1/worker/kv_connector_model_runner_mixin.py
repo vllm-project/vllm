@@ -14,7 +14,7 @@ from typing import (
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_shutdown,
@@ -126,7 +126,15 @@ class KVConnectorModelRunnerMixin:
         # These transfers are designed to be async and the requests
         # involved may be disjoint from the running requests.
         # Do this here to save a collective_rpc.
-        kv_connector.start_load_kv(get_forward_context())
+        forward_ctx = get_forward_context()
+        kv_connector.start_load_kv(forward_ctx)
+
+        # Ensure all async KV cache loads are complete before CUDA graph
+        # capture/replay. During replay, the per-layer wait_for_layer_load()
+        # calls in the attention layer decorator are bypassed.
+        if forward_ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE:
+            kv_connector.wait_for_load()
+
         try:
             yield output
         finally:
