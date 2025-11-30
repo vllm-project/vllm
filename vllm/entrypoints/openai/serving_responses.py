@@ -846,14 +846,15 @@ class OpenAIServingResponses(OpenAIServing):
         if message_item:
             outputs.append(message_item)
         if tool_calls:
+            # tool_calls now contains ToolCall objects, extract function info
             tool_call_items = [
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
                     call_id=f"call_{random_uuid()}",
                     type="function_call",
                     status="completed",
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
+                    name=tool_call.function.name,
+                    arguments=tool_call.function.arguments,
                 )
                 for tool_call in tool_calls
             ]
