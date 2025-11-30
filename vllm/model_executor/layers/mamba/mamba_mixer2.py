@@ -579,8 +579,12 @@ class MambaMixer2(MambaBase, CustomOp):
             chunk_size = attn_metadata.chunk_size
             seq_idx_p = attn_metadata.seq_idx_p
             query_start_loc_p = attn_metadata.query_start_loc_p
+            query_start_loc_d = attn_metadata.query_start_loc_d
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            nums_dict = attn_metadata.nums_dict
+            batch_ptr = attn_metadata.batch_ptr
+            token_chunk_offset_ptr = attn_metadata.token_chunk_offset_ptr
 
         if attn_metadata is None:
             # profile run
@@ -611,7 +615,7 @@ class MambaMixer2(MambaBase, CustomOp):
         )
         # Split along batch dimension
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
+            state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
         )
@@ -683,8 +687,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
-                metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
+                nums_dict=nums_dict,
+                batch_ptr=batch_ptr,
+                token_chunk_offset_ptr=token_chunk_offset_ptr,
             ).transpose(0, 1)[:num_prefill_tokens]
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
@@ -837,6 +843,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
+                query_start_loc=query_start_loc_d,
+                max_query_len=1,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
