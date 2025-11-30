@@ -62,6 +62,12 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
+# Suppress ptxas warnings for flash attention compilation
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  # Add ptxas flags to suppress C7520 warnings about wgmma.mma_async serialization
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas --diag_suppress=7520")
+endif()
+
 # Restore the install prefix
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
