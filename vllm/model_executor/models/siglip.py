@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property
 from typing import Annotated, Literal
 
@@ -1144,6 +1144,38 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_language_model(self) -> torch.nn.Module:
         return self.text_model
 
+    def _embed_text_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        is_multimodal: torch.Tensor | None,
+        handle_oov_mm_token: bool,
+    ) -> torch.Tensor:
+        inputs_embeds = super()._embed_text_input_ids(
+            input_ids,
+            embed_input_ids,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        # NOTE: inputs_embeds in model runner has size
+        # text_config.projection_size to accommodate image embeddings
+        inputs_embeds_size = self.text_projection_size
+        if inputs_embeds.shape[1] != inputs_embeds_size:
+            inputs_embeds = torch.cat(
+                [
+                    inputs_embeds,
+                    inputs_embeds.new_empty(
+                        inputs_embeds.shape[0],
+                        inputs_embeds_size - inputs_embeds.shape[1],
+                    ),
+                ],
+                dim=1,
+            )
+
+        return inputs_embeds
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -1157,26 +1189,13 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         )
 
         if multimodal_embeddings is None or is_multimodal is None:
-            embeddings = super().embed_input_ids(input_ids)
-        else:
-            embeddings = super().embed_input_ids(
-                input_ids,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
-            )
+            return super().embed_input_ids(input_ids)
 
-        # NOTE: inputs_embeds in model runner has hidden dimension
-        # text_config.projection_size to accommodate image embeddings
-        text_config = self.config.text_config
-        return torch.cat(
-            [
-                embeddings,
-                embeddings.new_empty(
-                    len(embeddings), text_config.projection_size - embeddings.shape[1]
-                ),
-            ],
-            dim=1,
+        return super().embed_input_ids(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
@@ -1202,10 +1221,11 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # NOTE: inputs_embeds in model runner has hidden dimension
+        # NOTE: inputs_embeds in model runner has size
         # text_config.projection_size to accommodate image embeddings
-        text_config = self.config.text_config
-        inputs_embeds = inputs_embeds[:, : text_config.hidden_size]
+        hidden_size = self.text_embed_dim
+        if inputs_embeds.shape[1] != hidden_size:
+            inputs_embeds = inputs_embeds[:, :hidden_size]
 
         return self.get_text_features(input_ids, positions, inputs_embeds)
 
