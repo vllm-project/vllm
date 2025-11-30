@@ -697,6 +697,7 @@ else:
 
 setup(
     # static metadata should rather go in pyproject.toml
+    name="vllm",
     version=get_vllm_version(),
     ext_modules=ext_modules,
     install_requires=get_requirements(),
