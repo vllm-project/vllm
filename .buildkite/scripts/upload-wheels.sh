@@ -39,7 +39,7 @@ normal_wheel="$wheel" # Save the original wheel filename
 # If the version contains "dev", rename it to v1.0.0.dev for consistency
 if [[ $version == *dev* ]]; then
     suffix="${version##*.}"
-    if [[ $suffix == cu* ]]; then
+    if [[ $suffix == cu* || $suffix == cpu ]]; then
         new_version="1.0.0.dev+${suffix}"
     else
         new_version="1.0.0.dev"
@@ -54,17 +54,22 @@ fi
 # Upload the wheel to S3
 python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 
+if [[ $version == *cpu* ]]; then
+    BUILDKITE_COMMIT="$BUILDKITE_COMMIT/cpu"
+fi
+
 # generate index for this commit
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 
-if [[ $normal_wheel == *"cu129"* ]]; then
+if [[ $normal_wheel == *"cu129"* || $normal_wheel == *"cpu"* ]]; then
     # only upload index.html for cu129 wheels (default wheels) as it
     # is available on both x86 and arm64
+    # also upload cpu wheels as is available on both x86 and arm64
     aws s3 cp index.html "s3://vllm-wheels/$BUILDKITE_COMMIT/vllm/index.html"
     aws s3 cp "s3://vllm-wheels/nightly/index.html" "s3://vllm-wheels/$BUILDKITE_COMMIT/index.html"
 else
-    echo "Skipping index files for non-cu129 wheels"
+    echo "Skipping index files for non-cu129, non-cpu wheels"
 fi
 
 # generate index for nightly
