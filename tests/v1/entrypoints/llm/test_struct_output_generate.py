@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import fields
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +20,6 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import (
-    GuidedDecodingParams,
     SamplingParams,
     StructuredOutputsParams,
 )
@@ -106,23 +104,6 @@ class CarDescription(BaseModel):
     brand: str
     model: str
     car_type: CarType
-
-
-def test_guided_decoding_deprecated():
-    with pytest.warns(DeprecationWarning, match="GuidedDecodingParams is deprecated.*"):
-        guided_decoding = GuidedDecodingParams(json_object=True)
-
-    structured_outputs = StructuredOutputsParams(json_object=True)
-    assert fields(guided_decoding) == fields(structured_outputs)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp1 = SamplingParams(guided_decoding=guided_decoding)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp2 = SamplingParams.from_optional(guided_decoding=guided_decoding)
-
-    assert sp1 == sp2
-    assert sp1.structured_outputs == guided_decoding
 
 
 @pytest.mark.parametrize(
@@ -899,13 +880,11 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
                 output_json = json.loads(generated_text)
 
 
-@pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
-def test_structured_output_with_structural_tag(
-    guided_decoding_backend: str,
-):
+@pytest.mark.parametrize("backend", ["xgrammar"])
+def test_structured_output_with_structural_tag(backend: str):
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
-        guided_decoding_backend=guided_decoding_backend,
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
     )
 
     structural_tag_config = {
@@ -923,7 +902,7 @@ def test_structured_output_with_structural_tag(
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=500,
-        guided_decoding=StructuredOutputsParams(
+        structured_outputs=StructuredOutputsParams(
             structural_tag=json.dumps(structural_tag_config)
         ),
     )

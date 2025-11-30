@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -53,6 +54,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl,
     swap_w13_to_w31,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
@@ -149,8 +153,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, Attention):
             return self.KVCacheMethodCls(self)
@@ -171,9 +173,15 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # now, the layer is quantized, handle it here
         if isinstance(layer, LinearBase):
-            return self.LinearMethodCls(self)
+            quant_method = self.LinearMethodCls(self)
+            if getattr(quant_method, "backend", "") == "marlin":
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, FusedMoE):
-            return self.FusedMoEMethodCls(quant_config=self, layer=layer)
+            quant_method = self.FusedMoEMethodCls(quant_config=self, layer=layer)
+            if getattr(quant_method, "backend", "") == "marlin":
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
 
         return None
 
@@ -696,7 +704,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -717,12 +725,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `ModelOptFp8MoEMethod` yet."
-            )
-
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            if layer.enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `ModelOptFp8MoEMethod` yet."
+                )
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
@@ -740,19 +747,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
@@ -910,6 +907,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
+        self.marlin_input_dtype = None
 
         self.backend = "none"
         if envs.VLLM_NVFP4_GEMM_BACKEND is None:
@@ -1077,6 +1075,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
                 bias=bias,
+                input_dtype=self.marlin_input_dtype,
             )
 
         output_dtype = x.dtype
@@ -1136,6 +1135,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
+        self.marlin_input_dtype = None
         self.flashinfer_moe_backend = None
         if self.allow_flashinfer:
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
@@ -1143,6 +1143,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
                 " for ModelOptNvFp4FusedMoE."
             )
+        elif self.use_marlin:
+            logger.info_once("Using Marlin for ModelOptNvFp4FusedMoE.")
+        else:
+            logger.info_once("Using Cutlass for ModelOptNvFp4FusedMoE.")
 
     def maybe_make_prepare_finalize(
         self,
@@ -1459,7 +1463,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
@@ -1480,16 +1484,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-            )
         assert activation == "silu", "Only SiLU activation is supported."
 
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
+            if enable_eplb:
+                raise NotImplementedError(
+                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
+                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
@@ -1502,19 +1506,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if self.use_marlin:
@@ -1535,7 +1529,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                workspace=layer.workspace,
+                input_dtype=self.marlin_input_dtype,
             )
 
         elif self.allow_flashinfer:
