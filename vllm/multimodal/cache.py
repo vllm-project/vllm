@@ -4,6 +4,7 @@ import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from itertools import islice
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
@@ -272,35 +273,37 @@ class BaseMultiModalProcessorCache(
     """The required interface for caches on P0."""
 
     @abstractmethod
-    def is_cached_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
         """
-        Check whether a multi-modal item is
-        in the underlying cache.
+        Check whether a multi-modal item will continue to be cached
+        after `n` new items are inserted into this cache.
 
         This **DOES NOT** update the cache eviction order.
 
         Args:
-            mm_hash: The hash of the item to check.
+            mm_hash: The hash of the item to fetch.
+            n: The number of new items to look ahead.
 
         Returns:
-            `True` if the item is cached, otherwise `False`.
+            `True` if the item will remain cached, otherwise `False`.
         """
         raise NotImplementedError
 
-    def is_cached(self, mm_hashes: list[str]) -> list[bool]:
+    def is_cached(self, mm_hashes: list[str], *, n: int = 0) -> list[bool]:
         """
-        Check whether a sequence of multi-modal items are
-        in the underlying cache.
+        Check whether a sequence of multi-modal items will continue to be cached
+        after `n` new items are inserted into this cache.
 
         This **DOES NOT** update the cache eviction order.
 
         Args:
             mm_hashes: The hash of each item to check.
+            n: The number of new items to look ahead.
 
         Returns:
-            For each item, `True` if the item is cached, otherwise `False`.
+            For each item, `True` if the item will remain cached, otherwise `False`.
         """
-        return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
+        return [self.is_cached_item(mm_hash, n=n) for mm_hash in mm_hashes]
 
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
@@ -335,8 +338,25 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
+    def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
+        cache = self._cache
+
+        return mm_hash in cache and not any(
+            mm_hash == k for k in islice(cache.order, n)
+        )
+
+    @override
+    def is_cached(self, mm_hashes: list[str], *, n: int = 0) -> list[bool]:
+        if len(mm_hashes) <= 1:
+            return super().is_cached(mm_hashes, n=n)
+
+        # Avoid iterating over cache.order multiple times
+        cache = self._cache
+        hashes_to_evict = set(islice(cache.order, n))
+
+        return [
+            mm_hash in cache and mm_hash not in hashes_to_evict for mm_hash in mm_hashes
+        ]
 
     @override
     def get_and_update_item(
@@ -389,8 +409,25 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
+    def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
+        cache = self._cache
+
+        return mm_hash in cache and not any(
+            mm_hash == k for k in islice(cache.order, n)
+        )
+
+    @override
+    def is_cached(self, mm_hashes: list[str], *, n: int = 0) -> list[bool]:
+        if len(mm_hashes) <= 1:
+            return super().is_cached(mm_hashes, n=n)
+
+        # Avoid iterating over cache.order multiple times
+        cache = self._cache
+        hashes_to_evict = set(islice(cache.order, n))
+
+        return [
+            mm_hash in cache and mm_hash not in hashes_to_evict for mm_hash in mm_hashes
+        ]
 
     @override
     def get_and_update_item(
@@ -463,7 +500,8 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return info
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str, *, n: int = 0) -> bool:
+        # TODO: Handle n > 0 for safety if problems arise with this cache
         return self._shm_cache.is_cached(mm_hash)
 
     @override
@@ -485,15 +523,16 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         self._total += 1
 
         try:
-            address, monotonic_id = self._shm_cache.put(mm_hash, mm_item[0])
+            item, prompt_updates = mm_item
+            address, monotonic_id = self._shm_cache.put(mm_hash, item)
+
             # Try to remove dangling items if p0 cache is too large.
             if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
                 self.remove_dangling_items()
-            self._p0_cache[mm_hash] = mm_item[1], mm_item[0].modality
-            address_item = self.address_as_item(
-                address, monotonic_id, mm_item[0].modality
-            )
-            return address_item, mm_item[1]
+
+            self._p0_cache[mm_hash] = prompt_updates, item.modality
+            address_item = self.address_as_item(address, monotonic_id, item.modality)
+            return address_item, prompt_updates
         except (ValueError, MemoryError) as e:
             # put may fail if the object is too large or
             # the cache is full.
@@ -587,6 +626,7 @@ def processor_cache_from_config(
 
     if not _enable_mm_input_shm_cache(vllm_config):
         return MultiModalProcessorSenderCache(model_config)
+
     return ShmObjectStoreSenderCache(vllm_config)
 
 
@@ -613,6 +653,7 @@ class BaseMultiModalReceiverCache(
         """Update multimodal features with cached encoder outputs."""
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data, feature.identifier)
+
         return mm_features
 
 
