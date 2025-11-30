@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
-import copy
 import importlib.util
 import os
 import warnings
@@ -11,14 +9,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.tokenizers import MistralTokenizer, TokenizerLike, TokenizerRegistry
+from vllm.tokenizers import (
+    HfTokenizer,
+    MistralTokenizer,
+    TokenizerLike,
+    TokenizerRegistry,
+)
 
-from .config import get_sentence_transformer_tokenizer_config
 from .gguf_utils import get_gguf_file_path_from_hf
 from .repo_utils import list_filtered_repo_files
 from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
@@ -41,6 +42,18 @@ def __getattr__(name: str):
         )
 
         return TokenizerLike
+    if name == "get_cached_tokenizer":
+        from vllm.tokenizers.hf import get_cached_tokenizer
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.get_cached_tokenizer` "
+            "has been moved to `vllm.tokenizers.hf.get_cached_tokenizer`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return get_cached_tokenizer
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -58,10 +71,12 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
-    if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+    kw_args: dict[str, Any] = {}
 
-    return tokenizer.decode(token_ids)
+    if skip_special_tokens is not None:
+        kw_args["skip_special_tokens"] = skip_special_tokens
+
+    return tokenizer.decode(token_ids, **kw_args)
 
 
 def encode_tokens(
@@ -91,56 +106,6 @@ def encode_tokens(
         kw_args["add_special_tokens"] = add_special_tokens
 
     return tokenizer.encode(text, **kw_args)
-
-
-def get_cached_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
-    """
-    By default, transformers will recompute multiple tokenizer properties
-    each time they are called, leading to a significant slowdown.
-    This proxy caches these properties for faster access.
-    """
-    cached_tokenizer = copy.copy(tokenizer)
-
-    tokenizer_all_special_ids = tokenizer.all_special_ids
-    tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_vocab = tokenizer.get_vocab()
-    tokenizer_len = len(tokenizer)
-
-    max_token_id = max(tokenizer_vocab.values())
-    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
-    # are added and included in the implementation of the vocab_size
-    # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
-    if hasattr(tokenizer, "vocab_size"):
-        with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
-
-    class CachedTokenizer(tokenizer.__class__):  # type: ignore
-        @property
-        def all_special_ids(self) -> list[int]:
-            return tokenizer_all_special_ids
-
-        @property
-        def all_special_tokens(self) -> list[str]:
-            return tokenizer_all_special_tokens
-
-        @property
-        def max_token_id(self) -> int:
-            return max_token_id
-
-        def get_vocab(self) -> dict[str, int]:
-            return tokenizer_vocab
-
-        def __len__(self) -> int:
-            return tokenizer_len
-
-        def __reduce__(self):
-            return get_cached_tokenizer, (tokenizer,)
-
-    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
-
-    cached_tokenizer.__class__ = CachedTokenizer
-    return cached_tokenizer
 
 
 def get_tokenizer(
@@ -217,66 +182,39 @@ def get_tokenizer(
     if tokenizer_mode == "mistral":
         logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
         tokenizer = MistralTokenizer.from_pretrained(
-            str(tokenizer_name), revision=revision
+            tokenizer_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
         )
     elif tokenizer_mode == "custom":
         logger.debug_once(f"Loading CustomTokenizer from {tokenizer_name}")
         tokenizer = TokenizerRegistry.get_tokenizer(
             str(tokenizer_name),
             *args,
+            trust_remote_code=trust_remote_code,
             revision=revision,
             download_dir=download_dir,
             **kwargs,
         )
     else:
-        try:
-            logger.debug_once(f"Loading AutoTokenizer from {tokenizer_name}")
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                **kwargs,
-            )
-        except ValueError as e:
-            # If the error pertains to the tokenizer class not existing or not
-            # currently being imported,
-            # suggest using the --trust-remote-code flag.
-            if not trust_remote_code and (
-                "does not exist or is not currently imported." in str(e)
-                or "requires you to execute the tokenizer file" in str(e)
-            ):
-                err_msg = (
-                    "Failed to load the tokenizer. If the tokenizer "
-                    "is a custom tokenizer not yet available in the "
-                    "HuggingFace transformers library, consider "
-                    "setting `trust_remote_code=True` in LLM or using "
-                    "the `--trust-remote-code` flag in the CLI."
-                )
-                raise RuntimeError(err_msg) from e
-            else:
-                raise e
-
-        # The special_tokens in tokenizer should also be
-        # controlled by do_lower_case in encoder_config
-        encoder_config = get_sentence_transformer_tokenizer_config(
-            tokenizer_name, revision
+        logger.debug_once(f"Loading HfTokenizer from {tokenizer_name}")
+        tokenizer = HfTokenizer.from_pretrained(
+            tokenizer_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
         )
-        if isinstance(encoder_config, dict) and encoder_config.get(
-            "do_lower_case", False
-        ):
-            assert isinstance(tokenizer, PreTrainedTokenizerBase)
-            special_tokens_map = {
-                k: v.lower() for k, v in tokenizer.special_tokens_map.items()
-            }
-            tokenizer.add_special_tokens(special_tokens_map)
 
-        if not tokenizer.is_fast:
-            logger.warning(
-                "Using a slow tokenizer. This might cause a significant "
-                "slowdown. Consider using a fast tokenizer instead."
-            )
-        tokenizer = get_cached_tokenizer(tokenizer)
+    if not tokenizer.is_fast:
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead."
+        )
 
     return tokenizer
 
