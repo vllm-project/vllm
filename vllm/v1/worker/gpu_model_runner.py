@@ -887,6 +887,20 @@ class GPUModelRunner(
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
             if new_block_ids is not None:
+                # NOTE(hhy): same as block_ids, pop the last num_speculative_blocks
+                if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                    and self.speculative_config):
+                    num_poped_blocks = []
+                    for kv_cache_group in self.kv_cache_config.kv_cache_groups:
+                        if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                            num_poped_blocks.append(
+                                kv_cache_group.kv_cache_spec.num_speculative_blocks
+                            )
+                        else:
+                            num_poped_blocks.append(0)
+                    self.input_batch.block_table.pop_row(
+                        tuple(num_poped_blocks), req_index,
+                    )
                 self.input_batch.block_table.append_row(new_block_ids, req_index)
 
             # For the last rank, we don't need to update the token_ids_cpu
