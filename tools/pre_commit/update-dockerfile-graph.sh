@@ -37,37 +37,39 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   
   # Generate Dockerfile graph
   echo "Running dockerfilegraph tool..."
+
+  # Create a temporary directory for output
+  TEMP_OUTPUT_DIR=$(mktemp -d)
+  trap "rm -rf '$TEMP_OUTPUT_DIR'" EXIT
+
+  # Copy the Dockerfile to temp directory and ensure it's readable
+  chmod 777 "$TEMP_OUTPUT_DIR"
+  cp docker/Dockerfile "$TEMP_OUTPUT_DIR/"
+  chmod 644 "$TEMP_OUTPUT_DIR/Dockerfile"
+
+  # Run dockerfilegraph with output to temp directory
   docker run \
     --rm \
-    --user "$(id -u):$(id -g)" \
     --workdir /workspace \
-    --volume "$(pwd)":/workspace \
+    --volume "$TEMP_OUTPUT_DIR":/workspace \
+    --security-opt label=disable \
     ghcr.io/patrickhoefler/dockerfilegraph:alpine \
     --output png \
     --dpi 200 \
     --max-label-length 50 \
-    --filename docker/Dockerfile \
+    --filename Dockerfile \
     --legend
-  
-  echo "Finding generated PNG file..."
-  # Check for Dockerfile.png in the root directory (most likely location)
-  if [ -f "./Dockerfile.png" ]; then
-    echo "Found generated file at: ./Dockerfile.png"
-    mv "./Dockerfile.png" "$TARGET_GRAPH_FILE"
+
+  # Move the generated file to the target location
+  if [ -f "$TEMP_OUTPUT_DIR/Dockerfile.png" ]; then
+    echo "Successfully generated Dockerfile.png"
+    mv "$TEMP_OUTPUT_DIR/Dockerfile.png" "$TARGET_GRAPH_FILE"
   else
-    # Try to find it elsewhere
-    DOCKERFILE_PNG=$(find . -name "Dockerfile.png" -type f | head -1)
-    
-    if [ -n "$DOCKERFILE_PNG" ]; then
-      echo "Found generated file at: $DOCKERFILE_PNG"
-      mv "$DOCKERFILE_PNG" "$TARGET_GRAPH_FILE"
-    else
-      echo "Error: Could not find the generated PNG file"
-      find . -name "*.png" -type f -mmin -5
-      exit 1
-    fi
+    echo "Error: Could not find the generated PNG file in temp directory"
+    ls -la "$TEMP_OUTPUT_DIR"
+    exit 1
   fi
-  
+
   # Check if the graph has changed
   NEW_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
