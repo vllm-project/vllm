@@ -32,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -73,7 +72,10 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    grouped_topk,
+    zero_experts_compute_triton,
+)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
     rocm_aiter_grouped_topk,
 )
@@ -603,7 +605,7 @@ class FusedMoE(CustomOp):
             )
 
             if not isinstance(
-                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method, UnquantizedFusedMoEMethod | ModelOptFp8MoEMethod
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
