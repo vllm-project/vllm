@@ -460,7 +460,12 @@ def init_gloo_process_group(
 
 
 def stateless_init_torch_distributed_process_group(
-    host: str, port: int, rank: int, world_size: int, backend: str
+    host: str,
+    port: int,
+    rank: int,
+    world_size: int,
+    backend: str,
+    gloo_comm_timeout: int | None,
 ) -> ProcessGroup:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -495,7 +500,11 @@ def stateless_init_torch_distributed_process_group(
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
-    timeout = _get_default_timeout(backend)
+
+    if gloo_comm_timeout is None:
+        timeout = _get_default_timeout(backend)
+    else:
+        timeout = timedelta(seconds=gloo_comm_timeout)
 
     store, rank, world_size = next(
         rendezvous(init_method, rank, world_size, timeout=timeout)
