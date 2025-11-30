@@ -15,8 +15,8 @@ def _penalties_and_temperature_kernel(
     presence_penalty_ptr,
     temperature_ptr,
     idx_mapping_ptr,
-    prompt_bin_counts_ptr,
-    prompt_bin_counts_stride,
+    prompt_bin_mask_ptr,
+    prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
     vocab_size,
@@ -54,13 +54,16 @@ def _penalties_and_temperature_kernel(
 
         # Apply repetition penalties.
         if use_rep_penalty:
-            prompt_bin_counts = tl.load(
-                prompt_bin_counts_ptr
-                + req_state_idx * prompt_bin_counts_stride
-                + block,
-                mask=mask,
+            packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
+            packed_mask = tl.load(
+                prompt_bin_mask_ptr
+                + req_state_idx * prompt_bin_mask_stride
+                + packed_block,
+                mask=packed_block < tl.cdiv(vocab_size, 32),
             )
-            prompt_bin_mask = prompt_bin_counts > 0
+            prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
+            prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
+
             # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
             scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
             # If logits are positive, divide by penalty, otherwise multiply by penalty.
@@ -93,8 +96,8 @@ def apply_penalties_and_temperature(
         sampling_metadata.presence_penalty,
         sampling_metadata.temperature,
         sampling_metadata.idx_mapping,
-        sampling_metadata.prompt_bin_counts,
-        sampling_metadata.prompt_bin_counts.stride(0),
+        sampling_metadata.prompt_bin_mask,
+        sampling_metadata.prompt_bin_mask.stride(0),
         sampling_metadata.output_bin_counts,
         sampling_metadata.output_bin_counts.stride(0),
         vocab_size,
@@ -107,7 +110,7 @@ def _bincount_kernel(
     prefill_token_ids_ptr,
     prefill_len,
     prompt_len,
-    prompt_bin_counts_ptr,
+    prompt_bin_mask_ptr,
     output_bin_counts_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -119,7 +122,10 @@ def _bincount_kernel(
     if block_idx * BLOCK_SIZE < prompt_len:
         mask = block < prompt_len
         prefill_tokens = tl.load(prefill_token_ids_ptr + block, mask=mask)
-        tl.atomic_add(prompt_bin_counts_ptr + prefill_tokens, 1, mask=mask)
+        idx = prefill_tokens // 32
+        bit_idx = prefill_tokens % 32
+        bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
+        tl.atomic_or(prompt_bin_mask_ptr + idx, bit, mask=mask)
     if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
         mask = block < prefill_len
         mask &= block >= prompt_len
@@ -131,10 +137,10 @@ def bincount(
     prefill_token_ids: torch.Tensor,
     prefill_len: int,
     prompt_len: int,
-    prompt_bin_counts: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
 ) -> None:
-    prompt_bin_counts.zero_()
+    prompt_bin_mask.zero_()
     output_bin_counts.zero_()
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(prefill_len, BLOCK_SIZE)
@@ -142,7 +148,7 @@ def bincount(
         prefill_token_ids,
         prefill_len,
         prompt_len,
-        prompt_bin_counts,
+        prompt_bin_mask,
         output_bin_counts,
         BLOCK_SIZE=BLOCK_SIZE,
     )
