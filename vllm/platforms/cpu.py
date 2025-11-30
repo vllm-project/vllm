@@ -74,19 +74,50 @@ class CpuPlatform(Platform):
     dist_backend: str = "gloo"
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
 
+    @classmethod
+    def _bf16_support_mac(cls) -> bool:
+        """Check if the Apple Silicon device supports bf16.
+
+        This checks both hardware capabilities and PyTorch support for bf16
+        on Apple Silicon devices.
+        """
+        if not sys.platform.startswith("darwin"):
+            return False
+
+        if cls.get_cpu_architecture() != CpuArchEnum.ARM:
+            return False
+
+        # Check if we're on Apple Silicon
+        try:
+            import platform
+
+            if not platform.processor().startswith("arm"):
+                return False
+        except Exception:
+            return False
+
+        # Check PyTorch MPS backend support
+        if not torch.backends.mps.is_available():
+            return False
+
+        # Check if bf16 is supported by PyTorch on this device
+        try:
+            # Try to create a bf16 tensor on MP
+            torch.zeros(1, dtype=torch.bfloat16, device="mps")
+            return True
+        except Exception:
+            return False
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
-            "darwin"
+        elif (
+            sys.platform.startswith("darwin")
+            and self.get_cpu_architecture() == CpuArchEnum.ARM
         ):
-            if (
-                subprocess.check_output(
-                    ["sysctl -n hw.optional.arm.FEAT_BF16"], shell=True
-                ).strip()
-                == b"1"
-            ):
+            # Check for bf16 support on Apple Silicon
+            if self._bf16_support_mac():
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
