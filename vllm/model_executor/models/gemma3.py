@@ -287,8 +287,8 @@ class Gemma3Attention(nn.Module):
                 query,
                 key,
                 value,
-                attn_mask,
-                self.scaling,
+                attn_mask=attn_mask,
+                scale=self.scaling,
             )
             output = output.transpose(1, 2).flatten(-2, -1)
             out[start_idx:end_idx] = output
