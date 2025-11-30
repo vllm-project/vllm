@@ -226,6 +226,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
+        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             for i in self._invalid_req_indices:
@@ -3355,9 +3356,24 @@ class GPUModelRunner(
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
         ):
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: logprobs_tensors={sampler_output.logprobs_tensors}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: invalid_req_indices={invalid_req_indices}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: vocab_size={self.input_batch.vocab_size}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: output={output}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: sampler_output={sampler_output}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: kv_connector_output={kv_connector_output}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: valid_sampled_token_ids={valid_sampled_token_ids}")
+            sampled_token_ids = sampler_output.sampled_token_ids
+            if sampled_token_ids.shape[-1] == 1:
+                padded_sampled_token_ids = torch.full((sampled_token_ids.shape[0], self.speculative_config.num_speculative_tokens), -1, dtype=torch.int32, device=sampled_token_ids.device)
+                padded_sampled_token_ids[:, :sampled_token_ids.shape[-1]] = sampled_token_ids
+                sampled_token_ids = padded_sampled_token_ids
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: sampled_token_ids={sampler_output.sampled_token_ids}")
+            logger.info(f"[DEBUG] GETTING ASYNC OUTPUT: padded_sampled_token_ids={sampled_token_ids}")
+            
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
-                sampled_token_ids=sampler_output.sampled_token_ids,
+                sampled_token_ids=sampled_token_ids,
                 logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
