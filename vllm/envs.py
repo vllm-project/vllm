@@ -10,6 +10,8 @@ import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
+from vllm.config.utils import normalize_value
+
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
@@ -1579,11 +1581,7 @@ def is_set(name: str):
 
 
 def compile_factors() -> dict[str, object]:
-    """Return env vars used for torch.compile cache keys.
-
-    Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers."""
-
+    """Collect env vars used for torch.compile cache keys."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
@@ -1643,8 +1641,6 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
     }
-
-    from vllm.config.utils import normalize_value
 
     factors: dict[str, object] = {}
     for factor, getter in environment_variables.items():

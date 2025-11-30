@@ -18,7 +18,7 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import CompileFactors, config, get_compile_factors, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -320,17 +320,20 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        WARNING: Whenever a new field is added to this config, review
+        `ignored_factors` to decide whether that field must be excluded.
+        Every other dataclass field automatically participates in the hash.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This config is opt-out hashed: include every dataclass field except for
+        those explicitly listed in `ignored_factors`.
         """
         ignored_factors = {
             "runner",
@@ -369,10 +372,8 @@ class ModelConfig:
             "skip_mm_profiling",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        factors = get_compile_factors(self, ignored_factors)
+        return factors or {}
 
     def _update_nested(
         self,

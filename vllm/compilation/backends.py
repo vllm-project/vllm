@@ -3,7 +3,6 @@
 
 import ast
 import dataclasses
-import hashlib
 import json
 import operator
 import os
@@ -13,6 +12,7 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -33,7 +33,11 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .caching import VllmSerializableFunction
+from .caching import (
+    VllmSerializableFunction,
+    compute_env_and_config_hashes,
+    get_code_factors,
+)
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -95,8 +99,8 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compute_hash(vllm_config)
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+        return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
     def compile_context(self, runtime_shape: int | None = None):
@@ -596,31 +600,25 @@ class VllmBackend:
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
 
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
-        # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
-        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        (
+            env_hash,
+            config_hash,
+            env_factors,
+            config_factors,
+        ) = compute_env_and_config_hashes(vllm_config)
+        compiler_factors = self.compiler_manager.compile_factors(vllm_config)
+        compiler_hash = hash_factors(compiler_factors)
+        traced_files = set(self.compilation_config.traced_files)
+        forward_code_files = sorted(
+            (Path(filepath) for filepath in traced_files), key=str
+        )
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
+            lazy(lambda: "\n".join(map(str, forward_code_files))),
         )
-        hash_content = []
-        for filepath in forward_code_files:
-            hash_content.append(filepath)
-            if filepath == "<string>":
-                # This means the function was dynamically generated, with
-                # e.g. exec(). We can't actually check these.
-                continue
-            try:
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            except Exception:
-                logger.warning("Failed to read file %s", filepath)
-                continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        code_factors = get_code_factors(forward_code_files)
+        code_hash = hash_factors({"files": code_factors})
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -628,10 +626,15 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            all_factors = {
+                "env": env_factors,
+                "config": config_factors,
+                "code": {"files": code_factors},
+                "compiler": compiler_factors,
+            }
             # Use SHA-256 for cache key hashing to be consistent across
-            # compute_hash functions. Truncate for a short cache dir name.
-            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
+            # compile_factors functions. Truncate for a short cache dir name.
+            hash_key = hash_factors(all_factors)[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
@@ -686,9 +689,12 @@ class VllmBackend:
                     json.dump(
                         {
                             "env": env_factors,  # raw factors used for env_hash
+                            "config": config_factors,
                             "config_hash": config_hash,
-                            "code_hash": code_hash,
+                            "compiler": compiler_factors,
                             "compiler_hash": compiler_hash,
+                            "code_hash": code_hash,
+                            "code": code_factors,
                         },
                         f,
                         indent=2,

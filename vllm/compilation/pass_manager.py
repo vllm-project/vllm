@@ -127,9 +127,10 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
+        state = {"pass_config": self.pass_config.compile_factors(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
+        state["passes"].append(self.post_cleanup.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
 
         return InductorPass.hash_dict(state)

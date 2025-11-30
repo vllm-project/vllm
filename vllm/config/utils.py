@@ -26,6 +26,7 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
+CompileFactors = dict[str, object]
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -155,8 +156,8 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 @runtime_checkable
-class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> CompileFactors: ...
 
 
 class SupportsMetricsInfo(Protocol):
@@ -269,9 +270,12 @@ def normalize_value(x):
     )
 
 
-def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
+def get_compile_factors(
+    config: ConfigT, ignored_factors: set[str]
+) -> dict[str, object]:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
+    - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
     factors: dict[str, object] = {}
@@ -280,11 +284,14 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
         if factor in ignored_factors:
             continue
         value = getattr(config, factor, None)
+        # Nested configs expose factors via compile_factors; unwrap first.
+        if isinstance(value, SupportsCompileFactors):
+            value = value.compile_factors()
         try:
             factors[factor] = normalize_value(value)
         except TypeError as e:
             raise TypeError(
-                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"get_compile_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
     return factors
