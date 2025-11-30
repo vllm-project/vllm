@@ -37,6 +37,7 @@ if [[ $1 == "prefiller" ]]; then
         vllm serve $MODEL \
         --port 8100 \
         --enforce-eager \
+        --no-enable-prefix-caching \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
@@ -54,6 +55,7 @@ elif [[ $1 == "decoder" ]]; then
         vllm serve $MODEL \
         --port 8200 \
         --enforce-eager \
+        --no-enable-prefix-caching \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
 
