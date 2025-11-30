@@ -990,7 +990,8 @@ class SiglipTextEmbeddings(nn.Module):
                 embeddings.new_empty(
                     len(embeddings), config.projection_size - embeddings.shape[1]
                 ),
-            ]
+            ],
+            dim=1,
         )
 
 
