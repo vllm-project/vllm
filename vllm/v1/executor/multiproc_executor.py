@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -104,16 +105,24 @@ class MultiprocExecutor(Executor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
-        self.local_world_size = self.parallel_config.local_world_size
-        tp_size = self.parallel_config.tensor_parallel_size
-        pp_size = self.parallel_config.pipeline_parallel_size
-        pcp_size = self.parallel_config.prefill_context_parallel_size
+        if not USE_TPU_INFERENCE:
+            self.world_size = self.parallel_config.world_size
+            assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+                f"global world_size ({self.parallel_config.world_size}) must be "
+                f"divisible by nnodes_within_dp "
+                f"({self.parallel_config.nnodes_within_dp}). "
+            )
+            self.local_world_size = self.parallel_config.local_world_size
+            tp_size = self.parallel_config.tensor_parallel_size
+            pp_size = self.parallel_config.pipeline_parallel_size
+            pcp_size = self.parallel_config.prefill_context_parallel_size
+        else:
+            # Jax handles TP with SPMD, world_size = pp_size.
+            self.world_size = self.parallel_config.pipeline_parallel_size
+            self.local_world_size = self.world_size
+            tp_size = 1
+            pcp_size = 1
+            pp_size = self.parallel_config.pipeline_parallel_size
         assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
@@ -201,6 +210,17 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+        
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            # set up jax transfer connection.
+            if USE_TPU_INFERENCE:
+                for rank in range(1, self.world_size):
+                    self.collective_rpc(
+                        "initialize_pp_transfer_connect", unique_reply_rank=rank
+                    )
+
+            self.start_worker_monitor()
             success = True
         finally:
             if not success:
@@ -210,8 +230,6 @@ class MultiprocExecutor(Executor):
                     if uw.death_writer is not None:
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
-
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
 
@@ -427,6 +445,8 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
+        if USE_TPU_INFERENCE:
+            return self.world_size - 1
         return (
             self.world_size
             - self.parallel_config.tensor_parallel_size
@@ -526,7 +546,12 @@ class WorkerProc:
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
+        if USE_TPU_INFERENCE:
+            is_driver_worker = True
+        else:
+            is_driver_worker = (
+                rank % vllm_config.parallel_config.tensor_parallel_size == 0
+            )
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,

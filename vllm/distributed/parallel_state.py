@@ -1092,6 +1092,10 @@ _PP: GroupCoordinator | None = None
 
 
 def get_pp_group() -> GroupCoordinator:
+    from vllm.platforms.tpu import USE_TPU_INFERENCE
+    if USE_TPU_INFERENCE:
+        from tpu_inference.distributed import jax_parallel_state
+        return jax_parallel_state.get_pp_group()
     assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
 
