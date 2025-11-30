@@ -340,6 +340,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
+
     if recipient is not None and recipient.startswith("browser."):
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
@@ -452,7 +453,26 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         )
         output_items.append(text_item)
     else:
-        raise ValueError(f"Unknown channel: {message.channel}")
+        # For unknown channels or channel=None with recipient=None,
+        # treat as regular output
+        if recipient is None:
+            for content in message.content:
+                output_text = ResponseOutputText(
+                    text=content.text,
+                    annotations=[],
+                    type="output_text",
+                    logprobs=None,
+                )
+                text_item = ResponseOutputMessage(
+                    id=f"msg_{random_uuid()}",
+                    content=[output_text],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+                output_items.append(text_item)
+        else:
+            raise ValueError(f"Unknown channel: {message.channel}")
     return output_items
 
 
@@ -478,6 +498,26 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
             status=None,
         )
         return [reasoning_item]
+    elif parser.current_channel == "commentary":
+        # For commentary channel, be very conservative
+        # Only process if content doesn't look like incomplete message markers
+        if parser.current_content:
+            content_stripped = parser.current_content.strip()
+            if (content_stripped and not content_stripped.startswith('<|')
+                    and '<|' not in content_stripped):
+                reasoning_item = ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(
+                            text=parser.current_content, type="reasoning_text")
+                    ],
+                    status=None,
+                )
+                return [reasoning_item]
+        # If no valid content or content contains markers, return empty list
+        return []
     elif parser.current_channel == "final":
         output_text = ResponseOutputText(
             text=parser.current_content,
