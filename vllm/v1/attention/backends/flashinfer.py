@@ -508,7 +508,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if can_use_trtllm and not flashinfer_disable_q_quantization():
             self.q_data_type = self.kv_cache_dtype
         else:
-            self.q_data_type = self.model_config.dtype
+            # self.q_data_type = self.model_config.dtype
+            self.q_data_type = self.kv_cache_dtype
+
+        print(f"q_data_type: {self.q_data_type}")
+        print(f"kv_cache_dtype: {self.kv_cache_dtype}")
 
         # Prefer TRTLLM attention for decoding in all cases.
         # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
@@ -807,7 +811,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # The q quantization is not supported for non-trtllm attention,
             # fall back to model dtype.
-            self.q_data_type = self.model_config.dtype
+            # self.q_data_type = self.model_config.dtype
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -900,12 +904,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             kv_cache_dtype=self.kv_cache_dtype,
                             prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
+                            o_data_type=self.model_config.dtype,
                         )
                     else:
                         assert isinstance(
                             attn_metadata.prefill_wrapper,
                             BatchPrefillWithPagedKVCacheWrapper,
                         )
+                        print(f"calling plan() with q_data_type: {self.q_data_type}")
+                        print(f"calling plan() with kv_cache_dtype: {self.kv_cache_dtype}")
+                        print(f"calling plan() with o_data_type: {self.model_config.dtype}")
                         attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu,
                             paged_kv_indptr_cpu,
@@ -923,6 +931,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             kv_data_type=self.kv_cache_dtype,
                             fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
+                            o_data_type=self.model_config.dtype,
                         )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
@@ -967,6 +976,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_data_type=self.kv_cache_dtype,
                         fixed_split_size=self.decode_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                        o_data_type=self.model_config.dtype,
                     )
         return attn_metadata
 
@@ -1051,7 +1061,7 @@ class FlashInferImpl(AttentionImpl):
         if flashinfer_disable_q_quantization():
             return False
 
-        return self.support_trtllm_attn
+        return self.kv_cache_dtype.startswith("fp8")
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1239,6 +1249,7 @@ class FlashInferImpl(AttentionImpl):
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
+                        q_scale=layer._q_scale_float,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output[num_decode_tokens:],
@@ -1428,6 +1439,7 @@ def fast_plan_decode(
     non_blocking: bool = True,
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
+    o_data_type: str | torch.dtype | None = None,
 ) -> None:
     """
     A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
@@ -1468,6 +1480,7 @@ def fast_plan_decode(
             None,  # seq_lens
             fixed_split_size,
             disable_split_kv,
+            o_data_type,
         )
         self.vllm_first_call = False
         return
@@ -1477,24 +1490,6 @@ def fast_plan_decode(
     batch_size = len(last_page_len_cpu)
     if logits_soft_cap is None:
         logits_soft_cap = 0.0
-
-    # Handle data types consistently
-    if data_type is not None:
-        if q_data_type is None:
-            q_data_type = data_type
-        if kv_data_type is None:
-            kv_data_type = data_type
-    elif q_data_type is None:
-        q_data_type = "float16"
-
-    if kv_data_type is None:
-        kv_data_type = q_data_type
-    q_data_type = (
-        getattr(torch, q_data_type) if isinstance(q_data_type, str) else q_data_type
-    )
-    kv_data_type = (
-        getattr(torch, kv_data_type) if isinstance(kv_data_type, str) else kv_data_type
-    )
 
     if batch_size != self._fixed_batch_size:
         raise ValueError(
@@ -1515,13 +1510,13 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 19 arguments for tensor core version
-        self._plan_info = self._cached_module.plan(
+        # Make sure we pass exactly 19 arguments for fa2 backend and 16 arguments for fa3 backend
+        args = [
             self._float_workspace_buffer,
             self._int_workspace_buffer,
             self._pin_memory_int_workspace_buffer,
             qo_indptr_host,
-            indptr_cpu,
+            indptr_host,
             seq_lens_cpu,
             batch_size,  # total_num_rows
             batch_size,
@@ -1533,9 +1528,13 @@ def fast_plan_decode(
             head_dim,
             False,  # causal
             window_left,
-            fixed_split_size,
-            disable_split_kv,
-            0,
+        ]
+        if self._backend == "fa2":
+            args.append(fixed_split_size)
+            args.append(disable_split_kv)
+            args.append(0)  # num_colocated_ctas
+        self._plan_info = self._cached_module.plan(
+            *args,
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
