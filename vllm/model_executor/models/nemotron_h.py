@@ -67,7 +67,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -633,23 +632,9 @@ class NemotronHModel(nn.Module):
         return hidden_states
 
     def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        # TODO smor- adjusted to your current dummy MTP variant
-        if (
-            hasattr(config, "num_nextn_predict_layers")
-            and config.num_nextn_predict_layers > 0
-        ):
-            # Check for MTP layer weights (after mapper has remapped backbone -> model)
-            layer_idx = config.num_hidden_layers
-            for i in range(config.num_nextn_predict_layers):
-                if weight_name.startswith(f"layers.{layer_idx + i}."):
-                    return True
-            
-            # Also skip the MTP-specific final norm (backbone.norm.weight -> norm.weight)
-            # This is different from the main model's norm_f
-            if weight_name == "norm.weight":
-                return True
+        if weight_name.startswith("mtp."):
+            return True
         return False
-
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -683,9 +668,9 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
-            
+
             # Skip MTP/spec decode layers early (before stacked params mapping)
-            if self.is_spec_layer(self.config, name):
+            if name.startswith("mtp."):
                 continue
 
             # load stacked params
@@ -822,7 +807,7 @@ class NemotronHForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        
+
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
@@ -831,7 +816,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
-            num_spec=num_spec
+            num_spec=num_spec,
         )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
