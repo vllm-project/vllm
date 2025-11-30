@@ -61,8 +61,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 10min
-  timeout_in_minutes: 15
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
+  timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -310,8 +310,8 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Engine Test # 25min
-  timeout_in_minutes: 40
+- label: Engine Test # 9min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
