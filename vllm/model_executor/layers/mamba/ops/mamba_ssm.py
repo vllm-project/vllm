@@ -340,7 +340,11 @@ def selective_state_update(
     batch = x.shape[0]
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        # Only used to verify the shape of
+        # state_batch_indices and dst_state_batch_indices
+        max_seqlen = (
+            state_batch_indices.size(-1) if state_batch_indices is not None else 1
+        )
     else:
         N = batch
         max_seqlen = 1
@@ -359,9 +363,11 @@ def selective_state_update(
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
-        assert state_batch_indices.shape == (N, max_seqlen)
+        assert state_batch_indices.shape[0] >= N
+        assert state_batch_indices.shape[1] >= max_seqlen
     if dst_state_batch_indices is not None:
-        assert dst_state_batch_indices.shape == (N, max_seqlen)
+        assert dst_state_batch_indices.shape[0] >= N
+        assert dst_state_batch_indices.shape[1] >= max_seqlen
     else:
         # revert to the default behavior of in-place state updates
         dst_state_batch_indices = state_batch_indices

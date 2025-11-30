@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -11,6 +12,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
+    AttentionCGSupport,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
@@ -157,6 +159,8 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -649,3 +653,29 @@ class Mamba2AttentionMetadataBuilder(
         )
 
         return attn_metadata
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> Mamba2AttentionMetadata:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with Mamba2.
+        """
+        m = common_attn_metadata
+
+        assert (
+            m.num_reqs <= self.decode_cudagraph_max_bs
+            and m.num_actual_tokens <= self.decode_cudagraph_max_bs
+        ), (
+            f"Mamba2 only supports decode-only full CUDAGraph capture. "
+            f"Make sure batch size ({m.num_reqs}) <= "
+            f"cudagraph capture sizes ({self.decode_cudagraph_max_bs}), "
+            f"and number of tokens ({m.num_actual_tokens}) <= "
+            f"cudagraph capture sizes ({self.decode_cudagraph_max_bs})."
+        )
+
+        num_accepted_tokens = torch.diff(m.query_start_loc)
+        num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
+        m.num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
+
+        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
