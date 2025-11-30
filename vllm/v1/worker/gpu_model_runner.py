@@ -1566,12 +1566,12 @@ class GPUModelRunner(
                 # graph mode.
                 blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
                 
-                if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                    and self.cache_config.enable_prefix_caching
-                    and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-                ):
-                    # NOTE(Chen): where should we put this?
-                    self._preprocess_mamba(kv_cache_gid, kv_cache_group)
+                # if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                #     and self.cache_config.enable_prefix_caching
+                #     and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+                # ):
+                #     # NOTE(Chen): where should we put this?
+                #     self._preprocess_mamba(kv_cache_gid, kv_cache_group)
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -2681,15 +2681,10 @@ class GPUModelRunner(
                     for kv_cache_part in kv_cache:
                         kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
 
-    def _preprocess_mamba(self,
-                          kv_cache_group_id: int,
-                          kv_cache_group_spec: KVCacheGroupSpec,
-                          ):
+    def _preprocess_mamba(self):
         # TODO(Chen): we need to optimize this function a lot
-        assert isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
         assert self.cache_config.enable_prefix_caching
-        block_size = kv_cache_group_spec.kv_cache_spec.block_size
-        block_copy_requests = []
+        block_size = self.cache_config.block_size
         for i, req_id in enumerate(self.input_batch.req_ids):
             if is_global_first_rank():
                 logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {i=} {req_id=}')
@@ -2697,16 +2692,33 @@ class GPUModelRunner(
             if req_state.num_computed_tokens == 0:
                 # new request, no previous state
                 continue
+            
             prev_block_idx = (req_state.num_computed_tokens - 1)// block_size
             # NOTE(Chen): if we have 7 tokens and 3 unverified speculative decoding tokens, seq_lens=10 here
             # TODO in this PR(Chen): verify this for spec decode and adjust the comment
+            # TODO: copy must have new blocks
             curr_block_idx = (self.seq_lens.cpu[i] - 1) // block_size
             if is_global_first_rank():
-                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {req_state.block_ids[kv_cache_group_id]=}')
-                logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {req_id=}, prev_len {req_state.num_computed_tokens} prev_block_idx {prev_block_idx} curr_len {self.seq_lens.cpu[i]} curr_block_idx {curr_block_idx}')
+                logger.info(f'>>> [DEBUG] Worker: preprocess mamba: {req_id=}, prev_len={req_state.num_computed_tokens} '
+                            f'prev_block_idx={prev_block_idx}, curr_len={self.seq_lens.cpu[i]} curr_block_idx={curr_block_idx}')
             if prev_block_idx == curr_block_idx:
                 # same block, no need to copy
                 continue
+
+            for kv_cache_gid, kv_cache_group in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                if not isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                    continue
+                prev_block_id = req_state.block_ids[kv_cache_gid][prev_block_idx]
+                curr_block_id = req_state.block_ids[kv_cache_gid][curr_block_idx]
+                assert prev_block_id != 0
+                assert curr_block_id != 0
+                if is_global_first_rank():
+                    logger.info(f'>>> [DEBUG] Worker: preprocess mamba: {req_id=}, COPY block {prev_block_id=} -> {curr_block_id=}')
+                # TODO(Chen): parallelize this loop
+                self._mamba_copy_block(kv_cache_group, prev_block_id, curr_block_id)
+                    
     def _postprocess_mamba(self):
         assert self.cache_config.enable_prefix_caching
         assert self.speculative_config
@@ -2830,6 +2842,12 @@ class GPUModelRunner(
 
                 # TODO(lucas): move cudagraph dispatching here:
                 #   https://github.com/vllm-project/vllm/issues/23789
+
+                if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                    and self.cache_config.enable_prefix_caching
+                ):
+                    # TODO: add limition: preprocess only have new blocks
+                    self._preprocess_mamba()
 
                 total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
