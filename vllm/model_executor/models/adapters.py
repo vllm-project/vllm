@@ -301,7 +301,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             quant_config = vllm_config.quant_config
 
             self.score = ReplicatedLinear(
-                model_config.hidden_size,
+                model_config.get_hidden_size(),
                 text_config.num_labels,
                 bias=False,
                 params_dtype=vllm_config.model_config.head_dtype,
