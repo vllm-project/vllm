@@ -152,30 +152,3 @@ def bincount(
         output_bin_counts,
         BLOCK_SIZE=BLOCK_SIZE,
     )
-
-
-@triton.jit
-def _unpack_bitmask_kernel(
-    bitmask_ptr,
-    bitmask_stride,
-    output_ptr,
-    output_stride,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-
-    mask_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
-    bitmask = tl.load(
-        bitmask_ptr + batch_idx * bitmask_stride + mask_block,
-        mask=mask_block < tl.cdiv(vocab_size, 32),
-    )
-    unpacked_bitmask = (bitmask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
-    unpacked_bitmask = unpacked_bitmask.reshape(BLOCK_SIZE)
-
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    tl.store(
-        output_ptr + batch_idx * output_stride + block, unpacked_bitmask, mask=mask
-    )
