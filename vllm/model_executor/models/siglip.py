@@ -973,6 +973,10 @@ class SiglipTextEmbeddings(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.token_embedding(input_ids)
+        else:
+            # NOTE: inputs_embeds has size self.config.projection_size
+            # to accommodate image embeddings
+            inputs_embeds = inputs_embeds[:, : self.config.hidden_size]
 
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
