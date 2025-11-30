@@ -97,13 +97,18 @@ def construct_chat_message_with_tool_call(
             "role": "assistant",
             "reasoning": reasoning_content,
         }
+    elif isinstance(item, ResponseOutputMessage):
+        return {
+            "role": "assistant",
+            "content": item.content[0].text,
+        }
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.output,
             tool_call_id=item.call_id,
         )
-    elif item.get("type") == "function_call_output":
+    elif isinstance(item, dict) and item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
             role="tool",
