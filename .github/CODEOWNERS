@@ -19,6 +19,9 @@
 /vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
+# Benchmarks
+/benchmarks/multi_turn @segevido @ptovam
+
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
