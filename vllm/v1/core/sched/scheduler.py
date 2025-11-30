@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import torch
+import torch.distributed as dist
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -190,6 +192,16 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+
+        # Balance scheduling.
+        if self.vllm_config.scheduler_config.balance_scheduling:
+            self.balance_queue = [
+                torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(self.vllm_config.parallel_config.data_parallel_size)
+            ]
+
+    def balance_gather(self, dp_group):
+        runing_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
+        dist.all_gather(self.balance_queue, runing_tensor, group=dp_group)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -406,6 +418,11 @@ class Scheduler(SchedulerInterface):
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
+
+                if self.vllm_config.scheduler_config.balance_scheduling:
+                    balance_flag = max(t.item() for t in self.balance_gather) == self.max_num_running_reqs
+                    if balance_flag:
+                        break
 
                 request = self.waiting.peek_request()
 
