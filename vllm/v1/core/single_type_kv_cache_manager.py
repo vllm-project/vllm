@@ -37,7 +37,7 @@ def format_blocks(blocks: list[KVCacheBlock]):
                 i += 1
             result.append(f"Null-block*{count}")
         else:
-            result.append(f'KVBlock(block_id={blocks[i].block_id})')
+            result.append(f'KVBlock(block_id={blocks[i].block_id}, ref_cnt={blocks[i].ref_cnt})')
             i += 1
     
     return f"[{', '.join(result)}]"
@@ -184,6 +184,11 @@ class SingleTypeKVCacheManager(ABC):
 
         if num_cached_blocks >= num_full_blocks:
             return
+        
+        if isinstance(self, MambaManager) and num_cached_blocks < num_full_blocks:
+            self.print(f'Mamba.cache_blocks: req_id={request.request_id}, {num_tokens=}, '
+                       f'{num_cached_blocks=}, {num_full_blocks=}, '
+                       f'new_full_blocks={format_blocks(self.req_to_blocks[request.request_id][num_cached_blocks:num_full_blocks])}')
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -820,7 +825,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 new_blocks.extend(reuse_blocks)
                 req_blocks.extend(new_blocks)
                 self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, new_blocks={format_blocks(new_blocks)}')
-                # self.print(f'Mamba.alloc_blks: {request_id=}, {len(req_blocks)=}, {len(self.req_to_blocks[request_id])=}, req_blocks={format_blocks(req_blocks)}')
+                self.print(f'Mamba.alloc_blks: {request_id=}, {len(req_blocks)=}, {len(self.req_to_blocks[request_id])=}, req_blocks={format_blocks(req_blocks)}')
                 return new_blocks
 
     def free(self, request_id: str) -> None:

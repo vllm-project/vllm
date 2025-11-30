@@ -1002,6 +1002,11 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        if is_global_first_rank():
+            logger.info(f'>>> [DEBUG] Worker: _update_states: '
+                        f'{self.input_batch.num_accepted_tokens_cpu[:len(num_accepted_tokens)]=}')
+            logger.info(f'>>> [DEBUG] Worker: _update_states: '
+                        f'{self.input_batch.num_computed_tokens_cpu[:len(num_accepted_tokens)]=}')
         if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
             and self.cache_config.enable_prefix_caching
         ):
@@ -2740,6 +2745,9 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             prev_block_idx = (num_computed_tokens - 1)// block_size
             curr_block_idx = (self.seq_lens.cpu[i] - 1) // block_size + num_accepted_tokens - 1
+            if is_global_first_rank():
+                logger.info(f'>>> [DEBUG] Worker: postprocess mamba: {req_id=}, '
+                            f'{num_computed_tokens=}, {num_accepted_tokens=}, {prev_block_idx=}, {curr_block_idx=}')
             for kv_cache_gid, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups
             ):
@@ -2747,6 +2755,8 @@ class GPUModelRunner(
                     continue
                 prev_block_id = req_state.block_ids[kv_cache_gid][prev_block_idx]
                 curr_block_id = req_state.block_ids[kv_cache_gid][curr_block_idx]
+                if is_global_first_rank():
+                    logger.info(f'>>> [DEBUG] Worker: postprocess mamba: {kv_cache_gid=}, COPY block {curr_block_id=} -> {prev_block_id=}')
                 self._mamba_copy_block(kv_cache_group, curr_block_id, prev_block_id)
 
     @torch.inference_mode()
