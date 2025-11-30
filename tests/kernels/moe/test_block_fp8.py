@@ -86,7 +86,7 @@ MNK_FACTORS_DG = [
 ]
 
 BLOCK_SIZE = [[128, 128]]
-E = [2, 8, 16]  # [128, 256]
+E = [2, 8, 16, 258]  # [128, 256]
 TOP_KS = [1, 2, 6]
 SEEDS = [0]
 
@@ -148,6 +148,9 @@ def test_w8a8_block_fp8_fused_moe(
 
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
+
+    if E == 258:
+        monkeypatch.setenv("VLLM_USE_CUDA_FUSION_SHARED_EXPERTS", "1")
 
     w1, w2, quant_config = make_test_quant_config(
         E,
