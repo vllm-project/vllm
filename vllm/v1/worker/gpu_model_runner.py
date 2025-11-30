@@ -36,6 +36,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -55,6 +56,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
@@ -1603,6 +1608,10 @@ class GPUModelRunner(
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
                 slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
+                if self.model_config.enable_return_routed_experts:
+                    assert len(self.kv_cache_config.kv_cache_groups) == 1
+                    self.slot_mapping = slot_mapping.cpu().numpy()
+
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
@@ -2836,6 +2845,8 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
+        RoutedExpertsCapturer.get_instance().clear_buffer()
+
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
@@ -3207,6 +3218,14 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            if (
+                self.model_config.enable_return_routed_experts
+                and get_tensor_model_parallel_rank() == 0
+            ):
+                RoutedExpertsCapturer.get_instance().save_captured_experts(
+                    indices=self.slot_mapping
+                )
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -5287,6 +5306,30 @@ class GPUModelRunner(
                     f"{layer_impl.__class__.__name__} "
                     "does not return the softmax lse for decode."
                 )
+
+        self.init_routed_experts_capturer()
+
+    def init_routed_experts_capturer(self):
+        logger.info(
+            "Initializing routed experts capturer, enable_return_routed_experts: %s",
+            self.model_config.enable_return_routed_experts,
+        )
+        routed_experts_capturer = RoutedExpertsCapturer.create(
+            self.model_config.enable_return_routed_experts
+        )
+        block_size = self.cache_config.block_size
+        self.max_num_kv_tokens = (
+            self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
+            + 1
+        ) * block_size
+        self.instance_id = f"rank_{self.vllm_config.parallel_config.rank // self.vllm_config.parallel_config.world_size}"
+        routed_experts_capturer.init_buffer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_num_kv_tokens=self.max_num_kv_tokens,
+            model_config=self.model_config,
+            instance_id=self.instance_id,
+            enable_shared_memory=get_tensor_model_parallel_rank() == 0,
+        )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

@@ -352,6 +352,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
+    enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
@@ -639,6 +640,10 @@ class EngineArgs:
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
+        model_group.add_argument(
+            "--enable-return-routed-experts",
+            **model_kwargs["enable_return_routed_experts"],
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument(
@@ -1232,6 +1237,7 @@ class EngineArgs:
             max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
+            enable_return_routed_experts=self.enable_return_routed_experts,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
