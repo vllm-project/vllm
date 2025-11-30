@@ -803,6 +803,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             1920.0,
             7680.0,
         ]
+
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
@@ -852,6 +853,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_decode_time_request = make_per_engine(
             histogram_decode_time_request, engine_indexes, model_name
         )
+
+        max_token_capacity = min(
+            vllm_config.model_config.max_model_len *
+            vllm_config.scheduler_config.max_num_seqs,
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        gauge_max_token_capacity_per_batch = self._gauge_cls(
+            name="vllm:max_token_capacity_per_batch",
+            documentation=
+            "Maximum tokens processed by the model server at max batch size",
+            labelnames=labelnames)
+        self.gauge_max_token_capacity_per_batch = make_per_engine(
+            gauge_max_token_capacity_per_batch, engine_indexes, model_name)
+        for gauge in self.gauge_max_token_capacity_per_batch.values():
+            gauge.set(max_token_capacity)
 
         #
         # LoRA metrics
