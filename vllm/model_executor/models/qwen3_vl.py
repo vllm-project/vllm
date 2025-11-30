@@ -1050,28 +1050,39 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 tokenizer.encode(f"<{curr_time:.1f} seconds>", add_special_tokens=False)
                 for curr_time in timestamps
             ]
-            num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
+            tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
+            per_frame_token_counts = [tokens_per_frame for _ in frames_idx_token]
 
-            # EVS-specific code
             video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
             if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                T, H, W = map(int, grid_thw)
-                tokens_per_frame = (H // image_processor.merge_size) * (
-                    W // image_processor.merge_size
-                )
-                num_tokens_per_frame = compute_retained_tokens_count(
+                total_retained = compute_retained_tokens_count(
                     tokens_per_frame,
-                    T,
+                    len(frames_idx_token),
                     video_pruning_rate,
-                ) // T  # Divide by T to get tokens per frame
-            # End of EVS-specific code
+                )
+                if len(frames_idx_token) == 0:
+                    per_frame_token_counts = []
+                elif len(frames_idx_token) == 1:
+                    per_frame_token_counts = [tokens_per_frame]
+                else:
+                    first_frame_tokens = tokens_per_frame
+                    remaining_tokens = max(total_retained - first_frame_tokens, 0)
+                    base = remaining_tokens // (len(frames_idx_token) - 1)
+                    remainder = remaining_tokens % (len(frames_idx_token) - 1)
+                    per_frame_token_counts = [first_frame_tokens]
+                    for frame_idx in range(1, len(frames_idx_token)):
+                        extra = base + (1 if (frame_idx - 1) < remainder else 0)
+                        per_frame_token_counts.append(extra)
 
             placeholder = []
-            for frame_idx in frames_idx_token:
-                placeholder.extend(frame_idx)
+            for frame_idx, timestamp_tokens in enumerate(frames_idx_token):
+                placeholder.extend(timestamp_tokens)
+                tokens_this_frame = per_frame_token_counts[
+                    frame_idx if frame_idx < len(per_frame_token_counts) else -1
+                ]
                 placeholder.extend(
                     [vision_start_token_id]
-                    + [video_token_id] * num_tokens_per_frame
+                    + [video_token_id] * tokens_this_frame
                     + [vision_end_token_id]
                 )
             return PromptUpdateDetails.select_token_id(placeholder, video_token_id)
