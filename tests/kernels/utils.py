@@ -9,7 +9,6 @@ from numbers import Number
 from typing import Any, NamedTuple
 from unittest.mock import patch
 
-import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -17,9 +16,6 @@ from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention.backends.abstract import AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import (
-    STR_BACKEND_ENV_VAR,
-)
 from vllm.utils.torch_utils import make_tensor_with_pad
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
@@ -215,22 +211,6 @@ def make_causal_mask(
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1, float("-inf")).masked_fill(mask == 0, 0.0)
     return mask
-
-
-def override_backend_env_variable(
-    mpatch: pytest.MonkeyPatch, backend_name: str
-) -> None:
-    """
-    Override the environment variable indicating the vLLM backend temporarily,
-    using pytest monkeypatch to ensure that the env vars get
-    reset once the test context exits.
-
-    Arguments:
-
-    * mpatch: pytest monkeypatch instance
-    * backend_name: attention backend name to force
-    """
-    mpatch.setenv(STR_BACKEND_ENV_VAR, backend_name)
 
 
 def ref_masked_attention(
@@ -866,6 +846,13 @@ def torch_experts(
         or (expert_map is not None and global_num_experts == expert_map.shape[0])
     )
 
+    if quant_dtype in [torch.float16, torch.bfloat16]:
+        quant_dtype = None
+    quant_input_only = quant_dtype is not None and w1_scale is None and w2_scale is None
+    if quant_input_only:
+        assert a1_scale is None and a2_scale is None
+        assert per_act_token_quant
+
     M, K = a.shape
     topk = topk_ids.shape[1]
 
@@ -882,6 +869,9 @@ def torch_experts(
     a, a_scale = moe_kernel_quantize_input(
         a, a1_scale, quant_dtype, per_act_token_quant, block_shape
     )
+
+    if quant_input_only:
+        a = (a.float() * a_scale.view(-1, 1)).to(w1.dtype)
 
     num_experts = w1.shape[0]
 
@@ -902,6 +892,14 @@ def torch_experts(
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+            elif quant_input_only:
+                tmp1 = a[mask] @ w1[i].transpose(0, 1)
+                tmp2 = SiluAndMul()(tmp1)
+                tmp2, tmp2_scale = moe_kernel_quantize_input(
+                    tmp2, None, quant_dtype, per_act_token_quant
+                )
+                tmp2 = (tmp2.float() * tmp2_scale.view(-1, 1)).to(w2.dtype)
+                out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
                 # block quantized
                 assert (

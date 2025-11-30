@@ -57,14 +57,15 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
-  timeout_in_minutes: 10
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
+  timeout_in_minutes: 20
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -73,6 +74,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s tokenizers_
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -276,21 +278,18 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Engine Test # 25min
-  timeout_in_minutes: 40
+- label: Engine Test # 9min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/engine
-  - tests/tokenization
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
-  # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
@@ -820,14 +819,24 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: Multi-Modal Processor Test # 44min
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  no_gpu: true
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+
+- label: Multi-Modal Processor Test
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
@@ -1303,11 +1312,11 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
