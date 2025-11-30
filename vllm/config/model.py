@@ -14,6 +14,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -39,7 +40,12 @@ from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    is_gguf,
+    is_remote_gguf,
+    maybe_model_redirect,
+    split_remote_gguf,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -48,7 +54,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -56,7 +61,6 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -102,6 +106,10 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "pooling": ["embed", "classify", "reward"],
     "draft": [],
 }
+
+AttnTypeStr = Literal[
+    "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
+]
 
 
 @config
@@ -294,9 +302,6 @@ class ModelConfig:
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
-    override_pooler_config: dict | PoolerConfig | None = None
-    """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
-    v0.12.0 or v1.0.0, whichever is sooner."""
 
     # Multimodal config and init vars
     multimodal_config: MultiModalConfig | None = None
@@ -343,18 +348,15 @@ class ModelConfig:
             "logprobs_mode",
             "disable_cascade_attn",
             "skip_tokenizer_init",
-            "enable_prompt_embeds",
             "served_model_name",
             "config_format",
             "hf_token",
             "hf_overrides",
             "logits_processor_pattern",
-            "enable_sleep_mode",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
-            "override_pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
             "media_io_kwargs",
@@ -440,12 +442,6 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            if check_gguf_file(self.model):
-                raise ValueError(
-                    "Using a tokenizer is mandatory when loading a GGUF model. "
-                    "Please specify the tokenizer path or name using the "
-                    "--tokenizer argument."
-                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -642,18 +638,6 @@ class ModelConfig:
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
-            if self.override_pooler_config is not None:
-                logger.warning_once(
-                    "`override_pooler_config` is deprecated and will be "
-                    "removed in v0.12.0 or v1.0.0, whichever is sooner. "
-                    "Please use `pooler_config` instead."
-                )
-
-                if isinstance(self.override_pooler_config, dict):
-                    self.pooler_config = PoolerConfig(**self.override_pooler_config)
-                else:
-                    self.pooler_config = self.override_pooler_config
-
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
 
@@ -710,6 +694,14 @@ class ModelConfig:
             }
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+
+        # Multimodal GGUF models must use original repo for mm processing
+        if is_gguf(self.tokenizer) and self.is_multimodal_model:
+            raise ValueError(
+                "Loading a multimodal GGUF model needs to use original "
+                "tokenizer. Please specify the unquantized hf model's "
+                "repo name or path using the --tokenizer argument."
+            )
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -832,7 +824,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
-        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+        model = self.model
+        if is_remote_gguf(model):
+            model, _ = split_remote_gguf(model)
+        return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -1759,6 +1754,119 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    @property
+    def attn_type(self) -> AttnTypeStr:
+        if self.pooler_config is not None:
+            pooling_type = self._model_info.default_pooling_type.lower()
+            if pooling_type == "cls":
+                return "encoder_only"
+            else:
+                is_causal = getattr(self.hf_config, "is_causal", True)
+                return "encoder_only" if not is_causal else self._model_info.attn_type
+        elif self.is_hybrid:
+            return "hybrid"
+        elif self.is_attention_free:
+            return "attention_free"
+        elif self.is_encoder_decoder:
+            return "encoder_decoder"
+        else:
+            return "decoder"
+
+    @property
+    def is_chunked_prefill_supported(self) -> bool:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
+            # for pooling models
+            if attn_type == "encoder_only":
+                logger.debug(
+                    "Pooling models with bidirectional attn does not support "
+                    "chunked prefill."
+                )
+                return False
+            elif attn_type == "decoder":
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type in ["all", "mean", "step", "cls"]:
+                    logger.debug(
+                        "Pooling models with %s pooling does not "
+                        "support chunked prefill.",
+                        pooling_type,
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "chunked prefill."
+                    )
+                    return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free or encoder_decoder attn types.
+            return attn_type != "encoder_decoder"
+        else:
+            if attn_type == "encoder_decoder":
+                logger.debug("Encoder decoder models does not support chunked prefill.")
+                return False
+            logger.debug("Generative models support chunked prefill.")
+            return True
+
+    @property
+    def is_prefix_caching_supported(self) -> bool:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
+            # for pooling models
+            if attn_type == "encoder_only":
+                logger.debug(
+                    "Pooling models with bidirectional attn does not "
+                    "support prefix caching."
+                )
+                return False
+            elif attn_type == "decoder":
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type in ["all", "mean", "step", "cls"]:
+                    logger.debug(
+                        "Pooling models with %s pooling does not "
+                        "support prefix caching.",
+                        pooling_type,
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "prefix caching."
+                    )
+                    return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free or encoder_decoder attn types.
+            return False
+        else:
+            if attn_type == "hybrid":
+                logger.debug(
+                    "Hybrid models does not support prefix caching since the feature "
+                    "is still experimental."
+                )
+                return False
+            elif attn_type == "attention_free":
+                logger.debug(
+                    "Attention free models does not support prefix caching since the "
+                    "feature is still experimental."
+                )
+                return False
+            elif attn_type == "encoder_decoder":
+                logger.debug("Encoder decoder models does not support prefix caching.")
+                return False
+            else:  # attn_type == "decoder"
+                logger.debug("Generative models support prefix caching.")
+                return True
+
+    def is_model_moe(
+        self,
+    ) -> bool:
+        return self.get_num_experts() > 1
+
+    def is_quantized(self) -> bool:
+        return getattr(self.hf_config, "quantization_config", None) is not None
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
