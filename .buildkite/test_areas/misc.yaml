@@ -111,13 +111,14 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
   depends_on: ~
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -126,6 +127,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s tokenizers_
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
