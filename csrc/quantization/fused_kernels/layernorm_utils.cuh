@@ -520,19 +520,16 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 
     q8x4_t<scalar_out_t> out;
 
-    int64_t const num_groups = hidden_size / group_size;
-    int64_t scale_idx = 0;
+    float scale_val;
+
     if constexpr (group_size > 0) {
+      int64_t const num_groups = hidden_size / group_size;
+      int64_t scale_idx = 0;
       if constexpr (is_scale_transposed) {
         scale_idx = (i * VEC_SIZE / group_size) * gridDim.x + blockIdx.x;
       } else {
         scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;
       }
-    }
-
-    float scale_val;
-
-    if constexpr (group_size > 0) {
       scale_val =
           is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx];
     } else {
