@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.logger import init_logger
-
 _DEPRECATED_MAPPINGS = {
     "cprofile": "profiling",
     "cprofile_context": "profiling",
@@ -36,8 +34,6 @@ def __dir__() -> list[str]:
     # expose deprecated names in dir() for better UX/tab-completion
     return sorted(list(globals().keys()) + list(_DEPRECATED_MAPPINGS.keys()))
 
-
-logger = init_logger(__name__)
 
 MASK_64_BITS = (1 << 64) - 1
 

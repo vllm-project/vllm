@@ -36,7 +36,7 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         # If attention backend is None
         # If use_mla is true
         # The selected backend is triton MLA
-        m.setenv("VLLM_ATTENTION_BACKEND", None)
+        m.setenv("VLLM_ATTENTION_BACKEND", "")
         backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False, use_mla=True)
         assert backend.get_name() == "TRITON_MLA"
 
@@ -49,7 +49,7 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         # If use_mla is true
         # If VLLM_ROCM_USE_AITER is enabled
         # The selected backend is ROCM_AITER_MLA
-        m.setenv("VLLM_ATTENTION_BACKEND", None)
+        m.setenv("VLLM_ATTENTION_BACKEND", "")
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False, use_mla=True)
         assert backend.get_name() == "ROCM_AITER_MLA"

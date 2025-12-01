@@ -253,6 +253,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
         # Unsupported kv cache data type
         backend = get_attn_backend(16, torch.float16, "fp8", 16)
         assert backend.get_name() != "FLASH_ATTN"
+
         # Unsupported block size
         backend = get_attn_backend(16, torch.float16, None, 8)
         assert backend.get_name() != "FLASH_ATTN"
