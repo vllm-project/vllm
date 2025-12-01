@@ -18,6 +18,28 @@ from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.pooling.classify.protocol import (
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
+    ClassificationRequest,
+    ClassificationResponse,
+)
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+    EmbeddingRequest,
+    EmbeddingResponse,
+)
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
+    PoolingResponse,
+)
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankRequest,
+    ScoreRequest,
+    ScoreResponse,
+)
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -45,29 +67,16 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
-    ClassificationRequest,
-    ClassificationResponse,
     CompletionRequest,
     CompletionResponse,
     DetokenizeRequest,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-    EmbeddingRequest,
-    EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
     GenerateRequest,
     GenerateResponse,
-    IOProcessorRequest,
-    PoolingResponse,
-    RerankRequest,
     ResponsesRequest,
-    ScoreRequest,
-    ScoreResponse,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,

@@ -11,7 +11,7 @@ from tests.conftest import HfRunner
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import EmbedModelInfo
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
