@@ -683,7 +683,7 @@ if envs.VLLM_USE_PRECOMPILED:
 
         arch = platform.machine()
         # try to fetch the wheel metadata from the nightly wheel repo
-        main_variant = envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        main_variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
         variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
         commit = os.getenv(
             "VLLM_PRECOMPILED_WHEEL_COMMIT",
@@ -696,15 +696,15 @@ if envs.VLLM_USE_PRECOMPILED:
         wheels, repo_url, download_filename = None, None, None
         try:
             wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
-        except Exception:
+        except Exception as e:
             logger.warning(
-                "Failed to fetch precompiled wheel metadata for variant %s",
+                "Failed to fetch precompiled wheel metadata for variant %s: %s",
                 variant,
-                exc_info=True,
+                e,
             )
             try_default = True  # try outside handler to keep the stacktrace simple
         if try_default:
-            logger.info("Trying the default variant")
+            logger.info("Trying the default variant from remote")
             wheels, repo_url = _fetch_metadata_for_variant(commit, None)
             # if this also fails, then we have nothing more to try / cache
         assert wheels is not None and repo_url is not None, (
@@ -724,6 +724,8 @@ if envs.VLLM_USE_PRECOMPILED:
 "path": "../vllm-0.11.2.dev278%2Bgdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
 },
 ...]"""
+        from urllib.parse import urljoin
+
         for wheel in wheels:
             # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
             if wheel.get("package_name") == "vllm" and arch in wheel.get(
@@ -732,7 +734,7 @@ if envs.VLLM_USE_PRECOMPILED:
                 logger.info("Found precompiled wheel metadata: %s", wheel)
                 if "path" not in wheel:
                     raise ValueError(f"Wheel metadata missing path: {wheel}")
-                wheel_url = repo_url + wheel["path"]
+                wheel_url = urljoin(repo_url, wheel["path"])
                 download_filename = wheel.get("filename")
                 logger.info("Using precompiled wheel URL: %s", wheel_url)
                 break
