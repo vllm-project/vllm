@@ -58,6 +58,16 @@ def register_vllm_serve_api_routers(app: FastAPI, args: Namespace):
     if getattr(args, "enable_tokenizer_info_endpoint", False):
         """Conditionally register the tokenizer info endpoint if enabled."""
         app.include_router(tokenizer_info_router)
+
+    from vllm.entrypoints.serve.disagg.api_router import router as disagg_router
+
+    app.include_router(disagg_router)
+    # Optional endpoints
+    if getattr(args, "tokens_only", False):
+        """Conditionally register the disagg abort endpoint if enabled."""
+        from vllm.entrypoints.serve.disagg.api_router import abort_router
+
+        app.include_router(abort_router)
     from vllm.entrypoints.serve.instrumentator.health import (
         router as health_router,
     )

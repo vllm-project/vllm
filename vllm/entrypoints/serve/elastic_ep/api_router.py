@@ -13,6 +13,10 @@ from vllm.entrypoints.openai.api_server import validate_json_request
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
 )
+from vllm.entrypoints.serve.elastic_ep.protocol import (
+    get_scaling_elastic_ep,
+    set_scaling_elastic_ep,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -60,8 +64,7 @@ async def scale_elastic_ep(raw_request: Request):
         )
 
     # Set scaling flag to prevent new requests
-    global _scaling_elastic_ep
-    _scaling_elastic_ep = True
+    set_scaling_elastic_ep(True)
     client = engine_client(raw_request)
     try:
         await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
@@ -80,9 +83,9 @@ async def scale_elastic_ep(raw_request: Request):
         logger.error("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
-        _scaling_elastic_ep = False
+        set_scaling_elastic_ep(False)
 
 
 @router.post("/is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
-    return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
+    return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})

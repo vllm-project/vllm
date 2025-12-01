@@ -52,8 +52,6 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
     ErrorInfo,
     ErrorResponse,
-    GenerateRequest,
-    GenerateResponse,
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
@@ -70,7 +68,6 @@ from vllm.entrypoints.openai.serving_models import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -81,6 +78,10 @@ from vllm.entrypoints.pooling.classify.serving import ServingClassification
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.serving import ServingScores
+from vllm.entrypoints.serve.disagg.serving import ServingTokens
+from vllm.entrypoints.serve.elastic_ep.protocol import (
+    ScalingMiddleware,
+)
 from vllm.entrypoints.serve.tokenize.protocol import OpenAIServingTokenization
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
@@ -716,41 +717,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"results": response})
 
 
-@router.post(
-    "/inference/v1/generate",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def generate(request: GenerateRequest, raw_request: Request):
-    handler = generate_tokens(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support generate tokens API"
-        )
-    try:
-        generator = await handler.serve_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, GenerateResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
 def load_log_config(log_config_file: str | None) -> dict | None:
     if not log_config_file:
         return None
@@ -841,41 +807,6 @@ class XRequestIdMiddleware:
             await send(message)
 
         return self.app(scope, receive, send_with_request_id)
-
-
-# Global variable to track scaling state
-_scaling_elastic_ep = False
-
-
-class ScalingMiddleware:
-    """
-    Middleware that checks if the model is currently scaling and
-    returns a 503 Service Unavailable response if it is.
-
-    This middleware applies to all HTTP requests and prevents
-    processing when the model is in a scaling state.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] != "http":
-            return self.app(scope, receive, send)
-
-        # Check global scaling state
-        global _scaling_elastic_ep
-        if _scaling_elastic_ep:
-            # Return 503 Service Unavailable response
-            response = JSONResponse(
-                content={
-                    "error": "The model is currently scaling. Please try again later."
-                },
-                status_code=503,
-            )
-            return response(scope, receive, send)
-
-        return self.app(scope, receive, send)
 
 
 def _extract_content_from_chunk(chunk_data: dict) -> str:
@@ -1122,31 +1053,6 @@ def build_app(args: Namespace) -> FastAPI:
             )
 
     app = sagemaker_standards.bootstrap(app)
-    # Optional endpoints
-    if args.tokens_only:
-
-        @app.post("/abort_requests")
-        async def abort_requests(raw_request: Request):
-            """
-            Abort one or more requests. To be used in a
-            Disaggregated Everything setup.
-            """
-            try:
-                body = await raw_request.json()
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail=f"JSON decode error: {e}",
-                ) from e
-            request_ids = body.get("request_ids")
-            if request_ids is None:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Missing 'request_ids' in request body",
-                )
-            # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
-            return Response(status_code=200)
 
     return app
 
