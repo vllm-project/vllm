@@ -401,6 +401,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3VLMoeForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
+    is_3d_moe_weight: bool = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

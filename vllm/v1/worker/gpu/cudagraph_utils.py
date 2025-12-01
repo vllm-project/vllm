@@ -37,7 +37,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-
+        self.cudagraph_mode: CUDAGraphMode
         if self.compilation_config.cudagraph_mode is None:
             self.cudagraph_mode = CUDAGraphMode.NONE
         else:
@@ -78,7 +78,7 @@ class CudaGraphManager:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
-        input_ids = input_buffers.input_ids.gpu[:num_tokens]
+        input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         attn_metadata = prepare_inputs_to_capture(
             num_reqs,
