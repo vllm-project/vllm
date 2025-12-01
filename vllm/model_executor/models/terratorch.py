@@ -64,7 +64,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type
 
 logger = init_logger(__name__)
 
@@ -220,7 +220,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@default_pooling_type("All")
+@attn_type("attention_free")
 @MULTIMODAL_REGISTRY.register_processor(
     TerratorchMultiModalProcessor,
     info=TerratorchProcessingInfo,
