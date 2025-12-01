@@ -41,9 +41,7 @@ class EAGLEConfig(PretrainedConfig):
         # LlamaForCausalLM -> EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
         # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
-        if method is None:
-            pass
-        elif method == "eagle":
+        if method == "eagle":
             assert self.model is not None, (
                 "model should not be None when method is eagle"
             )
