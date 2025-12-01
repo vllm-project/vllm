@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 from shutil import which
 
@@ -74,21 +75,13 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
-def is_url_available(url: str) -> bool:
-    from urllib.request import urlopen
-
-    status = None
-    try:
-        with urlopen(url) as f:
-            status = f.status
-    except Exception:
-        return False
-    return status == 200
+def is_freethreaded():
+    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+        super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -298,6 +291,20 @@ class cmake_build_ext(build_ext):
             print(f"Copying {file} to {dst_file}")
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
+
+        if _is_cuda() or _is_hip():
+            # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
+            # to current directory so that they can be included in the editable
+            # build
+            print(
+                f"Copying {self.build_lib}/vllm/third_party/triton_kernels "
+                "to vllm/third_party/triton_kernels"
+            )
+            shutil.copytree(
+                f"{self.build_lib}/vllm/third_party/triton_kernels",
+                "vllm/third_party/triton_kernels",
+                dirs_exist_ok=True,
+            )
 
 
 class precompiled_build_ext(build_ext):
@@ -519,28 +526,6 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
-def get_gaudi_sw_version():
-    """
-    Returns the driver version.
-    """
-    # Enable console printing for `hl-smi` check
-    output = subprocess.run(
-        "hl-smi",
-        shell=True,
-        text=True,
-        capture_output=True,
-        env={"ENABLE_CONSOLE": "true"},
-    )
-    if output.returncode == 0 and output.stdout:
-        return (
-            output.stdout.split("\n")[2]
-            .replace(" ", "")
-            .split(":")[1][:-1]
-            .split("-")[0]
-        )
-    return "0.0.0"  # when hl-smi is not available
-
-
 def get_vllm_version() -> str:
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
@@ -633,6 +618,9 @@ ext_modules = []
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
+    # Optional since this doesn't get built (produce an .so file). This is just
+    # copying the relevant .py files from the source repository.
+    ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))

@@ -3,6 +3,10 @@
 
 import torch
 
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -154,7 +158,7 @@ def _fused_moe_lora_kernel(
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
         # pre-fetch lora weight
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()
@@ -311,6 +315,7 @@ def _fused_moe_lora_expand(
     num_stages: int,
     split_k: int,
     mul_routed_weight: bool = False,
+    offset: int = 0,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -380,7 +385,7 @@ def _fused_moe_lora_expand(
         **expand_config,
     )
     for i in range(num_slices):
-        output[:, :, i * N : (i + 1) * N] += b_intermediate_cache1[i]
+        output[:, :, i * N + offset : (i + 1) * N + offset] += b_intermediate_cache1[i]
 
 
 @torch.inference_mode()
@@ -416,6 +421,8 @@ def _fused_moe_lora(
     expand_num_stages: int,
     expand_split_k: int,
     mul_routed_weight: bool = False,
+    fully_sharded: bool = False,
+    offset: int = 0,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert (
@@ -430,7 +437,6 @@ def _fused_moe_lora(
         == expert_ids.shape[0]
         == num_tokens_post_padded.shape[0]
     )
-    assert len(lora_b_stacked) * lora_b_stacked[0].shape[-2] == output.shape[-1]
     assert output.shape[0] == topk_weights.shape[0]
     assert top_k_num == topk_weights.shape[1]
     device = qcurr_hidden_states.device
@@ -480,6 +486,19 @@ def _fused_moe_lora(
         mul_routed_weight,
     )
 
+    if fully_sharded:
+        if max_lora_rank == w1_lora_b_stacked.shape[-1]:
+            a_intermediate_cache1 = tensor_model_parallel_all_reduce(
+                a_intermediate_cache1
+            )
+        else:
+            a_intermediate_cache1 = tensor_model_parallel_all_gather(
+                a_intermediate_cache1
+            )
+
+            # reset max_lora_rank to the full rank after allgather
+            max_lora_rank = a_intermediate_cache1.shape[-1]
+
     _fused_moe_lora_expand(
         output,
         a_intermediate_cache1,
@@ -510,6 +529,7 @@ def _fused_moe_lora(
         expand_num_stages,
         expand_split_k,
         mul_routed_weight,
+        offset,
     )
 
 

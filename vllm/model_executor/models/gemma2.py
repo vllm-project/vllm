@@ -23,7 +23,7 @@ import torch
 from torch import nn
 from transformers import Gemma2Config
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -107,7 +107,6 @@ class Gemma2Attention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        rope_theta: float,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
@@ -134,7 +133,6 @@ class Gemma2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.query_pre_attn_scalar**-0.5
-        self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -156,7 +154,7 @@ class Gemma2Attention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
 
@@ -206,7 +204,6 @@ class Gemma2DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            rope_theta=config.rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=config.attn_logit_softcapping,

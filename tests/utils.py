@@ -676,7 +676,7 @@ def compare_all_settings(
                 results += _test_image_text(
                     client,
                     model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
@@ -1073,6 +1073,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
         memory_gb < min_gb,
         reason=f"Need at least {min_gb}GB GPU memory to run the test.",
     )
+
+
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
 
 
 def large_gpu_test(*, min_gb: int):
