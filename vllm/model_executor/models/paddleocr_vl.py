@@ -33,12 +33,10 @@ from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
-    vit_xformers_attn_wrapper,
 )
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -583,7 +581,6 @@ class SiglipAttention(nn.Module):
         prefix: str = "",
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
         attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
 
@@ -613,11 +610,9 @@ class SiglipAttention(nn.Module):
         )
 
         self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
@@ -657,7 +652,6 @@ class SiglipAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         batch_size, _, _ = hidden_states.shape
 
@@ -682,7 +676,6 @@ class SiglipAttention(nn.Module):
                 max_seqlen,
                 batch_size,
                 self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             outputs = []
@@ -703,10 +696,6 @@ class SiglipAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            if seqlens is None:
-                raise ValueError("xFormers attention backend requires seqlens tensor.")
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
         else:
             raise RuntimeError(
                 f"PaddleOCR-VL does not support {self.attn_backend} backend now."
@@ -789,7 +778,6 @@ class SiglipEncoderLayer(nn.Module):
         *,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
         attn_backend_override: AttentionBackendEnum | None = None,
-        use_upstream_fa: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -802,7 +790,6 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_backend=attn_backend,
             attn_backend_override=attn_backend_override,
-            use_upstream_fa=use_upstream_fa,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -818,7 +805,6 @@ class SiglipEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
-        seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -828,7 +814,6 @@ class SiglipEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
 
         hidden_states = residual + hidden_states
@@ -860,17 +845,9 @@ class SiglipEncoder(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        } and check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
-            self.use_upstream_fa = True
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -884,7 +861,6 @@ class SiglipEncoder(nn.Module):
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_backend=self.attn_backend,
                     attn_backend_override=attn_backend_override,
-                    use_upstream_fa=self.use_upstream_fa,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
@@ -943,14 +919,11 @@ class SiglipEncoder(nn.Module):
             cu_seqlens = cu_seqlens.to(device=device)
 
         max_seqlen = None
-        seqlens = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -959,7 +932,6 @@ class SiglipEncoder(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
         return hidden_states
 
