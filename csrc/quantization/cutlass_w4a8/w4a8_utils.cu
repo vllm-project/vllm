@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cuda_runtime.h>
+#include <cstdio>
 
 namespace vllm::cutlass_w4a8_utils {
 
@@ -66,8 +67,24 @@ bool unified_encode_int4b(cutlass::int4b_t const* in, cutlass::int4b_t* out,
   if (grid == 0) grid = 1;  // ensure we still cover the tail in the kernel
 
   unified_encode_int4b_device<<<grid, block>>>(in_bytes, out_bytes, nbytes);
+
+  // launch errors
   cudaError_t err = cudaGetLastError();
-  return (err == cudaSuccess);
+  if (err != cudaSuccess) {
+    printf("unified_encode_int4b_device launch error: %s (%d)\n",
+           cudaGetErrorString(err), err);
+    return false;
+  }
+
+  // runtime errors
+  err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("unified_encode_int4b_device runtime error: %s (%d)\n",
+           cudaGetErrorString(err), err);
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace vllm::cutlass_w4a8_utils

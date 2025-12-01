@@ -22,7 +22,7 @@ __global__ void get_group_gemm_starts(
     ElementAccumulator* a_scales_base_as_int,
     ElementAccumulator* b_scales_base_as_int,
     ElementGroupScale* b_group_scales_base_as_int, int64_t n, int64_t k,
-    int scale_k) {
+    int64_t scale_k) {
   int expert_id = threadIdx.x;
 
   int64_t expert_offset = expert_offsets[expert_id];
@@ -88,7 +88,7 @@ void run_get_group_gemm_starts(
   // logical k, n
   int64_t n = out_tensors.size(1);
   int64_t k = a_tensors.size(1);
-  int scale_k = cutlass::ceil_div(k, b_group_size);
+  int64_t scale_k = cutlass::ceil_div(k, b_group_size);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 

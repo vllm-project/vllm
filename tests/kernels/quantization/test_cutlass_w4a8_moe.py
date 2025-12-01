@@ -88,6 +88,7 @@ TEST_SHAPES = [
     (4, 2048, 768),
     (8, 768, 2048),
     (64, 1536, 2048),
+    (128, 8192, 4096),  # test overflow int32
 ]
 ALIGNMENT = 16  # torch._scaled_mm alignment for M, needed for reference check
 
