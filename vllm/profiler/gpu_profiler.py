@@ -162,7 +162,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
             with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
+                torch_profiler_trace_dir,
+                worker_name=worker_name,
+                use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
             ),
         )
 
@@ -174,18 +176,19 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _stop(self) -> None:
         self.profiler.stop()
 
-        rank = self.local_rank
-        profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
-        profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-        sort_key = "self_cuda_time_total"
-        table = self.profiler.key_averages().table(sort_by=sort_key)
+        if envs.VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL:
+            rank = self.local_rank
+            profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            sort_key = "self_cuda_time_total"
+            table = self.profiler.key_averages().table(sort_by=sort_key)
 
-        with open(profiler_out_file, "w") as f:
-            print(table, file=f)
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
 
-        # only print profiler results on rank 0
-        if rank == 0:
-            print(table)
+            # only print profiler results on rank 0
+            if rank == 0:
+                print(table)
 
     @override
     def annotate_context_manager(self, name: str):
