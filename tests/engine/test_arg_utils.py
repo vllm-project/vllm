@@ -222,6 +222,47 @@ def test_media_io_kwargs_parser(arg, expected):
     assert args.media_io_kwargs == expected
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["-O", "1"], "1"),
+        (["-O", "2"], "2"),
+        (["-O", "3"], "3"),
+        (["-O0"], "0"),
+        (["-O1"], "1"),
+        (["-O2"], "2"),
+        (["-O3"], "3"),
+    ],
+)
+def test_optimization_level(args, expected):
+    """
+    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    optimization_level.
+    """
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.optimization_level == expected
+    assert parsed_args.compilation_config.mode is None
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["-cc.mode=0"], 0),
+        (["-cc.mode=1"], 1),
+        (["-cc.mode=2"], 2),
+        (["-cc.mode=3"], 3),
+    ],
+)
+def test_mode_parser(args, expected):
+    """
+    Test compilation config modes (-cc.mode=int) map to compilation_config.
+    """
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.compilation_config.mode == expected
+
+
 def test_compilation_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
@@ -229,26 +270,10 @@ def test_compilation_config():
     args = parser.parse_args([])
     assert args.compilation_config == CompilationConfig()
 
-    # set to O3
-    args = parser.parse_args(["-O0"])
-    assert args.compilation_config.mode == 0
-
-    # set to O 3 (space)
-    args = parser.parse_args(["-O", "1"])
-    assert args.compilation_config.mode == 1
-
-    # set to O 3 (equals)
-    args = parser.parse_args(["-O=2"])
-    assert args.compilation_config.mode == 2
-
-    # set to O.mode 3
-    args = parser.parse_args(["-O.mode", "3"])
-    assert args.compilation_config.mode == 3
-
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "-O",
+            "-cc",
             '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], "backend": "eager"}',
         ]
     )

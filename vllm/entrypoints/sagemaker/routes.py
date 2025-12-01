@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
+from typing import Any
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
@@ -9,12 +11,56 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.entrypoints.openai.api_server import (
-    INVOCATION_VALIDATORS,
     base,
+    chat,
+    completion,
+    create_chat_completion,
+    create_completion,
     health,
     validate_json_request,
 )
-from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    ErrorResponse,
+)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.pooling.classify.api_router import classify, create_classify
+from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+from vllm.entrypoints.pooling.embed.api_router import create_embedding, embedding
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.pooling.api_router import create_pooling, pooling
+from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+from vllm.entrypoints.pooling.score.api_router import (
+    create_score,
+    do_rerank,
+    rerank,
+    score,
+)
+from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
+
+# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
+# (requires typing_extensions >= 4.13)
+RequestType = Any
+GetHandlerFn = Callable[[Request], OpenAIServing | None]
+EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+# NOTE: Items defined earlier take higher priority
+INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
+    (ChatCompletionRequest, (chat, create_chat_completion)),
+    (CompletionRequest, (completion, create_completion)),
+    (EmbeddingRequest, (embedding, create_embedding)),
+    (ClassificationRequest, (classify, create_classify)),
+    (ScoreRequest, (score, create_score)),
+    (RerankRequest, (rerank, do_rerank)),
+    (PoolingRequest, (pooling, create_pooling)),
+]
+
+# NOTE: Construct the TypeAdapters only once
+INVOCATION_VALIDATORS = [
+    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+]
 
 
 def register_sagemaker_routes(router: APIRouter):
