@@ -52,7 +52,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:set-up-using-python"
 
-### Pre-built wheels {#pre-built-wheels}
+### Pre-built wheels
 
 === "NVIDIA CUDA"
 
