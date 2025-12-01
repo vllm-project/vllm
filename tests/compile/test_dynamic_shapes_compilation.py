@@ -8,7 +8,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config.compilation import CompilationMode, DynamicShapesType
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
