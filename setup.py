@@ -310,6 +310,11 @@ class cmake_build_ext(build_ext):
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
 
+    def finalize_options(self) -> None:
+        # use the project root as build_lib
+        super().finalize_options()
+        self.build_lib = str(ROOT_DIR)
+
     def run(self) -> None:
         assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
@@ -639,6 +644,9 @@ if _is_cuda():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+
+if envs.VLLM_USE_PRECOMPILED:
+    ext_modules = [ext for ext in ext_modules if ext.name != "vllm.triton_kernels"]
 
 package_data = {
     "vllm": [
