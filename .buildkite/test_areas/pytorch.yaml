@@ -1,4 +1,6 @@
 group: PyTorch
+depends_on: 
+  - image-build
 steps:
 - label: PyTorch Compilation Unit Tests
   timeout_in_minutes: 30

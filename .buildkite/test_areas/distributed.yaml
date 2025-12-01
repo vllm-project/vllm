@@ -1,4 +1,6 @@
 group: Distributed
+depends_on: 
+  - image-build
 steps:
 - label: Distributed Comm Ops
   timeout_in_minutes: 20

@@ -1,4 +1,6 @@
 group: Quantization
+depends_on: 
+  - image-build
 steps:
 - label: Quantization
   timeout_in_minutes: 90

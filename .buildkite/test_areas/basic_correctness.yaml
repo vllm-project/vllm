@@ -1,4 +1,6 @@
 group: Basic Correctness
+depends_on: 
+  - image-build
 steps:
 - label: Basic Correctness
   timeout_in_minutes: 30

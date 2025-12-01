@@ -1,10 +1,12 @@
 name: ci
 job_dirs:
   - ".buildkite/test_areas"
+  - ".buildkite/build"
 run_all_patterns:
   - ".*"
 run_all_exclude_patterns:
   - ".*"
-registries:
-  main: "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo"
-  premerge: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo"
+registries: public.ecr.aws/q9t5s3a7
+repositories:
+  main: "vllm-ci-postmerge-repo"
+  premerge: "vllm-ci-test-repo"

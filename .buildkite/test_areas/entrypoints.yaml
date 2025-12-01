@@ -1,4 +1,6 @@
 group: Entrypoints
+depends_on: 
+  - image-build
 steps:
 - label: Entrypoints Unit Tests  
   timeout_in_minutes: 10

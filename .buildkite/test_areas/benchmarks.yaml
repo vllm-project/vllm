@@ -1,4 +1,6 @@
 group: Benchmarks
+depends_on: 
+  - image-build
 steps:
 - label: Benchmarks
   timeout_in_minutes: 20

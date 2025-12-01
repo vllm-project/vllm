@@ -1,4 +1,6 @@
 group: CUDA
+depends_on: 
+  - image-build
 steps:
 - label: Platform Tests (CUDA)
   timeout_in_minutes: 15

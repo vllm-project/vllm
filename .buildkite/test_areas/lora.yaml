@@ -1,4 +1,6 @@
 group: LoRA
+depends_on: 
+  - image-build
 steps:
 - label: LoRA %N
   timeout_in_minutes: 30

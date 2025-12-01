@@ -1,4 +1,6 @@
 group: E2E Integration
+depends_on: 
+  - image-build
 steps:
 - label: DeepSeek V2-Lite Accuracy
   timeout_in_minutes: 60

@@ -1,4 +1,6 @@
 group: Models - Multimodal
+depends_on: 
+  - image-build
 steps:
 - label: Multi-Modal Models (Standard) # 60min
   timeout_in_minutes: 80

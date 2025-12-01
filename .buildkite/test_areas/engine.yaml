@@ -1,4 +1,6 @@
 group: Engine
+depends_on: 
+  - image-build
 steps:
 - label: Engine
   timeout_in_minutes: 40

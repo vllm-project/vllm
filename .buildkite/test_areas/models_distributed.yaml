@@ -1,4 +1,6 @@
 group: Models - Distributed
+depends_on: 
+  - image-build
 steps:
 - label: Distributed Model Tests (2 GPUs)
   timeout_in_minutes: 50

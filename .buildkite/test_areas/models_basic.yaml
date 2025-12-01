@@ -1,4 +1,6 @@
 group: Models - Basic
+depends_on: 
+  - image-build
 steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
@@ -30,8 +32,6 @@ steps:
 
 - label: Basic Models Tests (Other)
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_transformers.py
@@ -41,7 +41,6 @@ steps:
 
 - label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py

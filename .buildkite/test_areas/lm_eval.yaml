@@ -1,4 +1,6 @@
 group: LM Eval
+depends_on: 
+  - image-build
 steps:
 - label: LM Eval Small Models
   timeout_in_minutes: 75

@@ -1,4 +1,6 @@
 group: Expert Parallelism
+depends_on: 
+  - image-build
 steps:
 - label: EPLB Algorithm
   timeout_in_minutes: 15

@@ -1,4 +1,6 @@
 group: Compile
+depends_on: 
+  - image-build
 steps:
 - label: Fusion and Compile Tests (B200)
   timeout_in_minutes: 40

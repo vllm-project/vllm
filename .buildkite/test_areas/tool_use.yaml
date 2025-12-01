@@ -1,4 +1,6 @@
 group: Tool use
+depends_on: 
+  - image-build
 steps:
 - label: OpenAI-Compatible Tool Use
   timeout_in_minutes: 35
@@ -11,6 +13,7 @@ steps:
     - pytest -v -s -m 'not cpu_test' tool_use
 
 - label: OpenAI-Compatible Tool Use (CPU)
+  depends_on: ~
   timeout_in_minutes: 10
   source_file_dependencies:
     - vllm/

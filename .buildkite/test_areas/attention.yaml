@@ -1,4 +1,6 @@
 group: Attention
+depends_on: 
+  - image-build
 steps:
 - label: V1 attention (H100)
   timeout_in_minutes: 30

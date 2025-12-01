@@ -1,4 +1,6 @@
 group: Models - Language
+depends_on: 
+  - image-build
 steps:
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25

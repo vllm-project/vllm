@@ -1,4 +1,6 @@
 group: Plugins
+depends_on: 
+  - image-build
 steps:
 - label: Plugin Tests (2 GPUs)
   timeout_in_minutes: 60
