@@ -5,7 +5,6 @@ Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
-import hashlib
 import importlib
 import json
 import os
@@ -18,7 +17,7 @@ from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
@@ -32,6 +31,15 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.utils.hashing import safe_hash
+
+if TYPE_CHECKING:
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import PoolingTypeStr
+else:
+    AttnTypeStr = Any
+    PoolingTypeStr = Any
+
 
 from .interfaces import (
     has_inner_state,
@@ -39,6 +47,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     supports_cross_encoding,
+    supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -46,6 +55,7 @@ from .interfaces import (
     supports_transcription,
 )
 from .interfaces_base import (
+    get_attn_type,
     get_default_pooling_type,
     is_pooling_model,
     is_text_generation_model,
@@ -55,6 +65,7 @@ logger = init_logger(__name__)
 
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
@@ -75,7 +86,7 @@ _TEXT_GENERATION_MODELS = {
     "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
-    "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
+    "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
@@ -117,6 +128,7 @@ _TEXT_GENERATION_MODELS = {
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
+    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),  # noqa: E501
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -131,6 +143,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
@@ -145,11 +158,15 @@ _TEXT_GENERATION_MODELS = {
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
+    "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
+    "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
+    "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
+    "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -162,6 +179,7 @@ _TEXT_GENERATION_MODELS = {
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
+    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -199,6 +217,7 @@ _EMBEDDING_MODELS = {
     "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     # [Multimodal]
@@ -209,6 +228,7 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
@@ -278,8 +298,16 @@ _MULTIMODAL_MODELS = {
         "GraniteSpeechForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
+    "HunYuanVLForConditionalGeneration": (
+        "hunyuan_vision",
+        "HunYuanVLForConditionalGeneration",
+    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "OpenCUAForConditionalGeneration": (
+        "opencua",
+        "OpenCUAForConditionalGeneration",
+    ),
     "InternS1ForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
@@ -335,6 +363,10 @@ _MULTIMODAL_MODELS = {
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "PaddleOCRVLForConditionalGeneration": (
+        "paddleocr_vl",
+        "PaddleOCRVLForConditionalGeneration",
+    ),
     "PaliGemmaForConditionalGeneration": (
         "paligemma",
         "PaliGemmaForConditionalGeneration",
@@ -391,12 +423,14 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -484,7 +518,8 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
-    default_pooling_type: str
+    attn_type: AttnTypeStr
+    default_pooling_type: PoolingTypeStr
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
@@ -494,6 +529,7 @@ class _ModelInfo:
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
+    supports_mamba_prefix_caching: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -504,6 +540,7 @@ class _ModelInfo:
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
             default_pooling_type=get_default_pooling_type(model),
+            attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
@@ -516,6 +553,7 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
+            supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
@@ -582,7 +620,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                     mi_dict = json.load(file)
             except FileNotFoundError:
                 logger.debug(
-                    ("Cached model info file for class %s.%s not found"),
+                    "Cached model info file for class %s.%s not found",
                     self.module_name,
                     self.class_name,
                 )
@@ -590,7 +628,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
             if mi_dict["hash"] != module_hash:
                 logger.debug(
-                    ("Cached model info file for class %s.%s is stale"),
+                    "Cached model info file for class %s.%s is stale",
                     self.module_name,
                     self.class_name,
                 )
@@ -600,7 +638,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return _ModelInfo(**mi_dict["modelinfo"])
         except Exception:
             logger.debug(
-                ("Cached model info for class %s.%s error. "),
+                "Cached model info for class %s.%s error. ",
                 self.module_name,
                 self.class_name,
             )
@@ -630,19 +668,19 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
         if model_path.exists():
             with open(model_path, "rb") as f:
-                module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
+                module_hash = safe_hash(f.read(), usedforsecurity=False).hexdigest()
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
-                    ("Loaded model info for class %s.%s from cache"),
+                    "Loaded model info for class %s.%s from cache",
                     self.module_name,
                     self.class_name,
                 )
                 return mi
             else:
                 logger.debug(
-                    ("Cache model info for class %s.%s miss. Loading model instead."),
+                    "Cache model info for class %s.%s miss. Loading model instead.",
                     self.module_name,
                     self.class_name,
                 )

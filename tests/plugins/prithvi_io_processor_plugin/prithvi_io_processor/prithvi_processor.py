@@ -18,7 +18,10 @@ from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorRequest, IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
+    IOProcessorResponse,
+)
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -368,9 +371,9 @@ class PrithviMultimodalDataProcessor(IOProcessor):
             out_format = "b64_json"
 
         for output in model_output:
-            y_hat = output.outputs.data.argmax(dim=1)
+            y_hat = output.outputs.data.argmax(dim=0)
             pred = torch.nn.functional.interpolate(
-                y_hat.unsqueeze(1).float(),
+                y_hat[None, None, ...].float(),
                 size=self.img_size,
                 mode="nearest",
             )

@@ -18,6 +18,7 @@ import pytest
 from vllm.config.compilation import CompilationMode
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -161,6 +162,7 @@ def _compare_sp(
     test_options: SPTestOptions,
     num_gpus_available: int,
     use_inductor_graph_partition: bool,
+    enable_async_tp: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
@@ -181,7 +183,7 @@ def _compare_sp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
-    skip_tokenizer_init = model_info.skip_tokenizer_init
+    require_embed_inputs = model_info.require_embed_inputs
 
     if load_format == "dummy":
         # Avoid OOM
@@ -233,15 +235,21 @@ def _compare_sp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
-    if skip_tokenizer_init:
-        common_args.append("--skip-tokenizer-init")
+    if require_embed_inputs:
+        common_args.extend(
+            [
+                "--skip-tokenizer-init",
+                "--enable-prompt-embeds",
+                "--enable-mm-embeds",
+            ]
+        )
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
-        "custom_ops": ["+rms_norm"],
         "compile_sizes": [4, 8],
         "pass_config": {
             "enable_sequence_parallelism": True,
+            "enable_async_tp": enable_async_tp,
             "enable_fusion": enable_fusion,
             "enable_noop": True,
         },
@@ -301,6 +309,7 @@ SP_TEST_MODELS = [
     ],
 )
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+@pytest.mark.parametrize("enable_async_tp", [False])  # TODO: enable async TP
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
@@ -310,9 +319,18 @@ def test_tp_sp_generation(
     test_options: SPTestOptions,
     num_gpus_available,
     use_inductor_graph_partition: bool,
+    enable_async_tp: bool,
 ):
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    # Skip FP8 SP-only test on sm89 (compute capability 8.9)
+    if (
+        "fp8" in model_id.lower()
+        and current_platform.get_device_capability() < (9, 0)
+        and (not enable_async_tp)
+    ):
+        pytest.skip("FP8 reduction support begins with sm90 capable devices.")
 
     _compare_sp(
         model_id,
@@ -322,6 +340,7 @@ def test_tp_sp_generation(
         test_options,
         num_gpus_available,
         use_inductor_graph_partition,
+        enable_async_tp=enable_async_tp,
         method="generate",
         is_multimodal=False,
     )

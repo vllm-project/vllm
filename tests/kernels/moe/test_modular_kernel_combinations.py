@@ -46,6 +46,12 @@ meets_multi_gpu_requirements = pytest.mark.skipif(
     reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
 
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
+
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
@@ -295,6 +301,8 @@ def test_modular_kernel_combinations_singlegpu(
     world_size: int,
     pytestconfig,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     config = Config(
         Ms=Ms,
         K=k,
@@ -309,6 +317,12 @@ def test_modular_kernel_combinations_singlegpu(
         world_size=world_size,
     )
 
+    if (
+        quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
+    ) and not current_platform.has_device_capability(89):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 

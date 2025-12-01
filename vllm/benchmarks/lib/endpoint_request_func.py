@@ -498,10 +498,17 @@ async def _run_pooling_request(
         async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
                 output.ttft = output.latency = time.perf_counter() - st
-                data = await response.json()
+
+                if payload.get("encoding_format", "float") == "bytes":
+                    metadata = json.loads(response.headers["metadata"])
+                    usage = metadata.get("usage", {})
+                else:
+                    data = await response.json()
+                    usage = data.get("usage", {})
+
                 output.success = True
                 output.generated_text = ""
-                output.prompt_len = data.get("usage", {}).get("prompt_tokens", 0)
+                output.prompt_len = usage.get("prompt_tokens", 0)
             else:
                 output.success = False
                 output.error = response.reason or ""

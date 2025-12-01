@@ -6,7 +6,6 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionMetadata,
@@ -16,7 +15,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
@@ -24,15 +23,6 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
-
-
-def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
-    """Gets the max number of encoder input tokens from the config."""
-    sc = vllm_config.scheduler_config
-    assert sc and isinstance(sc.max_num_encoder_input_tokens, int), (
-        "max_num_encoder_input_tokens must be int for enc-dec models"
-    )
-    return sc.max_num_encoder_input_tokens
 
 
 def _get_cross_slot_mapping(
@@ -94,23 +84,32 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
-            max_encoder_len = _get_max_encoder_len(self.vllm_config)
+            max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
+            # Any computed tokens indicated decode step>1 (no chunked prefill)
+            num_cache_decodes = (
+                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            )
+            if num_cache_decodes > 0:
+                # CrossAttn KV cache has already been populated on first decoder step,
+                # skip slot_mapping calculation for requests that do not need
+                # reshape_and_cache.
+                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                new_metadata.encoder_seq_lens_cpu = np.where(
+                    num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
+                )
 
-            new_metadata.seq_lens = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device=self.device,
+            # seq_lens is provided by model runner: initial encoder input length is
+            # needed here to know how many tokens to attend to from the cached
+            # cross-attention KV cache.
+            new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
+            new_metadata.seq_lens_cpu = torch.from_numpy(
+                common_attn_metadata.encoder_seq_lens_cpu
             )
-            new_metadata.seq_lens_cpu = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device="cpu",
-            )
+
+            # NOTE (NickLucche) use `new_metadata` instead of `common_*` (initial) here
             new_metadata.slot_mapping = _get_cross_slot_mapping(
-                new_metadata.encoder_seq_lens,
+                new_metadata.encoder_seq_lens_cpu,
                 new_metadata.block_table_tensor,
                 self.kv_cache_spec,
                 self.device,
@@ -150,15 +149,10 @@ class CrossAttention(Attention):
             kv_cache_dtype = "auto"
             block_size = 16
 
-        if envs.VLLM_USE_V1:
-            underlying_attn_backend = get_attn_backend(
-                head_size, dtype, kv_cache_dtype, block_size
-            )
-
-            attn_backend = create_cross_attention_backend(underlying_attn_backend)
-        else:
-            # in v0 cross attention is handled inside the backends
-            attn_backend = None
+        underlying_attn_backend = get_attn_backend(
+            head_size, dtype, kv_cache_dtype, block_size
+        )
+        attn_backend = create_cross_attention_backend(underlying_attn_backend)
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (

@@ -28,8 +28,8 @@ from vllm.multimodal.utils import (
     encode_image_base64,
     encode_video_base64,
 )
+from vllm.tokenizers import MistralTokenizer
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
@@ -100,6 +100,19 @@ def qwen2_audio_model_config():
         limit_mm_per_prompt={
             "audio": 1,
         },
+    )
+
+
+@pytest.fixture(scope="function")
+def audio_embeds_model_config():
+    return ModelConfig(
+        QWEN2AUDIO_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "audio": 2,
+        },
+        enable_mm_embeds=True,
     )
 
 
@@ -841,6 +854,138 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
     assert "image" in mm_data
     assert mm_data["image"] is None
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_empty_audio_embeds_with_uuid(
+    audio_embeds_model_config,
+    qwen2_audio_tokenizer,
+):
+    """Test audio_embeds with UUID (no actual embeds data)."""
+    uuid = "test-audio-uuid-123"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this audio"},
+                    {"type": "audio_embeds", "audio_embeds": None, "uuid": uuid},
+                ],
+            }
+        ],
+        audio_embeds_model_config,
+        qwen2_audio_tokenizer,
+        content_format="string",
+    )
+
+    # Should have audio in mm_data as None (UUID provided)
+    assert mm_data is not None
+    assert "audio" in mm_data
+    assert mm_data["audio"] is None
+    # UUID should be recorded
+    assert mm_uuids is not None
+    assert "audio" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_audio_embeds_with_string(
+    audio_embeds_model_config,
+    qwen2_audio_tokenizer,
+):
+    """Test audio_embeds with base64 string embedding data."""
+    import base64
+    import io
+
+    import torch
+
+    # Create a sample audio embedding tensor
+    audio_embedding = torch.randn(1, 128, 768)
+
+    # Encode it as base64
+    buffer = io.BytesIO()
+    torch.save(audio_embedding, buffer)
+    buffer.seek(0)
+    binary_data = buffer.read()
+    base64_audio_embedding = base64.b64encode(binary_data).decode("utf-8")
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this audio"},
+                    {
+                        "type": "audio_embeds",
+                        "audio_embeds": base64_audio_embedding,
+                    },
+                ],
+            }
+        ],
+        audio_embeds_model_config,
+        qwen2_audio_tokenizer,
+        content_format="string",
+    )
+
+    # Should have audio embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "audio" in mm_data
+    assert isinstance(mm_data["audio"], torch.Tensor)
+    assert mm_data["audio"].shape == audio_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "audio" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_audio_embeds_async(
+    audio_embeds_model_config,
+    qwen2_audio_tokenizer,
+):
+    """Test audio_embeds with async futures."""
+    import base64
+    import io
+
+    import torch
+
+    # Create a sample audio embedding tensor
+    audio_embedding = torch.randn(1, 128, 768)
+
+    # Encode it as base64
+    buffer = io.BytesIO()
+    torch.save(audio_embedding, buffer)
+    buffer.seek(0)
+    binary_data = buffer.read()
+    base64_audio_embedding = base64.b64encode(binary_data).decode("utf-8")
+
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this audio"},
+                    {
+                        "type": "audio_embeds",
+                        "audio_embeds": base64_audio_embedding,
+                    },
+                ],
+            }
+        ],
+        audio_embeds_model_config,
+        qwen2_audio_tokenizer,
+        content_format="string",
+    )
+
+    # Should have audio embedding in mm_data (single tensor, not a list)
+    mm_data = await mm_future
+    assert mm_data is not None
+    assert "audio" in mm_data
+    assert isinstance(mm_data["audio"], torch.Tensor)
+    assert mm_data["audio"].shape == audio_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "audio" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
 @pytest.mark.asyncio
@@ -1742,7 +1887,9 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1842,7 +1989,9 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1878,6 +2027,39 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
     )
     assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 
+    # Additional test: Verify HF base parameters work with **kwargs tokenizers
+    # This validates the fix for tokenizers like Kimi K2 that use **kwargs
+    # to receive standard HuggingFace parameters instead of declaring them explicitly
+    from vllm.entrypoints.chat_utils import _get_hf_base_chat_template_params
+
+    hf_base_params = _get_hf_base_chat_template_params()
+    # Verify common HF parameters are in the base class
+    assert {"add_generation_prompt", "tools", "continue_final_message"}.issubset(
+        hf_base_params
+    ), f"Expected HF base params not found in {hf_base_params}"
+
+    # Test with a mock tokenizer that uses **kwargs (like Kimi K2)
+    class MockTokenizerWithKwargs:
+        def apply_chat_template(self, conversation, **kwargs):
+            return "mocked_output"
+
+    mock_tokenizer = MockTokenizerWithKwargs()
+    mock_kwargs = {
+        "add_generation_prompt": True,
+        "tools": tools,
+        "continue_final_message": False,
+        "unknown_param": "should_be_filtered",
+    }
+    resolved_mock = resolve_chat_template_kwargs(
+        mock_tokenizer, chat_template, mock_kwargs, raise_on_unexpected=False
+    )
+    # HF base params should pass through even with **kwargs tokenizer
+    assert "add_generation_prompt" in resolved_mock
+    assert "tools" in resolved_mock
+    assert "continue_final_message" in resolved_mock
+    # Unknown params should be filtered out
+    assert "unknown_param" not in resolved_mock
+
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
@@ -1903,7 +2085,9 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
@@ -1961,7 +2145,9 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
