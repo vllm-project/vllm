@@ -186,6 +186,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            hash_block_size=self.block_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
@@ -233,11 +234,15 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
-            # Make sure the input position does not exceed the max model len or
-            # request's max_tokens.
-            # This is necessary when using spec decoding and/or async scheduling.
+            num_spec_placeholders = max(0, request.num_output_placeholders - 1)
             max_total_tokens = min(
-                request.num_prompt_tokens + request.max_tokens, self.max_model_len
+                # Avoid scheduling tokens that we're sure won't will be needed based on
+                # request.max_tokens. For this calculation we assume placeholder
+                # speculated output tokens are rejected.
+                request.num_prompt_tokens + request.max_tokens + num_spec_placeholders,
+                # Make sure the input position does not exceed the max model len.
+                # This is necessary when using spec decoding.
+                self.max_model_len,
             )
             num_new_tokens = min(
                 num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
@@ -258,6 +263,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
+                    shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
             if num_new_tokens == 0:
@@ -508,9 +514,9 @@ class Scheduler(SchedulerInterface):
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
-                        self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
-                        continue
+                        # If chunked_prefill is disabled,
+                        # we can stop the scheduling here.
+                        break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
@@ -527,6 +533,7 @@ class Scheduler(SchedulerInterface):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
+                            shift_computed_tokens=1 if self.use_eagle else 0,
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
@@ -824,6 +831,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_compute_budget: int,
+        shift_computed_tokens: int = 0,
     ) -> tuple[list[int], int, int, list[int]]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
@@ -868,7 +876,10 @@ class Scheduler(SchedulerInterface):
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
             # [start_pos, start_pos + num_encoder_tokens)
-            if start_pos >= num_computed_tokens + num_new_tokens:
+            if (
+                start_pos
+                >= num_computed_tokens + num_new_tokens + shift_computed_tokens
+            ):
                 # The encoder input is not needed in this step.
                 break
 
@@ -924,10 +935,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_computed_tokens < start_pos:
+                if num_computed_tokens + shift_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
                     # encoder input.
-                    num_new_tokens = start_pos - num_computed_tokens
+                    num_new_tokens = start_pos - (
+                        num_computed_tokens + shift_computed_tokens
+                    )
                 else:
                     # Because of prefix caching, num_computed_tokens is greater
                     # than start_pos even though its encoder input is not
@@ -1088,9 +1101,7 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.logprobs is not None
                 and logprobs
             ):
-                # NOTE: once we support N tokens per step (spec decode),
-                # the outer lists can be of length > 1.
-                new_logprobs = logprobs.slice(req_index, req_index + 1)
+                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request

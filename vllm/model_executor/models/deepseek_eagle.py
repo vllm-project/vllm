@@ -23,11 +23,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
-from vllm.utils import init_logger
 
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
-
-logger = init_logger(__name__)
 
 
 @support_torch_compile
