@@ -219,6 +219,7 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -1570,7 +1571,25 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+            if (
+                isinstance(layer.quant_method, Fp8LinearMethod)
+                and layer.quant_method.quant_config.activation_scheme == "static"
+            ):
+                # NOTE: We need a special path for static scaling, we can't send
+                # of bunch of ones with `eye`, it might overflow.
+                weight = layer.weight.data.to(act_dtype)
+                weight_scale = layer.weight_scale.data
+                m, n = weight.shape
+                if weight_scale.ndim < 2:
+                    m_scale, n_scale = weight_scale.view(1, -1).shape
+                else:
+                    assert weight_scale.ndim == 2
+                    m_scale, n_scale = weight_scale.shape
+                weight = weight.view(m // m_scale, m_scale, n // n_scale, n_scale)
+                weight *= weight_scale.view(1, m_scale, 1, n_scale)
+                dequant_weights = weight.view(m, n)
+                return dequant_weights.T
+            elif not isinstance(layer.quant_method, UnquantizedLinearMethod):
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(
                     layer.input_size_per_partition,
