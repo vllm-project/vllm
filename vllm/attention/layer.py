@@ -834,17 +834,22 @@ def get_attention_context(
     forward_context: ForwardContext = get_forward_context()
 
     attn_metadata = forward_context.attn_metadata
-    num_stages = len(forward_context.afd_metadata.afd_tokens_start_loc) - 1
+    afd_metadata = getattr(forward_context, "afd_metadata", None)
+    num_stages = (
+        len(afd_metadata.afd_tokens_start_loc) - 1
+        if afd_metadata is not None and afd_metadata.afd_tokens_start_loc is not None
+        else 0
+    )
     if isinstance(attn_metadata, dict) and num_stages > 1:
         attn_metadata = attn_metadata[layer_name]
-        if forward_context.afd_metadata:
-            afd_stage_idx = forward_context.afd_metadata.afd_stage_idx
+        if afd_metadata is not None:
+            afd_stage_idx = afd_metadata.afd_stage_idx
             if afd_stage_idx < len(attn_metadata):
                 attn_metadata = attn_metadata[afd_stage_idx]
             else:
                 attn_metadata = None  # padding
     else:
-        attn_metadata = attn_metadata[layer_name] if attn_metadata != None else None
+        attn_metadata = attn_metadata[layer_name] if attn_metadata is not None else None
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
     return attn_metadata, attn_layer, kv_cache
