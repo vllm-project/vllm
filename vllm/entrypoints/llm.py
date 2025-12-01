@@ -1077,6 +1077,7 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1114,6 +1115,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1151,6 +1153,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
@@ -1162,6 +1165,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1197,6 +1201,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -1210,6 +1215,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """
         Generate rewards for each prompt.
@@ -1237,6 +1243,7 @@ class LLM:
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
             pooling_task="token_classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _embedding_score(
@@ -1248,6 +1255,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
@@ -1256,6 +1264,7 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
@@ -1280,6 +1289,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1295,7 +1305,8 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        tokenization_kwargs: dict[str, Any] = {}
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
 
         _validate_truncation_size(
             model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
@@ -1329,6 +1340,7 @@ class LLM:
             params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1554,6 +1566,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None,
         priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
@@ -1599,6 +1612,7 @@ class LLM:
                     if isinstance(lora_request, Sequence)
                     else lora_request,
                     priority=priority[i] if priority else 0,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -1662,9 +1676,11 @@ class LLM:
         *,
         lora_request: LoRARequest | None,
         priority: int,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        tokenization_kwargs: dict[str, Any] = {}
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
         _validate_truncation_size(
             self.model_config.max_model_len,
             params.truncate_prompt_tokens,
@@ -1687,6 +1703,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
@@ -1697,6 +1714,7 @@ class LLM:
             params,
             lora_request=lora_request,
             priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         self.llm_engine.add_request(
