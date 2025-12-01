@@ -1871,20 +1871,34 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         
         # Check if we should enable ROCm AITER for w4a16
         self.rocm_aiter_moe_enabled = (
-            current_platform.is_rocm()
-            and self.num_bits == 4
+            self.num_bits == 4
             and rocm_aiter_ops.is_fused_moe_enabled()
         )
         
         # Reconfigure packed weights and scales to match moe_wna16 format
+        # IMPORTANT: Force convert to uint8 for int4 quantization
+        # If weights are in float4_e2m1fn_x2 (mxfp4) format, view as uint8 first
+        w13_transposed = layer.w13_weight_packed.transpose(1, 2).contiguous()
+        w2_transposed = layer.w2_weight_packed.transpose(1, 2).contiguous()
+        
+        # Check and log the dtype before conversion
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[CompressedTensorsMoE] Original w13_weight_packed dtype: {w13_transposed.dtype}")
+        logger.info(f"[CompressedTensorsMoE] Original w2_weight_packed dtype: {w2_transposed.dtype}")
+        
+        # Force view as uint8 (works for both int4 packed and mxfp4)
         layer.w13_weight_packed = torch.nn.Parameter(
-            layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
+            w13_transposed.view(torch.uint8),
             requires_grad=False,
         )
         layer.w2_weight_packed = torch.nn.Parameter(
-            layer.w2_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
+            w2_transposed.view(torch.uint8),
             requires_grad=False,
         )
+        
+        logger.info(f"[CompressedTensorsMoE] Converted w13_weight_packed dtype: {layer.w13_weight_packed.dtype}")
+        logger.info(f"[CompressedTensorsMoE] Converted w2_weight_packed dtype: {layer.w2_weight_packed.dtype}")
         layer.w13_weight_scale = torch.nn.Parameter(
             layer.w13_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
@@ -1901,6 +1915,14 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             
             # Preprocess weights for AITER (shuffle + convert scales)
             num_experts = layer.w13_weight_packed.shape[0]
+            
+            logger.info(f"[CompressedTensorsMoE] Before AITER preprocessing:")
+            logger.info(f"  w13_weight_packed: shape={layer.w13_weight_packed.shape}, dtype={layer.w13_weight_packed.dtype}")
+            logger.info(f"  w2_weight_packed: shape={layer.w2_weight_packed.shape}, dtype={layer.w2_weight_packed.dtype}")
+            logger.info(f"  w13_weight_scale: shape={layer.w13_weight_scale.shape}, dtype={layer.w13_weight_scale.dtype}")
+            logger.info(f"  w2_weight_scale: shape={layer.w2_weight_scale.shape}, dtype={layer.w2_weight_scale.dtype}")
+            logger.info(f"  num_experts: {num_experts}")
+            
             shuffled_w13, shuffled_w2, shuffled_w13_scale, shuffled_w2_scale = (
                 preprocess_w4a16_weights_for_aiter(
                     w1=layer.w13_weight_packed.data,
@@ -1912,6 +1934,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             )
             
             # Update layer parameters with shuffled weights and scales
+            logger.info(f"[CompressedTensorsMoE] Shuffled weights and scales:")
+            logger.info(f"  shuffled_w13: shape={shuffled_w13.shape}, dtype={shuffled_w13.dtype}")
+            logger.info(f"  shuffled_w2: shape={shuffled_w2.shape}, dtype={shuffled_w2.dtype}")
+            logger.info(f"  shuffled_w13_scale: shape={shuffled_w13_scale.shape}, dtype={shuffled_w13_scale.dtype}")
+            logger.info(f"  shuffled_w2_scale: shape={shuffled_w2_scale.shape}, dtype={shuffled_w2_scale.dtype}")
+            
             layer.w13_weight_packed = torch.nn.Parameter(shuffled_w13, requires_grad=False)
             layer.w2_weight_packed = torch.nn.Parameter(shuffled_w2, requires_grad=False)
             layer.w13_weight_scale = torch.nn.Parameter(shuffled_w13_scale, requires_grad=False)

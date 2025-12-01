@@ -93,7 +93,14 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
+    # TODO: remove this after AITER supports silu
+    activation = ActivationType.Swiglu 
 
+    # TODO: remove this after AITER supports bias = None
+    E, INTER_DIM, MODEL_DIM = w1.shape[0], w1.shape[1], w2.shape[1]
+    bias1 = torch.zeros((E, INTER_DIM), dtype=torch.bfloat16).to(torch.float32).to(hidden_states.device)
+    bias2 = torch.zeros((E, MODEL_DIM), dtype=torch.bfloat16).to(torch.float32).to(hidden_states.device)
+    
     return fused_moe(
         hidden_states,
         w1,
@@ -108,6 +115,8 @@ def _rocm_aiter_fused_moe_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        bias1=bias1,
+        bias2=bias2,
     )
 
 

@@ -37,6 +37,7 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
+    SWIGLU = 2
 
 
 aiter_topK_meta_data = None
@@ -77,19 +78,33 @@ def preprocess_w4a16_weights_for_aiter(
     
     logger.info(
         f"Preprocessing w4a16 weights for AITER: "
-        f"w1={w1.shape}, w2={w2.shape}, "
+        f"w1={w1.shape} dtype={w1.dtype}, w2={w2.shape} dtype={w2.dtype}, "
         f"w1_scale={w1_scale.shape}, w2_scale={w2_scale.shape}, "
         f"num_experts={num_experts}"
     )
     
-    # Step 1: Shuffle weights
+    if w1.dtype != torch.uint8:
+        logger.warning(f"w1 dtype is {w1.dtype}, converting to uint8")
+        w1 = w1.view(torch.uint8)
+    if w2.dtype != torch.uint8:
+        logger.warning(f"w2 dtype is {w2.dtype}, converting to uint8")
+        w2 = w2.view(torch.uint8)
+    
     # Use rocm_aiter_ops registered functions
     w1_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w1, NLane=16, gate_up=True)
     w2_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w2, NLane=16, gate_up=False)
     
+    # Ensure output is uint8 (AITER shuffle might preserve input dtype)
+    if w1_aiter.dtype != torch.uint8:
+        logger.warning(f"w1_aiter dtype is {w1_aiter.dtype} after shuffle, converting to uint8")
+        w1_aiter = w1_aiter.view(torch.uint8)
+    if w2_aiter.dtype != torch.uint8:
+        logger.warning(f"w2_aiter dtype is {w2_aiter.dtype} after shuffle, converting to uint8")
+        w2_aiter = w2_aiter.view(torch.uint8)
+    
     logger.info(
         f"Weight shuffle completed: "
-        f"w1_aiter={w1_aiter.shape}, w2_aiter={w2_aiter.shape}"
+        f"w1_aiter={w1_aiter.shape} dtype={w1_aiter.dtype}, w2_aiter={w2_aiter.shape} dtype={w2_aiter.dtype}"
     )
     
     # Step 2: Preprocess scales
@@ -97,15 +112,12 @@ def preprocess_w4a16_weights_for_aiter(
     # AITER expects: [E*N, num_groups]
     
     # For w1 (gate_up projection)
-    w1_scale_2d = w1_scale.view(num_experts * w1_scale.shape[1], -1).to(torch.float32)
-    w1_scale_e8m0 = rocm_aiter_ops.f32_to_e8m0(w1_scale_2d)
-    w1_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w1_scale_e8m0, num_experts, gate_up=True)
+    w1_scale_2d = w1_scale.view(num_experts * w1_scale.shape[1], -1)
+    w1_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w1_scale_2d, num_experts, gate_up=True)   
     
     # For w2 (down projection)
-    w2_scale_2d = w2_scale.view(num_experts * w2_scale.shape[1], -1).to(torch.float32)
-    w2_scale_e8m0 = rocm_aiter_ops.f32_to_e8m0(w2_scale_2d)
-    w2_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w2_scale_e8m0, num_experts, gate_up=False)
-    
+    w2_scale_2d = w2_scale.view(num_experts * w2_scale.shape[1], -1)
+    w2_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w2_scale_2d, num_experts, gate_up=False)
     logger.info(
         f"Scale shuffle completed: "
         f"w1_scale_aiter={w1_scale_aiter.shape}, w2_scale_aiter={w2_scale_aiter.shape}"
@@ -300,12 +312,10 @@ def rocm_aiter_fused_experts(
     else:
         quant_method = QuantMethod.NO.value
         
-        # w4a16 quantization (int4 or mxfp4)
-        # Both use BLOCK_1X32 quant method in AITER
-        if quant_config.use_int4_w4a16 or quant_config.use_mxfp4_w4a16:
-            quant_method = QuantMethod.BLOCK_1X32.value
-            # Note: Weights and scales are already preprocessed in
-            # process_weights_after_loading(), so we can use them directly
+        # w4a16 quantization (int4 or mxfp4):
+        # Use QuantMethod.NO to prevent activation quantization
+        # AITER will detect w1_scale/w2_scale and use a16w4 kernels for weights
+        # (activations stay in bf16/fp16, weights are pre-quantized int4/mxfp4)
         
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
@@ -321,6 +331,10 @@ def rocm_aiter_fused_experts(
         elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
+        elif quant_config.use_int4_w4a16 or quant_config.use_mxfp4_w4a16:
+            quant_method = QuantMethod.BLOCK_1X32.value
+        else:
+            raise ValueError(f"Unsupported quantization method: {quant_config}")
 
         if apply_router_weight_on_input:
             assert topk_weights.dim() == 2, (
