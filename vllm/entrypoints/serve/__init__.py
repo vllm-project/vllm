@@ -58,7 +58,7 @@ def register_vllm_serve_api_routers(app: FastAPI):
     attach_metrics_router(app)
 
     from vllm.entrypoints.serve.instrumentator.health import (
-        router as health_router,
+        attach_router as attach_health_router,
     )
 
-    app.include_router(health_router)
+    attach_health_router(app)

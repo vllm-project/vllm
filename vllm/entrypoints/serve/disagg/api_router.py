@@ -43,43 +43,45 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+router = APIRouter()
+
+
+@router.post(
+    "/inference/v1/generate",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def generate(request: GenerateRequest, raw_request: Request):
+    handler = generate_tokens(raw_request)
+    if handler is None:
+        return tokenization(raw_request).create_error_response(
+            message="The model does not support generate tokens API"
+        )
+    try:
+        generator = await handler.serve_tokens(request, raw_request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
+
+    elif isinstance(generator, GenerateResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
 def attach_router(app: FastAPI):
-    router = APIRouter()
-
-    @router.post(
-        "/inference/v1/generate",
-        dependencies=[Depends(validate_json_request)],
-        responses={
-            HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        },
-    )
-    @with_cancellation
-    @load_aware_call
-    async def generate(request: GenerateRequest, raw_request: Request):
-        handler = generate_tokens(raw_request)
-        if handler is None:
-            return tokenization(raw_request).create_error_response(
-                message="The model does not support generate tokens API"
-            )
-        try:
-            generator = await handler.serve_tokens(request, raw_request)
-        except Exception as e:
-            raise HTTPException(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-            ) from e
-        if isinstance(generator, ErrorResponse):
-            return JSONResponse(
-                content=generator.model_dump(), status_code=generator.error.code
-            )
-
-        elif isinstance(generator, GenerateResponse):
-            return JSONResponse(content=generator.model_dump())
-
-        return StreamingResponse(content=generator, media_type="text/event-stream")
-
     if getattr(app.state.args, "tokens_only", False):
 
         @router.post("/abort_requests")
