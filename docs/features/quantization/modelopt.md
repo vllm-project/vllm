@@ -56,9 +56,9 @@ The quantized checkpoint can then be deployed with vLLM. As an example, the foll
     from vllm import LLM, SamplingParams
 
     def main():
-
         model_id = "nvidia/Llama-3.1-8B-Instruct-FP8"
-        # Ensure you specify quantization='modelopt' when loading the modelopt checkpoint
+
+        # Ensure you specify quantization="modelopt" when loading the modelopt checkpoint
         llm = LLM(model=model_id, quantization="modelopt", trust_remote_code=True)
 
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)

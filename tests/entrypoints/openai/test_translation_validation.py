@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+
 # imports for structured outputs tests
 import json
 
@@ -17,8 +18,9 @@ from ...utils import RemoteOpenAIServer
 SERVER_ARGS = ["--enforce-eager"]
 
 
-@pytest.fixture(scope="module",
-                params=["openai/whisper-small", "google/gemma-3n-E2B-it"])
+@pytest.fixture(
+    scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
+)
 def server(request):
     # Parametrize over model name
     with RemoteOpenAIServer(request.param, SERVER_ARGS) as remote_server:
@@ -38,12 +40,46 @@ async def test_non_asr_model(foscolo):
     model_name = "JackFram/llama-68m"
     with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
         client = remote_server.get_async_client()
-        res = await client.audio.translations.create(model=model_name,
-                                                     file=foscolo,
-                                                     temperature=0.0)
+        res = await client.audio.translations.create(
+            model=model_name, file=foscolo, temperature=0.0
+        )
         err = res.error
         assert err["code"] == 400 and not res.text
         assert err["message"] == "The model does not support Translations API"
+
+
+@pytest.mark.asyncio
+async def test_basic_audio_with_lora(mary_had_lamb):
+    """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # NOTE - careful to call this test before the module scoped server
+    # fixture, otherwise it'll OOMkill the CI
+    model_name = "ibm-granite/granite-speech-3.3-2b"
+    lora_model_name = "speech"
+    server_args = [
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "64",
+        "--lora-modules",
+        f"{lora_model_name}={model_name}",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "1",
+    ]
+
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=lora_model_name,
+            file=mary_had_lamb,
+            extra_body=dict(language="en", to_language="es"),
+            response_format="text",
+            temperature=0.0,
+        )
+    out = json.loads(translation)["text"].strip().lower()
+    assert "pequeño" in out.split(" ")
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
@@ -56,8 +92,9 @@ async def test_basic_audio(foscolo, client_and_model):
         response_format="text",
         # TODO remove `language="it"` once language detection is implemented
         extra_body=dict(language="it", to_language="en"),
-        temperature=0.0)
-    out = json.loads(translation)['text'].strip().lower()
+        temperature=0.0,
+    )
+    out = json.loads(translation)["text"].strip().lower()
     assert "greek sea" in out
 
 
@@ -72,8 +109,9 @@ async def test_audio_prompt(foscolo, client_and_model):
         prompt=prompt,
         extra_body=dict(language="it", to_language="en"),
         response_format="text",
-        temperature=0.0)
-    out = json.loads(transcription)['text']
+        temperature=0.0,
+    )
+    out = json.loads(transcription)["text"]
     assert "Nor will I ever touch the sacred" not in out
     assert prompt not in out
 
@@ -87,7 +125,8 @@ async def test_streaming_response(foscolo, client_and_model, server):
         file=foscolo,
         response_format="json",
         extra_body=dict(language="it", to_language="en", seed=42),
-        temperature=0.0)
+        temperature=0.0,
+    )
 
     # Stream via HTTPX since OpenAI translation client doesn't expose streaming
     server, model_name = server
@@ -104,16 +143,14 @@ async def test_streaming_response(foscolo, client_and_model, server):
     foscolo.seek(0)
     async with httpx.AsyncClient() as http_client:
         files = {"file": foscolo}
-        async with http_client.stream("POST",
-                                      url,
-                                      headers=headers,
-                                      data=data,
-                                      files=files) as response:
+        async with http_client.stream(
+            "POST", url, headers=headers, data=data, files=files
+        ) as response:
             async for line in response.aiter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):
-                    line = line[len("data: "):]
+                    line = line[len("data: ") :]
                 if line.strip() == "[DONE]":
                     break
                 chunk = json.loads(line)
@@ -124,9 +161,10 @@ async def test_streaming_response(foscolo, client_and_model, server):
     # NOTE There's a small non-deterministic issue here, likely in the attn
     # computation, which will cause a few tokens to be different, while still
     # being very close semantically.
-    assert sum([
-        x == y for x, y in zip(res_stream, res_no_stream.text.split())
-    ]) >= len(res_stream) * 0.9
+    assert (
+        sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
+        >= len(res_stream) * 0.9
+    )
 
 
 @pytest.mark.asyncio
@@ -148,16 +186,14 @@ async def test_stream_options(foscolo, server):
     continuous = True
     async with httpx.AsyncClient() as http_client:
         files = {"file": foscolo}
-        async with http_client.stream("POST",
-                                      url,
-                                      headers=headers,
-                                      data=data,
-                                      files=files) as response:
+        async with http_client.stream(
+            "POST", url, headers=headers, data=data, files=files
+        ) as response:
             async for line in response.aiter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):
-                    line = line[len("data: "):]
+                    line = line[len("data: ") :]
                 if line.strip() == "[DONE]":
                     break
                 chunk = json.loads(line)
@@ -180,13 +216,14 @@ async def test_long_audio_request(foscolo, client_and_model):
     repeated_audio = np.tile(audio, 2)
     # Repeated audio to buffer
     buffer = io.BytesIO()
-    sf.write(buffer, repeated_audio, sr, format='WAV')
+    sf.write(buffer, repeated_audio, sr, format="WAV")
     buffer.seek(0)
     translation = await client.audio.translations.create(
         model=model_name,
         file=buffer,
         extra_body=dict(language="it", to_language="en"),
         response_format="text",
-        temperature=0.0)
-    out = json.loads(translation)['text'].strip().lower()
+        temperature=0.0,
+    )
+    out = json.loads(translation)["text"].strip().lower()
     assert out.count("greek sea") == 2

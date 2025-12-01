@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> main
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
@@ -114,9 +119,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
-                self.sharded_to_full_mapping,
-                device=self.device,
-                dtype=torch.long)
+                self.sharded_to_full_mapping, device=self.device, dtype=torch.long
+            )
         else:
             self.sharded_to_full_mapping_gpu = None
 
@@ -133,12 +137,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         assert isinstance(lora_a, torch.Tensor)
         assert isinstance(lora_b, torch.Tensor)
         self.reset_lora(index)
-        self.lora_a_stacked[index,
-                            0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
-                                lora_a, non_blocking=True)
-        self.lora_b_stacked[index,
-                            0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
-                                lora_b, non_blocking=True)
+        self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
+        self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
+            lora_b, non_blocking=True
+        )
 
     def _get_logits(
         self,
@@ -182,14 +186,14 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked,
-            1.0)
+            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
+        )
 
         if not current_platform.can_update_inplace():
             logits = lora_output
 
         # Remove paddings in vocab (if any).
-        logits = logits[:, :self.base_layer.vocab_size]
+        logits = logits[:, : self.base_layer.vocab_size]
         return logits
 
     def forward(self, *args, **kwargs):

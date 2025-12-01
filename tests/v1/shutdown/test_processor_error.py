@@ -30,9 +30,9 @@ async def test_async_llm_processor_error(model: str) -> None:
 
     async def generate(request_id: str):
         # [] is not allowed and will raise a ValueError in Processor.
-        generator = async_llm.generate(TokensPrompt([]),
-                                       request_id=request_id,
-                                       sampling_params=SamplingParams())
+        generator = async_llm.generate(
+            TokensPrompt([]), request_id=request_id, sampling_params=SamplingParams()
+        )
         try:
             async for _ in generator:
                 pass
@@ -55,11 +55,12 @@ async def test_async_llm_processor_error(model: str) -> None:
     EXPECTED_TOKENS = 5
     outputs = []
     async for out in async_llm.generate(
-            "Hello my name is",
-            request_id="abc",
-            sampling_params=SamplingParams(
-                max_tokens=EXPECTED_TOKENS,
-                output_kind=RequestOutputKind.DELTA)):
+        "Hello my name is",
+        request_id="abc",
+        sampling_params=SamplingParams(
+            max_tokens=EXPECTED_TOKENS, output_kind=RequestOutputKind.DELTA
+        ),
+    ):
         outputs.append(out)
 
     generated_tokens = []

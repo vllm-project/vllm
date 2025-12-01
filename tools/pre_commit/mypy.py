@@ -20,42 +20,55 @@ Args:
 
 import subprocess
 import sys
-from typing import Optional
 
 import regex as re
 
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/distributed",
+    "vllm/engine",
     "vllm/entrypoints",
+    "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
+    "vllm/plugins",
+    "vllm/tokenizers",
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/utils",
+    "vllm/worker",
+    "vllm/v1/core",
+    "vllm/v1/engine",
+    "vllm/v1/metrics",
+    "vllm/v1/pool",
+    "vllm/v1/sample",
+    "vllm/v1/worker",
 ]
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move the following directories to FILES
 SEPARATE_GROUPS = [
     "tests",
+    # v0 related
     "vllm/attention",
     "vllm/compilation",
-    "vllm/distributed",
-    "vllm/engine",
-    "vllm/executor",
-    "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",
-    "vllm/plugins",
-    "vllm/worker",
-    "vllm/v1",
+    # v1 related
+    "vllm/v1/attention",
+    "vllm/v1/executor",
+    "vllm/v1/kv_offload",
+    "vllm/v1/spec_decode",
+    "vllm/v1/structured_output",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
+    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
@@ -94,11 +107,15 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     return file_groups
 
 
-def mypy(targets: list[str], python_version: Optional[str],
-         follow_imports: Optional[str], file_group: str) -> int:
+def mypy(
+    targets: list[str],
+    python_version: str | None,
+    follow_imports: str | None,
+    file_group: str,
+) -> int:
     """
     Run mypy on the given targets.
-    
+
     Args:
         targets: List of files or directories to check.
         python_version: Python version to use (e.g., "3.10") or None to use
@@ -131,8 +148,9 @@ def main():
     for file_group, changed_files in file_groups.items():
         follow_imports = None if ci and file_group == "" else "skip"
         if changed_files:
-            returncode |= mypy(changed_files, python_version, follow_imports,
-                               file_group)
+            returncode |= mypy(
+                changed_files, python_version, follow_imports, file_group
+            )
     return returncode
 
 
