@@ -8,6 +8,7 @@ from vllm.config.compilation import (
     CUDAGraphMode,
     PassConfig,
 )
+from vllm.config.afd import AFDConfig
 from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -61,6 +62,8 @@ __all__ = [
     "KVEventsConfig",
     # From vllm.config.kv_transfer
     "KVTransferConfig",
+    # AFD (Attention FFN Disaggregation) configuration
+    "AFDConfig",
     # From vllm.config.load
     "LoadConfig",
     # From vllm.config.lora
