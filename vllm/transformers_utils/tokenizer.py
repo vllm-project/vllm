@@ -1,28 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
-import os
 import warnings
 from functools import lru_cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import huggingface_hub
 from typing_extensions import assert_never
 
-from vllm import envs
 from vllm.logger import init_logger
-from vllm.tokenizers import (
-    HfTokenizer,
-    MistralTokenizer,
-    TokenizerLike,
-    TokenizerRegistry,
-)
-
-from .gguf_utils import get_gguf_file_path_from_hf
-from .repo_utils import list_filtered_repo_files
-from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -106,117 +92,6 @@ def encode_tokens(
         kw_args["add_special_tokens"] = add_special_tokens
 
     return tokenizer.encode(text, **kw_args)
-
-
-def get_tokenizer(
-    tokenizer_name: str | Path,
-    *args,
-    tokenizer_mode: str = "auto",
-    trust_remote_code: bool = False,
-    revision: str | None = None,
-    download_dir: str | None = None,
-    **kwargs,
-) -> TokenizerLike:
-    """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
-    if envs.VLLM_USE_MODELSCOPE:
-        # download model from ModelScope hub,
-        # lazy import so that modelscope is not required for normal use.
-        # pylint: disable=C.
-        from modelscope.hub.snapshot_download import snapshot_download
-
-        # avoid circuit import
-        from vllm.model_executor.model_loader.weight_utils import get_lock
-
-        # Only set the tokenizer here, model will be downloaded on the workers.
-        if not os.path.exists(tokenizer_name):
-            # Use file lock to prevent multiple processes from
-            # downloading the same file at the same time.
-            with get_lock(tokenizer_name, download_dir):
-                tokenizer_path = snapshot_download(
-                    model_id=tokenizer_name,
-                    cache_dir=download_dir,
-                    revision=revision,
-                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                    # Ignore weights - we only need the tokenizer.
-                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
-                )
-                tokenizer_name = tokenizer_path
-
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-        kwargs["use_fast"] = False
-
-    if "truncation_side" not in kwargs:
-        kwargs["truncation_side"] = "left"
-
-    # Separate model folder from file path for GGUF models
-    if is_gguf(tokenizer_name):
-        if check_gguf_file(tokenizer_name):
-            kwargs["gguf_file"] = Path(tokenizer_name).name
-            tokenizer_name = Path(tokenizer_name).parent
-        elif is_remote_gguf(tokenizer_name):
-            tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
-            # Get the HuggingFace Hub path for the GGUF file
-            gguf_file = get_gguf_file_path_from_hf(
-                tokenizer_name,
-                quant_type,
-                revision=revision,
-            )
-            kwargs["gguf_file"] = gguf_file
-
-    # if `tokenizer_mode` == "auto", check if tokenizer can be loaded via Mistral format
-    # first to use official Mistral tokenizer if possible.
-    mistral_common_installed = importlib.util.find_spec("mistral_common") is not None
-    if tokenizer_mode == "auto" and mistral_common_installed:
-        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
-        files_list = list_filtered_repo_files(
-            model_name_or_path=str(tokenizer_name),
-            allow_patterns=allow_patterns,
-            revision=revision,
-        )
-        if len(files_list) > 0:
-            tokenizer_mode = "mistral"
-
-    tokenizer: TokenizerLike
-    if tokenizer_mode == "mistral":
-        logger.debug_once(f"Loading MistralTokenizer from {tokenizer_name}")
-        tokenizer = MistralTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            download_dir=download_dir,
-            **kwargs,
-        )
-    elif tokenizer_mode == "custom":
-        logger.debug_once(f"Loading CustomTokenizer from {tokenizer_name}")
-        tokenizer = TokenizerRegistry.get_tokenizer(
-            str(tokenizer_name),
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            download_dir=download_dir,
-            **kwargs,
-        )
-    else:
-        logger.debug_once(f"Loading HfTokenizer from {tokenizer_name}")
-        tokenizer = HfTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            download_dir=download_dir,
-            **kwargs,
-        )
-
-    if not tokenizer.is_fast:
-        logger.warning(
-            "Using a slow tokenizer. This might cause a significant "
-            "slowdown. Consider using a fast tokenizer instead."
-        )
-
-    return tokenizer
 
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
