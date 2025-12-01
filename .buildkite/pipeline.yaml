@@ -6,7 +6,7 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - .buildkite/build/image_build_cpu_arm64.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+    - .buildkite/image_build/image_build_cpu_arm64.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
     soft_fail: false
   - label: ':docker: Build CPU image'
@@ -14,7 +14,7 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - .buildkite/build/image_build_cpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+    - .buildkite/image_build/image_build_cpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
     soft_fail: false
     retry:
@@ -30,7 +30,7 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - .buildkite/build/image_build_cu118.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+    - .buildkite/image_build/image_build_cu118.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
     soft_fail: false
     retry:
@@ -46,7 +46,7 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - .buildkite/build/image_build_hpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+    - .buildkite/image_build/image_build_hpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
     soft_fail: true
     retry:
@@ -62,7 +62,8 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - .buildkite/build/image_build.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo 123
+    - .buildkite/image_build/image_build.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+      123
     soft_fail: false
     retry:
       automatic:

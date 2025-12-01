@@ -1,0 +1,61 @@
+group: Abuild
+steps:
+  - label: ":docker: Build image"
+    key: image-build
+    commands:
+    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
+  - label: ":docker: Build CPU image"
+    key: image-build-cpu
+    commands:
+    - .buildkite/image_build/image_build_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  - label: ":docker: Build CUDA 11.8 image"
+    key: image-build-cu118
+    commands:
+    - .buildkite/image_build/image_build_cu118.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
+  - label: ":docker: Build HPU image"
+    soft_fail: true
+    key: image-build-hpu
+    commands:
+    - .buildkite/image_build/image_build_hpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  - label: ":docker: Build CPU arm64 image"
+    key: image-build-cpu-arm64
+    optional: true
+    commands:
+    - .buildkite/image_build/image_build_cpu_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:

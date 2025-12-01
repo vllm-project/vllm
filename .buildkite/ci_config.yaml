@@ -1,7 +1,7 @@
 name: ci
 job_dirs:
   - ".buildkite/test_areas"
-  - ".buildkite/build"
+  - ".buildkite/image_build"
 run_all_patterns:
   - ".*"
 run_all_exclude_patterns:
