@@ -686,17 +686,17 @@ if envs.VLLM_USE_PRECOMPILED:
             precompiled_wheel_utils.get_base_commit_in_main_branch(),
         )
         logger.info(
-            "Using precompiled wheel commit {} with variant {}", commit, variant
+            "Using precompiled wheel commit %s with variant %s", commit, variant
         )
         try_default = False
         wheels, repo_url = None, None
         try:
             wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
-        except Exception as e:
+        except Exception:
             logger.warning(
-                "Failed to fetch precompiled wheel metadata for variant {}",
+                "Failed to fetch precompiled wheel metadata for variant %s",
                 variant,
-                exc_info=e,
+                exc_info=True,
             )
             try_default = True  # try outside handler to keep the stacktrace simple
         if try_default:
@@ -725,17 +725,18 @@ if envs.VLLM_USE_PRECOMPILED:
             if wheel.get("package_name") == "vllm" and arch in wheel.get(
                 "platform_tag", ""
             ):
-                logger.info("Found precompiled wheel metadata: {}", wheel)
+                logger.info("Found precompiled wheel metadata: %s", wheel)
                 if "path" not in wheel:
                     raise ValueError(f"Wheel metadata missing path: {wheel}")
                 path = wheel["path"]
                 # path may contain '+' which needs to be URL-encoded
-                if '+' in path:
+                if "+" in path:
                     from urllib.parse import quote
+
                     path = quote(path, safe=":%/")
-                    logger.info("Encoded wheel path to {}", path)
+                    logger.info("Encoded wheel path to %s", path)
                 wheel_url = repo_url + path
-                logger.info("Using precompiled wheel URL: {}", wheel_url)
+                logger.info("Using precompiled wheel URL: %s", wheel_url)
                 break
         else:
             raise ValueError(
