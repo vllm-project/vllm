@@ -59,36 +59,21 @@ BENCHMARK_CONFIGS = {
 
 
 def get_gpu_memory_info() -> dict[str, float]:
-    """Get current GPU memory statistics in GiB."""
-    if not torch.cuda.is_available():
-        return {"free_memory_gib": 0, "total_memory_gib": 0, "used_memory_gib": 0}
-
-    torch.cuda.synchronize()
-    free_memory, total_memory = torch.cuda.mem_get_info()
-    used_memory = total_memory - free_memory
-
-    return {
-        "free_memory_gib": free_memory / (1024**3),
-        "total_memory_gib": total_memory / (1024**3),
-        "used_memory_gib": used_memory / (1024**3),
-    }
+    """Get current GPU memory statistics in GiB.
+    
+    Note: vLLM runs in a separate process and takes exclusive GPU control.
+    We cannot call CUDA functions from the parent process.
+    Memory info will be obtained from vLLM's engine API instead.
+    """
+    return {"free_memory_gib": 0, "total_memory_gib": 0, "used_memory_gib": 0}
 
 
 def get_torch_memory_stats() -> dict[str, float]:
-    """Get PyTorch CUDA memory statistics."""
-    if not torch.cuda.is_available():
-        return {}
-
-    stats = torch.cuda.memory_stats()
-    return {
-        "allocated_bytes_current_gib": stats.get("allocated_bytes.all.current", 0)
-        / (1024**3),
-        "allocated_bytes_peak_gib": stats.get("allocated_bytes.all.peak", 0)
-        / (1024**3),
-        "reserved_bytes_current_gib": stats.get("reserved_bytes.all.current", 0)
-        / (1024**3),
-        "reserved_bytes_peak_gib": stats.get("reserved_bytes.all.peak", 0) / (1024**3),
-    }
+    """Get PyTorch CUDA memory statistics.
+    
+    Note: vLLM runs in a separate process - CUDA stats are not available here.
+    """
+    return {}
 
 
 def generate_prompts(
@@ -311,11 +296,10 @@ def run_benchmark(
         },
     }
 
-    # Clean up
+    # Clean up - deleting LLM will terminate the engine subprocess
     del llm
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # Note: Don't call torch.cuda functions here - GPU is in child process
 
     return results
 
