@@ -901,7 +901,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
         )
 
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        # assert vllm_config.kv_transfer_config.engine_id is not None
         self._set_port_defaults(vllm_config)
 
         self.engine_id = (
@@ -2135,9 +2134,6 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name, kv_layer):
-        # logger.debug(f"write block for req {req_id} to remote engine "
-        #             f"{meta.remote_engine_id}")
-
         self.schedule_write_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
