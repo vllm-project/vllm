@@ -288,9 +288,7 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   }
 
 // To avoid LLVM silently upcasting to double
-__device__ inline int min__(int a, int b) {
-  return min(a, b); 
-}
+__device__ inline int min__(int a, int b) { return min(a, b); }
 
 #if defined(__HIP__GFX9__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
@@ -1751,7 +1749,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
-  auto axl_glbl = torch::zeros( // use empty() for FAST_UNSAFE_RDC_INIT
+  auto axl_glbl = torch::zeros(  // use empty() for FAST_UNSAFE_RDC_INIT
       {N_in, M_in * 2},
       torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
 
