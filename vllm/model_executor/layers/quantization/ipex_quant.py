@@ -150,7 +150,10 @@ class IPEXConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped(
-                    prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                    prefix,
+                    self.modules_to_not_convert,
+                    self.packed_modules_mapping,
+                    skip_with_substr=True,
                 ):
                     return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)
