@@ -4,6 +4,8 @@
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
+from typing import ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -20,11 +22,11 @@ from torch.nn.attention.flex_attention import (
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -72,26 +74,25 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        return  # FlexAttention supports any head size
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
     def get_name() -> str:
         return "FLEX_ATTENTION"
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """FlexAttention supports both decoder and encoder-only attention."""
+        return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
+
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlexAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -110,6 +111,10 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")
@@ -311,6 +316,14 @@ class FlexAttentionMetadata:
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
 
+    @cached_property
+    def logical_block_ids(self):
+        return torch.arange(
+            cdiv(self.max_seq_len, self.block_size),
+            device=self.block_table.device,
+            dtype=torch.long,
+        )
+
     def _convert_physical_to_logical(
         self,
         request_lookup: torch.Tensor,
@@ -489,6 +502,7 @@ class FlexAttentionMetadata:
 
         The direct path works as follows:
         1. For each query token, fetch blocks from block_table using max_seq_len
+           and exclude out of sliding window blocks if needed.
            (this fetches more blocks than needed for shorter sequences)
         2. Group query tokens into chunks of q_block_size
         3. For each group, deduplicate the blocks using unique_static_unsorted
@@ -513,6 +527,23 @@ class FlexAttentionMetadata:
         used_pages = self.block_table[
             self.doc_ids, : cdiv(self.max_seq_len, self.block_size)
         ]
+
+        if self.sliding_window and self.causal:
+            device = used_pages.device
+            assert self.doc_ids is not None
+            token_indices = torch.arange(
+                self.doc_ids.shape[0], device=device, dtype=torch.long
+            )
+            logical_q_idx = (
+                token_indices
+                - self.query_start_loc[self.doc_ids]
+                + self.decode_offset[self.doc_ids]
+            )
+            min_kv_idx = torch.clamp(logical_q_idx - (self.sliding_window - 1), min=0)
+            min_block_idx = min_kv_idx // self.block_size
+            sliding_mask = self.logical_block_ids >= min_block_idx[:, None]
+            used_pages.masked_fill_(~sliding_mask, 0)
+
         used_pages_padded = pad_to_multiple(
             used_pages, multiple=self.q_block_size, dim=0
         )
@@ -725,7 +756,6 @@ class FlexAttentionImpl(AttentionImpl):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("FlexAttention does not support kv sharing yet.")
 
-        FlexAttentionBackend.validate_head_size(head_size)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet"
@@ -782,12 +812,6 @@ class FlexAttentionImpl(AttentionImpl):
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
-                # TODO: Support skipping the computation of sliding window
-                # in direct block mask building code path.
-                logger.warning_once(
-                    "Using direct block mask building with sliding window, "
-                    "which is suboptimal now. Performance may be degraded."
-                )
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
                 attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
@@ -896,6 +920,8 @@ def get_kernel_options(
         return kernel_options
     else:
         preferred_block = 32 if query.dtype == torch.float32 else 64
+        block_lower_bound = 16
+
         block_m_candidate = ensure_divisible(preferred_block, block_m)
         block_n_candidate = ensure_divisible(preferred_block, block_n)
 
@@ -909,6 +935,9 @@ def get_kernel_options(
                 block_n_candidate = ensure_divisible(
                     max(1, block_n_candidate // 2), block_n
                 )
+
+        block_m_candidate = max(block_m_candidate, block_lower_bound)
+        block_n_candidate = max(block_n_candidate, block_lower_bound)
 
         kernel_options["BLOCK_M"] = block_m_candidate
         kernel_options["BLOCK_N"] = block_n_candidate

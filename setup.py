@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 from shutil import which
 
@@ -74,21 +75,13 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
-def is_url_available(url: str) -> bool:
-    from urllib.request import urlopen
-
-    status = None
-    try:
-        with urlopen(url) as f:
-            status = f.status
-    except Exception:
-        return False
-    return status == 200
+def is_freethreaded():
+    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+        super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -208,6 +201,8 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+        elif _is_hip():
+            cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
@@ -297,12 +292,23 @@ class cmake_build_ext(build_ext):
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
+        if _is_cuda() or _is_hip():
+            # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
+            # to current directory so that they can be included in the editable
+            # build
+            print(
+                f"Copying {self.build_lib}/vllm/third_party/triton_kernels "
+                "to vllm/third_party/triton_kernels"
+            )
+            shutil.copytree(
+                f"{self.build_lib}/vllm/third_party/triton_kernels",
+                "vllm/third_party/triton_kernels",
+                dirs_exist_ok=True,
+            )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
-
-    def run(self) -> None:
-        assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
     def build_extensions(self) -> None:
         print("Skipping build_ext: using precompiled extensions.")
@@ -313,14 +319,17 @@ class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
     @staticmethod
-    def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
+    def extract_precompiled_and_patch_package(
+        wheel_url_or_path: str, download_filename: str | None
+    ) -> dict:
         import tempfile
         import zipfile
 
         temp_dir = None
         try:
             if not os.path.isfile(wheel_url_or_path):
-                wheel_filename = wheel_url_or_path.split("/")[-1]
+                # use provided filename first, then derive from URL
+                wheel_filename = download_filename or wheel_url_or_path.split("/")[-1]
                 temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
                 wheel_path = os.path.join(temp_dir, wheel_filename)
                 print(f"Downloading wheel from {wheel_url_or_path} to {wheel_path}")
@@ -517,33 +526,13 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
-def get_gaudi_sw_version():
-    """
-    Returns the driver version.
-    """
-    # Enable console printing for `hl-smi` check
-    output = subprocess.run(
-        "hl-smi",
-        shell=True,
-        text=True,
-        capture_output=True,
-        env={"ENABLE_CONSOLE": "true"},
-    )
-    if output.returncode == 0 and output.stdout:
-        return (
-            output.stdout.split("\n")[2]
-            .replace(" ", "")
-            .split(":")[1][:-1]
-            .split("-")[0]
-        )
-    return "0.0.0"  # when hl-smi is not available
-
-
 def get_vllm_version() -> str:
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        return env_version
+        print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
+        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
+        return get_version(write_to="vllm/_version.py")
 
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
@@ -628,6 +617,10 @@ ext_modules = []
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
+    # Optional since this doesn't get built (produce an .so file). This is just
+    # copying the relevant .py files from the source repository.
+    ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -643,7 +636,6 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
-    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
@@ -656,38 +648,102 @@ package_data = {
     ]
 }
 
+
+def _fetch_metadata_for_variant(
+    commit: str, variant: str | None
+) -> tuple[list[dict], str]:
+    variant_dir = f"{variant}/" if variant is not None else ""
+    repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+    meta_url = repo_url + "metadata.json"
+    logger.info("Trying to fetch metadata from {}", meta_url)
+    from urllib.request import urlopen
+
+    with urlopen(meta_url) as resp:
+        # urlopen raises HTTPError on unexpected status code
+        wheels = json.loads(resp.read().decode("utf-8"))
+    return wheels, repo_url
+
+
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
-    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+    # Attempts:
+    # 1. user-specified wheel location (can be either local or remote, via
+    #    VLLM_PRECOMPILED_WHEEL_LOCATION)
+    # 2. user-specified variant from nightly repo (current main commit via
+    #    VLLM_PRECOMPILED_WHEEL_VARIANT)
+    # 3. the variant corresponding to VLLM_MAIN_CUDA_VERSION from nightly repo
+    # 4. the default variant from nightly repo (current main commit)
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
+        download_filename = None
+        logger.info("Using user-specified precompiled wheel location: %s", wheel_url)
     else:
         import platform
 
         arch = platform.machine()
-        if arch == "x86_64":
-            wheel_tag = "manylinux1_x86_64"
-        elif arch == "aarch64":
-            wheel_tag = "manylinux2014_aarch64"
-        else:
-            raise ValueError(f"Unsupported architecture: {arch}")
-        base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
-        nightly_wheel_url = (
-            f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        # try to fetch the wheel metadata from the nightly wheel repo
+        main_variant = envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
+        commit = os.getenv(
+            "VLLM_PRECOMPILED_WHEEL_COMMIT",
+            precompiled_wheel_utils.get_base_commit_in_main_branch(),
         )
-        from urllib.request import urlopen
-
+        logger.info(
+            "Using precompiled wheel commit %s with variant %s", commit, variant
+        )
+        try_default = False
+        wheels, repo_url, download_filename = None, None, None
         try:
-            with urlopen(wheel_url) as resp:
-                if resp.status != 200:
-                    wheel_url = nightly_wheel_url
-        except Exception as e:
-            print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = nightly_wheel_url
-
-    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
+            wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
+        except Exception:
+            logger.warning(
+                "Failed to fetch precompiled wheel metadata for variant %s",
+                variant,
+                exc_info=True,
+            )
+            try_default = True  # try outside handler to keep the stacktrace simple
+        if try_default:
+            logger.info("Trying the default variant")
+            wheels, repo_url = _fetch_metadata_for_variant(commit, None)
+            # if this also fails, then we have nothing more to try / cache
+        assert wheels is not None and repo_url is not None, (
+            "Failed to fetch precompiled wheel metadata"
+        )
+        # The metadata.json has the following format:
+        # see .buildkite/scripts/generate-nightly-index.py for details
+        """[{
+"package_name": "vllm",
+"version": "0.11.2.dev278+gdbc3d9991",
+"build_tag": null,
+"python_tag": "cp38",
+"abi_tag": "abi3",
+"platform_tag": "manylinux1_x86_64",
+"variant": null,
+"filename": "vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl",
+"path": "../vllm-0.11.2.dev278%2Bgdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
+},
+...]"""
+        for wheel in wheels:
+            # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
+            if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                "platform_tag", ""
+            ):
+                logger.info("Found precompiled wheel metadata: %s", wheel)
+                if "path" not in wheel:
+                    raise ValueError(f"Wheel metadata missing path: {wheel}")
+                wheel_url = repo_url + wheel["path"]
+                download_filename = wheel.get("filename")
+                logger.info("Using precompiled wheel URL: %s", wheel_url)
+                break
+        else:
+            raise ValueError(
+                f"No precompiled vllm wheel found for architecture {arch} "
+                f"from repo {repo_url}. All available wheels: {wheels}"
+            )
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
+        wheel_url, download_filename
+    )
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 
@@ -712,7 +768,7 @@ setup(
         "bench": ["pandas", "matplotlib", "seaborn", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.14.0"],
+        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.0"],
         "audio": [
             "librosa",
             "soundfile",

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -28,8 +31,20 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT poll_source FROM candidate GROUP BY poll_source ORDER BY count(*) DESC LIMIT 1",  # noqa: E501
 ]
 
+EXPECTED_BASE_MODEL_OUTPUT = [
+    "SELECT COUNT(Candidate_ID) FROM candidate",
+    "SELECT COUNT(Candidate_ID) FROM candidate",
+    "SELECT Candidate_ID, COUNT(*) as Total_Candidates\nFROM candidate\nINNER JOIN people ON candidate.People_ID = people.People_ID",  # noqa: E501
+    "SELECT Candidate_ID, Poll_Source FROM candidate WHERE People_ID IN (SELECT People_ID FROM people) ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
+]
 
-def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
+
+def generate_and_test(
+    llm: vllm.LLM,
+    lora_path: str,
+    lora_id: list[int | None] | int | None,
+    compare_lower: bool = False,
+) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(context="How many candidates are there?"),
         PROMPT_TEMPLATE.format(context="Count the number of candidates."),
@@ -40,12 +55,18 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
             context="Return the poll resource associated with the most candidates."
         ),
     ]
+
+    lora_request = None
+    if isinstance(lora_id, int):
+        lora_request = LoRARequest(str(lora_id), lora_id, lora_path)
+    elif isinstance(lora_id, list):
+        lora_request = [
+            LoRARequest(str(i), i, lora_path) if i is not None else None
+            for i in lora_id
+        ]
+
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
-    )
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -55,7 +76,19 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        req_lora_id = lora_id[i] if isinstance(lora_id, list) else lora_id
+        generated_text = generated_texts[i]
+        expected_output = (
+            EXPECTED_LORA_OUTPUT[i]
+            if req_lora_id is not None
+            else EXPECTED_BASE_MODEL_OUTPUT[i]
+        )
+
+        if compare_lower:
+            generated_text = generated_text.lower()
+            expected_output = expected_output.lower()
+
+        assert generated_text.startswith(expected_output)
 
 
 def test_olmoe_lora(olmoe_lora_files):
@@ -75,8 +108,23 @@ def test_olmoe_lora(olmoe_lora_files):
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
 
 
+def test_olmoe_lora_mixed(olmoe_lora_files):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+    )
+
+    generate_and_test(llm, olmoe_lora_files, lora_id=[1, None, 3, None])
+
+
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
-def test_olmoe_lora_tp2(olmoe_lora_files):
+def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -86,14 +134,16 @@ def test_olmoe_lora_tp2(olmoe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
+        fully_sharded_loras=fully_sharded_loras,
     )
 
     generate_and_test(llm, olmoe_lora_files, lora_id=1)
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
 
 
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=4)
-def test_olmoe_lora_tp4(olmoe_lora_files):
+def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -103,7 +153,11 @@ def test_olmoe_lora_tp4(olmoe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=4,
+        fully_sharded_loras=fully_sharded_loras,
     )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=1)
-    generate_and_test(llm, olmoe_lora_files, lora_id=2)
+    generate_and_test(
+        llm, olmoe_lora_files, lora_id=1, compare_lower=fully_sharded_loras
+    )
+    generate_and_test(
+        llm, olmoe_lora_files, lora_id=2, compare_lower=fully_sharded_loras
+    )

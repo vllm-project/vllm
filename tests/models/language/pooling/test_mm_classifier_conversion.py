@@ -2,18 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.config.pooler import PoolerConfig
-from vllm.platforms import current_platform
 
 
 def test_idefics_multimodal(
     vllm_runner,
-    monkeypatch,
 ) -> None:
-    if current_platform.is_rocm():
-        # ROCm Triton FA does not currently support sliding window attention
-        # switch to use ROCm CK FA backend
-        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -59,13 +52,7 @@ def update_config(config):
 
 def test_gemma_multimodal(
     vllm_runner,
-    monkeypatch,
 ) -> None:
-    if current_platform.is_rocm():
-        # ROCm Triton FA does not currently support sliding window attention
-        # switch to use ROCm CK FA backend
-        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
     messages = [
         {
             "role": "system",
@@ -88,7 +75,7 @@ def test_gemma_multimodal(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Set_of_fourteen_side_chairs_MET_DP110780.jpg"
+                        "url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/red_chair.jpg"
                     },
                 },
                 {"type": "text", "text": "A fine 19th century piece of furniture."},

@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPrometheus,
 )
 from vllm.logger import init_logger
-from vllm.plugins import load_plugins_by_group
+from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -67,7 +67,7 @@ class StatLoggerBase(ABC):
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
 
-    for name, plugin_class in load_plugins_by_group("vllm.stat_logger_plugins").items():
+    for name, plugin_class in load_plugins_by_group(STAT_LOGGER_PLUGINS_GROUP).items():
         if not isinstance(plugin_class, type) or not issubclass(
             plugin_class, StatLoggerBase
         ):
@@ -104,8 +104,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.mm_caching_metrics = CachingMetrics()
 
         self.spec_decoding_logging = SpecDecodingLogging()
-        kv_tranfer_config = self.vllm_config.kv_transfer_config
-        self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
@@ -117,11 +117,15 @@ class LoggingStatLogger(StatLoggerBase):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: int = 0
         self.num_generation_tokens: int = 0
+        self.num_corrupted_reqs: int = 0
+        self.num_preemptions: int = 0
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
         self.num_prompt_tokens += iteration_stats.num_prompt_tokens
         self.num_generation_tokens += iteration_stats.num_generation_tokens
+        self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
+        self.num_preemptions += iteration_stats.num_preempted_reqs
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -194,17 +198,34 @@ class LoggingStatLogger(StatLoggerBase):
             "Avg generation throughput: %.1f tokens/s",
             "Running: %d reqs",
             "Waiting: %d reqs",
-            "GPU KV cache usage: %.1f%%",
-            "Prefix cache hit rate: %.1f%%",
         ]
         log_args = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
             self.last_scheduler_stats.num_waiting_reqs,
-            self.last_scheduler_stats.kv_cache_usage * 100,
-            self.prefix_caching_metrics.hit_rate * 100,
         ]
+
+        if self.num_preemptions > 0:
+            log_parts.append("Preemptions: %d")
+            log_args.append(self.num_preemptions)
+
+        log_parts.extend(
+            [
+                "GPU KV cache usage: %.1f%%",
+                "Prefix cache hit rate: %.1f%%",
+            ]
+        )
+        log_args.extend(
+            [
+                self.last_scheduler_stats.kv_cache_usage * 100,
+                self.prefix_caching_metrics.hit_rate * 100,
+            ]
+        )
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            log_parts.append("Corrupted: %d reqs")
+            log_args.append(self.num_corrupted_reqs)
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
@@ -275,9 +296,6 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             )
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
-            )
-            self.last_scheduler_stats.num_corrupted_reqs += (
-                last_scheduler_stats.num_corrupted_reqs
             )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
@@ -362,7 +380,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        per_engine_labelvalues: dict[int, list[str]] = {
+        per_engine_labelvalues: dict[int, list[object]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
 
@@ -395,92 +413,55 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = make_per_engine(
             gauge_scheduler_waiting, engine_indexes, model_name
         )
-        if envs.VLLM_SERVER_DEV_MODE:
-            gauge_engine_sleep_state = self._gauge_cls(
-                name="vllm:engine_sleep_state",
-                documentation=(
-                    "Engine sleep state; awake = 0 means engine is sleeping; "
-                    "awake = 1 means engine is awake; "
-                    "weights_offloaded = 1 means sleep level 1; "
-                    "discard_all = 1 means sleep level 2."
-                ),
-                labelnames=labelnames + ["sleep_state"],
-                multiprocess_mode="mostrecent",
-            )
 
-            self.gauge_engine_sleep_state = {}
-            sleep_state = ["awake", "weights_offloaded", "discard_all"]
+        gauge_engine_sleep_state = self._gauge_cls(
+            name="vllm:engine_sleep_state",
+            documentation=(
+                "Engine sleep state; awake = 0 means engine is sleeping; "
+                "awake = 1 means engine is awake; "
+                "weights_offloaded = 1 means sleep level 1; "
+                "discard_all = 1 means sleep level 2."
+            ),
+            labelnames=labelnames + ["sleep_state"],
+            multiprocess_mode="mostrecent",
+        )
 
-            for s in sleep_state:
-                self.gauge_engine_sleep_state[s] = {
-                    idx: gauge_engine_sleep_state.labels(
-                        engine=idx, model_name=model_name, sleep_state=s
-                    )
-                    for idx in engine_indexes
-                }
+        self.gauge_engine_sleep_state = {}
+        sleep_state = ["awake", "weights_offloaded", "discard_all"]
 
-            # Setting default values
-            self.record_sleep_state()
+        for s in sleep_state:
+            self.gauge_engine_sleep_state[s] = {
+                idx: gauge_engine_sleep_state.labels(
+                    engine=idx, model_name=model_name, sleep_state=s
+                )
+                for idx in engine_indexes
+            }
 
-        # GPU cache
-        #
-        # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            gauge_gpu_cache_usage = self._gauge_cls(
-                name="vllm:gpu_cache_usage_perc",
-                documentation=(
-                    "GPU KV-cache usage. 1 means 100 percent usage."
-                    "DEPRECATED: Use vllm:kv_cache_usage_perc instead."
-                ),
-                multiprocess_mode="mostrecent",
-                labelnames=labelnames,
-            )
-            self.gauge_gpu_cache_usage = make_per_engine(
-                gauge_gpu_cache_usage, engine_indexes, model_name
-            )
-
-        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_queries
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            counter_gpu_prefix_cache_queries = self._counter_cls(
-                name="vllm:gpu_prefix_cache_queries",
-                documentation=(
-                    "GPU prefix cache queries, in terms of number of queried"
-                    "tokens. DEPRECATED: Use vllm:prefix_cache_queries instead."
-                ),
-                labelnames=labelnames,
-            )
-            self.counter_gpu_prefix_cache_queries = make_per_engine(
-                counter_gpu_prefix_cache_queries, engine_indexes, model_name
-            )
-
-        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_hits
-        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
-        # TODO: remove in 0.12.0
-        if self.show_hidden_metrics:
-            counter_gpu_prefix_cache_hits = self._counter_cls(
-                name="vllm:gpu_prefix_cache_hits",
-                documentation=(
-                    "GPU prefix cache hits, in terms of number of cached "
-                    "tokens. DEPRECATED: Use vllm:prefix_cache_hits instead."
-                ),
-                labelnames=labelnames,
-            )
-            self.counter_gpu_prefix_cache_hits = make_per_engine(
-                counter_gpu_prefix_cache_hits, engine_indexes, model_name
-            )
+        # Setting default values
+        self.record_sleep_state()
 
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
             documentation="KV-cache usage. 1 means 100 percent usage.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
         self.gauge_kv_cache_usage = make_per_engine(
             gauge_kv_cache_usage, engine_indexes, model_name
         )
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            counter_corrupted_requests = self._counter_cls(
+                name="vllm:corrupted_requests",
+                documentation=(
+                    "Corrupted requests, in terms of total number of requests "
+                    "with NaNs in logits."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_corrupted_requests = make_per_engine(
+                counter_corrupted_requests, engine_indexes, model_name
+            )
 
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
@@ -703,39 +684,41 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # TODO: in 0.12, only enable if show_hidden_metrics=True
-        histogram_time_per_output_token = self._histogram_cls(
-            name="vllm:time_per_output_token_seconds",
-            documentation=(
-                "Histogram of time per output token in seconds."
-                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-            ),
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
-            labelnames=labelnames,
-        )
-        self.histogram_time_per_output_token = make_per_engine(
-            histogram_time_per_output_token, engine_indexes, model_name
-        )
+        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
+        # TODO: remove in 0.13.0
+        if self.show_hidden_metrics:
+            histogram_time_per_output_token = self._histogram_cls(
+                name="vllm:time_per_output_token_seconds",
+                documentation=(
+                    "Histogram of time per output token in seconds."
+                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
+                ),
+                buckets=[
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.075,
+                    0.1,
+                    0.15,
+                    0.2,
+                    0.3,
+                    0.4,
+                    0.5,
+                    0.75,
+                    1.0,
+                    2.5,
+                    5.0,
+                    7.5,
+                    10.0,
+                    20.0,
+                    40.0,
+                    80.0,
+                ],
+                labelnames=labelnames,
+            )
+            self.histogram_time_per_output_token = make_per_engine(
+                histogram_time_per_output_token, engine_indexes, model_name
+            )
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
@@ -934,20 +917,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )
-
-            if self.show_hidden_metrics:
-                self.gauge_gpu_cache_usage[engine_idx].set(
-                    scheduler_stats.kv_cache_usage
-                )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
-
-            if self.show_hidden_metrics:
-                self.counter_gpu_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.queries
-                )
-                self.counter_gpu_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.prefix_cache_stats.hits
-                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
@@ -974,13 +944,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
+            if self.gauge_lora_info is not None:
+                running_lora_adapters = ",".join(
+                    scheduler_stats.running_lora_adapters.keys()
+                )
+                waiting_lora_adapters = ",".join(
+                    scheduler_stats.waiting_lora_adapters.keys()
+                )
+                lora_info_labels = {
+                    self.labelname_running_lora_adapters: running_lora_adapters,
+                    self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                    self.labelname_max_lora: self.max_lora,
+                }
+                self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
             self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
 
         if iteration_stats is None:
             return
-
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            self.counter_corrupted_requests[engine_idx].inc(
+                iteration_stats.num_corrupted_reqs
+            )
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )
@@ -1002,7 +989,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            self.histogram_time_per_output_token[engine_idx].observe(itl)
+            if self.show_hidden_metrics:
+                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][
@@ -1037,20 +1025,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
-        if self.gauge_lora_info is not None:
-            running_lora_adapters = ",".join(
-                iteration_stats.running_lora_adapters.keys()
-            )
-            waiting_lora_adapters = ",".join(
-                iteration_stats.waiting_lora_adapters.keys()
-            )
-            lora_info_labels = {
-                self.labelname_running_lora_adapters: running_lora_adapters,
-                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
-                self.labelname_max_lora: self.max_lora,
-            }
-            self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
-
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
         discard_all = 0
@@ -1078,7 +1052,7 @@ PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
 def make_per_engine(
-    metric: PromMetric, engine_idxs: list[int], model_name: str
+    metric: PromMetric, engine_idxs: list[int], model_name: object
 ) -> dict[int, PromMetric]:
     return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
 

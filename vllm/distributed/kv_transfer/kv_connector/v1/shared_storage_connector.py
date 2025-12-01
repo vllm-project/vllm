@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import hashlib
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import safetensors
 import torch
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -15,13 +15,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -86,8 +87,17 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config,
+        )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
@@ -201,7 +211,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
@@ -336,7 +346,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
             if not resumed_from_preemption or req_id not in self._requests_need_load:
                 continue
 
@@ -413,7 +423,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         if mm_hashes:
             mm_str = "-".join(mm_hashes)
             token_bytes += mm_str.encode("utf-8")
-        input_ids_hash = hashlib.md5(token_bytes, usedforsecurity=False).hexdigest()
+        input_ids_hash = safe_hash(token_bytes, usedforsecurity=False).hexdigest()
 
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:

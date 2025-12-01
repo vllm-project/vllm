@@ -28,7 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -107,12 +107,14 @@ class JAISAttention(nn.Module):
             total_num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_attn",
         )
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -147,6 +149,7 @@ class JAISMLP(nn.Module):
         intermediate_size: int,
         config: JAISConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -156,6 +159,7 @@ class JAISMLP(nn.Module):
             intermediate_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.c_fc2 = (
             ColumnParallelLinear(
@@ -163,6 +167,7 @@ class JAISMLP(nn.Module):
                 intermediate_size,
                 bias=True,
                 quant_config=quant_config,
+                prefix=f"{prefix}.c_fc2",
             )
             if self.swiglu
             else None
@@ -172,6 +177,7 @@ class JAISMLP(nn.Module):
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
 
         self.act = SwiGLUActivation()
@@ -206,7 +212,7 @@ class JAISBlock(nn.Module):
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = JAISMLP(inner_dim, config, quant_config)
+        self.mlp = JAISMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -269,7 +275,7 @@ class JAISModel(nn.Module):
             ["hidden_states"], config.n_embd
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
@@ -281,7 +287,7 @@ class JAISModel(nn.Module):
     ) -> IntermediateTensors | torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                inputs_embeds = self.get_input_embeddings(input_ids)
+                inputs_embeds = self.embed_input_ids(input_ids)
             if self.wpe is not None:
                 position_embeds = self.wpe(position_ids)
                 hidden_states = inputs_embeds + position_embeds
@@ -333,8 +339,8 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
