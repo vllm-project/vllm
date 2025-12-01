@@ -254,6 +254,7 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
+    task = "token_classify"
     input_text = ["This product was excellent and exceeded my expectations"]
     response = requests.post(
         server.url_for("pooling"),
@@ -261,7 +262,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
             "model": model_name,
             "input": input_text,
             "encoding_format": "float",
-            "task": "token_classify",
+            "task": task,
         },
     )
     poolings = PoolingResponse.model_validate(response.json())
