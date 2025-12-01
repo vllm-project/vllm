@@ -82,6 +82,9 @@ def find_op_nodes(
         if n.args[0] == op:
             yield n
 
+    for n in graph.find_nodes(op="call_function", target=op):
+        yield n
+
 
 # Asserts that the node only has one user and returns it
 # Even if a node has only 1 user, it might share storage with another node,
