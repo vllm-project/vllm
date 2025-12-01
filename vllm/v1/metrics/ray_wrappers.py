@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorPrometheus
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -17,7 +16,7 @@ except ImportError:
 import regex as re
 
 
-def _get_replica_id() -> Optional[str]:
+def _get_replica_id() -> str | None:
     """Get the current Ray Serve replica ID, or None if not in a Serve context."""
     if serve is None:
         return None
@@ -30,12 +29,12 @@ def _get_replica_id() -> Optional[str]:
 
 class RayPrometheusMetric:
     """Base class for Ray metric wrappers.
-    
+
     Automatically adds ReplicaId tag when running in a Ray Serve context.
     """
 
     # Cache replica ID at class level (same for all metrics in a replica)
-    _replica_id: Optional[str] = None
+    _replica_id: str | None = None
     _replica_id_checked: bool = False
 
     def __init__(self):
@@ -43,14 +42,14 @@ class RayPrometheusMetric:
             raise ImportError("RayPrometheusMetric requires Ray to be installed.")
 
         self.metric: Metric = None
-        
+
         # Cache replica ID on first metric creation
         if not RayPrometheusMetric._replica_id_checked:
             RayPrometheusMetric._replica_id = _get_replica_id()
             RayPrometheusMetric._replica_id_checked = True
 
     @classmethod
-    def _get_tag_keys(cls, labelnames: Optional[list[str]]) -> Optional[tuple[str, ...]]:
+    def _get_tag_keys(cls, labelnames: list[str] | None) -> tuple[str, ...] | None:
         """Build tag keys, adding ReplicaId if in a Serve context."""
         labels = list(labelnames) if labelnames else []
         if cls._replica_id is not None:
