@@ -110,9 +110,7 @@ WARNING: The benchmarking script will save json results by itself, so please do 
 
 #### New JSON Format
 
-Serving tests now support an enhanced format that includes a default section.  
-Values defined in this section are applied globally to all tests unless explicitly overridden in a specific test case.  
-Each test may also specify a tier. Tests assigned to the "full" tier will only be executed when RUN_FULL_TESTS is set to 1.  
+We can specify default parameters in a JSON field with key `defaults`. Parameters defined in the field are applied globally to all serving tests, and can be overridden in test case fields. Here is an example:
 
 <details>
 <summary> An Example of New JSON Format </summary>
