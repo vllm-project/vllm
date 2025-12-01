@@ -121,50 +121,46 @@ We can specify default parameters in a JSON field with key `defaults`. Parameter
     "qps_list": [
       "inf"
     ],
-    "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
     "server_environment_variables": {
-      "VLLM_RPC_TIMEOUT": 100000,
-      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
-      "VLLM_CPU_SGL_KERNEL": 1,
-      "VLLM_CPU_KVCACHE_SPACE": 40
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1
     },
     "server_parameters": {
-      "model": "meta-llama/Llama-3.1-8B-Instruct",
       "tensor_parallel_size": 1,
       "dtype": "bfloat16",
-      "distributed_executor_backend": "mp",
       "block_size": 128,
-      "trust_remote_code": "",
       "disable_log_stats": "",
-      "enforce_eager": "",
-      "max_num_batched_tokens": 2048,
-      "max_num_seqs": 256,
       "load_format": "dummy"
     },
     "client_parameters": {
-      "model": "meta-llama/Llama-3.1-8B-Instruct",
       "backend": "vllm",
-      "num_prompts": 200
+      "dataset_name": "random",
+      "random-input-len": 128,
+      "random-output-len": 128,
+      "num_prompts": 200,
+      "ignore-eos": ""
     }
   },
   "tests": [
     {
       "test_name": "serving_llama3B_tp2_random_128_128",
-      "tier": "full",
       "server_parameters": {
         "model": "meta-llama/Llama-3.2-3B-Instruct",
         "tensor_parallel_size": 2,
-        "enable_chunked_prefill": ""
       },
       "client_parameters": {
         "model": "meta-llama/Llama-3.2-3B-Instruct",
-        "dataset_name": "random",
-        "random-input-len": 128,
-        "random-output-len": 128,
-        "ignore-eos": ""
       }
-    }
+    },
+    {
+      "test_name": "serving_qwen3_tp4_random_128_128",
+      "server_parameters": {
+        "model": "Qwen/Qwen3-14B",
+        "tensor_parallel_size": 4,
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen3-14B",
+      }
+    },
   ]
 }
 ```
