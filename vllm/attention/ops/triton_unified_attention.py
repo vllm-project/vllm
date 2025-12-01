@@ -53,7 +53,6 @@ def find_seq_idx(
     return left - 1
 
 
-
 @triton.jit
 def unified_attention_2d(
     kv_head_idx,  # int
@@ -588,6 +587,7 @@ def kernel_decode_attention_2d(
         FP8_MAX=FP8_MAX,
     )
 
+
 @triton.jit
 def kernel_unified_attention_3d(
     segm_output_ptr,
@@ -1029,11 +1029,7 @@ def unified_attention(
     # function. However, it is recommended to include these assignments in the
     # attention metadata itself, as performing them here may negatively impact
     # performance.
-    if (
-        seq_threshold_3D is None
-        or split_launch is None
-        or num_decodes is None
-    ):
+    if seq_threshold_3D is None or split_launch is None or num_decodes is None:
         seq_threshold_3D = 128 // num_kv_heads
         split_launch = False
         seq_lens = torch.diff(cu_seqlens_q)
@@ -1050,7 +1046,9 @@ def unified_attention(
         # batch contains prefills
 
         BLOCK_M = (
-            64 if num_queries_per_kv <= 64 else triton.next_power_of_2(num_queries_per_kv)
+            64
+            if num_queries_per_kv <= 64
+            else triton.next_power_of_2(num_queries_per_kv)
         )
         BLOCK_Q = BLOCK_M // num_queries_per_kv
 
@@ -1119,7 +1117,6 @@ def unified_attention(
             num_seqs=num_seqs - num_decodes if split_launch else num_seqs,
             BLOCK_M=BLOCK_M,
             q_block_offset=num_decodes if split_launch else 0,
-            #decode_only=False,
             USE_FP8=output_scale is not None,
         )
 
@@ -1127,7 +1124,9 @@ def unified_attention(
         # batch contains decodes that are not processed in unified fashion
 
         BLOCK_M = (
-            16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+            16
+            if num_queries_per_kv <= 16
+            else triton.next_power_of_2(num_queries_per_kv)
         )
         BLOCK_Q = BLOCK_M // num_queries_per_kv
 
@@ -1183,7 +1182,6 @@ def unified_attention(
                 num_seqs=num_decodes,
                 BLOCK_M=BLOCK_M,
                 q_block_offset=0,
-                #decode_only=True,
                 USE_FP8=output_scale is not None,
             )
         else:
