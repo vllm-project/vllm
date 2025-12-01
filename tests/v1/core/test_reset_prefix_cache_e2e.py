@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# import os
 
+# os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 PROMPTS = [
-    # "A robot may not injure a human being ",
-    # "To be or not to be,",
+    "A robot may not injure a human being ",
+    "To be or not to be,",
     "What is the meaning of life?",
+    "What does the fox say? " * 20,  # Test long prompt
 ]
 
 
 def test_reset_prefix_cache_e2e():
-    # 17 tokens will make sure first 16 tokens are cached in a block
     engine_args = EngineArgs(
         model="Qwen/Qwen3-0.6B",
         gpu_memory_utilization=0.2,
         async_scheduling=True,
+        max_num_batched_tokens=32,
+        compilation_config={"mode": 0},
     )
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams(

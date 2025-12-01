@@ -1362,8 +1362,12 @@ class Scheduler(SchedulerInterface):
             # Preempt in reverse order so the requests will be added back to the
             # running queue in FIFO order.
             while self.running:
-                self._preempt_request(self.running.pop(), timestamp)
-            self.running = []
+                request = self.running.pop()
+                self._preempt_request(request, timestamp)
+                # NOTE(zhuohan): For async scheduling, we need to discard the latest
+                # output token on the fly to avoid a redundant repetitive output token.
+                request.num_output_placeholders = 0
+                request.discard_latest_async_token = True
 
             # Clear scheduled request ids cache
             self.prev_step_scheduled_req_ids.clear()
