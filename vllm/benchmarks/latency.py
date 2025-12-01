@@ -79,10 +79,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
+    if args.profile and not (
+        envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE
+    ):
         raise OSError(
-            "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
-            "Please set it to a valid path to use torch profiler."
+            "Profiling is enabled but the profiler environment variables"
+            " are not set. Please set either VLLM_TORCH_PROFILER_DIR or"
+            " VLLM_TORCH_CUDA_PROFILE."
         )
     engine_args = EngineArgs.from_cli_args(args)
 
@@ -151,17 +154,12 @@ def main(args: argparse.Namespace):
             )
         elif envs.VLLM_TORCH_CUDA_PROFILE:
             print("Profiling with nsys ...")
-        else:
-            raise ValueError(
-                "Profiling is enabled but no profiler is set in envs. Please set either"
-                " VLLM_TORCH_PROFILER_DIR or VLLM_TORCH_CUDA_PROFILE."
-            )
         run_to_completion(do_profile=True)
         return
 
     # Benchmark.
     latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
+    for _ in tqdm(range(args.num_iters), desc="Bench iterations"):
         latencies.append(run_to_completion(do_profile=False))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
