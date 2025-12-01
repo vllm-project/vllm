@@ -378,7 +378,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
-class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):  # type: ignore[type-var]
     def __init__(
         self,
         num_heads: int,

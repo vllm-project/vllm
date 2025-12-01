@@ -190,7 +190,7 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLACommonImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(MLACommonImpl[ROCMAiterMLASparseMetadata]):  # type: ignore[type-var]
     def __init__(
         self,
         num_heads: int,
