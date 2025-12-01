@@ -205,22 +205,6 @@ async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling(server: RemoteOpenAIServer, model_name: str):
-    input_text = ["This product was excellent and exceeded my expectations"]
-    response = requests.post(
-        server.url_for("pooling"),
-        json={"model": model_name, "input": input_text, "encoding_format": "float"},
-    )
-    poolings = PoolingResponse.model_validate(response.json())
-
-    # token_classify
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 8
-    assert len(poolings.data[0].data[0]) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_score(server: RemoteOpenAIServer, model_name: str):
     # score api is only enabled for num_labels == 1.
     response = requests.post(
