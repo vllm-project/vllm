@@ -97,7 +97,7 @@ class Request:
         # Used in async scheduling.
         self.num_output_placeholders = 0
         # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_token = False
+        self.discard_latest_async_tokens = False
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0

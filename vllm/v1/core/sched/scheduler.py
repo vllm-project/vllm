@@ -1371,9 +1371,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(zhuohan): For async scheduling, we need to discard the latest
                 # output token on the fly to avoid a redundant repetitive output token.
                 request.num_output_placeholders = 0
-                request.discard_latest_async_token = True
+                request.discard_latest_async_tokens = True
 
-            # Clear scheduled request ids cache
+            # Clear scheduled request ids cache. Since we are forcing preemption
+            # + resumption in the same step, we must act as if these requests were
+            # not scheduled in the prior step. They will be flushed from the
+            # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
@@ -1381,8 +1384,8 @@ class Scheduler(SchedulerInterface):
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
                 "preempted and moved to the waiting queue. This is likely due to "
-                "there are running requests waiting for remote KV transfer, which "
-                "is not supported yet."
+                "the presence of running requests waiting for remote KV transfer, "
+                "which is not supported yet."
             )
         return reset_successful
 
