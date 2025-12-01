@@ -1136,17 +1136,9 @@ def fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
-    scoring_func: str = "softmax",
 ):
     n_routed_experts = gating_output.shape[-1]
-
-    if scoring_func == "softmax":
-        scores = gating_output.softmax(dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
-    else:
-        raise ValueError(f"Unsupported scoring function: {scoring_func}")
-
+    scores = gating_output.softmax(dim=-1)
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
@@ -1197,27 +1189,6 @@ def grouped_topk(
         )
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
-
-    num_experts = gating_output.shape[-1]
-    if num_experts <= num_expert_group or num_experts % num_expert_group != 0:
-        logger.warning(
-            (
-                "Grouped topk is not applied since num_experts (%d) <= "
-                "num_expert_group (%d) or num_experts %% num_expert_group != 0."
-                "Falling back to normal topk computation."
-            ),
-            num_experts,
-            num_expert_group,
-        )
-        # fallback to normal topk computation
-        return fused_topk_bias(
-            hidden_states,
-            gating_output,
-            e_score_correction_bias,
-            topk,
-            renormalize,
-            scoring_func=scoring_func,
-        )
 
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
