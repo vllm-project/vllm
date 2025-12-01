@@ -1273,7 +1273,7 @@ class Qwen3VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
-        
+
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
