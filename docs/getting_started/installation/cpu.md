@@ -53,6 +53,16 @@ For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
 
 ### Build wheel from source
 
+#### Set up using Python-only build (without compilation) {#python-only-build}
+
+Please refer to the instructions for [Python-only build on GPU](./gpu.md#python-only-build), and replace the build commands with:
+
+```bash
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu uv pip install --editable .
+```
+
+#### Full build (with compilation) {#full-build}
+
 === "Intel/AMD x86"
 
     --8<-- "docs/getting_started/installation/cpu.x86.inc.md:build-wheel-from-source"

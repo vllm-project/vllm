@@ -84,7 +84,7 @@ uv pip install vllm \
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-#### Set up using Python-only build (without compilation)
+#### Set up using Python-only build (without compilation) {#python-only-build}
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `uv pip`'s [`--editable` flag](https://docs.astral.sh/uv/pip/packages/#editable-packages), changes you make to the code will be reflected when you run vLLM:
 
@@ -108,10 +108,16 @@ This command will do the following:
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
 ```bash
-export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+export VLLM_PRECOMPILED_WHEEL_COMIMT=$(git rev-parse HEAD~1) # or earlier commit on main
+export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 ```
+
+There are more environment variables to control the behavior of Python-only build:
+
+* `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
+* `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+* `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cpu`. If not specified, the CUDA variant with `VLLM_MAIN_CUDA_VERSION` will be tried, then fallback to the default variant on the remote index.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
@@ -119,7 +125,7 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
     It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
-#### Full build (with compilation)
+#### Full build (with compilation) {#full-build}
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
