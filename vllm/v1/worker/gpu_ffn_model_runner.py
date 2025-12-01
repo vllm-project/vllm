@@ -49,7 +49,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         # Initialize torch.profile for performance monitoring
         self.profiler = torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(wait=200, warmup=1, active=30, repeat=1),
+            schedule=torch.profiler.schedule(wait=6000*27 + 4000 * 27 * 2, warmup=1, active=30, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs/ffn'),
             record_shapes=True,
             profile_memory=False,
