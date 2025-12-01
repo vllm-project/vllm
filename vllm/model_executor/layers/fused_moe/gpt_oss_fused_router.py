@@ -38,6 +38,7 @@ def _topk_softmax_kernel(
     BLOCK_N: tl.constexpr,
     RENORM: tl.constexpr,
     num_stages: tl.constexpr,
+    ROWS_PER_PID: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -105,47 +106,73 @@ def _topk_softmax_kernel(
             tl.store(indices_ptr + row_idx * stride_im + 1 * stride_wk, idx1)
 
     else:
-        topk_vals = tl.zeros([topk_padded], dtype=tl.float32) + float("-inf")
-        topk_idxs = tl.zeros([topk_padded], dtype=tl.int32)
+        topk_vals = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.float32) + float(
+            "-inf"
+        )
+        topk_idxs = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.int32)
 
-        for row_idx in tl.range(pid, M, num_programs, num_stages):
+        rows = tl.arange(0, ROWS_PER_PID)
+        for row_idx in tl.range(
+            pid * ROWS_PER_PID, M, num_programs * ROWS_PER_PID, num_stages
+        ):
+            row_indices = row_idx + rows  # [ROWS_PER_POD,]
+            row_mask = row_indices < M
+            # broadcast to [ROWS_PER_PID, BLOCKN]
             logits = tl.load(
-                logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
-                mask=mask_n,
+                logits_ptr
+                + row_indices[:, None] * stride_lm  # [ROWS_PER_PID, 1]
+                + offs_n[None, :] * stride_ln,  # [1, BLOCK_N]
+                mask=row_mask[:, None]  # [ROWS_PER_PID,1]
+                & mask_n[None, :],  # [1, BLOCKN]
                 other=float("-inf"),
             )
 
             if not RENORM:
-                row_sub_max = logits - tl.max(logits, axis=0)
+                row_sub_max = logits - tl.max(
+                    logits, axis=1, keep_dims=True
+                )  # [ROWS_PER_PID, BLOCK_N] - [ROWS_PER_PID,1]
                 numerator = tl.exp(row_sub_max)
-                denominator = tl.sum(numerator, axis=0)
+                denominator = tl.sum(
+                    numerator, axis=1, keep_dims=True
+                )  # [ROWS_PER_PID, BLOCKN]
                 logits = numerator / denominator
 
             for k in tl.static_range(topk):
-                cur_max = tl.max(logits, axis=0)
-                cur_idx = tl.argmax(logits, axis=0)
+                cur_max = tl.max(logits, axis=1, keep_dims=True)  # [ROWS_PER_PID, 1]
+                cur_idx = tl.argmax(logits, axis=1, keep_dims=True)
 
                 k_mask = offs_k == k
-                topk_vals = tl.where(k_mask, cur_max, topk_vals)
+                topk_vals = tl.where(
+                    k_mask, cur_max, topk_vals
+                )  # [ROWS_PER PID, 1], [ROWS_PER PID, topkpadded]
                 topk_idxs = tl.where(k_mask, cur_idx, topk_idxs)
 
-                logits = tl.where(offs_n == cur_idx, float("-inf"), logits)
+                mask_selected = cur_idx == offs_n[None, :]  # [ROWSPERPID,1] [1,BLOCKN]
+                logits = tl.where(mask_selected, float("-inf"), logits)
 
             if RENORM:
-                topk_vals = topk_vals - tl.max(topk_vals, axis=0)
+                topk_vals = topk_vals - tl.max(
+                    topk_vals, axis=1, keep_dims=True
+                )  # [ROWSPERPID, topkpadded] - [ROWSPERPID,1]
                 numerator = tl.exp(topk_vals)
-                denominator = tl.sum(numerator, axis=0)
-                topk_vals = numerator / denominator
+                denominator = tl.sum(
+                    numerator, axis=1, keep_dims=True
+                )  # [ROWSPERPID,1]
+                topk_vals = numerator / denominator  # [ROWSPERPID,topkpadded]
 
             tl.store(
-                weights_ptr + row_idx * stride_wm + offs_k * stride_wk,
+                weights_ptr
+                + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+                + offs_k[None, :] * stride_wk,  # [1, topkpadded]
                 topk_vals,
-                mask=store_mask,
+                mask=row_mask[:, None] & store_mask[None, :],  # [1, topkpadded]
             )
             tl.store(
-                indices_ptr + row_idx * stride_im + offs_k * stride_ik,
+                indices_ptr
+                + row_indices[:, None] * stride_im
+                + offs_k[None, :] * stride_ik,
                 topk_idxs,
-                mask=store_mask,
+                mask=row_mask[:, None] & store_mask[None, :],
             )
 
 
@@ -165,6 +192,7 @@ def fused_topk_softmax(
     topk_padded = triton.next_power_of_2(topk)
     grid = (M,)
     num_stages = 2
+    ROWS_PER_PID = 4
 
     _topk_softmax_kernel[grid](
         logits_ptr=router_logits,
@@ -183,6 +211,7 @@ def fused_topk_softmax(
         BLOCK_N=BLOCK_N,
         RENORM=renormalize,
         num_stages=num_stages,
+        ROWS_PER_PID=ROWS_PER_PID,
     )
 
     return weights, indices
