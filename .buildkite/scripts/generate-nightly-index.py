@@ -112,11 +112,12 @@ def generate_package_index_and_metadata(
         relative_path = (
             wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
         )
-        href_tags.append(
-            f'    <a href="{quote(relative_path.as_posix())}">{file.filename}</a><br/>'
-        )
+        # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
+        # NOTE: this is AWS S3 specific behavior!
+        file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
+        href_tags.append(f'    <a href="{file_path_quoted}">{file.filename}</a><br/>')
         file_meta = asdict(file)
-        file_meta["path"] = relative_path.as_posix()
+        file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
     index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags))
     metadata_str = json.dumps(metadata, indent=2)
@@ -185,7 +186,7 @@ def generate_index_and_metadata(
                 "platform_tag": "manylinux2014_aarch64",
                 "variant": "cu129",
                 "filename": "vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl",
-                "path": "../vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl" # to be concatenated with the directory URL
+                "path": "../vllm-0.10.2rc2%2Bcu129-cp38-abi3-manylinux2014_aarch64.whl" # to be concatenated with the directory URL and URL-encoded
             },
             ...
         ]
