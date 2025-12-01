@@ -15,6 +15,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.config.utils import CompileFactors
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -45,14 +46,15 @@ class CompilerInterface:
         """
         pass
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         """
         Gather compiler-specific factors that influence the generated code.
 
         See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
         for the base configuration factors. This method should return any
         additional data that uniquely identifies the compiler's contribution to
-        the cache key.
+        the cache key. Subclasses must return a dictionary; use an empty dict
+        when no compiler-specific data is needed.
         """
         return {}
 
@@ -193,7 +195,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]):
         self.save_format = save_format
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         return {"inductor_standalone": get_inductor_factors()}
 
     def initialize_cache(
@@ -278,7 +280,7 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         return {"inductor": get_inductor_factors()}
 
     def initialize_cache(

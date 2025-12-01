@@ -26,7 +26,7 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.utils import hash_factors
+from vllm.config.utils import CompileFactors, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -99,7 +99,7 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
 
-    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, object]:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
