@@ -184,8 +184,9 @@ def run_benchmark(
         # Build prompt
         prompt = build_qwen25_vl_prompt(num_frames, question)
 
-        # Get baseline memory
-        result.memory["baseline"] = get_gpu_memory_info()
+        # NOTE: Do NOT call get_gpu_memory_info() here - it initializes CUDA
+        # in the parent process, which causes "CUDA device busy" errors when
+        # vLLM spawns its subprocess. We'll capture memory after LLM init.
 
         # Initialize LLM
         print(f"\nInitializing LLM with {config_name}...")
@@ -218,7 +219,9 @@ def run_benchmark(
         init_time = time.perf_counter() - init_start
         print(f"  Initialization time: {init_time:.2f}s")
 
+        # Now safe to check GPU memory - LLM subprocess is already running
         result.memory["post_init"] = get_gpu_memory_info()
+        result.memory["baseline"] = result.memory["post_init"]  # Best we can do
 
         # Sampling parameters
         sampling_params = SamplingParams(
