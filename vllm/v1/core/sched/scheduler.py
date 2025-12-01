@@ -227,12 +227,17 @@ class Scheduler(SchedulerInterface):
 
             if (
                 request.num_output_placeholders > 0
+                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
+                # Since output placeholders are also included in the computed tokens
+                # count, we subtract (num_output_placeholders - 1) to remove any draft
+                # tokens, so that we can be sure no further steps are needed even if
+                # they are all rejected.
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
-                # partial spec tokens since this prevents uniform decode optimizations.
+                # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
 
