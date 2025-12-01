@@ -27,8 +27,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import bind_kv_cache
 
-
 logger = init_logger(__name__)
+
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}

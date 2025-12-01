@@ -5288,9 +5288,7 @@ class GPUModelRunner(
         # Validate that the kv_cache_config layers match layers on this rank.
         # This helps catch mismatches in pipeline parallelism setups.
         layer_type = cast(type[Any], AttentionLayerBase)
-        local_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config, layer_type
-        )
+        local_attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
         config_layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             config_layer_names.update(group.layer_names)
@@ -5303,8 +5301,10 @@ class GPUModelRunner(
             logger.debug(
                 "KV cache config has %d layers (sample: %s), "
                 "local rank has %d layers (sample: %s)",
-                len(config_layer_names), config_sample,
-                len(local_layer_names), local_sample
+                len(config_layer_names),
+                config_sample,
+                len(local_layer_names),
+                local_sample,
             )
 
             # Check for complete mismatch which indicates config was sent to

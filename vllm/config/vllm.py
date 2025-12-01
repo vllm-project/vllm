@@ -8,13 +8,13 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import is_dataclass, replace
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import torch
