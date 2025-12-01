@@ -32,11 +32,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
     MultiModalFeatureSpec = object
+    _ProcessorFactories = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -85,6 +87,11 @@ class SupportsMultiModal(Protocol):
     multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
     """
     A set indicating CPU-only multimodal fields.
+    """
+
+    _processor_factory: ClassVar[_ProcessorFactories]
+    """
+    Set internally by `MultiModalRegistry.register_processor`.
     """
 
     @classmethod
@@ -336,10 +343,10 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+    is_3d_moe_weight: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: dict[str, list[str]] = {}
 
 
@@ -351,7 +358,6 @@ class _SupportsLoRAType(Protocol):
 
     packed_modules_mapping: dict[str, list[str]]
     embedding_modules: dict[str, str]
-    embedding_padding_modules: list[str]
 
 
 @overload
@@ -371,7 +377,6 @@ def supports_lora(
         lora_attrs = (
             "packed_modules_mapping",
             "embedding_modules",
-            "embedding_padding_modules",
         )
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
@@ -586,13 +591,11 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -834,6 +837,10 @@ class SupportsTranscription(Protocol):
     Transcription models can opt out of text generation by setting this to
     `True`.
     """
+    supports_segment_timestamp: ClassVar[bool] = False
+    """
+    Enables the segment timestamp option for supported models by setting this to `True`.
+    """
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -1049,7 +1056,7 @@ class SupportsMRoPE(Protocol):
     supports_mrope: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports M-RoPE.
-    
+
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
@@ -1090,3 +1097,52 @@ def supports_mrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMRoPE]] | TypeIs[SupportsMRoPE]:
     return isinstance(model, SupportsMRoPE)
+
+
+@runtime_checkable
+class SupportsXDRoPE(Protocol):
+    """The interface required for all models that support XD-RoPE."""
+
+    supports_xdrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports XD-RoPE.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        XDRope of your model class.
+    """
+
+    def get_xdrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> torch.Tensor:
+        """
+        Get XD-RoPE input positions and delta value for this specific model.
+
+        This method should be implemented by each model that supports XD-RoPE
+        to provide model-specific logic for computing input positions.
+
+        Args:
+            input_tokens: List of input token IDs
+            mm_features: Information about each multi-modal data item
+
+        Returns:
+            llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
+            4D(P/W/H/T) or 3D(W/H/T) positions.
+        """
+        ...
+
+
+@overload
+def supports_xdrope(model: type[object]) -> TypeIs[type[SupportsXDRoPE]]: ...
+
+
+@overload
+def supports_xdrope(model: object) -> TypeIs[SupportsXDRoPE]: ...
+
+
+def supports_xdrope(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
+    return isinstance(model, SupportsXDRoPE)

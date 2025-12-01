@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolParser,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import MistralTokenizer
+from vllm.tokenizers import MistralTokenizer
 
 from ...utils import check_logprobs_close
 
@@ -208,7 +208,7 @@ def test_mistral_format(
     with vllm_runner(
         model,
         dtype=dtype,
-        tokenizer_mode="auto",
+        tokenizer_mode="hf",
         load_format="safetensors",
         config_format="hf",
     ) as hf_format_model:

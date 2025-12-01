@@ -13,7 +13,7 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library
+from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 
@@ -78,7 +78,6 @@ def guard_cuda_initialization():
         yield
         return
 
-    had_key = "CUDA_VISIBLE_DEVICES" in os.environ
     old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     try:
@@ -90,10 +89,10 @@ def guard_cuda_initialization():
             err_msg = str(e)
         raise RuntimeError(err_msg) from e
     finally:
-        if had_key:
-            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        if old_value is None:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
         else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES")
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -525,8 +524,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
 
 # Helper function used in testing.
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    torch_version = version.parse(torch_version)
-    return torch_version >= version.parse(target)
+    return version.parse(torch_version) >= version.parse(target)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
@@ -640,15 +638,8 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    import torch.library
+    schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

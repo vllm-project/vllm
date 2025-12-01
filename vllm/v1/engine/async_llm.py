@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -25,20 +26,20 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.processor import Processor
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -113,16 +114,17 @@ class AsyncLLM(EngineClient):
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
+            self.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -152,6 +154,10 @@ class AsyncLLM(EngineClient):
             )
             self.logger_manager.log_engine_initialized()
 
+        # Pause / resume state for async RL workflows.
+        self._pause_cond = asyncio.Condition()
+        self._paused = False
+
         self.output_handler: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -160,11 +166,23 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        if (
+            envs.VLLM_TORCH_PROFILER_DIR
+            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+        ):
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
                 envs.VLLM_TORCH_PROFILER_DIR,
             )
+            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
+                logger.warning_once(
+                    "Torch profiler received max_iters or delay_iters setting. These "
+                    "are not compatible with the AsyncLLM profiler and will be ignored "
+                    "for the AsyncLLM process. Engine process profiling will still "
+                    "respect these settings. Consider setting "
+                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
+                    "AsyncLLM profiling."
+                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
@@ -172,19 +190,23 @@ class AsyncLLM(EngineClient):
                 ],
                 with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
                 ),
             )
         else:
             self.profiler = None
 
-    @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=(
-            "This argument will have no effect. Use `enable_log_requests` instead."
-        ),
+    @property
+    @deprecated(
+        "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
+        "The old name will be removed in v0.13."
     )
+    def processor(self):
+        return self.input_processor
+
+    @classmethod
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
@@ -197,7 +219,6 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -285,11 +306,7 @@ class AsyncLLM(EngineClient):
             request = prompt
         else:
             assert prompt_text is None
-            logger.warning_once(
-                "Processor has been moved under OpenAIServing and will "
-                "be removed from AsyncLLM in v0.13."
-            )
-            request = self.processor.process_inputs(
+            request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -305,14 +322,15 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
+
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request_id, parent_params)
@@ -392,6 +410,10 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
+            # Wait until generation is resumed if the engine is paused.
+            async with self._pause_cond:
+                await self._pause_cond.wait_for(lambda: not self._paused)
+
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
                 truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
@@ -468,7 +490,7 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
-        processor = self.processor
+        input_processor = self.input_processor
 
         async def output_handler():
             try:
@@ -519,7 +541,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=processor.stat_mm_cache(),
+                            mm_cache_stats=input_processor.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -538,6 +560,58 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
+
+    async def pause_generation(
+        self,
+        *,
+        wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
+    ) -> None:
+        """
+        Pause generation to allow model weight updates.
+
+        New generation/encoding requests are blocked until resume.
+
+        Args:
+            wait_for_inflight_requests: When ``True`` waits for in-flight
+                requests to finish before pausing. When ``False`` (default),
+                immediately aborts any in-flight requests.
+            clear_cache: Whether to clear KV cache and prefix cache after
+                draining. Set to ``False`` to preserve cache for faster resume.
+                Default is ``True`` (clear caches).
+        """
+
+        async with self._pause_cond:
+            if self._paused:
+                return
+            self._paused = True
+
+        if not wait_for_inflight_requests:
+            request_ids = list(self.output_processor.request_states.keys())
+            if request_ids:
+                await self.abort(request_ids)
+
+        # Wait for running requests to drain before clearing cache.
+        if self.output_processor.has_unfinished_requests():
+            await self.output_processor.wait_for_requests_to_drain()
+
+        # Clear cache
+        if clear_cache:
+            await self.reset_prefix_cache()
+            await self.reset_mm_cache()
+
+    async def resume_generation(self) -> None:
+        """Resume generation after :meth:`pause_generation`."""
+
+        async with self._pause_cond:
+            self._paused = False
+            self._pause_cond.notify_all()  # Wake up all waiting requests
+
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
+
+        async with self._pause_cond:
+            return self._paused
 
     async def encode(
         self,
@@ -569,6 +643,10 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            # Respect pause state before accepting new requests.
+            async with self._pause_cond:
+                await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
@@ -629,17 +707,17 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
 
     @property
-    def tokenizer(self) -> AnyTokenizer | None:
-        return self.processor.tokenizer
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.input_processor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
-        self.processor.tokenizer = tokenizer
+    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
+        self.input_processor.tokenizer = tokenizer
 
-    async def get_tokenizer(self) -> AnyTokenizer:
+    async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
         return self.tokenizer
@@ -669,7 +747,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self) -> None:

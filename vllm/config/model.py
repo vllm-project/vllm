@@ -14,6 +14,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
@@ -32,14 +33,19 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
-    uses_custom_attention_masks,
     uses_mrope,
+    uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
+from vllm.transformers_utils.utils import (
+    is_gguf,
+    is_remote_gguf,
+    maybe_model_redirect,
+    split_remote_gguf,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -48,7 +54,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -56,7 +61,6 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -82,7 +86,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -102,6 +106,10 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "pooling": ["embed", "classify", "reward"],
     "draft": [],
 }
+
+AttnTypeStr = Literal[
+    "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
+]
 
 
 @config
@@ -129,12 +137,13 @@ class ModelConfig:
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
-    tokenizer_mode: TokenizerMode = "auto"
+    tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:\n
-    - "auto" will use the fast tokenizer if available.\n
+    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
-    - "custom" will use --tokenizer to select the preregistered tokenizer."""
+    - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -147,9 +156,12 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
-    seed: int | None = None
-    """Random seed for reproducibility. Initialized to None in V0, but
-    initialized to 0 in V1."""
+    seed: int = 0
+    """Random seed for reproducibility.
+
+    We must set the global seed because otherwise,
+    different tensor parallel workers would sample different tokens,
+    leading to inconsistent results."""
     hf_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
@@ -239,8 +251,8 @@ class ModelConfig:
     first one."""
     config_format: str | ConfigFormat = "auto"
     """The format of the model config to load:\n
-    - "auto" will try to load the config in hf format if available else it
-    will try to load in mistral format.\n
+    - "auto" will try to load the config in hf format if available after trying
+    to load in mistral format.\n
     - "hf" will load the config in hf format.\n
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
@@ -290,9 +302,6 @@ class ModelConfig:
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
-    override_pooler_config: dict | PoolerConfig | None = None
-    """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
-    v0.12.0 or v1.0.0, whichever is sooner."""
 
     # Multimodal config and init vars
     multimodal_config: MultiModalConfig | None = None
@@ -339,18 +348,15 @@ class ModelConfig:
             "logprobs_mode",
             "disable_cascade_attn",
             "skip_tokenizer_init",
-            "enable_prompt_embeds",
             "served_model_name",
             "config_format",
             "hf_token",
             "hf_overrides",
             "logits_processor_pattern",
-            "enable_sleep_mode",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
-            "override_pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
             "media_io_kwargs",
@@ -416,7 +422,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
-        limit_mm_per_prompt: dict[str, int] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -429,23 +435,6 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V1, we use separate processes for workers (unless
-        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
-        # doesn't affect the user process. However, without a consistent seed,
-        # different tensor parallel workers would sample different tokens,
-        # leading to inconsistent results.
-        if self.seed is None:
-            self.seed = 0
-            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
-                logger.warning(
-                    "The global random seed is set to %d. Since "
-                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
-                    "affect the random state of the Python process that "
-                    "launched vLLM.",
-                    self.seed,
-                )
-
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
@@ -453,12 +442,6 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
-            if check_gguf_file(self.model):
-                raise ValueError(
-                    "Using a tokenizer is mandatory when loading a GGUF model. "
-                    "Please specify the tokenizer path or name using the "
-                    "--tokenizer argument."
-                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -599,16 +582,26 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
-                debug_info = {
-                    "architectures": architectures,
-                    "is_generative_model": is_generative_model,
-                    "is_pooling_model": is_pooling_model,
-                }
-                raise AssertionError(
-                    "The model should be a generative or "
-                    "pooling model when task is set to "
-                    f"{self.task!r}. Found: {debug_info}"
-                )
+                # Neither generative nor pooling model - try to convert if possible
+                if is_pooling_task:
+                    runner = "pooling"
+                    convert = _task_to_convert(self.task)
+                    msg_hint = (
+                        "Please replace this option with `--runner pooling "
+                        f"--convert {convert}` to continue using this model "
+                        "as a pooling model."
+                    )
+                else:
+                    debug_info = {
+                        "architectures": architectures,
+                        "is_generative_model": is_generative_model,
+                        "is_pooling_model": is_pooling_model,
+                    }
+                    raise AssertionError(
+                        "The model should be a generative or "
+                        "pooling model when task is set to "
+                        f"{self.task!r}. Found: {debug_info}"
+                    )
 
             self.runner = runner
             self.convert = convert
@@ -645,18 +638,6 @@ class ModelConfig:
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
-            if self.override_pooler_config is not None:
-                logger.warning_once(
-                    "`override_pooler_config` is deprecated and will be "
-                    "removed in v0.12.0 or v1.0.0, whichever is sooner. "
-                    "Please use `pooler_config` instead."
-                )
-
-                if isinstance(self.override_pooler_config, dict):
-                    self.pooler_config = PoolerConfig(**self.override_pooler_config)
-                else:
-                    self.pooler_config = self.override_pooler_config
-
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
 
@@ -714,13 +695,18 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
 
+        # Multimodal GGUF models must use original repo for mm processing
+        if is_gguf(self.tokenizer) and self.is_multimodal_model:
+            raise ValueError(
+                "Loading a multimodal GGUF model needs to use original "
+                "tokenizer. Please specify the unquantized hf model's "
+                "repo name or path using the --tokenizer argument."
+            )
+
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
-
-        if not self.skip_tokenizer_init:
-            self._verify_tokenizer_mode()
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
@@ -728,6 +714,10 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @field_validator("tokenizer_mode", mode="after")
+    def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
+        return tokenizer_mode.lower()
 
     @field_validator("quantization", mode="before")
     @classmethod
@@ -835,16 +825,10 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
-        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
-
-    def _verify_tokenizer_mode(self) -> None:
-        tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
-        if tokenizer_mode not in get_args(TokenizerMode):
-            raise ValueError(
-                f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                f"one of {get_args(TokenizerMode)}."
-            )
-        self.tokenizer_mode = tokenizer_mode
+        model = self.model
+        if is_remote_gguf(model):
+            model, _ = split_remote_gguf(model)
+        return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _get_default_runner_type(
         self,
@@ -1152,12 +1136,6 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
-        if parallel_config.distributed_executor_backend == "external_launcher":
-            assert self.seed is not None, (
-                "Seed must be set when using external launcher backend to "
-                "make sure sampling results are the same across workers."
-            )
-
         total_num_attention_heads = getattr(
             self.hf_text_config, "num_attention_heads", 0
         )
@@ -1215,6 +1193,16 @@ class ModelConfig:
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
+
+    def get_inputs_embeds_size(self) -> int:
+        # The size of inputs_embeds is usually identical to the size
+        # of the hidden states, however there are exceptions, such as
+        # embedding models like CLIP and SigLIP
+        for target_attr in ("projection_dim", "projection_size"):
+            if hasattr(self.hf_text_config, target_attr):
+                return getattr(self.hf_text_config, target_attr)
+
+        return self.get_hidden_size()
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1626,8 +1614,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_custom_attention_masks(self) -> bool:
-        return uses_custom_attention_masks(self.hf_config)
+    def uses_xdrope_dim(self) -> int:
+        return uses_xdrope_dim(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1731,18 +1719,11 @@ class ModelConfig:
         return head_dtype
 
     @property
-    def hidden_size(self):
-        if hasattr(self.hf_config, "hidden_size"):
-            return self.hf_config.hidden_size
-        text_config = self.hf_config.get_text_config()
-        return text_config.hidden_size
-
-    @property
     def embedding_size(self):
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
-        return self.hidden_size
+        return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
@@ -1768,6 +1749,119 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    @property
+    def attn_type(self) -> AttnTypeStr:
+        if self.pooler_config is not None:
+            pooling_type = self._model_info.default_pooling_type.lower()
+            if pooling_type == "cls":
+                return "encoder_only"
+            else:
+                is_causal = getattr(self.hf_config, "is_causal", True)
+                return "encoder_only" if not is_causal else self._model_info.attn_type
+        elif self.is_hybrid:
+            return "hybrid"
+        elif self.is_attention_free:
+            return "attention_free"
+        elif self.is_encoder_decoder:
+            return "encoder_decoder"
+        else:
+            return "decoder"
+
+    @property
+    def is_chunked_prefill_supported(self) -> bool:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
+            # for pooling models
+            if attn_type == "encoder_only":
+                logger.debug(
+                    "Pooling models with bidirectional attn does not support "
+                    "chunked prefill."
+                )
+                return False
+            elif attn_type == "decoder":
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type in ["all", "mean", "step", "cls"]:
+                    logger.debug(
+                        "Pooling models with %s pooling does not "
+                        "support chunked prefill.",
+                        pooling_type,
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "chunked prefill."
+                    )
+                    return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free or encoder_decoder attn types.
+            return attn_type != "encoder_decoder"
+        else:
+            if attn_type == "encoder_decoder":
+                logger.debug("Encoder decoder models does not support chunked prefill.")
+                return False
+            logger.debug("Generative models support chunked prefill.")
+            return True
+
+    @property
+    def is_prefix_caching_supported(self) -> bool:
+        attn_type = self.attn_type
+        if self.pooler_config is not None:
+            # for pooling models
+            if attn_type == "encoder_only":
+                logger.debug(
+                    "Pooling models with bidirectional attn does not "
+                    "support prefix caching."
+                )
+                return False
+            elif attn_type == "decoder":
+                pooling_type = self.pooler_config.pooling_type.lower()
+                if pooling_type in ["all", "mean", "step", "cls"]:
+                    logger.debug(
+                        "Pooling models with %s pooling does not "
+                        "support prefix caching.",
+                        pooling_type,
+                    )
+                    return False
+                else:
+                    # pooling_type == "last"
+                    logger.debug(
+                        "Pooling models with causal attn and last pooling support "
+                        "prefix caching."
+                    )
+                    return True
+            # vllm currently does not have pooling models using hybrid,
+            # attention_free or encoder_decoder attn types.
+            return False
+        else:
+            if attn_type == "hybrid":
+                logger.debug(
+                    "Hybrid models does not support prefix caching since the feature "
+                    "is still experimental."
+                )
+                return False
+            elif attn_type == "attention_free":
+                logger.debug(
+                    "Attention free models does not support prefix caching since the "
+                    "feature is still experimental."
+                )
+                return False
+            elif attn_type == "encoder_decoder":
+                logger.debug("Encoder decoder models does not support prefix caching.")
+                return False
+            else:  # attn_type == "decoder"
+                logger.debug("Generative models support prefix caching.")
+                return True
+
+    def is_model_moe(
+        self,
+    ) -> bool:
+        return self.get_num_experts() > 1
+
+    def is_quantized(self) -> bool:
+        return getattr(self.hf_config, "quantization_config", None) is not None
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
