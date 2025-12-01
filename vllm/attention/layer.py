@@ -247,6 +247,24 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             self.attn_backend = attn_backend
 
+        # prefix caching + batch invariance is currently not supported for
+        # FLASHINFER and TRITON_MLA.
+        if (
+            cache_config is not None
+            and cache_config.enable_prefix_caching
+            and vllm_is_batch_invariant()
+            and (
+                self.attn_backend.get_name() == "FLASHINFER"
+                or self.attn_backend.get_name() == "TRITON_MLA"
+            )
+        ):
+            logger.warning_once(
+                "Disabling prefix caching for FLASHINFER/TRITON_MLA "
+                "with batch invariance, as it is not yet supported.",
+                scope="local",
+            )
+            cache_config.enable_prefix_caching = False
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(
             num_heads,
@@ -635,8 +653,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         ):
             logger.warning_once(
-                "Disabling prefix caching for TRITON_MLA with batch invariance, "
-                "as it is not yet supported.",
+                "Disabling prefix caching for TRITON_MLA / FLASHINFER "
+                "with batch invariance, as it is not yet supported.",
                 scope="local",
             )
             cache_config.enable_prefix_caching = False
