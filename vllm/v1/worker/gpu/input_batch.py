@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-import numba
-import numba.types as types
 import numpy as np
 import torch
 
@@ -19,7 +17,7 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        hidden_size: int,
+        inputs_embeds_size: int,
         vocab_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -31,7 +29,7 @@ class InputBuffers:
         self.pin_memory = pin_memory
 
         self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
-        self.input_ids = self._make_buffer(max_num_tokens, dtype=torch.int32)
+        self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
@@ -118,7 +116,7 @@ class InputBatch:
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
-        input_ids = input_buffers.input_ids.copy_to_gpu(num_tokens)
+        input_ids = input_buffers.input_ids[:num_tokens]
         positions = input_buffers.positions[:num_tokens]
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
@@ -144,80 +142,64 @@ class InputBatch:
         )
 
 
-# NOTE: With the type annotations, this function is pre-compiled
-# before the first call.
-@numba.jit(
-    [
-        types.none(
-            types.int32[:],  # idx_mapping
-            types.int32[:],  # num_scheduled_tokens
-            types.int32[:, :],  # prefill_token_ids
-            types.int32[:],  # num_computed_prefill_tokens
-            types.int32[:],  # prefill_len
-            types.int32[:],  # input_ids
-            types.int32[:],  # query_start_loc
-        )
-    ],
-    nopython=True,
-    cache=True,
-)
-def _prepare_prefill_inputs(
-    idx_mapping: np.ndarray,  # batch_idx -> req_idx
-    num_scheduled_tokens: np.ndarray,  # [B]
-    prefill_token_ids: np.ndarray,  # [N, max_model_len]
-    num_computed_prefill_tokens: np.ndarray,  # [N]
-    prefill_len: np.ndarray,  # [N]
-    input_ids: np.ndarray,  # [num_input_tokens]
-    query_start_loc: np.ndarray,  # [B + 1]
-) -> None:
-    num_reqs = num_scheduled_tokens.shape[0]
-    query_start_loc[0] = 0
+@triton.jit
+def _prepare_prefill_inputs_kernel(
+    input_ids_ptr,
+    next_prefill_tokens_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    prefill_token_ids_ptr,
+    prefill_token_ids_stride,
+    prefill_lens_ptr,
+    num_computed_tokens_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    if num_computed >= prefill_len:
+        # Not prefill.
+        return
 
-    cu_num_tokens = 0
-    for i in range(num_reqs):
-        req_idx = idx_mapping[i]
-        query_len = num_scheduled_tokens[i]
+    query_start = tl.load(query_start_loc_ptr + batch_idx)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    query_len = query_end - query_start
 
-        start = num_computed_prefill_tokens[req_idx]
-        end = min(start + query_len, prefill_len[req_idx])
-        n = end - start
+    prefill_ptr = prefill_token_ids_ptr + req_state_idx * prefill_token_ids_stride
+    for i in range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        tokens = tl.load(prefill_ptr + num_computed + block, mask=mask)
+        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
 
-        start_idx = cu_num_tokens
-        input_ids[start_idx : start_idx + n] = prefill_token_ids[req_idx, start:end]
-
-        cu_num_tokens = start_idx + query_len
-        query_start_loc[i + 1] = cu_num_tokens
-
-    # Pad the inputs for CUDA graphs.
-    # Note: pad query_start_loc to be non-decreasing, as kernels
-    # like FlashAttention requires that
-    query_start_loc[num_reqs + 1 :].fill(cu_num_tokens)
+    next_pos = num_computed + query_len
+    if next_pos < prefill_len:
+        next_token = tl.load(prefill_ptr + next_pos)
+        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
 def prepare_prefill_inputs(
-    idx_mapping: np.ndarray,
-    num_scheduled_tokens: np.ndarray,
-    total_num_tokens: int,
-    prefill_token_ids: np.ndarray,
-    num_computed_prefill_tokens: np.ndarray,
-    prefill_len: np.ndarray,
-    input_ids: CpuGpuBuffer,
-    query_start_loc: CpuGpuBuffer,
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
 ) -> None:
-    _prepare_prefill_inputs(
+    num_reqs = idx_mapping.shape[0]
+    _prepare_prefill_inputs_kernel[(num_reqs,)](
+        input_ids,
+        next_prefill_tokens,
         idx_mapping,
-        num_scheduled_tokens,
+        query_start_loc,
         prefill_token_ids,
-        num_computed_prefill_tokens,
+        prefill_token_ids.stride(0),
         prefill_len,
-        input_ids.np,
-        query_start_loc.np,
+        num_computed_tokens,
+        BLOCK_SIZE=1024,
     )
-    input_ids.copy_to_gpu(total_num_tokens)
-    # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
-    # tensors from CPU to GPU, because they may include paddings needed
-    # for full CUDA graph mode.
-    query_start_loc.copy_to_gpu()
 
 
 @triton.jit
@@ -377,11 +359,13 @@ def _post_update_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     last_sampled_tokens_ptr,
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
     sampled_tokens_ptr,
     sampled_tokens_stride,
     num_sampled_ptr,
+    num_rejected_ptr,
     query_start_loc_ptr,
-    cu_num_logits_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
@@ -393,20 +377,22 @@ def _post_update_kernel(
         )
         tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
 
+    for i in range(num_sampled):
+        token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
+        token_ptr = (
+            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
+        )
+        count = tl.load(token_ptr)
+        count += 1
+        tl.store(token_ptr, count)
+
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
     query_len = query_end - query_start
+    num_rejected = tl.load(num_rejected_ptr + req_id)
 
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len
-    # Consider the rejected tokens in spec decoding.
-    if num_sampled > 0:
-        # NOTE(woosuk): We must skip num_sampled == 0 to account for chunked prefills.
-        logits_start = tl.load(cu_num_logits_ptr + req_id)
-        logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
-        num_logits = logits_end - logits_start
-        num_rejected = num_logits - num_sampled
-        num_computed -= num_rejected
+    num_computed += query_len - num_rejected
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
@@ -417,24 +403,28 @@ def post_update(
     num_computed_tokens: torch.Tensor,
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
+    # [max_num_reqs, vocab_size]
+    output_bin_counts: torch.Tensor,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
+    num_rejected: torch.Tensor,
     # [num_reqs + 1]
     query_start_loc: torch.Tensor,
-    # [num_reqs + 1]
-    cu_num_logits: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
         last_sampled_tokens,
+        output_bin_counts,
+        output_bin_counts.stride(0),
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,
+        num_rejected,
         query_start_loc,
-        cu_num_logits,
         num_warps=1,
     )

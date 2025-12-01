@@ -29,6 +29,109 @@ A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all 
 
 By default, the cache saves compiled artifacts as binary files. If you would like to interact with the generated code for debugging purposes, set the field `compile_cache_save_format=unpacked` in the compilation config, or omit this and set the env variable `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`.
 
+## Dynamic shapes and vllm guard dropping
+
+`torch.compile` is designed to guard on dynamic shapes with no hesitation
+when needed. This contradicts with vLLM's `torch.compile` approach of
+dropping the guards since many of those guards could be material.
+
+`torch.compile` provides two kinds of dynamic shapes: `backed` and `unbacked`.
+`torch.compile` guards on `backed` dynamic shapes and does not provide a
+guarantee that no guards will be added to them. User code, dynamo,
+inductor, and autograd all can add guards. Moreover, for 0/1
+specializations, backed symbols are specialized unconditionally to 0, 1,
+or >=2 even without encountering a branching on those ranges.
+
+On the contrary, `unbacked` dynamic shapes are guaranteed not to be guarded
+on and are not 0/1 specialized. However, there is a possibility of
+throwing a data dependent error when a branch that requires their value is
+encountered and no explicit unbacked handling is defined. The framework is
+converging to a state where it won't throw DDE but rather pick general
+paths. One downside of using unbacked is missed optimization opportunities
+due to either perf bugs or picking general paths, also using a fixed
+non-example input-based hint (this will be fixed soon with override_hint
+API). An example of picking general paths is assuming input not contiguous
+in functions call contiguous() and reshape() when can't be symbolically proven
+with a change of introducing a clone.
+
+`backed_size_oblivious` is a flag that enables treating backed symbols as
+unbacked wherever explicit handling for unbacked is defined. With this
+mode, 0/1 specializations are mostly avoided in framework code and the
+default 0/1 specialization does not happen. However, there is still no
+guarantee that torch.compile won't guard, especially due to user code or
+custom passes. `backed_size_oblivious` is experimental in PyTorch compile
+and could be deprecated. That said, it's a safer option to use than
+`backed` and the probability of reducing performance is lower than
+`unbacked`.
+
+### Configuring Dynamic Shapes
+
+The `DynamicShapesConfig` allows you to control the dynamic shapes behavior by
+setting the `type` field. You can choose between three modes:
+`BACKED`(default), `UNBACKED` , and `BACKED_SIZE_OBLIVIOUS`.
+
+#### Offline Inference Example (Using LLM class)
+
+When using the `LLM` class for offline inference, you can configure dynamic
+shapes through the `compilation_config` parameter:
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.config.compilation import CompilationConfig, DynamicShapesConfig, DynamicShapesType
+
+# Example: Using backed_size_oblivious (experimental, safer than backed)
+llm = LLM(
+    model="meta-llama/Llama-3.2-1B",
+    compilation_config=CompilationConfig(
+        dynamic_shapes_config=DynamicShapesConfig(
+            type=DynamicShapesType.BACKED_SIZE_OBLIVIOUS
+        )
+    )
+)
+
+# Example: Using unbacked (strongest guarantee against guards)
+llm = LLM(
+    model="meta-llama/Llama-3.2-1B",
+    compilation_config=CompilationConfig(
+        dynamic_shapes_config=DynamicShapesConfig(
+            type=DynamicShapesType.UNBACKED
+        )
+    )
+)
+
+# Generate outputs
+prompts = ["Hello, my name is", "The future of AI is"]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+outputs = llm.generate(prompts, sampling_params)
+```
+
+#### Online Serving Example (Using vllm serve)
+
+When using `vllm serve` for online serving, you can configure dynamic shapes
+through the `--compilation-config` flag:
+
+```bash
+# Example: Using unbacked
+vllm serve meta-llama/Llama-3.2-1B \
+  --compilation-config '{"dynamic_shapes_config": {"type": "unbacked"}}'
+
+
+# Alternative: Using dot notation (simpler for single values)
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
+```
+
+#### Choosing the Right Mode
+
+- **BACKED** (default): Use when you're willing to accept potential unsafe dropping of guards
+for maximal performance. Guard could be unsoundly added and then ignored.
+
+- **UNBACKED**  Use when you need the strongest guarantee against guards.
+  This is the most conservative option but may miss some optimization opportunities.
+
+- **BACKED_SIZE_OBLIVIOUS**: Use when you want a balance between avoiding guards
+  and performance. This experimental mode is safer than BACKED but still not as
+  conservative as UNBACKED.
+
 ## Python Code Compilation
 
 In the very verbose logs, we can see:
@@ -122,7 +225,7 @@ When all the shapes are known, `torch.compile` can compare different configs, an
       triton_mm_4 0.0130 ms 100.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=128, BLOCK_M=16, BLOCK_N=32, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=5, num_warps=2
       triton_mm_8 0.0134 ms 97.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=128, BLOCK_M=16, BLOCK_N=64, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=5, num_warps=4
       triton_mm_12 0.0148 ms 87.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=128, BLOCK_M=16, BLOCK_N=128, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=4, num_warps=4
-      mm 0.0160 ms 81.6% 
+      mm 0.0160 ms 81.6%
       triton_mm_16 0.0165 ms 78.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=16, BLOCK_N=128, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=5, num_warps=8
       triton_mm_3 0.0199 ms 65.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=16, BLOCK_N=32, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=5, num_warps=2
       triton_mm_1 0.0203 ms 64.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=128, BLOCK_M=16, BLOCK_N=32, B_PROLOGUE_CAST_TYPE=None, EVEN_K=True, GROUP_M=8, num_stages=2, num_warps=2
