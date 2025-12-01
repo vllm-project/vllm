@@ -6,12 +6,13 @@ from collections.abc import Callable
 from enum import Enum
 
 import torch
-from torch.nn.parameter import Parameter
+from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
     ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
 )
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -149,7 +150,20 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
-            # Prefer to use the MarlinMoE kernel when it is supported.
+
+            valid_format_and_bits = (
+                weight_quant.num_bits in WNA16_SUPPORTED_BITS
+                and scheme_dict.get("format") == CompressionFormat.pack_quantized.value
+            )
+
+            if not valid_format_and_bits:
+                raise ValueError(
+                    "For Fused MoE layers, only ",
+                    f"{CompressionFormat.pack_quantized.value} ",
+                    "is supported for the following bits: ",
+                    f"{WNA16_SUPPORTED_BITS}",
+                )
+
             if (
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
@@ -1436,14 +1450,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         assert weight_quant.symmetric, (
             "Only symmetric quantization is supported for MoE"
         )
-
-        # Note: quant_format check removed since we don't have access to full config
-        # The format validation should happen earlier in get_moe_method dispatch
-        if self.num_bits not in WNA16_SUPPORTED_BITS:
-            raise ValueError(
-                "For Fused MoE layers, only the following bits are supported: "
-                f"{WNA16_SUPPORTED_BITS}, got {self.num_bits}"
-            )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.use_marlin = True
 
@@ -1834,13 +1840,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         assert weight_quant.symmetric, (
             "Only symmetric quantization is supported for MoE"
         )
-
-        # Note: quant_format check removed since we don't have access to full config
-        if self.num_bits not in WNA16_SUPPORTED_BITS:
-            raise ValueError(
-                "For Fused MoE layers, only the following bits are supported: "
-                f"{WNA16_SUPPORTED_BITS}, got {self.num_bits}"
-            )
 
     def create_weights(
         self,
