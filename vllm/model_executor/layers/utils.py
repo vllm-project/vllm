@@ -129,8 +129,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx9
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx9, on_gfx950
 
     n = x.numel() / x.size(-1)
     m = weight.shape[0]
@@ -140,16 +139,16 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
-        and (n==32 and k == 2880 and (m == 640 or m == 128)) # or (n==32 and k == 512 and m == 2880))
+        and (n == 32 and k == 2880 and (m == 640 or m == 128))
     )
     if use_skinny_race is True:
         cu_count = get_cu_count()
         x_view = x.reshape(-1, x.size(-1))
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
-
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
         return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
