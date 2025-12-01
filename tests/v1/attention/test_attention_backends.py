@@ -626,10 +626,29 @@ def test_sliding_window_backend_correctness(
         sliding_window_mask_mod, sliding_window=sliding_window
     )
 
+    LARGE_BLOCK_BACKENDS = (
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
+    )
+    SMALL_BLOCK_BACKENDS = [
+        x for x in SLIDING_WINDOW_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
     _test_backend_correctness(
         batch_spec,
         model,
-        SLIDING_WINDOW_BACKENDS_TO_TEST,
+        SMALL_BLOCK_BACKENDS,
         sliding_window_mask_mod_fn,
         tensor_parallel_size=tensor_parallel_size,
     )
+
+    # Fast FlexAttention needs to run with block_size=128
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            sliding_window_mask_mod_fn,
+            block_size=128,
+            tensor_parallel_size=tensor_parallel_size,
+        )
