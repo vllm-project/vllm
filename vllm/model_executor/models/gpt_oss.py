@@ -177,9 +177,7 @@ class MLPBlock(torch.nn.Module):
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
             custom_routing_function=(
-                gpt_oss_custom_routing_function
-                if not current_platform.is_rocm()
-                else None
+                gpt_oss_custom_routing_function if current_platform.is_cuda() else None
             ),
         )
 

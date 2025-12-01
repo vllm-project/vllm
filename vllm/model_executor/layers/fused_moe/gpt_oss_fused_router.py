@@ -22,11 +22,11 @@ def torch_dtype_to_tl(dtype: torch.dtype):
 
 @triton.jit
 def _topk_softmax_kernel(
-    logits_ptr: torch.Tensor,
-    weights_ptr: torch.Tensor,
-    indices_ptr: torch.Tensor,
+    logits_ptr,
+    weights_ptr,
+    indices_ptr,
     M,
-    N,
+    N: tl.constexpr,
     topk: tl.constexpr,
     topk_padded: tl.constexpr,
     stride_lm,
@@ -36,6 +36,7 @@ def _topk_softmax_kernel(
     stride_im,
     stride_ik,
     BLOCK_N: tl.constexpr,
+    RENORM: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -44,6 +45,7 @@ def _topk_softmax_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, topk_padded)
     mask_n = offs_n < N
+    store_mask = offs_k < topk
 
     topk_vals = tl.zeros([topk_padded], dtype=tl.float32) + float("-inf")
     topk_idxs = tl.zeros([topk_padded], dtype=tl.int32)
@@ -54,10 +56,12 @@ def _topk_softmax_kernel(
             mask=mask_n,
             other=float("-inf"),
         )
-        row_sub_max = logits - tl.max(logits, axis=0)
-        numerator = tl.exp(row_sub_max)
-        denominator = tl.sum(numerator, axis=0)
-        logits = numerator / denominator
+
+        if not RENORM:
+            row_sub_max = logits - tl.max(logits, axis=0)
+            numerator = tl.exp(row_sub_max)
+            denominator = tl.sum(numerator, axis=0)
+            logits = numerator / denominator
 
         for k in tl.static_range(topk):
             cur_max = tl.max(logits, axis=0)
@@ -69,7 +73,12 @@ def _topk_softmax_kernel(
 
             logits = tl.where(offs_n == cur_idx, float("-inf"), logits)
 
-        store_mask = offs_k < topk
+        if RENORM:
+            topk_vals = topk_vals - tl.max(topk_vals, axis=0)
+            numerator = tl.exp(topk_vals)
+            denominator = tl.sum(numerator, axis=0)
+            topk_vals = numerator / denominator
+
         tl.store(
             weights_ptr + row_idx * stride_wm + offs_k * stride_wk,
             topk_vals,
@@ -80,66 +89,6 @@ def _topk_softmax_kernel(
             topk_idxs,
             mask=store_mask,
         )
-
-
-@triton.jit
-def _topk_softmax_renorm_kernel(
-    logits_ptr,
-    weights_ptr,
-    indices_ptr,
-    M,
-    N,
-    topk: tl.constexpr,
-    topk_padded: tl.constexpr,
-    stride_lm,
-    stride_ln,
-    stride_wm,
-    stride_wk,
-    stride_im,
-    stride_ik,
-    BLOCK_N: tl.constexpr,
-    num_stages: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, topk_padded)
-    mask_n = offs_n < N
-
-    for row_idx in tl.range(pid, M, num_programs, num_stages):
-        logits = tl.load(
-            logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
-            mask=mask_n,
-            other=float("-inf"),
-        )
-
-        topk_vals = tl.zeros([topk_padded], dtype=tl.float32) + float("-inf")
-        topk_idxs = tl.zeros([topk_padded], dtype=tl.int32)
-
-        running_max = float("-inf")
-        running_sum = 0.0
-
-        for k in tl.static_range(topk):
-            cur_max = tl.max(logits, axis=0)
-            cur_idx = tl.argmax(logits, axis=0)
-
-            new_max = tl.maximum(running_max, cur_max)
-            running_sum = running_sum * tl.exp(running_max - new_max) + tl.exp(
-                cur_max - new_max
-            )
-            running_max = new_max
-
-            k_mask = offs_k == k
-            topk_vals = tl.where(k_mask, cur_max, topk_vals)
-            topk_idxs = tl.where(k_mask, cur_idx, topk_idxs)
-
-            logits = tl.where(offs_n == cur_idx, float("-inf"), logits)
-
-        topk_vals = tl.exp(topk_vals - running_max) / running_sum
-
-        tl.store(weights_ptr + row_idx * stride_wm + offs_k * stride_wk, topk_vals)
-        tl.store(indices_ptr + row_idx * stride_im + offs_k * stride_ik, topk_idxs)
 
 
 def fused_topk_softmax(
@@ -155,48 +104,28 @@ def fused_topk_softmax(
     indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int32)
 
     BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
-
     topk_padded = triton.next_power_of_2(topk)
-
     grid = (M,)
     num_stages = 2
 
-    if renormalize:
-        _topk_softmax_renorm_kernel[grid](
-            logits_ptr=router_logits,
-            weights_ptr=weights,
-            indices_ptr=indices,
-            M=M,
-            N=N,
-            topk=topk,
-            topk_padded=topk_padded,
-            stride_lm=router_logits.stride(0),
-            stride_ln=router_logits.stride(1),
-            stride_wm=weights.stride(0),
-            stride_wk=weights.stride(1),
-            stride_im=indices.stride(0),
-            stride_ik=indices.stride(1),
-            BLOCK_N=BLOCK_N,
-            num_stages=num_stages,
-        )
-    else:
-        _topk_softmax_kernel[grid](
-            logits_ptr=router_logits,
-            weights_ptr=weights,
-            indices_ptr=indices,
-            M=M,
-            N=N,
-            topk=topk,
-            topk_padded=topk_padded,
-            stride_lm=router_logits.stride(0),
-            stride_ln=router_logits.stride(1),
-            stride_wm=weights.stride(0),
-            stride_wk=weights.stride(1),
-            stride_im=indices.stride(0),
-            stride_ik=indices.stride(1),
-            BLOCK_N=BLOCK_N,
-            num_stages=num_stages,
-        )
+    _topk_softmax_kernel[grid](
+        logits_ptr=router_logits,
+        weights_ptr=weights,
+        indices_ptr=indices,
+        M=M,
+        N=N,
+        topk=topk,
+        topk_padded=topk_padded,
+        stride_lm=router_logits.stride(0),
+        stride_ln=router_logits.stride(1),
+        stride_wm=weights.stride(0),
+        stride_wk=weights.stride(1),
+        stride_im=indices.stride(0),
+        stride_ik=indices.stride(1),
+        BLOCK_N=BLOCK_N,
+        RENORM=renormalize,
+        num_stages=num_stages,
+    )
 
     return weights, indices
 
