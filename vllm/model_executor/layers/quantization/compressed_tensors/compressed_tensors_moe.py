@@ -205,14 +205,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
-        elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
-            return CompressedTensorsW4A8Int8MoEMethod(
-                weight_quant, input_quant, layer.moe_config
-            )
         elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
             logger.info_once("Using CompressedTensorsW4A8Fp8MoEMethod")
             return CompressedTensorsW4A8Fp8MoEMethod(
-                quant_config, layer.moe_config, layer_name
+                weight_quant, input_quant, layer.moe_config
+            )
+        elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
+            return CompressedTensorsW4A8Int8MoEMethod(
+                weight_quant, input_quant, layer.moe_config
             )
         else:
             raise RuntimeError(
@@ -2439,16 +2439,15 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
         layer_name: str | None = None,
     ):
         super().__init__(moe)
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations"
-        )
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+
         self.group_size = self.weight_quant.group_size
         self.num_bits = self.weight_quant.num_bits
         self.packed_factor = 32 // self.num_bits
