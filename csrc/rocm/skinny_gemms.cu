@@ -1437,7 +1437,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   bool doRdc = (kfitsPerRdc * kFit < K);
 
-  // given above k-split, find this wave's postion
+  // given above k-split, find this wave's position
   uint32_t kFitPdd = kFit + (kFit / ASTRD) * APAD;
   uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
   uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
