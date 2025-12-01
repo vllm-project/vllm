@@ -26,8 +26,7 @@ def test_load_checkpoints(
     chatglm3_lora_files,
 ):
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-    embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
-    embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
+
     expected_lora_lst: list[str] = []
     for module in BAICHUAN_LORA_MODULES:
         if module in packed_modules_mapping:
@@ -47,8 +46,7 @@ def test_load_checkpoints(
             peft_helper=peft_helper,
             lora_model_id=1,
             device="cpu",
-            embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
+            model_vocab_size=64000,
         )
     elif lora_name == "baichuan7B-zero":
         # Test that the target_modules contain prefix
@@ -63,8 +61,7 @@ def test_load_checkpoints(
             peft_helper=peft_helper,
             lora_model_id=1,
             device="cpu",
-            embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
+            model_vocab_size=64000,
         )
     elif lora_name == "baichuan7B-zero-regex":
         # Test that the `target_modules` in the form of regular expressions,
@@ -78,8 +75,7 @@ def test_load_checkpoints(
             peft_helper=peft_helper,
             lora_model_id=1,
             device="cpu",
-            embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
+            model_vocab_size=64000,
         )
     else:
         # For the baichuan7B model, load chatglm3-6b's LoRA,
@@ -95,15 +91,13 @@ def test_load_checkpoints(
                 peft_helper=peft_helper,
                 lora_model_id=1,
                 device="cpu",
-                embedding_modules=embedding_modules,
-                embedding_padding_modules=embed_padding_modules,
+                model_vocab_size=64000,
             )
 
 
 def test_lora_weights_mapping(baichuan_lora_files):
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-    embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
-    embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
+
     expected_lora_lst: list[str] = []
     for module in BAICHUAN_LORA_MODULES:
         if module in packed_modules_mapping:
@@ -128,8 +122,7 @@ def test_lora_weights_mapping(baichuan_lora_files):
         peft_helper=peft_helper,
         lora_model_id=1,
         device="cpu",
-        embedding_modules=embedding_modules,
-        embedding_padding_modules=embed_padding_modules,
+        model_vocab_size=64000,
         weights_mapper=hf_to_vllm_mapper,
     )
     for name in lora_model.loras:
