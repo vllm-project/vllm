@@ -351,7 +351,7 @@ The following extra parameters are supported by default:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
     ```
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
@@ -359,7 +359,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
     ```
 
 ### Transcriptions API
@@ -629,7 +629,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
+--8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
 ```
 
 ### Score API
@@ -834,7 +834,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 ### Re-rank API
@@ -915,7 +915,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM
