@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -233,7 +233,7 @@ class BaiChuanDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=getattr(config, "rope_parameters", None),
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,

@@ -53,7 +53,7 @@ async def test_tokenize_completions(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_special in [False, True]:
         prompt = "vllm1 This is a test prompt."
@@ -87,7 +87,7 @@ async def test_tokenize_chat(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
@@ -140,7 +140,7 @@ async def test_tokenize_chat_with_tools(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
@@ -210,7 +210,7 @@ async def test_tokenize_with_return_token_strs(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a token_strs test prompt! vllm1"
     response = requests.post(
@@ -240,7 +240,7 @@ async def test_detokenize(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)

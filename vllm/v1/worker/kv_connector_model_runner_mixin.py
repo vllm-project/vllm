@@ -13,7 +13,7 @@ from typing import (
 
 import torch
 
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import (
@@ -59,7 +59,7 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def ensure_kv_transfer_shutdown() -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
-        if has_kv_transfer_group and has_kv_transfer_group():
+        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
             ensure_kv_transfer_shutdown()
 
     @staticmethod

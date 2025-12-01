@@ -22,14 +22,6 @@ def test_n_gt_1(llm):
     assert len(outputs[0].outputs) == 3
 
 
-def test_best_of(llm):
-    """Raise a ValueError since best_of is deprecated."""
-
-    params = SamplingParams(n=2, best_of=3)
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, params)
-
-
 def test_penalties(llm):
     """Check that we do not get errors if applied."""
 

@@ -49,7 +49,8 @@ We currently support the following OpenAI APIs:
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
-    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+    - *Note: `user` parameter is ignored.*
+    - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -350,7 +351,7 @@ The following extra parameters are supported by default:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
     ```
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
@@ -358,7 +359,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
     ```
 
 ### Transcriptions API
@@ -455,6 +456,7 @@ For `verbose_json` response format:
       ]
     }
     ```
+Currently “verbose_json” response format doesn’t support avg_logprob, compression_ratio, no_speech_prob.
 
 #### Extra Parameters
 
@@ -628,7 +630,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
+--8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
 ```
 
 ### Score API
@@ -833,7 +835,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 ### Re-rank API
@@ -914,7 +916,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM

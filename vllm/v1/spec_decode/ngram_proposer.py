@@ -54,7 +54,7 @@ class NgramProposer:
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(
-            [np.array([])] * 1024,
+            [[]] * 1024,
             [""] * 1024,
             np.zeros(1024, dtype=np.int32),
             np.zeros((1024, self.max_model_len), dtype=np.int32),
@@ -131,7 +131,7 @@ class NgramProposer:
 
     def propose(
         self,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
         req_ids: list[str],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
@@ -140,7 +140,7 @@ class NgramProposer:
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = sampled_ids.shape[0]
+            num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
                 continue
@@ -269,7 +269,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
                 prev_lps = lps[max_ngram - 1]
             i += 1
         elif prev_lps != 0:
-            # Token mismatch: try the second longest prefix
+            # Token mismatch: try the second-longest prefix
             # among all suffix of tokens[:i],
             # which is the longest prefix of tokens[:prev_lps]
             prev_lps = lps[prev_lps - 1]

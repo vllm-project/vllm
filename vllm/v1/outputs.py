@@ -29,27 +29,15 @@ class LogprobsLists(NamedTuple):
     # different for each request.
     cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start_req_idx: int, end_req_idx: int):
-        if self.cu_num_generated_tokens:
-            start = self.cu_num_generated_tokens[start_req_idx]
-            end = self.cu_num_generated_tokens[end_req_idx]
-            # Recompute cumulative array starting from 0
-            cu_num_offset = self.cu_num_generated_tokens[start_req_idx]
-            sliced_cu_num_generated_tokens = [
-                cu_num - cu_num_offset
-                for cu_num in self.cu_num_generated_tokens[
-                    start_req_idx : end_req_idx + 1
-                ]
-            ]
-        else:
-            start = start_req_idx
-            end = end_req_idx
-            sliced_cu_num_generated_tokens = None
+    def slice_request(self, req_idx: int, num_positions: int):
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
         return LogprobsLists(
-            self.logprob_token_ids[start:end],
-            self.logprobs[start:end],
-            self.sampled_token_ranks[start:end],
-            sliced_cu_num_generated_tokens,
+            self.logprob_token_ids[req_idx:end_idx],
+            self.logprobs[req_idx:end_idx],
+            self.sampled_token_ranks[req_idx:end_idx],
+            None,
         )
 
 
@@ -158,7 +146,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[np.ndarray]
+    sampled_token_ids: list[list[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -220,7 +208,7 @@ def make_empty_encoder_model_runner_output(
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
     # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [np.array([0]) for _ in req_ids]
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
