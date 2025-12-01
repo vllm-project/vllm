@@ -1,41 +1,53 @@
-# Anything LLM
+# AnythingLLM
 
-[Anything LLM](https://github.com/Mintplex-Labs/anything-llm) is a full-stack application that enables you to turn any document, resource, or piece of content into context that any LLM can use as references during chatting.
+[AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) is a full-stack application that enables you to turn any document, resource, or piece of content into context that any LLM can use as references during chatting.
 
 It allows you to deploy a large language model (LLM) server with vLLM as the backend, which exposes OpenAI-compatible endpoints.
 
 ## Prerequisites
 
-- Setup vLLM environment
+Set up the vLLM environment:
+
+```bash
+pip install vllm
+```
 
 ## Deploy
 
-- Start the vLLM server with the supported chat completion model, e.g.
+1. Start the vLLM server with a supported chat-completion model, for example:
 
-```bash
-vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
-```
+    ```bash
+    vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
+    ```
 
-- Download and install [Anything LLM desktop](https://anythingllm.com/desktop).
+1. Download and install [AnythingLLM Desktop](https://anythingllm.com/desktop).
 
-- On the bottom left of open settings, AI Providers --> LLM:
-    - LLM Provider: Generic OpenAI
-    - Base URL: http://{vllm server host}:{vllm server port}/v1
-    - Chat Model Name: `Qwen/Qwen1.5-32B-Chat-AWQ`
+1. Configure the AI provider:
 
-![](../../assets/deployment/anything-llm-provider.png)
+    - At the bottom, click the 🔧 wrench icon -> **Open settings** -> **AI Providers** -> **LLM**.
+    - Enter the following values:
+        - LLM Provider: Generic OpenAI
+        - Base URL: `http://{vllm server host}:{vllm server port}/v1`
+        - Chat Model Name: `Qwen/Qwen1.5-32B-Chat-AWQ`
 
-- Back to home page, New Workspace --> create `vllm` workspace, and start to chat:
+    ![set AI providers](../../assets/deployment/anything-llm-provider.png)
 
-![](../../assets/deployment/anything-llm-chat-without-doc.png)
+1. Create a workspace:
 
-- Click the upload button:
-    - upload the doc
-    - select the doc and move to the workspace
-    - save and embed
+    1. At the bottom, click the ↺ back icon and back to workspaces.
+    1. Create a workspace (e.g., `vllm`) and start chatting.
 
-![](../../assets/deployment/anything-llm-upload-doc.png)
+    ![create a workspace](../../assets/deployment/anything-llm-chat-without-doc.png)
 
-- Chat again:
+1. Add a document.
 
-![](../../assets/deployment/anything-llm-chat-with-doc.png)
+    1. Click the 📎 attachment icon.
+    1. Upload a document.
+    1. Select and move the document into your workspace.
+    1. Save and embed it.
+
+    ![add a document](../../assets/deployment/anything-llm-upload-doc.png)
+
+1. Chat using your document as context.
+
+    ![chat with your context](../../assets/deployment/anything-llm-chat-with-doc.png)

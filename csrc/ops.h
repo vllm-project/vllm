@@ -52,14 +52,13 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-#ifndef USE_ROCM
 void merge_attn_states(torch::Tensor& output,
                        std::optional<torch::Tensor> output_lse,
                        const torch::Tensor& prefix_output,
                        const torch::Tensor& prefix_lse,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
-
+#ifndef USE_ROCM
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
     torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
@@ -92,10 +91,24 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps, torch::Tensor& q_weight,
+                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
+                        bool is_neox, torch::Tensor& position_ids);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
                                  const torch::Tensor& repetition_penalties);
+
+void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
+                   const torch::Tensor& rowEnds, torch::Tensor& indices,
+                   int64_t numRows, int64_t stride0, int64_t stride1);
+
+void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
+                          const torch::Tensor& seq_lens, torch::Tensor& indices,
+                          int64_t numRows, int64_t stride0, int64_t stride1);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
@@ -119,16 +132,23 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
-void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                              std::optional<torch::Tensor> key,
-                              int64_t head_size, torch::Tensor& cos_sin_cache,
-                              bool is_neox, int64_t rot_dim,
-                              torch::Tensor& cos_sin_cache_offsets);
-
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
+
+#ifndef USE_ROCM
+void silu_and_mul_nvfp4_quant(torch::Tensor& out,
+                              torch::Tensor& output_block_scale,
+                              torch::Tensor& input,
+                              torch::Tensor& input_global_scale);
+#endif
+void persistent_masked_m_silu_mul_quant(
+    const at::Tensor& input,   // (E, T, 2*H)
+    const at::Tensor& counts,  // (E)
+    at::Tensor& y_q,           // (E, T, H) [OUT]
+    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
+    bool use_ue8m0);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
@@ -292,7 +312,7 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit);
+                        bool use_exllama, bool use_v2_format, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
@@ -306,17 +326,25 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
     std::optional<torch::Tensor> const& scale_ub);
 
-void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
-                        const torch::Tensor& A, const torch::Tensor& B,
-                        const torch::Tensor& C,
-                        const std::optional<torch::Tensor>& D_,
-                        const std::optional<torch::Tensor>& z_,
-                        const std::optional<torch::Tensor>& delta_bias_,
-                        bool delta_softplus,
-                        const std::optional<torch::Tensor>& query_start_loc,
-                        const std::optional<torch::Tensor>& cache_indices,
-                        const std::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
+void selective_scan_fwd(
+    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
+    const torch::Tensor& B, const torch::Tensor& C,
+    const std::optional<torch::Tensor>& D_,
+    const std::optional<torch::Tensor>& z_,
+    const std::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
+    const std::optional<torch::Tensor>& query_start_loc,
+    const std::optional<torch::Tensor>& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
+    const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
+    const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
+    const std::optional<torch::Tensor>& initial_state_idx);
+
+torch::Tensor dynamic_4bit_int_moe_cpu(
+    torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
+    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
+    int64_t I2, int64_t group_size, bool apply_router_weight_on_input,
+    int64_t activation_kind);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
@@ -336,6 +364,8 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
 
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,
