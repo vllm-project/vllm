@@ -2460,6 +2460,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
         self.disable_expert_map = False
+        self.layer_name = layer_name
 
     def create_weights(
         self,
