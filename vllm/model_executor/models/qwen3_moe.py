@@ -648,9 +648,7 @@ class Qwen3MoeForCausalLM(
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
-        "unembed_tokens": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head", "unembed_tokens"]
 
     fall_back_to_pt_during_load = False
 
