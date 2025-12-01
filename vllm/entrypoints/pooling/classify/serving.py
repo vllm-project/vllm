@@ -13,11 +13,6 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
-    ClassificationData,
-    ClassificationRequest,
-    ClassificationResponse,
     ErrorResponse,
     UsageInfo,
 )
@@ -27,6 +22,13 @@ from vllm.entrypoints.openai.serving_engine import (
     ServeContext,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.pooling.classify.protocol import (
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
+    ClassificationData,
+    ClassificationRequest,
+    ClassificationResponse,
+)
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
@@ -221,7 +223,7 @@ class ServingClassification(ClassificationMixin):
 
     def _create_pooling_params(
         self,
-        ctx: ClassificationServeContext,
+        ctx: ServeContext[ClassificationRequest],
     ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):
