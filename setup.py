@@ -319,17 +319,14 @@ class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
     @staticmethod
-    def extract_precompiled_and_patch_package(
-        wheel_url_or_path: str, download_filename: str | None
-    ) -> dict:
+    def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
         import tempfile
         import zipfile
 
         temp_dir = None
         try:
             if not os.path.isfile(wheel_url_or_path):
-                # use provided filename first, then derive from URL
-                wheel_filename = download_filename or wheel_url_or_path.split("/")[-1]
+                wheel_filename = wheel_url_or_path.split("/")[-1]
                 temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
                 wheel_path = os.path.join(temp_dir, wheel_filename)
                 print(f"Downloading wheel from {wheel_url_or_path} to {wheel_path}")
@@ -676,8 +673,7 @@ if envs.VLLM_USE_PRECOMPILED:
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
-        download_filename = None
-        logger.info("Using user-specified precompiled wheel location: %s", wheel_url)
+        logger.info("Using user-specified precompiled wheel location: {}", wheel_url)
     else:
         import platform
 
@@ -690,17 +686,17 @@ if envs.VLLM_USE_PRECOMPILED:
             precompiled_wheel_utils.get_base_commit_in_main_branch(),
         )
         logger.info(
-            "Using precompiled wheel commit %s with variant %s", commit, variant
+            "Using precompiled wheel commit {} with variant {}", commit, variant
         )
         try_default = False
-        wheels, repo_url, download_filename = None, None, None
+        wheels, repo_url = None, None
         try:
             wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
-        except Exception:
+        except Exception as e:
             logger.warning(
-                "Failed to fetch precompiled wheel metadata for variant %s",
+                "Failed to fetch precompiled wheel metadata for variant {}",
                 variant,
-                exc_info=True,
+                exc_info=e,
             )
             try_default = True  # try outside handler to keep the stacktrace simple
         if try_default:
@@ -721,29 +717,26 @@ if envs.VLLM_USE_PRECOMPILED:
 "platform_tag": "manylinux1_x86_64",
 "variant": null,
 "filename": "vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl",
-"path": "../vllm-0.11.2.dev278%2Bgdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
+"path": "../vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
 },
 ...]"""
         for wheel in wheels:
-            # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
             if wheel.get("package_name") == "vllm" and arch in wheel.get(
                 "platform_tag", ""
             ):
-                logger.info("Found precompiled wheel metadata: %s", wheel)
+                logger.info("Found precompiled wheel metadata: {}", wheel)
                 if "path" not in wheel:
                     raise ValueError(f"Wheel metadata missing path: {wheel}")
+                # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
                 wheel_url = repo_url + wheel["path"]
-                download_filename = wheel.get("filename")
-                logger.info("Using precompiled wheel URL: %s", wheel_url)
+                logger.info("Using precompiled wheel URL: {}", wheel_url)
                 break
         else:
             raise ValueError(
                 f"No precompiled vllm wheel found for architecture {arch} "
                 f"from repo {repo_url}. All available wheels: {wheels}"
             )
-    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
-        wheel_url, download_filename
-    )
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 
