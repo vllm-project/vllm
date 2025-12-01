@@ -1273,11 +1273,7 @@ class Qwen3VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
-        if self.is_multimodal_pruning_enabled:
-            logger.debug(
-                "EVS (Efficient Video Sampling) enabled with pruning_rate=%.2f",
-                self.video_pruning_rate,
-            )
+        
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
