@@ -2,6 +2,7 @@ steps:
 - group: Abuild
   steps:
   - label: ':docker: Build CPU arm64 image'
+    key: image-build-cpu-arm64
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
@@ -9,6 +10,7 @@ steps:
       123
     soft_fail: false
   - label: ':docker: Build CPU image'
+    key: image-build-cpu
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
@@ -24,6 +26,7 @@ steps:
     env:
       DOCKER_BUILDKIT: '1'
   - label: ':docker: Build CUDA 11.8 image'
+    key: image-build-cu118
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
@@ -39,6 +42,7 @@ steps:
     env:
       DOCKER_BUILDKIT: '1'
   - label: ':docker: Build HPU image'
+    key: image-build-hpu
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
@@ -54,6 +58,7 @@ steps:
     env:
       DOCKER_BUILDKIT: '1'
   - label: ':docker: Build image'
+    key: image-build
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
