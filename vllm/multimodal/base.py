@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, TypeVar
 
+import numpy as np
+
 _T = TypeVar("_T")
 
 
@@ -20,6 +22,10 @@ class MediaWithBytes(Generic[_T]):
 
     media: _T
     original_bytes: bytes
+
+    def __array__(self, dtype=None, copy=None):
+        """Allow np.array(obj) to return np.array(obj.media)."""
+        return np.array(self.media, dtype=dtype, copy=copy)
 
 
 class MediaIO(ABC, Generic[_T]):
