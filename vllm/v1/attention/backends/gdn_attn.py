@@ -255,13 +255,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
-        # prepare tensors for cudagraph
-        #
-        # With speculative decoding, the xgrammar backend may rollback tokens
-        # and causing some sequences has less draft tokens than self.num_spec.
-        #
-        # In above cases, the max possible batch size for n tokens, can be
-        # min(n, cudagraph_max_bs).
+        # Prepare tensors for cudagraph
+        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
+        batch_size = m.num_actual_tokens
+
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -269,8 +266,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
-            batch_size = min(self.decode_cudagraph_max_bs, m.num_actual_tokens)
-
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
             )
@@ -315,8 +310,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            batch_size = m.num_actual_tokens
-
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
