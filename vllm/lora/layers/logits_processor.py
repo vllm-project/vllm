@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-<<<<<<< HEAD
-=======
-
->>>>>>> main
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -151,12 +147,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        if hasattr(lm_head, 'base_layer'):
+        if hasattr(lm_head, "base_layer"):
             actual_lm_head = lm_head.base_layer
         else:
             actual_lm_head = lm_head
-        logits = actual_lm_head.quant_method.apply(actual_lm_head,
-                                                   hidden_states)
+        logits = actual_lm_head.quant_method.apply(actual_lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
 
