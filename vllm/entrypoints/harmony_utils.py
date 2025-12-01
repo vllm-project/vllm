@@ -67,6 +67,17 @@ MCP_BUILTIN_TOOLS: set[str] = {
     "container",
 }
 
+# Mapping between Harmony tool namespaces (used by ToolServer) and tool types
+# (used in the request payload). Keep a single source of truth here.
+TOOL_NAME_TO_TYPE_MAP: dict[str, str] = {
+    "browser": "web_search_preview",
+    "python": "code_interpreter",
+    "container": "container",
+}
+TYPE_TO_TOOL_NAME_MAP: dict[str, str] = {
+    tool_type: tool_name for tool_name, tool_type in TOOL_NAME_TO_TYPE_MAP.items()
+}
+
 
 def has_custom_tools(tool_types: set[str]) -> bool:
     """

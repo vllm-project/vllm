@@ -63,6 +63,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    TYPE_TO_TOOL_NAME_MAP,
     construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -257,7 +258,41 @@ class OpenAIServingResponses(OpenAIServing):
                 "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
+        if self.use_harmony:
+            tool_error = self._validate_requested_tools_available(request)
+            if tool_error is not None:
+                return tool_error
         return None
+
+    def _validate_requested_tools_available(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        """Validate that all requested built-in tools are available."""
+        if not request.tools:
+            return None
+
+        tool_types = extract_tool_types(request.tools)
+
+        missing_tools: list[str] = []
+        for tool_type, tool_name in TYPE_TO_TOOL_NAME_MAP.items():
+            if tool_type not in tool_types:
+                continue
+            if self.tool_server is None or not self.tool_server.has_tool(tool_name):
+                missing_tools.append(tool_type)
+
+        if not missing_tools:
+            return None
+
+        missing_str = ", ".join(sorted(missing_tools))
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(
+                f"Requested tool(s) {missing_str} are not available on this "
+                "server. Ensure the tool server provides them or remove them "
+                "from the request."
+            ),
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
 
     async def create_responses(
         self,
