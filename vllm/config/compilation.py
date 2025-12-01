@@ -873,48 +873,55 @@ class CompilationConfig:
 
         if self.use_inductor_graph_partition:
             self.set_splitting_ops_for_inductor_graph_partition()
-            return
-
-        if self.pass_config.enable_attn_fusion:
+        elif self.pass_config.enable_attn_fusion:
             # here use_inductor_graph_partition is False
             self.set_splitting_ops_for_attn_fusion()
-            return
-
-        if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture
-            # the full cudagraph outside the fx graph. This reduces some
-            # cpu overhead when the runtime batch_size is not cudagraph
-            # captured. see https://github.com/vllm-project/vllm/pull/20059
-            # for details. Make a copy to avoid mutating the class-level
-            # list via reference.
-            self.splitting_ops = list(self._attention_ops)
-        elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty splitting_ops")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        else:
+            if self.splitting_ops is None:
+                # NOTE: When using full cudagraph, instead of setting an empty
+                # list and capture the full cudagraph inside the flattened fx
+                # graph, we keep the piecewise fx graph structure but capture
+                # the full cudagraph outside the fx graph. This reduces some
+                # cpu overhead when the runtime batch_size is not cudagraph
+                # captured. see https://github.com/vllm-project/vllm/pull/20059
+                # for details. Make a copy to avoid mutating the class-level
+                # list via reference.
+                self.splitting_ops = list(self._attention_ops)
+            elif len(self.splitting_ops) == 0:
                 logger.warning_once(
-                    "Piecewise compilation with empty splitting_ops do not"
-                    "contains piecewise cudagraph. Setting cudagraph_"
-                    "mode to NONE. Hint: If you are using attention backends "
-                    "that support cudagraph, consider manually setting "
-                    "cudagraph_mode to FULL or FULL_DECODE_ONLY to enable "
-                    "full cudagraphs."
+                    "Using piecewise compilation with empty splitting_ops"
                 )
-                self.cudagraph_mode = CUDAGraphMode.NONE
-            elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-                logger.warning_once(
-                    "Piecewise compilation with empty splitting_ops do not "
-                    "contains piecewise cudagraph. Setting cudagraph_mode "
-                    "to FULL."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-            self.splitting_ops = []
+                if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops do not"
+                        "contains piecewise cudagraph. Setting cudagraph_"
+                        "mode to NONE. Hint: If you are using attention "
+                        "backends that support cudagraph, consider manually "
+                        "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
+                        "to enable full cudagraphs."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.NONE
+                elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops do "
+                        "not contains piecewise cudagraph. Setting "
+                        "cudagraph_mode to FULL."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.FULL
+                self.splitting_ops = []
 
-        # split moe op for cudagraph
+        # split MoE ops for cudagraph
         backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
         dp_size = data_parallel_size if data_parallel_size is not None else 1
-        if backend == "deepep_high_throughput" and dp_size > 1 and self.splitting_ops:
+        if (
+            backend == "deepep_high_throughput"
+            and dp_size > 1
+            and self.splitting_ops
+            and (
+                not self.pass_config.enable_attn_fusion
+                or self.use_inductor_graph_partition
+            )
+        ):
             moe_ops = [
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
