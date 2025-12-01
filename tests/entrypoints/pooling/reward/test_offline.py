@@ -35,6 +35,7 @@ def llm():
 
     cleanup_dist_env_and_memory()
 
+
 @pytest.mark.skip_global_cleanup
 def test_config(llm: LLM):
     vllm_config = llm.llm_engine.vllm_config
