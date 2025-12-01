@@ -571,7 +571,11 @@ def get_weight_block_size_safety(config, default_value=None):
 def main(args: argparse.Namespace):
     print(args)
 
-    config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
+    config = get_config(
+        model=args.model,
+        trust_remote_code=args.trust_remote_code,
+        config_format=args.config_format,
+    )
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
 
@@ -621,6 +625,12 @@ def main(args: argparse.Namespace):
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
+    elif config.architectures[0] in ("MistralLarge3ForCausalLM"):
+        config = config.get_text_config()
+        E = config.n_routed_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        hidden_size = config.hidden_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -784,6 +794,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--config-format", type=str, default="auto")
     parser.add_argument("--model-prefix", type=str, required=False)
     args = parser.parse_args()
 
