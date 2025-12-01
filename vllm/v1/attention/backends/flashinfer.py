@@ -290,6 +290,13 @@ class FlashInferBackend(AttentionBackend):
     def get_name() -> str:
         return "FLASHINFER"
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER_DECODER,
+        )
+
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
