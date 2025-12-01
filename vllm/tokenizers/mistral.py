@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
+from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
@@ -165,6 +166,7 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
+@TokenizerRegistry.register("mistral")
 class MistralTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(

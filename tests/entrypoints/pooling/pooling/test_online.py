@@ -158,11 +158,7 @@ async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str)
     chat_response.raise_for_status()
     chat_poolings = PoolingResponse.model_validate(chat_response.json())
 
-    tokenizer = get_tokenizer(
-        tokenizer_name=model_name,
-        tokenizer_mode="fast",
-        trust_remote_code=True,
-    )
+    tokenizer = get_tokenizer(tokenizer_name=model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(
         messages,
         chat_template=DUMMY_CHAT_TEMPLATE,

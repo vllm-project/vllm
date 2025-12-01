@@ -4,6 +4,12 @@
 from .hf import HfTokenizer
 from .mistral import MistralTokenizer
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
+from .registry import TokenizerRegistry, get_tokenizer
 
-__all__ = ["TokenizerLike", "HfTokenizer", "MistralTokenizer", "TokenizerRegistry"]
+__all__ = [
+    "TokenizerLike",
+    "HfTokenizer",
+    "MistralTokenizer",
+    "TokenizerRegistry",
+    "get_tokenizer",
+]
