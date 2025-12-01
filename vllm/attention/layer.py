@@ -1079,6 +1079,7 @@ def _forward_prefill_impl(
             )
 
         # unpad if necessary
+        assert context_output is not None
         if impl._pad_v:
             context_output = context_output[..., : v.shape[-1]]
             suffix_output = suffix_output[..., : v.shape[-1]]
