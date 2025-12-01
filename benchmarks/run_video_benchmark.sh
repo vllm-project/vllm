@@ -27,6 +27,9 @@
 
 set -e
 
+# Set multiprocessing method to avoid CUDA initialization conflicts
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+
 # Default configuration
 MODEL_PATH="${1:-Qwen/Qwen2.5-VL-3B-Instruct}"
 OUTPUT_DIR="${2:-./video_benchmark_results}"
@@ -209,5 +212,14 @@ echo "NUM_FRAMES=32 ./benchmarks/run_video_benchmark.sh"
 echo ""
 echo "# Run with different model:"
 echo "./benchmarks/run_video_benchmark.sh Qwen/Qwen2.5-VL-7B-Instruct ./results_7b"
+echo ""
+echo "============================================================"
+echo "Troubleshooting"
+echo "============================================================"
+echo ""
+echo "If you see 'CUDA device busy' errors, try:"
+echo "  1. Check for other GPU processes: nvidia-smi"
+echo "  2. Kill any stale processes: pkill -f vllm"
+echo "  3. Set specific GPU: CUDA_VISIBLE_DEVICES=0 ./benchmarks/run_video_benchmark.sh"
 echo ""
 

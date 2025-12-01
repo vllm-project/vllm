@@ -40,7 +40,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
-import torch
+
+# Note: We avoid importing torch at module level to prevent CUDA initialization
+# issues with vLLM's multiprocessing. Torch is imported lazily where needed.
 
 
 @dataclass
@@ -68,10 +70,12 @@ class BenchmarkResult:
 
 def get_gpu_memory_info() -> dict[str, float]:
     """Get GPU memory usage information."""
-    if not torch.cuda.is_available():
-        return {"available": False}
-
     try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {"available": False}
+
         device = torch.cuda.current_device()
         free_memory = torch.cuda.mem_get_info(device)[0]
         total_memory = torch.cuda.mem_get_info(device)[1]
@@ -204,11 +208,11 @@ def run_benchmark(
 
         # For hybrid attention, we need to use the hybrid model
         if use_hybrid_attention:
-            # Override model architecture to use hybrid version
-            engine_kwargs["override_neuron_config"] = {
+            # Override HuggingFace config to enable hybrid attention
+            engine_kwargs["hf_overrides"] = {
                 "use_hybrid_attention": True,
             }
-            print("  Hybrid attention enabled via config override")
+            print("  Hybrid attention enabled via hf_overrides")
 
         llm = LLM(**engine_kwargs)
         init_time = time.perf_counter() - init_start
@@ -233,8 +237,13 @@ def run_benchmark(
             print(f"  Warmup {i + 1}/{num_warmup} complete")
 
         # Clear any cached memory
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception:
+            pass
 
         # Benchmark iterations
         print(f"\nRunning {num_iterations} benchmark iterations...")
@@ -298,8 +307,13 @@ def run_benchmark(
         # Cleanup
         del llm
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     except Exception as e:
         result.error = str(e)
