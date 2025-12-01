@@ -254,9 +254,7 @@ def normalize_value(x):
 
     # PretrainedConfig
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        # using `use_diff=False` to avoid initializing object with
-        # default arguments only
-        return x.to_json_string(use_diff=False)
+        return x.to_json_string()
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid
