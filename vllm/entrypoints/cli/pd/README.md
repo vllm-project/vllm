@@ -12,7 +12,7 @@ PD Disaggregation separates the prefill phase (processing input tokens) and the 
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              Ray Cluster                                 │
 │                                                                          │
@@ -38,18 +38,13 @@ PD Disaggregation separates the prefill phase (processing input tokens) and the 
 
 ## Module Structure
 
-```
+```text
 vllm/entrypoints/cli/pd/
 ├── __init__.py
 ├── README.md              # This file
 ├── base.py                # Base classes: BasePDJob, _BaseVllmService, Service, ProxyServer
 ├── config.py              # Configuration parsing from YAML
-├── single_prefill.py      # SinglePrefillPDJob (deprecated, alias to MultiplePrefillsPDJob)
-├── multiple_prefills.py   # MultiplePrefillsPDJob implementation
-└── llm_scheduler/         # Proxy server implementations
-    ├── __init__.py
-    ├── simple_proxy.py    # Simple load-balanced proxy
-    └── flexible_proxy.py  # Flexible proxy with advanced routing
+└── multiple_prefills.py   # MultiplePrefillsPDJob implementation
 ```
 
 ## Quick Start
@@ -253,4 +248,3 @@ vllm pdjob --config=config.yaml 2>&1 | tee pdjob.log
 - [NIXL Connector Usage](../../../docs/features/nixl_connector_usage.md)
 - [Disaggregated Encoder](../../../docs/features/disagg_encoder.md)
 - [Example Configuration](../../../examples/pdjob/config.yaml)
-

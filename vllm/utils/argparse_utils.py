@@ -27,15 +27,15 @@ logger = init_logger(__name__)
 
 
 class StoreBoolean(Action):
-
     def __call__(self, parser, namespace, values, option_string=None):
         if values.lower() == "true":
             setattr(namespace, self.dest, True)
         elif values.lower() == "false":
             setattr(namespace, self.dest, False)
         else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
+            raise ValueError(
+                f"Invalid boolean value: {values}. Expected 'true' or 'false'."
+            )
 
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
@@ -479,35 +479,37 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def _format_boolean_arg(self, key: str, value: Any) -> list[str]:
         """Format a boolean argument as CLI flag."""
-        flag = '--' + key if self._is_truthy(value) else '--no-' + key
+        flag = "--" + key if self._is_truthy(value) else "--no-" + key
         return [flag]
 
     def _format_regular_arg(self, key: str, value: Any) -> list[str]:
         """Format a regular argument as CLI key-value pair."""
-        return ['--' + key, str(value)]
+        return ["--" + key, str(value)]
 
-    def _process_arg(self, key: str, value: Any,
-                     store_boolean_args: set[str]) -> list[str]:
+    def _process_arg(
+        self, key: str, value: Any, store_boolean_args: set[str]
+    ) -> list[str]:
         """Process a single argument and return formatted CLI arguments."""
         if key == "model":
             return []
-        use_boolean_format = (self._is_boolean_like(value) and
-                              key not in store_boolean_args)
+        use_boolean_format = (
+            self._is_boolean_like(value) and key not in store_boolean_args
+        )
         if use_boolean_format:
             return self._format_boolean_arg(key, value)
         return self._format_regular_arg(key, value)
 
-    def _pull_args_from_dict(self, args: dict[str, Any],
-                             extra_params: str) -> list[str]:
+    def _pull_args_from_dict(
+        self, args: dict[str, Any], extra_params: str
+    ) -> list[str]:
         """Pulls arguments from a dictionary and returns them as a list of strings.
         This is used to convert a dictionary of arguments into a format that can
         be passed to the ArgumentParser.
         """
         store_boolean_args = {
-            action.dest for action in self._actions
-            if isinstance(action, StoreBoolean)
+            action.dest for action in self._actions if isinstance(action, StoreBoolean)
         }
-        logger.info(f"show the store_boolean_arguments: {store_boolean_args}")
+        logger.info("show the store_boolean_arguments: %s", store_boolean_args)
 
         processed_args = ["serve", args["model"]]
         for key, value in args.items():

@@ -64,18 +64,22 @@ scheduler:
   prefill_dp: 1
   
   # Data parallelism size for decode workers
-  decode_dp: 8
+  # Note: Should match data_parallel_size in decode section
+  decode_dp: 4
   
   # Tensor parallelism size for prefill workers
+  # Note: Should match tensor_parallel_size in prefill section
   prefill_tp: 8
   
   # Tensor parallelism size for decode workers
-  decode_tp: 1
+  # Note: Should match tensor_parallel_size in decode section
+  decode_tp: 2
   
   # ==========================================================================
   # REQUIRED: Custom command to start the proxy scheduler
   # ==========================================================================
   # The command will be executed by the ProxyServer actor on the Ray head node.
+  # You must provide your own proxy/scheduler implementation.
   #
   # Available Placeholders (automatically replaced before execution):
   # -------------------------------------------------------------------------
@@ -93,21 +97,28 @@ scheduler:
   #
   # Examples:
   # -------------------------------------------------------------------------
-  # For toy_proxy_server.py (hosts and ports separately):
-  #   command: "python toy_proxy_server.py --port {PORT} \
-  #             --prefiller-hosts $PREFILL_HOST_1 $PREFILL_HOST_2 \
-  #             --prefiller-ports $PREFILL_PORT_1 $PREFILL_PORT_2 \
-  #             --decoder-hosts $DECODE_HOST_1 $DECODE_HOST_2 \
-  #             --decoder-ports $DECODE_PORT_1 $DECODE_PORT_2"
+  # Example 1: Python-based proxy server (hosts and ports separately):
+  #   command: "python /path/to/your/proxy_server.py --port {PORT} \
+  #             --prefiller-hosts $PREFILL_HOST_1 \
+  #             --prefiller-ports $PREFILL_PORT_1 \
+  #             --decoder-hosts $DECODE_HOST_1 \
+  #             --decoder-ports $DECODE_PORT_1"
   #
-  # For cargo-based proxy (full URLs):
+  # Example 2: Rust/Cargo-based proxy (full URLs):
   #   command: "cargo run --release -- --policy consistent_hash \
   #             --vllm-pd-disaggregation \
-  #             --prefill $PREFILL_URL_1 --prefill $PREFILL_URL_2 \
-  #             --decode $DECODE_URL_1 --decode $DECODE_URL_2 \
+  #             --prefill $PREFILL_URL_1 \
+  #             --decode $DECODE_URL_1 \
   #             --host 0.0.0.0 --port {PORT}"
+  #
+  # Example 3: Using vllm's built-in proxy (if available):
+  #   command: "python -m vllm.entrypoints.openai.proxy \
+  #             --port {PORT} \
+  #             --prefill-url $PREFILL_URL_1 \
+  #             --decode-url $DECODE_URL_1"
   # -------------------------------------------------------------------------
-  command: "python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port {PORT} --prefiller-hosts $PREFILL_HOST_1 $PREFILL_HOST_2 --prefiller-ports $PREFILL_PORT_1 $PREFILL_PORT_2 --decoder-hosts $DECODE_HOST_1 $DECODE_HOST_2 --decoder-ports $DECODE_PORT_1 $DECODE_PORT_2"
+  # IMPORTANT: Replace this with your actual proxy server command
+  command: "python /path/to/your/proxy_server.py --port {PORT} --prefill-url $PREFILL_URL_1 --decode-url $DECODE_URL_1"
 
 # -----------------------------------------------------------------------------
 # General Parameters (Shared by Prefill and Decode)
