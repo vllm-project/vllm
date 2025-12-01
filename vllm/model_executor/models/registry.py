@@ -162,6 +162,7 @@ _TEXT_GENERATION_MODELS = {
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
+    "HybridQwen2ForCausalLM": ("qwen2_5_vl_hybrid", "HybridQwen2ForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -372,6 +373,10 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5_VLForConditionalGeneration": (
         "qwen2_5_vl",
         "Qwen2_5_VLForConditionalGeneration",
+    ),
+    "HybridQwen2_5_VLForConditionalGeneration": (
+        "qwen2_5_vl_hybrid",
+        "HybridQwen2_5_VLForConditionalGeneration",
     ),
     "Qwen2AudioForConditionalGeneration": (
         "qwen2_audio",
