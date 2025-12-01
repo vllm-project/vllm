@@ -151,13 +151,21 @@ class CpuPlatform(Platform):
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
+        node_dir = "/sys/devices/system/node"
         if kv_cache_space is None:
-            free_cpu_memory = psutil.virtual_memory().available
+            nodes = (
+                [d for d in os.listdir(node_dir) if d.startswith("node")]
+                if os.path.exists(node_dir)
+                else []
+            )
+            num_numa_nodes = len(nodes) or 1
+            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
             DEFAULT_CPU_MEM_UTILIZATION = 0.5
             kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
+            kv_cache_space_gib = kv_cache_space / GiB_bytes
             logger.warning_once(
-                "VLLM_CPU_KVCACHE_SPACE not set. "
-                "Using automatic CPU memory for KV cache."
+                "VLLM_CPU_KVCACHE_SPACE not set. Using "
+                f"{kv_cache_space_gib:.2f} GiB for KV cache."
             )
         else:
             kv_cache_space *= GiB_bytes
