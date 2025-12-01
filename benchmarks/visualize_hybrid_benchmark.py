@@ -322,11 +322,11 @@ def plot_memory_efficiency(
         if "error" in length_data:
             continue
 
-        throughput = length_data.get("throughput", {}).get("tokens_per_second", 0)
+        throughput = length_data.get("throughput", {}).get("tokens_per_second", 0) or 0
         memory = length_data.get("memory", {})
-        total_memory = (
-            memory.get("kv_cache_memory_gib", 0) + memory.get("model_memory_gib", 0)
-        )
+        kv_mem = memory.get("kv_cache_memory_gib") or 0
+        model_mem = memory.get("model_memory_gib") or 0
+        total_memory = kv_mem + model_mem
 
         if throughput > 0 and total_memory > 0:
             efficiency = throughput / total_memory
