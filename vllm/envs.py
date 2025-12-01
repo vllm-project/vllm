@@ -241,6 +241,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_HMA_FOR_KV_CONNECTOR: bool = False
 
 
 def get_default_cache_root():
@@ -1578,6 +1579,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    ),
+    # Flag to enable HMA for KV connector (experimental).
+    "VLLM_USE_HMA_FOR_KV_CONNECTOR": lambda: bool(
+        int(os.getenv("VLLM_USE_HMA_FOR_KV_CONNECTOR", "0"))
     ),
 }
 
