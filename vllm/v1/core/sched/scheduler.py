@@ -228,7 +228,9 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
-        print(f">>> [DEBUG] Scheduler: schedule new step")
+        print(f">>> [DEBUG] Scheduler: schidule new step")
+        for req in self.requests.values():
+            print(f">>> [DEBUG] Scheduler: request {req.request_id} num_computed_tokens={req.num_computed_tokens} num_tokens={req.num_tokens} num_tokens_with_spec={req.num_tokens_with_spec}")
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -801,6 +803,7 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        logger.info('>>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}')
         return scheduler_output
 
     def _update_after_schedule(

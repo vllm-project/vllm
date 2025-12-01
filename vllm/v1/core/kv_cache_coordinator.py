@@ -56,6 +56,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
+        num_tokens_target_model: int,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -68,7 +69,8 @@ class KVCacheCoordinator(ABC):
                 prefix caching.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
-
+            num_tokens_target_model: w/o spec decode, this should be the same as
+            num_tokens, with spec decode, TODO more comments here.
         Returns:
             The number of blocks.
         """
@@ -82,7 +84,7 @@ class KVCacheCoordinator(ABC):
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_tokens, new_computed_blocks[i]
+                    request_id, num_tokens, new_computed_blocks[i], num_tokens_target_model
                 )
         return num_blocks_to_allocate
 
@@ -101,7 +103,7 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self, request_id: str, num_tokens: int, num_tokens_target_model: int, num_encoder_tokens: int = 0
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -111,9 +113,10 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
+            num_tokens_target_model: w/o spec decode, this should be the same as
+            num_tokens, with spec decode, TODO more comments here.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
-
         Returns:
             The new allocated blocks.
         """
@@ -123,6 +126,7 @@ class KVCacheCoordinator(ABC):
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
+                num_tokens_target_model,
             )
             for manager in self.single_type_managers
         )
