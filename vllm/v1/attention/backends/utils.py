@@ -875,6 +875,10 @@ def split_decodes_and_prefills(
     if max_query_len <= decode_threshold and (
         not require_uniform or decode_threshold <= 1
     ):
+        # NOTE(lucas): Workaround for now to help backends that assume
+        # num_tokens == num_reqs when max_query_len == 1; which may not be true due to
+        # 0 length padded requests.
+        num_tokens = min(num_tokens, max_query_len * num_reqs)
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
