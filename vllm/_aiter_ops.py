@@ -94,13 +94,21 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
     # TODO: remove this after AITER supports silu
-    activation = ActivationType.Swiglu 
+    activation = ActivationType.Swiglu
 
     # TODO: remove this after AITER supports bias = None
     E, INTER_DIM, MODEL_DIM = w1.shape[0], w1.shape[1], w2.shape[1]
-    bias1 = torch.zeros((E, INTER_DIM), dtype=torch.bfloat16).to(torch.float32).to(hidden_states.device)
-    bias2 = torch.zeros((E, MODEL_DIM), dtype=torch.bfloat16).to(torch.float32).to(hidden_states.device)
-    
+    bias1 = (
+        torch.zeros((E, INTER_DIM), dtype=torch.bfloat16)
+        .to(torch.float32)
+        .to(hidden_states.device)
+    )
+    bias2 = (
+        torch.zeros((E, MODEL_DIM), dtype=torch.bfloat16)
+        .to(torch.float32)
+        .to(hidden_states.device)
+    )
+
     return fused_moe(
         hidden_states,
         w1,
@@ -994,17 +1002,17 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         """
         Shuffle weight tensor for w4a16 quantization.
-        
+
         Args:
             tensor: Weight tensor to shuffle
             NLane: Number of lanes (typically 16)
             gate_up: Whether this is gate/up projection (True) or down projection (False)
-        
+
         Returns:
             Shuffled weight tensor
         """
         from aiter.ops.shuffle import shuffle_weight_a16w4
-        
+
         return shuffle_weight_a16w4(tensor, NLane=NLane, gate_up=gate_up)
 
     @staticmethod
@@ -1013,32 +1021,32 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         """
         Shuffle scale tensor for w4a16 quantization.
-        
+
         Args:
             tensor: Scale tensor to shuffle [n_experts, k_]
             experts_cnt: Number of experts
             gate_up: Whether this is gate/up projection (True) or down projection (False)
-        
+
         Returns:
             Shuffled scale tensor
         """
         from aiter.ops.shuffle import shuffle_scale_a16w4
-        
+
         return shuffle_scale_a16w4(tensor, experts_cnt=experts_cnt, gate_up=gate_up)
 
     @staticmethod
     def f32_to_e8m0(tensor: torch.Tensor) -> torch.Tensor:
         """
         Convert float32 tensor to e8m0 format.
-        
+
         Args:
             tensor: Float32 tensor
-        
+
         Returns:
             Tensor in e8m0 format
         """
         from aiter.utility import fp4_utils
-        
+
         return fp4_utils.f32_to_e8m0(tensor)
 
 

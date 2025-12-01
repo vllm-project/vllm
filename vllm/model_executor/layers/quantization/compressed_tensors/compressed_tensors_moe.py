@@ -1734,7 +1734,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "is supported for the following bits: ",
                 f"{WNA16_SUPPORTED_BITS}",
             )
-        
+
         # Check if ROCm AITER is available for w4a16
         self.rocm_aiter_moe_enabled = False
 
@@ -1866,27 +1866,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.platforms import current_platform
-        
         # Check if we should enable ROCm AITER for w4a16
         self.rocm_aiter_moe_enabled = (
-            self.num_bits == 4
-            and rocm_aiter_ops.is_fused_moe_enabled()
+            self.num_bits == 4 and rocm_aiter_ops.is_fused_moe_enabled()
         )
-        
+
         # Reconfigure packed weights and scales to match moe_wna16 format
         # IMPORTANT: Force convert to uint8 for int4 quantization
-        # If weights are in float4_e2m1fn_x2 (mxfp4) format, view as uint8 first
         w13_transposed = layer.w13_weight_packed.transpose(1, 2).contiguous()
         w2_transposed = layer.w2_weight_packed.transpose(1, 2).contiguous()
-        
-        # Check and log the dtype before conversion
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[CompressedTensorsMoE] Original w13_weight_packed dtype: {w13_transposed.dtype}")
-        logger.info(f"[CompressedTensorsMoE] Original w2_weight_packed dtype: {w2_transposed.dtype}")
-        
+
         # Force view as uint8 (works for both int4 packed and mxfp4)
         layer.w13_weight_packed = torch.nn.Parameter(
             w13_transposed.view(torch.uint8),
@@ -1896,33 +1885,23 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_transposed.view(torch.uint8),
             requires_grad=False,
         )
-        
-        logger.info(f"[CompressedTensorsMoE] Converted w13_weight_packed dtype: {layer.w13_weight_packed.dtype}")
-        logger.info(f"[CompressedTensorsMoE] Converted w2_weight_packed dtype: {layer.w2_weight_packed.dtype}")
+
         layer.w13_weight_scale = torch.nn.Parameter(
             layer.w13_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
-        
+
         # If using AITER, preprocess weights and scales for w4a16
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 preprocess_w4a16_weights_for_aiter,
             )
-            from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
-            
+
             # Preprocess weights for AITER (shuffle + convert scales)
             num_experts = layer.w13_weight_packed.shape[0]
-            
-            logger.info(f"[CompressedTensorsMoE] Before AITER preprocessing:")
-            logger.info(f"  w13_weight_packed: shape={layer.w13_weight_packed.shape}, dtype={layer.w13_weight_packed.dtype}")
-            logger.info(f"  w2_weight_packed: shape={layer.w2_weight_packed.shape}, dtype={layer.w2_weight_packed.dtype}")
-            logger.info(f"  w13_weight_scale: shape={layer.w13_weight_scale.shape}, dtype={layer.w13_weight_scale.dtype}")
-            logger.info(f"  w2_weight_scale: shape={layer.w2_weight_scale.shape}, dtype={layer.w2_weight_scale.dtype}")
-            logger.info(f"  num_experts: {num_experts}")
-            
+
             shuffled_w13, shuffled_w2, shuffled_w13_scale, shuffled_w2_scale = (
                 preprocess_w4a16_weights_for_aiter(
                     w1=layer.w13_weight_packed.data,
@@ -1932,26 +1911,24 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                     num_experts=num_experts,
                 )
             )
-            
-            # Update layer parameters with shuffled weights and scales
-            logger.info(f"[CompressedTensorsMoE] Shuffled weights and scales:")
-            logger.info(f"  shuffled_w13: shape={shuffled_w13.shape}, dtype={shuffled_w13.dtype}")
-            logger.info(f"  shuffled_w2: shape={shuffled_w2.shape}, dtype={shuffled_w2.dtype}")
-            logger.info(f"  shuffled_w13_scale: shape={shuffled_w13_scale.shape}, dtype={shuffled_w13_scale.dtype}")
-            logger.info(f"  shuffled_w2_scale: shape={shuffled_w2_scale.shape}, dtype={shuffled_w2_scale.dtype}")
-            
-            layer.w13_weight_packed = torch.nn.Parameter(shuffled_w13, requires_grad=False)
-            layer.w2_weight_packed = torch.nn.Parameter(shuffled_w2, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(shuffled_w13_scale, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(shuffled_w2_scale, requires_grad=False)
+
+            layer.w13_weight_packed = torch.nn.Parameter(
+                shuffled_w13, requires_grad=False
+            )
+            layer.w2_weight_packed = torch.nn.Parameter(
+                shuffled_w2, requires_grad=False
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(
+                shuffled_w13_scale, requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                shuffled_w2_scale, requires_grad=False
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         assert self.num_bits == 4 or self.num_bits == 8
-        
-        # For w4a16, use int4 config (compressed-tensors uses int4 quantization)
-        # Note: AITER will handle the int4 weights correctly with BLOCK_1X32 quant method
         config_builder = (
             int4_w4a16_moe_quant_config
             if self.num_bits == 4
@@ -2033,7 +2010,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,
             )
-            
+
             return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight_packed,

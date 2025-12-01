@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
-from typing import Tuple
 
 import torch
 
@@ -42,9 +41,6 @@ class ActivationMethod(IntEnum):
 
 aiter_topK_meta_data = None
 
-# Cache for shuffled weights to avoid repeated preprocessing
-_w4a16_weight_cache = {}
-
 
 def preprocess_w4a16_weights_for_aiter(
     w1: torch.Tensor,
@@ -52,79 +48,57 @@ def preprocess_w4a16_weights_for_aiter(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     num_experts: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Preprocess vLLM format weights to AITER format for w4a16 quantization.
-    
-    Supports both int4 and mxfp4 quantization (both use BLOCK_1X32 in AITER).
-    
-    This function performs the following transformations:
-    1. Shuffle weight tensors using shuffle_weight_a16w4
-    2. Reshape and convert scale tensors from [E, N, num_groups] to [E*N, num_groups]
-    3. Convert scales to e8m0 format
-    4. Shuffle scale tensors using shuffle_scale_a16w4
-    
+    Preprocess vLLM weights to AITER format for w4a16 quantization.
+
     Args:
-        w1: Weight tensor for gate/up projection, shape [E, 2*inter_dim, hidden_size//8*4] uint8 (int4 packed)
-        w2: Weight tensor for down projection, shape [E, hidden_size, inter_dim//8*4] uint8 (int4 packed)
-        w1_scale: Scale tensor for w1, shape [E, 2*inter_dim, num_groups] float
-        w2_scale: Scale tensor for w2, shape [E, hidden_size, num_groups] float
+        w1: Gate/up projection weights [E, 2*inter_dim, K] uint8
+        w2: Down projection weights [E, hidden_size, K] uint8
+        w1_scale: Scale for w1 [E, 2*inter_dim, groups] float
+        w2_scale: Scale for w2 [E, hidden_size, groups] float
         num_experts: Number of experts (E)
-    
+
     Returns:
         Tuple of (w1_aiter, w2_aiter, w1_scale_aiter, w2_scale_aiter)
     """
     from vllm._aiter_ops import rocm_aiter_ops
-    
-    logger.info(
-        f"Preprocessing w4a16 weights for AITER: "
-        f"w1={w1.shape} dtype={w1.dtype}, w2={w2.shape} dtype={w2.dtype}, "
-        f"w1_scale={w1_scale.shape}, w2_scale={w2_scale.shape}, "
-        f"num_experts={num_experts}"
-    )
-    
+
     if w1.dtype != torch.uint8:
-        logger.warning(f"w1 dtype is {w1.dtype}, converting to uint8")
+        logger.warning("w1 dtype is %s, converting to uint8", w1.dtype)
         w1 = w1.view(torch.uint8)
     if w2.dtype != torch.uint8:
-        logger.warning(f"w2 dtype is {w2.dtype}, converting to uint8")
+        logger.warning("w2 dtype is %s, converting to uint8", w2.dtype)
         w2 = w2.view(torch.uint8)
-    
+
     # Use rocm_aiter_ops registered functions
     w1_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w1, NLane=16, gate_up=True)
     w2_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w2, NLane=16, gate_up=False)
-    
+
     # Ensure output is uint8 (AITER shuffle might preserve input dtype)
     if w1_aiter.dtype != torch.uint8:
-        logger.warning(f"w1_aiter dtype is {w1_aiter.dtype} after shuffle, converting to uint8")
+        logger.warning(
+            "w1_aiter dtype is %s after shuffle, converting to uint8",
+            w1_aiter.dtype,
+        )
         w1_aiter = w1_aiter.view(torch.uint8)
     if w2_aiter.dtype != torch.uint8:
-        logger.warning(f"w2_aiter dtype is {w2_aiter.dtype} after shuffle, converting to uint8")
+        logger.warning(
+            "w2_aiter dtype is %s after shuffle, converting to uint8",
+            w2_aiter.dtype,
+        )
         w2_aiter = w2_aiter.view(torch.uint8)
-    
-    logger.info(
-        f"Weight shuffle completed: "
-        f"w1_aiter={w1_aiter.shape} dtype={w1_aiter.dtype}, w2_aiter={w2_aiter.shape} dtype={w2_aiter.dtype}"
-    )
-    
-    # Step 2: Preprocess scales
-    # vLLM format: [E, N, num_groups]
-    # AITER expects: [E*N, num_groups]
-    
-    # For w1 (gate_up projection)
+
     w1_scale_2d = w1_scale.view(num_experts * w1_scale.shape[1], -1)
-    w1_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w1_scale_2d, num_experts, gate_up=True)   
-    
-    # For w2 (down projection)
-    w2_scale_2d = w2_scale.view(num_experts * w2_scale.shape[1], -1)
-    w2_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(w2_scale_2d, num_experts, gate_up=False)
-    logger.info(
-        f"Scale shuffle completed: "
-        f"w1_scale_aiter={w1_scale_aiter.shape}, w2_scale_aiter={w2_scale_aiter.shape}"
+    w1_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(
+        w1_scale_2d, num_experts, gate_up=True
     )
-    
-    logger.info("w4a16 weight preprocessing completed")
-    
+
+    w2_scale_2d = w2_scale.view(num_experts * w2_scale.shape[1], -1)
+    w2_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(
+        w2_scale_2d, num_experts, gate_up=False
+    )
+
     return w1_aiter, w2_aiter, w1_scale_aiter, w2_scale_aiter
 
 
@@ -311,12 +285,12 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        
+
         # w4a16 quantization (int4 or mxfp4):
         # Use QuantMethod.NO to prevent activation quantization
         # AITER will detect w1_scale/w2_scale and use a16w4 kernels for weights
         # (activations stay in bf16/fp16, weights are pre-quantized int4/mxfp4)
-        
+
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
