@@ -16,7 +16,8 @@ namespace vllm {
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
-                            scalar_t const* __restrict__ residual = nullptr) {
+                            scalar_t const* __restrict__ residual = nullptr,
+                            int32_t const group_size = 0) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   // sum of squares
   float ss = 0.0f;
@@ -34,13 +35,20 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   __shared__ typename BlockReduce::TempStorage reduceStore;
   ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
-  __shared__ float s_rms;
-  if (threadIdx.x == 0) {
-    s_rms = rsqrtf(ss / hidden_size + epsilon);
-  }
-  __syncthreads();
+  if (group_size > 0) {
+    if (threadIdx.x == 0) {
+      *rms = rsqrtf(ss / hidden_size + epsilon);
+    }
+    __syncthreads();
+  } else {
+    __shared__ float s_rms;
+    if (threadIdx.x == 0) {
+      s_rms = rsqrtf(ss / hidden_size + epsilon);
+    }
+    __syncthreads();
 
-  *rms = s_rms;
+    *rms = s_rms;
+  }
 }
 
 // TODO replace 32 with WARP_SIZE
@@ -218,7 +226,8 @@ namespace vectorized {
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
-                            scalar_t const* __restrict__ residual = nullptr) {
+                            scalar_t const* __restrict__ residual = nullptr,
+                            int32_t const group_size = 0) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output to better utilize memory bandwidth.
@@ -264,13 +273,20 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   __shared__ typename BlockReduce::TempStorage reduceStore;
   ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
-  __shared__ float s_rms;
-  if (threadIdx.x == 0) {
-    s_rms = rsqrtf(ss / hidden_size + epsilon);
-  }
-  __syncthreads();
+  if (group_size > 0) {
+    if (threadIdx.x == 0) {
+      *rms = rsqrtf(ss / hidden_size + epsilon);
+    }
+    __syncthreads();
+  } else {
+    __shared__ float s_rms;
+    if (threadIdx.x == 0) {
+      s_rms = rsqrtf(ss / hidden_size + epsilon);
+    }
+    __syncthreads();
 
-  *rms = s_rms;
+    *rms = s_rms;
+  }
 }
 
 // Vectorized version of vllm::compute_dynamic_per_token_scales
