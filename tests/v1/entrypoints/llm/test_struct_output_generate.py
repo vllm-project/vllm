@@ -4,7 +4,7 @@
 
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jsonschema
 import pytest
@@ -23,11 +23,6 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-
-if TYPE_CHECKING:
-    from vllm.config.model import TokenizerMode
-else:
-    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -627,7 +622,7 @@ Make the response as short as possible.
 )
 def test_structured_output_with_reasoning_matrices(
     backend: str,
-    tokenizer_mode: TokenizerMode,
+    tokenizer_mode: str,
     reasoning_parser: str,
     model_name: str,
     speculative_config: dict[str, Any] | None,
