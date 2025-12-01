@@ -5,7 +5,6 @@ Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
-import hashlib
 import importlib
 import json
 import os
@@ -18,7 +17,7 @@ from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
@@ -32,6 +31,15 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.utils.hashing import safe_hash
+
+if TYPE_CHECKING:
+    from vllm.config.model import AttnTypeStr
+    from vllm.config.pooler import PoolingTypeStr
+else:
+    AttnTypeStr = Any
+    PoolingTypeStr = Any
+
 
 from .interfaces import (
     has_inner_state,
@@ -47,6 +55,7 @@ from .interfaces import (
     supports_transcription,
 )
 from .interfaces_base import (
+    get_attn_type,
     get_default_pooling_type,
     is_pooling_model,
     is_text_generation_model,
@@ -170,6 +179,7 @@ _TEXT_GENERATION_MODELS = {
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
+    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -207,6 +217,7 @@ _EMBEDDING_MODELS = {
     "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     # [Multimodal]
@@ -412,6 +423,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
@@ -506,7 +518,8 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
-    default_pooling_type: str
+    attn_type: AttnTypeStr
+    default_pooling_type: PoolingTypeStr
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
@@ -527,6 +540,7 @@ class _ModelInfo:
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
             default_pooling_type=get_default_pooling_type(model),
+            attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
@@ -654,7 +668,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
         if model_path.exists():
             with open(model_path, "rb") as f:
-                module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
+                module_hash = safe_hash(f.read(), usedforsecurity=False).hexdigest()
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:

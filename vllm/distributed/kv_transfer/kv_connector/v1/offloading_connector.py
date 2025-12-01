@@ -8,7 +8,8 @@ from typing import Any, ClassVar
 
 import torch
 
-from vllm.attention import Attention, AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (

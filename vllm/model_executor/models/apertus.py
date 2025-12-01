@@ -32,7 +32,8 @@ import torch
 from torch import nn
 from transformers import ApertusConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -481,7 +482,6 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(
         self,
