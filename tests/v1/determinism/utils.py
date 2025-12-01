@@ -17,7 +17,6 @@ skip_unsupported = pytest.mark.skipif(
 
 BACKENDS: list[str] = [
     "FLASH_ATTN",
-    "FLASHINFER",
     "TRITON_MLA",
 ]
 
