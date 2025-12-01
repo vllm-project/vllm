@@ -32,9 +32,8 @@ model_config = {
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("disable_hybrid_kv_cache_manager", [True, False])
-@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_sliding_window_retrieval(
-    model, batch_size, seed, disable_hybrid_kv_cache_manager, enforce_eager
+    model, batch_size, seed, disable_hybrid_kv_cache_manager
 ):
     """
     The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
@@ -42,12 +41,10 @@ def test_sliding_window_retrieval(
     If we tell it upfront which we are going to be looking for, then
     it answers correctly (mostly).
     """
-    if current_platform.is_rocm() and not enforce_eager:
-        pytest.skip(
-            "[ROCm] Pytorch's native implementation of GELU with tanh approximation "
-            "is currently unstable with torch.compile and produces garbage. "
-            "Use `enforce_eager=True` for custom kernel implementation."
-        )
+    # NOTE: For ROCm, we have to enforce eager mode to use custom kernel
+    # implementation of GELU with tanh approximation, as PyTorch's native
+    # implementation is currently unstable with torch.compile and produces garbage.
+    enforce_eager = current_platform.is_rocm()
 
     test_config = model_config[model]
 
