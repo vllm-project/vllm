@@ -770,7 +770,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",
-        tokenizer_mode="mistral",
+        extras={
+            "mistral-large-3": "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+            "ministral-3": "mistralai/Ministral-3-3B-Instruct-2512",
+        },
+        tokenizer_mode="mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+        # TODO: revert once Mistral-Large-3 and Ministral-3 are publicly available.
+        is_available_online=False,
     ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
