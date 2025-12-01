@@ -23,7 +23,7 @@ class _HfExamplesInfo:
     tokenizer: str | None = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: TokenizerMode = "auto"
+    tokenizer_mode: TokenizerMode | str = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: str | None = None
