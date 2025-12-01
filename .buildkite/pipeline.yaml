@@ -2,24 +2,16 @@ steps:
 - group: Abuild
   steps:
   - block: 'Run :docker: Build CPU arm64 image'
-    depends_on: image-build
+    depends_on: []
     key: block--docker--build-cpu-arm64-image
   - label: ':docker: Build CPU arm64 image'
-    key: image-build-cpu-arm64
+    key: cpu-arm64-image-build
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
     - .buildkite/image_build/image_build_cpu_arm64.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
     depends_on: block--docker--build-cpu-arm64-image
-    soft_fail: false
-  - label: ':docker: Build CPU image'
-    key: image-build-cpu
-    agents:
-      queue: cpu_queue_premerge_us_east_1
-    commands:
-    - .buildkite/image_build/image_build_cpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
-      123
     soft_fail: false
     retry:
       automatic:
@@ -29,6 +21,26 @@ steps:
         limit: 2
     env:
       DOCKER_BUILDKIT: '1'
+  - label: ':docker: Build CPU image'
+    key: image-build-cpu
+    agents:
+      queue: cpu_queue_premerge_us_east_1
+    commands:
+    - .buildkite/image_build/image_build_cpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
+      123
+    depends_on: []
+    soft_fail: false
+    retry:
+      automatic:
+      - exit_status: -1
+        limit: 2
+      - exit_status: -10
+        limit: 2
+    env:
+      DOCKER_BUILDKIT: '1'
+  - block: 'Run :docker: Build CUDA 11.8 image'
+    depends_on: []
+    key: block--docker--build-cuda-11.8-image
   - label: ':docker: Build CUDA 11.8 image'
     key: image-build-cu118
     agents:
@@ -36,6 +48,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_cu118.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
+    depends_on: block--docker--build-cuda-11.8-image
     soft_fail: false
     retry:
       automatic:
@@ -52,6 +65,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_hpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
+    depends_on: []
     soft_fail: true
     retry:
       automatic:
@@ -68,6 +82,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
+    depends_on: []
     soft_fail: false
     retry:
       automatic:

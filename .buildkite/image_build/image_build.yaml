@@ -2,7 +2,7 @@ group: Abuild
 steps:
   - label: ":docker: Build image"
     key: image-build
-    depends_on: ~
+    depends_on: []
     commands:
     - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
@@ -16,6 +16,7 @@ steps:
 
   - label: ":docker: Build CPU image"
     key: image-build-cpu
+    depends_on: []
     commands:
     - .buildkite/image_build/image_build_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
@@ -29,6 +30,7 @@ steps:
   
   - label: ":docker: Build CUDA 11.8 image"
     key: image-build-cu118
+    optional: true
     commands:
     - .buildkite/image_build/image_build_cu118.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
@@ -42,6 +44,7 @@ steps:
 
   - label: ":docker: Build HPU image"
     soft_fail: true
+    depends_on: []
     key: image-build-hpu
     commands:
     - .buildkite/image_build/image_build_hpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
@@ -56,6 +59,7 @@ steps:
   
   - label: ":docker: Build CPU arm64 image"
     key: cpu-arm64-image-build
+    depends_on: []
     optional: true
     commands:
     - .buildkite/image_build/image_build_cpu_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
