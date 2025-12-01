@@ -247,16 +247,27 @@ class FlexibleArgumentParser(ArgumentParser):
             elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
-                # also handle -O=<mode> here
-                mode = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.mode={mode}")
+                # also handle -O=<optimization_level> here
+                optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args += ["--optimization-level", optimization_level]
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.mode <n>
-                processed_args.append("-O.mode")
+                # Convert -O <n> to --optimization-level <n>
+                processed_args.append("--optimization-level")
+            elif arg.startswith("-O."):
+                # Handle -O.* dotted syntax - ALL dotted syntax is deprecated
+                logger.warning_once(
+                    "The -O.* dotted syntax for --compilation-config is "
+                    "deprecated and will be removed in v0.13.0 or v1.0.0"
+                    ", whichever is earlier.  Please use -cc.* instead. "
+                    "Example: -cc.backend=eager instead of "
+                    "-O.backend=eager."
+                )
+                converted_arg = arg.replace("-O", "-cc", 1)
+                processed_args.append(converted_arg)
             else:
                 processed_args.append(arg)
 
@@ -294,8 +305,22 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         duplicates = set[str]()
+        # Track regular arguments (non-dict args) for duplicate detection
+        regular_args_seen = set[str]()
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("--") and "." not in processed_arg:
+                if "=" in processed_arg:
+                    arg_name = processed_arg.split("=", 1)[0]
+                else:
+                    arg_name = processed_arg
+
+                if arg_name in regular_args_seen:
+                    duplicates.add(arg_name)
+                else:
+                    regular_args_seen.add(arg_name)
                 continue
 
             if processed_arg.startswith("-") and "." in processed_arg:

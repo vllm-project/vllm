@@ -28,8 +28,8 @@ from vllm.multimodal.utils import (
     encode_image_base64,
     encode_video_base64,
 )
+from vllm.tokenizers import MistralTokenizer
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
