@@ -108,7 +108,7 @@ The number of this test is less stable compared to the delay and latency benchma
 
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
-#### New JSON Format
+#### Default Parameters Field
 
 We can specify default parameters in a JSON field with key `defaults`. Parameters defined in the field are applied globally to all serving tests, and can be overridden in test case fields. Here is an example:
 

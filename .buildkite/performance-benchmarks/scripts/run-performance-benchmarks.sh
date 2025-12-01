@@ -480,11 +480,7 @@ run_serving_tests() {
         echo "Running test case $test_name with qps $qps"
         echo "Client command: $client_command"
 
-        if [ "$TEST_MODE" == "1" ]; then
-          echo "TEST MODE for '$client_command'"
-        else
-          bash -c "$client_command"
-        fi
+        bash -c "$client_command"
 
         # record the benchmarking commands
         jq_output=$(jq -n \
@@ -502,7 +498,7 @@ run_serving_tests() {
     done
 
     # clean up
-    kill -9 $server_pid 2>/dev/null || true
+    kill -9 $server_pid
     kill_gpu_processes
   done
 }

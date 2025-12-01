@@ -157,6 +157,13 @@ ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmar
 The benchmark results will be saved in `./benchmark/results/`.
 In the directory, the generated `.commands` files contain all example commands for the benchmark.
 
+We recommend configuring tensor-parallel-size to match the number of NUMA nodes on your system. Note that the current release does not support tensor-parallel-size=6.
+To determine the number of NUMA nodes available, use the following command:
+
+```bash
+lscpu | grep "NUMA node(s):" | awk '{print $3}'
+```
+
 For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
 , which publishes default-model CPU results produced using the same Benchmark Suite.
 
