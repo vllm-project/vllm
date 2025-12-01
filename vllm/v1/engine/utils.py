@@ -371,8 +371,7 @@ class CoreEngineActorManager:
         )
         assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
         assert dp_master_ip_key in nodes[0], (
-            "The DP master node (ip: %s) is missing or dead",
-            dp_master_ip,
+            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
@@ -446,8 +445,7 @@ class CoreEngineActorManager:
                 if key != "node:__internal_head__" and key.startswith("node:")
             ]
             assert len(node_ip_keys) == 1, (
-                "Zero or multiple node IP keys found in node resources: %s",
-                node_ip_keys,
+                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
             )
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
@@ -464,11 +462,9 @@ class CoreEngineActorManager:
             if node_ip == dp_master_ip:
                 if dp_size_available < dp_size_local:
                     raise ValueError(
-                        "Not enough resources to allocate %s DP ranks "
-                        "on DP master node %s, possible to fit %s DP ranks",
-                        dp_size_local,
-                        dp_master_ip,
-                        dp_size_available,
+                        f"Not enough resources to allocate {dp_size_local} DP ranks "
+                        f"on DP master node {dp_master_ip}, possible to fit "
+                        f"{dp_size_available} DP ranks."
                     )
                 dp_size_to_allocate = dp_size_local
             elif pack_strategy == "strict":

@@ -24,12 +24,14 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     device = get_dp_group().device
     group = get_dp_group().device_group
 
-    # Transfering this tensor from GPU to CPU will introduce a GPU sync
+    # Transferring this tensor from GPU to CPU will introduce a GPU sync
     # point that could adversely affect performance of vllm with asynch
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
+        logger.info_once(
+            "Using CPU all reduce to synchronize DP padding between ranks."
+        )
         device = "cpu"
         group = get_dp_group().cpu_group
     return device, group
@@ -91,13 +93,16 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 # This just pads the second ubatch slice out to the total number of tokens
 # (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
-def _pad_out_ubatch_slice(ubatch_slices: UBatchSlices, num_total_tokens: int):
-    padded_second_ubatch_slice = slice(
+def _pad_out_ubatch_slice(
+    ubatch_slices: UBatchSlices, num_total_tokens: int
+) -> UBatchSlices:
+    padded_second_token_slice = slice(
         ubatch_slices[1].token_slice.start, num_total_tokens
     )
     ubatch_slices[1] = UBatchSlice(
-        padded_second_ubatch_slice, padded_second_ubatch_slice
+        ubatch_slices[1].request_slice, padded_second_token_slice
     )
+    return ubatch_slices
 
 
 def _synchronize_dp_ranks(
