@@ -23,9 +23,9 @@ class MediaWithBytes(Generic[_T]):
     media: _T
     original_bytes: bytes
 
-    def __array__(self, dtype=None, copy=None):
+    def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
-        return np.array(self.media, dtype=dtype, copy=copy)
+        return np.array(self.media, *args, **kwargs)
 
 
 class MediaIO(ABC, Generic[_T]):
