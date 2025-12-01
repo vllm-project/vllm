@@ -154,8 +154,8 @@ Below is an example command to benchmark all CPU-supported models using optimize
 ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
-When executed, the Benchmark Suite writes results to the benchmark/results/ directory.
-Within this directory, the generated .commands files contain all optimized server and client commands for the various supported models.
+The benchmark results will be saved in `./benchmark/results/`.
+In the directory, the generated `.commands` files contain all example commands for the benchmark.
 
 For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
 , which publishes default-model CPU results produced using the same Benchmark Suite.
