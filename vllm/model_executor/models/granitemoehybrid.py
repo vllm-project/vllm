@@ -569,52 +569,6 @@ class GraniteMoeHybridModel(nn.Module):
                         shard_id="w2",
                         expert_id=e,
                     )
-            
-            elif ('.block_sparse_moe.output_linear.experts.' in n and 
-                (n.endswith('.weight') or n.endswith('.weight_scale'))):
-                
-                # Extract expert ID from the parameter name
-                expert_idx = int(n.split('.experts.')[1].split('.')[0]) if '.experts.' in n else None
-                
-                # Generate the target w2 name
-                w2_name = n.replace(
-                    f'.block_sparse_moe.output_linear.experts.{expert_idx}.weight',
-                    f".block_sparse_moe.experts.{expert_idx}.w2.weight")
-                
-                w2_param = p
-                _load_expert(n.replace(f'.output_linear.experts.{expert_idx}.', '.experts.w2_'),
-                            w2_param,
-                            w2_name,
-                            shard_id='w2',
-                            expert_id=expert_idx)
-
-            elif ('.block_sparse_moe.input_linear.experts.' in n and 
-                (n.endswith('.weight') or n.endswith('.weight_scale'))):
-
-                # Extract expert ID from the parameter name
-                expert_idx = int(n.split('.experts.')[1].split('.')[0]) if '.experts.' in n else None
-                
-                # Generate the target w1 and w3 names
-                w1_name = n.replace(
-                    f'.block_sparse_moe.input_linear.experts.{expert_idx}.weight',
-                    f".block_sparse_moe.experts.{expert_idx}.w1.weight")
-                w3_name = n.replace(
-                    f'.block_sparse_moe.input_linear.experts.{expert_idx}.weight',
-                    f".block_sparse_moe.experts.{expert_idx}.w3.weight")
-                
-                # Split the parameter into w1 and w3
-                w1_param, w3_param = p.chunk(2, dim=0)
-
-                _load_expert(n.replace(f'.input_linear.experts.{expert_idx}.', '.experts.w13_'),
-                            w1_param,
-                            w1_name,
-                            shard_id='w1',
-                            expert_id=expert_idx)
-                _load_expert(n.replace(f'.input_linear.experts.{expert_idx}.', '.experts.w13_'),
-                            w3_param,
-                            w3_name,
-                            shard_id='w3',
-                            expert_id=expert_idx)
 
             elif n.endswith(".block_sparse_moe.router.layer.weight"):
                 gate_name = n.replace(
