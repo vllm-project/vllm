@@ -82,7 +82,7 @@ from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
-from vllm.entrypoints.serve.tokenize.protocol import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
     cli_env_setup,

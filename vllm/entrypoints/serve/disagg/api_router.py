@@ -21,7 +21,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
 from vllm.entrypoints.serve.disagg.serving import (
     ServingTokens,
 )
-from vllm.entrypoints.serve.tokenize.protocol import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     load_aware_call,
     with_cancellation,

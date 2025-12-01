@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.protocol import (
     TokenizeRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.serve.tokenize.protocol import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     with_cancellation,
 )
