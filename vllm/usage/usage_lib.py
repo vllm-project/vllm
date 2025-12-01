@@ -37,12 +37,10 @@ _GLOBAL_RUNTIME_DATA = dict[str, str | int | bool]()
 
 _USAGE_ENV_VARS_TO_COLLECT = [
     "VLLM_USE_MODELSCOPE",
-    "VLLM_USE_TRITON_FLASH_ATTN",
     "VLLM_ATTENTION_BACKEND",
     "VLLM_USE_FLASHINFER_SAMPLER",
     "VLLM_PP_LAYER_PARTITION",
     "VLLM_USE_TRITON_AWQ",
-    "VLLM_USE_V1",
     "VLLM_ENABLE_V1_MULTIPROCESSING",
 ]
 
@@ -176,6 +174,32 @@ class UsageMessage:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continuous_usage()
 
+    def _report_tpu_inference_usage(self) -> bool:
+        try:
+            from tpu_inference import tpu_info, utils
+
+            self.gpu_count = tpu_info.get_num_chips()
+            self.gpu_type = tpu_info.get_tpu_type()
+            self.gpu_memory_per_device = utils.get_device_hbm_limit()
+            self.cuda_runtime = "tpu_inference"
+            return True
+        except Exception:
+            return False
+
+    def _report_torch_xla_usage(self) -> bool:
+        try:
+            import torch_xla
+
+            self.gpu_count = torch_xla.runtime.world_size()
+            self.gpu_type = torch_xla.tpu.get_tpu_type()
+            self.gpu_memory_per_device = torch_xla.core.xla_model.get_memory_info()[
+                "bytes_limit"
+            ]
+            self.cuda_runtime = "torch_xla"
+            return True
+        except Exception:
+            return False
+
     def _report_usage_once(
         self,
         model_architecture: str,
@@ -192,16 +216,10 @@ class UsageMessage:
             )
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
-        if current_platform.is_tpu():
-            try:
-                import torch_xla
-
-                self.gpu_count = torch_xla.runtime.world_size()
-                self.gpu_type = torch_xla.tpu.get_tpu_type()
-                self.gpu_memory_per_device = torch_xla.core.xla_model.get_memory_info()[
-                    "bytes_limit"
-                ]
-            except Exception:
+        if current_platform.is_tpu():  # noqa: SIM102
+            if (not self._report_tpu_inference_usage()) and (
+                not self._report_torch_xla_usage()
+            ):
                 logger.exception("Failed to collect TPU information")
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()

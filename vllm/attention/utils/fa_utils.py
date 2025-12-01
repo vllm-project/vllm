@@ -18,6 +18,14 @@ elif current_platform.is_xpu():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = ops.flash_attn_varlen_func
     get_scheduler_metadata = ops.get_scheduler_metadata
+elif current_platform.is_rocm():
+    try:
+        from flash_attn import flash_attn_varlen_func  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "Rocm platform requires upstream flash-attn "
+            "to be installed. Please install flash-attn first."
+        ) from e
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
@@ -78,6 +86,13 @@ def flash_attn_supports_fp8() -> bool:
         get_flash_attn_version() == 3
         and current_platform.get_device_capability().major == 9
     )
+
+
+def flash_attn_supports_sinks() -> bool:
+    if current_platform.is_xpu():
+        return True
+    else:
+        return get_flash_attn_version() == 3
 
 
 def flash_attn_supports_mla():

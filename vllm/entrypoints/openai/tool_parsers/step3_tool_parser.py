@@ -19,16 +19,14 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["step3"])
 class Step3ToolParser(ToolParser):
     """
     Tool parser for a model that uses a specific XML-like format for tool calls.
@@ -43,7 +41,7 @@ class Step3ToolParser(ToolParser):
     TOOL_SEP = "<｜tool_sep｜>"
     SPECIAL_TOKENS = [TOOL_CALLS_BEGIN, TOOL_CALLS_END, TOOL_CALL_BEGIN, TOOL_CALL_END]
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
         self.position = 0
         # Explicit state flags for robust streaming
@@ -51,6 +49,7 @@ class Step3ToolParser(ToolParser):
         self.tool_block_finished = False
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             request.skip_special_tokens = False
         return request

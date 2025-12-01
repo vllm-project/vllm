@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     triton_kernel_moe_forward,
 )
 from vllm.model_executor.layers.utils import shuffle_weight
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 
 def deshuffle(w: torch.Tensor):
@@ -201,7 +201,7 @@ class ModelConfig:
     sliding_window: int = 128
     initial_context_length: int = 4096
     rope_theta: float = 150000.0
-    rope_scaling_factor: float = 32.0
+    rope_parameters_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 
@@ -270,6 +270,11 @@ class Case:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp):
+    from triton_kernels.tensor_details import layout
+
+    if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
+        pytest.skip("make_default_matmul_mxfp4_w_layout not available")
+
     M = num_token
     E = ModelConfig.num_experts
     K = ModelConfig.hidden_size

@@ -40,6 +40,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
     "siglip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }
 
 

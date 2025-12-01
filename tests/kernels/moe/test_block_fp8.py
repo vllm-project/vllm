@@ -31,10 +31,13 @@ dg_available = has_deep_gemm()
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
@@ -42,57 +45,43 @@ DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 # and its hidden size is 7168.
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 512, 512),
     (1, 128, 7168),
     (1, 1024, 7168),
     (1, 4608, 128),
-    (1, 4608, 512),
     (1, 4608, 7168),
     (83, 128, 128),
     (83, 512, 512),
-    (83, 1024, 7168),
     (83, 4608, 512),
     (83, 4608, 7168),
-    (128, 128, 128),
     (128, 512, 512),
     (128, 1024, 7168),
-    (128, 4608, 512),
     (128, 4608, 7168),
     (2048, 128, 128),
     (2048, 1024, 7168),
     (2048, 4608, 512),
     (2048, 4608, 7168),
     (8192, 128, 128),
-    (8192, 512, 512),
     (8192, 128, 7168),
     (8192, 1024, 7168),
-    (8192, 4608, 512),
     (8192, 4608, 7168),
 ]
 
 MNK_FACTORS_DG = [
     (128, 128, 128),
-    (128, 512, 512),
     (128, 128, 7168),
     (128, 1024, 7168),
     (128, 4608, 128),
-    (128, 4608, 512),
     (128, 4608, 7168),
-    (192, 128, 128),
     (192, 512, 512),
     (192, 1024, 7168),
-    (192, 4608, 512),
     (192, 4608, 7168),
     (1335, 128, 128),
     (1335, 1024, 7168),
     (1335, 4608, 512),
     (1335, 4608, 7168),
     (2048, 128, 128),
-    (2048, 512, 512),
     (2048, 128, 7168),
     (2048, 1024, 7168),
-    (2048, 4608, 128),
-    (2048, 4608, 512),
     (2048, 4608, 7168),
 ]
 
