@@ -113,12 +113,26 @@ echo "Hybrid attention results saved to: $hybrid_output"
 
 echo ""
 echo "============================================================"
+echo "Generating visualizations"
+echo "============================================================"
+
+# Generate visualization plots
+python benchmarks/visualize_video_benchmark.py \
+    --results-dir "$OUTPUT_DIR" \
+    --output-dir "$OUTPUT_DIR/plots" \
+    --format png
+
+echo ""
+echo "============================================================"
 echo "Benchmark Complete!"
 echo "============================================================"
 echo "Results saved to: $OUTPUT_DIR"
+echo "Plots saved to: $OUTPUT_DIR/plots"
 echo ""
 echo "Generated files:"
 ls -la "$OUTPUT_DIR"/*.json 2>/dev/null || echo "  No JSON files found"
+echo ""
+ls -la "$OUTPUT_DIR/plots"/*.png 2>/dev/null || echo "  No plot files found"
 echo ""
 
 # Print comparison summary
