@@ -776,7 +776,7 @@ class GPUModelRunner(
         cached_req_ids = self.input_batch.req_id_to_index.keys()
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
         # NOTE(zhuohan): cached_req_ids and resumed_req_ids are usually disjoint,
-        # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids`` holds
+        # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids` holds
         # apart from the forced-preemption case in reset_prefix_cache. And in
         # that case we include the resumed_req_ids in the unscheduled set so
         # that they get cleared from the persistent batch before being re-scheduled
