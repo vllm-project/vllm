@@ -22,7 +22,11 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
+from .utils import (
+    _merge_multimodal_embeddings,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -121,8 +125,6 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        from .utils import _merge_multimodal_embeddings
-
         inputs_embeds = super().embed_input_ids(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
