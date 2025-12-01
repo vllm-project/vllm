@@ -1,13 +1,13 @@
-================================
+========================================
 Reducing PyTorch Profiler Overhead
-================================
+========================================
 
-The built-in PyTorch profiler can add 50–70 s overhead on A100/H100 because of gzip compression and CUDA time dumps.
+The built-in PyTorch profiler can add 50–70s overhead on A100/H100 due to gzip compression and CUDA time dumps.
 
-Quick Workaround (no code changes needed in main repo)
-======================================================
+Quick Workaround (Fork & Modify)
+=================================
 
-Fork the repo and edit ``vllm/profiler/gpu_profiler.py`` (~line 80):
+Edit `vllm/profiler/gpu_profiler.py` (~line 80):
 
 .. code-block:: diff
 
@@ -16,13 +16,17 @@ Fork the repo and edit ``vllm/profiler/gpu_profiler.py`` (~line 80):
    - dump_self_cuda_time_total=True
    + dump_self_cuda_time_total=False
 
-Benchmark (Nov 30 2025, T4, opt-125m)
-====================================
-- Default: ~18 s trace time
-- Modified: ~4 s trace time (78 % faster)
+Run server:
+.. code-block:: bash
 
-Future native support
-=====================
-Env-var support is being tracked in #29564.
+    python -m vllm.entrypoints.openai.api_server --model facebook/opt-125m
+
+Benchmarks (Nov 30, 2025, T4, opt-125m)
+=======================================
+
+- Default: ~18s trace time
+- Modified: ~4s trace time (78% faster)
+
+Native env var support tracked in #29564.
 
 .. include:: ../../CONTRIBUTING.rst
