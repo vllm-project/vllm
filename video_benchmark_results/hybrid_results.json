@@ -1,0 +1,46 @@
+{
+  "benchmark_type": "video_inference",
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "num_frames": 16,
+  "question": "Describe what is happening in this video in detail.",
+  "results": [
+    {
+      "config": "hybrid_attention",
+      "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "num_frames": 16,
+      "num_iterations": 5,
+      "total_input_tokens": 12115,
+      "total_output_tokens": 640,
+      "avg_latency_seconds": 1.7281582303345204,
+      "min_latency_seconds": 1.7266454603523016,
+      "max_latency_seconds": 1.7301098760217428,
+      "p50_latency_seconds": 1.728085933253169,
+      "p90_latency_seconds": 1.7293380308896302,
+      "p99_latency_seconds": 1.7300326915085316,
+      "throughput_tokens_per_second": 1476.1379804360865,
+      "generation_tokens_per_second": 74.06729184469583,
+      "all_latencies": [
+        1.728085933253169,
+        1.7266454603523016,
+        1.7301098760217428,
+        1.7281802631914616,
+        1.7277696188539267
+      ],
+      "memory": {
+        "post_init": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        },
+        "baseline": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        },
+        "post_benchmark": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        }
+      },
+      "error": null
+    }
+  ]
+}

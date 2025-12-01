@@ -23,7 +23,7 @@
       "model": "meta-llama/Llama-3.2-1B",
       "num_prompts": 50,
       "initialization": {
-        "time_seconds": 7.883013237267733
+        "time_seconds": 6.460759278386831
       },
       "memory": {
         "baseline": {
@@ -46,25 +46,25 @@
         "model_memory_gib": 0
       },
       "throughput": {
-        "tokens_per_second": 15190.385291289813,
-        "requests_per_second": 23.734977017640333,
+        "tokens_per_second": 15305.768363181385,
+        "requests_per_second": 23.915263067470914,
         "total_prompt_tokens": 25600,
         "total_output_tokens": 6400
       },
       "latency": {
-        "avg_seconds": 2.106595677882433,
-        "min_seconds": 2.0221383925527334,
-        "max_seconds": 2.4341664630919695,
-        "std_seconds": 0.16379667018395425,
-        "p50_seconds": 2.025951812043786,
-        "p90_seconds": 2.2715145949274302,
-        "p99_seconds": 2.4179012762755154,
+        "avg_seconds": 2.0907150324434043,
+        "min_seconds": 2.0034154914319515,
+        "max_seconds": 2.425036311149597,
+        "std_seconds": 0.16718701428595853,
+        "p50_seconds": 2.0087619852274656,
+        "p90_seconds": 2.2597201958298685,
+        "p99_seconds": 2.4085046996176245,
         "all_latencies": [
-          2.4341664630919695,
-          2.0221383925527334,
-          2.0231849290430546,
-          2.027536792680621,
-          2.025951812043786
+          2.425036311149597,
+          2.0046153515577316,
+          2.0034154914319515,
+          2.0087619852274656,
+          2.011746022850275
         ]
       },
       "benchmark_params": {
@@ -81,7 +81,7 @@
       "model": "meta-llama/Llama-3.2-1B",
       "num_prompts": 50,
       "initialization": {
-        "time_seconds": 7.716357855126262
+        "time_seconds": 5.830795558169484
       },
       "memory": {
         "baseline": {
@@ -104,25 +104,25 @@
         "model_memory_gib": 0
       },
       "throughput": {
-        "tokens_per_second": 20773.44356730229,
-        "requests_per_second": 18.03250309661657,
+        "tokens_per_second": 20723.953672687505,
+        "requests_per_second": 17.989543118652346,
         "total_prompt_tokens": 51200,
         "total_output_tokens": 6400
       },
       "latency": {
-        "avg_seconds": 2.772770908847451,
-        "min_seconds": 2.5937039721757174,
-        "max_seconds": 3.4725967049598694,
-        "std_seconds": 0.34994069850157977,
-        "p50_seconds": 2.597375003620982,
-        "p90_seconds": 3.125957538187504,
-        "p99_seconds": 3.437932788282633,
+        "avg_seconds": 2.7793924320489167,
+        "min_seconds": 2.589493414387107,
+        "max_seconds": 3.475830474868417,
+        "std_seconds": 0.3485113619953869,
+        "p50_seconds": 2.6006975043565035,
+        "p90_seconds": 3.1382622089236976,
+        "p99_seconds": 3.442073648273945,
         "all_latencies": [
-          3.4725967049598694,
-          2.5937039721757174,
-          2.597375003620982,
-          2.6059987880289555,
-          2.5941800754517317
+          3.475830474868417,
+          2.5990309566259384,
+          2.6006975043565035,
+          2.6319098100066185,
+          2.589493414387107
         ]
       },
       "benchmark_params": {
@@ -139,7 +139,7 @@
       "model": "meta-llama/Llama-3.2-1B",
       "num_prompts": 50,
       "initialization": {
-        "time_seconds": 6.533978544175625
+        "time_seconds": 5.748518666252494
       },
       "memory": {
         "baseline": {
@@ -162,25 +162,25 @@
         "model_memory_gib": 0
       },
       "throughput": {
-        "tokens_per_second": 26154.853926989625,
-        "requests_per_second": 12.019693900270967,
+        "tokens_per_second": 26234.13136281681,
+        "requests_per_second": 12.056126545412138,
         "total_prompt_tokens": 102400,
         "total_output_tokens": 6400
       },
       "latency": {
-        "avg_seconds": 4.159839710965753,
-        "min_seconds": 3.788424715399742,
-        "max_seconds": 5.626834550872445,
-        "std_seconds": 0.7335249802205133,
-        "p50_seconds": 3.7896284088492393,
-        "p90_seconds": 4.898253554478288,
-        "p99_seconds": 5.553976451233029,
+        "avg_seconds": 4.147269009798765,
+        "min_seconds": 3.773140389472246,
+        "max_seconds": 5.624760625883937,
+        "std_seconds": 0.7387657501701321,
+        "p50_seconds": 3.775993447750807,
+        "p90_seconds": 4.8901596006006,
+        "p99_seconds": 5.551300523355603,
         "all_latencies": [
-          5.626834550872445,
-          3.7896284088492393,
-          3.788424715399742,
-          3.8053820598870516,
-          3.788928819820285
+          5.624760625883937,
+          3.775993447750807,
+          3.7741925232112408,
+          3.7882580626755953,
+          3.773140389472246
         ]
       },
       "benchmark_params": {
@@ -197,7 +197,7 @@
       "model": "meta-llama/Llama-3.2-1B",
       "num_prompts": 50,
       "initialization": {
-        "time_seconds": 6.587888199836016
+        "time_seconds": 6.0413644555956125
       },
       "memory": {
         "baseline": {
@@ -220,25 +220,25 @@
         "model_memory_gib": 0
       },
       "throughput": {
-        "tokens_per_second": 25562.096362803608,
-        "requests_per_second": 6.051632661648581,
+        "tokens_per_second": 25501.299338743796,
+        "requests_per_second": 6.037239426785937,
         "total_prompt_tokens": 204800,
         "total_output_tokens": 6400
       },
       "latency": {
-        "avg_seconds": 8.262233151867985,
-        "min_seconds": 7.495528049767017,
-        "max_seconds": 11.284751046448946,
-        "std_seconds": 1.5113000328367872,
-        "p50_seconds": 7.501933757215738,
-        "p90_seconds": 9.78195141479373,
-        "p99_seconds": 11.134471083283424,
+        "avg_seconds": 8.281930939853192,
+        "min_seconds": 7.513331227004528,
+        "max_seconds": 11.315708927810192,
+        "std_seconds": 1.516942546772316,
+        "p50_seconds": 7.516508297994733,
+        "p90_seconds": 9.808657545596361,
+        "p99_seconds": 11.165003789588809,
         "all_latencies": [
-          11.284751046448946,
-          7.501933757215738,
-          7.5012009385973215,
-          7.5277519673109055,
-          7.495528049767017
+          11.315708927810192,
+          7.513331227004528,
+          7.516025774180889,
+          7.548080472275615,
+          7.516508297994733
         ]
       },
       "benchmark_params": {
