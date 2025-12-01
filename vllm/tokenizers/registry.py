@@ -173,11 +173,11 @@ def get_tokenizer(
             "TokenizerRegistry now uses `tokenizer_mode` as the registry key "
             "instead of `tokenizer_name`. "
             "Please update the definition of `.from_pretrained` in "
-            "your custom tokenizer to accept `args=%s`, `tuple(kwargs.items())=%s`. "
+            "your custom tokenizer to accept `args=%s`, `kwargs=%s`. "
             "Then, you can pass `tokenizer_mode=%r` instead of "
             "`tokenizer_mode='custom'` when initializing vLLM.",
             tokenizer_args,
-            tuple(tokenizer_kwargs.items()),
+            str(tokenizer_kwargs),
             tokenizer_mode,
         )
 
