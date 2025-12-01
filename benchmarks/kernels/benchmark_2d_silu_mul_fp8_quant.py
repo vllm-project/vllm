@@ -11,9 +11,11 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
+    _per_token_group_quant_fp8_colmajor,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
+from vllm.utils import triton
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 from .utils import ArgPool, Bench, CudaGraphBenchParams
 
@@ -88,27 +90,71 @@ class BenchmarkTensors:
 
     def make_impl_kwargs(self, impl_type: ImplType) -> dict[str, Any]:
         if impl_type == ImplType.SILU_MUL_PER_TOKEN_GROUP_QUANT_FP8_COLMAJOR:
-            return {"input": self.input, "output": self.output}
+            return {
+                "input": self.input,
+                "output": self.output,
+                "use_ue8m0": is_deep_gemm_e8m0_used(),
+            }
         elif impl_type == ImplType.REFERENCE:
             return {
                 "input": self.input,
                 "act_out": self.ref_act_out,
                 "quant_out": self.ref_quant_out,
+                "use_ue8m0": is_deep_gemm_e8m0_used(),
             }
         raise ValueError(f"Unrecognized impl_type {impl_type}")
 
 
+def reference_quant(x: torch.Tensor, use_ue8m0: bool):
+    """
+    Reference triton quant kernel from,
+    vllm.model_executor.layers.quantization.utils.fp8_utils
+    """
+
+    # Allocate output tensors
+    x_q = torch.empty_like(x, device=x.device, dtype=FLOAT8_T)
+    # Allocate the scale tensor column-major format.
+    shape = (x.shape[-1] // GROUP_SIZE,) + x.shape[:-1]
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
+
+    M = x.numel() // GROUP_SIZE
+    N = GROUP_SIZE
+    BLOCK = triton.next_power_of_2(N)
+    # heuristics for number of warps
+    num_warps = min(max(BLOCK // 256, 1), 8)
+    num_stages = 1
+
+    finfo = torch.finfo(FLOAT8_T)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+
+    _per_token_group_quant_fp8_colmajor[(M,)](
+        x,
+        x_q,
+        x_s,
+        GROUP_SIZE,
+        x.shape[1],
+        x.stride(0),
+        x_s.stride(1),
+        eps=1e-10,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        use_ue8m0=use_ue8m0,
+        BLOCK=BLOCK,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return x_q, x_s
+
+
 def reference(
-    input: torch.Tensor, act_out: torch.Tensor, quant_out: torch.Tensor
+    input: torch.Tensor,
+    act_out: torch.Tensor,
+    quant_out: torch.Tensor,
+    use_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     torch.ops._C.silu_and_mul(act_out, input)
-    ref_output, ref_output_scales = per_token_group_quant_fp8(
-        act_out,
-        GROUP_SIZE,
-        column_major_scales=True,
-        out_q=quant_out,
-    )
-    return ref_output, ref_output_scales
+    return reference_quant(act_out, use_ue8m0)
 
 
 def bench_impl(
@@ -162,9 +208,7 @@ def test_correctness(T: int, N: int):
         ImplType.SILU_MUL_PER_TOKEN_GROUP_QUANT_FP8_COLMAJOR
     )
 
-    torch.testing.assert_close(
-        ref_out_q.to(torch.float32), out_q.to(torch.float32), atol=32, rtol=1e-3
-    )
+    torch.testing.assert_close(ref_out_q.to(torch.float32), out_q.to(torch.float32))
     torch.testing.assert_close(ref_out_s, out_s)
 
 
