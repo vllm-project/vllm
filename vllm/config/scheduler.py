@@ -274,3 +274,11 @@ class SchedulerConfig:
             )
 
         return self
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == 'max_model_len' or name == 'is_encoder_decoder':
+            raise AttributeError(
+                "max_model_len is an init-only parameter. "
+                "Access it from ModelConfig instead."
+            )
+        return object.__getattribute__(self, name)
