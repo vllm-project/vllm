@@ -64,11 +64,13 @@ def memory_fence():
     operation (~20ns) that guarantees:
     - All stores before the barrier are visible to other threads/processes
     - All loads after the barrier see the latest values
+
+    Reference: POSIX.1-2008 specifies that mutex operations synchronize memory.
     """
     # Lock acquire/release provides full memory barrier semantics.
-    # Using context manager ensures lock release even on exceptions.
-    with _memory_fence_lock:
-        pass
+    # This flushes CPU store buffers and invalidates stale cache lines.
+    _memory_fence_lock.acquire()
+    _memory_fence_lock.release()
 
 
 def to_bytes_big(value: int, size: int) -> bytes:
