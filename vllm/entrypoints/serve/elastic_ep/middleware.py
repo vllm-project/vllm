@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Global variable to track scaling state
-_scaling_elastic_ep = None
+_scaling_elastic_ep = False
 
 
 def get_scaling_elastic_ep():

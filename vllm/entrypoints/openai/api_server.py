@@ -79,7 +79,7 @@ from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
-from vllm.entrypoints.serve.elastic_ep.protocol import (
+from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
 from vllm.entrypoints.serve.tokenize.protocol import OpenAIServingTokenization
@@ -951,10 +951,10 @@ def build_app(args: Namespace) -> FastAPI:
         )
     else:
         app = FastAPI(lifespan=lifespan)
-
+    app.state.args = args
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
-    register_vllm_serve_api_routers(app, args=args)
+    register_vllm_serve_api_routers(app)
 
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 

@@ -17,7 +17,7 @@ class PrometheusResponse(Response):
     media_type = prometheus_client.CONTENT_TYPE_LATEST
 
 
-def mount_metrics(app: FastAPI):
+def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
 
     registry = get_prometheus_registry()
