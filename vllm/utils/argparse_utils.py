@@ -234,7 +234,7 @@ class FlexibleArgumentParser(ArgumentParser):
             except StopIteration:
                 pass
 
-        if "--config" in args:
+        if isinstance(args, list) and "--config" in args:
             args = self._pull_args_from_config(args)
 
         if isinstance(args, dict):
