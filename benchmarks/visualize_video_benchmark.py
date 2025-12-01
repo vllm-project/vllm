@@ -8,10 +8,23 @@ This script generates comparison charts from benchmark JSON files:
 3. Latency distribution box plot
 4. Performance delta chart
 
+For streaming benchmarks (--streaming-mode), additional charts:
+5. Memory scaling plot (O(1) vs O(n) comparison)
+6. Frame processing time plot
+7. Concurrent query throughput
+8. Memory growth rate comparison
+
 Usage:
+    # Standard video benchmark
     python benchmarks/visualize_video_benchmark.py \
         --results-dir ./video_benchmark_results \
         --output-dir ./video_benchmark_results/plots
+
+    # Streaming video benchmark
+    python benchmarks/visualize_video_benchmark.py \
+        --results-dir ./streaming_benchmark_results \
+        --output-dir ./streaming_benchmark_results/plots \
+        --streaming-mode
 """
 
 import argparse
@@ -29,8 +42,8 @@ COLORS = {
     "standard_attention": "#e86c4a",  # Warm coral
 }
 CONFIG_LABELS = {
-    "hybrid_attention": "Hybrid Attention",
-    "standard_attention": "Standard Attention",
+    "hybrid_attention": "Hybrid SSM + SW",
+    "standard_attention": "Standard Full Attention",
 }
 
 
@@ -414,9 +427,9 @@ def create_summary_table(
                 delta = 0
 
             if lower_is_better:
-                better = "Hybrid ✓" if delta < 0 else "Standard ✓"
+                better = "Hybrid" if delta < 0 else "Standard"
             else:
-                better = "Hybrid ✓" if delta > 0 else "Standard ✓"
+                better = "Hybrid" if delta > 0 else "Standard"
 
             lines.append(
                 f"| {name} | {h_val:.2f} | {s_val:.2f} | {delta:+.2f}% | {better} |"
@@ -426,6 +439,501 @@ def create_summary_table(
         f.write("\n".join(lines))
 
     print(f"Saved summary table to: {output_path}")
+
+
+# =============================================================================
+# Streaming Video Benchmark Visualizations
+# =============================================================================
+
+
+def load_streaming_results(results_dir: str) -> dict[str, list[dict]]:
+    """Load streaming benchmark results from comparison JSON files.
+
+    Returns:
+        Dictionary mapping scenario names to list of results.
+    """
+    results = {}
+    results_path = Path(results_dir)
+
+    for json_file in results_path.glob("*_comparison.json"):
+        with open(json_file) as f:
+            data = json.load(f)
+            scenario = data.get("scenario", json_file.stem.replace("_comparison", ""))
+            results[scenario] = data.get("results", [])
+
+    # Also try individual result files
+    for json_file in results_path.glob("*.json"):
+        if "_comparison" not in json_file.name:
+            with open(json_file) as f:
+                data = json.load(f)
+                if "results" in data and len(data["results"]) > 0:
+                    scenario = data.get("scenario", json_file.stem)
+                    if scenario not in results:
+                        results[scenario] = data["results"]
+
+    return results
+
+
+def plot_memory_scaling(
+    results: dict[str, list[dict]],
+    output_path: str,
+) -> None:
+    """Plot memory usage over frames to show O(1) vs O(n) scaling.
+
+    This is the most important visualization for demonstrating SSM efficiency.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Try to find a scenario with memory samples
+    scenario_data = None
+    for scenario_name, scenario_results in results.items():
+        for result in scenario_results:
+            if result.get("memory_samples"):
+                scenario_data = scenario_results
+                break
+        if scenario_data:
+            break
+
+    if not scenario_data:
+        for ax in axes:
+            ax.text(
+                0.5,
+                0.5,
+                "No memory scaling data available",
+                ha="center",
+                va="center",
+                fontsize=12,
+                transform=ax.transAxes,
+            )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved memory scaling chart to: {output_path}")
+        return
+
+    # Left plot: Memory vs Frame Index
+    ax1 = axes[0]
+    for result in scenario_data:
+        config = result.get("config", "unknown")
+        samples = result.get("memory_samples", [])
+        if samples:
+            frames = [s.get("frame_idx", i) for i, s in enumerate(samples)]
+            memory = [s.get("used_memory_gib", 0) for s in samples]
+
+            color = COLORS.get(config, "#95a5a6")
+            label = CONFIG_LABELS.get(config, config)
+            ax1.plot(frames, memory, "o-", color=color, label=label, linewidth=2, markersize=4)
+
+            # Add trend line
+            if len(frames) >= 2:
+                z = np.polyfit(frames, memory, 1)
+                p = np.poly1d(z)
+                ax1.plot(
+                    frames,
+                    p(frames),
+                    "--",
+                    color=color,
+                    alpha=0.5,
+                    linewidth=1.5,
+                    label=f"{label} trend",
+                )
+
+    ax1.set_xlabel("Frame Index", fontsize=12)
+    ax1.set_ylabel("GPU Memory Used (GiB)", fontsize=12)
+    ax1.set_title("Memory Usage vs Video Length", fontsize=14)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # Right plot: Memory Growth Rate Comparison
+    ax2 = axes[1]
+    configs = []
+    growth_rates = []
+    colors = []
+
+    for result in scenario_data:
+        config = result.get("config", "unknown")
+        growth_rate = result.get("memory_growth_rate_gib_per_frame", 0) * 1000  # MiB/frame
+        configs.append(CONFIG_LABELS.get(config, config))
+        growth_rates.append(growth_rate)
+        colors.append(COLORS.get(config, "#95a5a6"))
+
+    if configs:
+        bars = ax2.bar(configs, growth_rates, color=colors, edgecolor="white", linewidth=0.5)
+
+        # Add value labels
+        for bar, rate in zip(bars, growth_rates):
+            height = bar.get_height()
+            ax2.annotate(
+                f"{rate:.3f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                fontweight="bold",
+            )
+
+        ax2.set_ylabel("Memory Growth Rate (MiB/frame)", fontsize=12)
+        ax2.set_title("Memory Scaling Behavior", fontsize=14)
+
+        # Add annotation explaining the meaning
+        if len(growth_rates) == 2:
+            if growth_rates[0] > 0 and growth_rates[1] > 0:
+                ratio = max(growth_rates) / min(growth_rates) if min(growth_rates) > 0 else 0
+                if ratio > 1.5:
+                    ax2.annotate(
+                        f"SSM scales {ratio:.1f}x better",
+                        xy=(0.5, 0.95),
+                        xycoords="axes fraction",
+                        ha="center",
+                        fontsize=12,
+                        fontweight="bold",
+                        color="#27ae60",
+                    )
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved memory scaling chart to: {output_path}")
+
+
+def plot_frame_processing_time(
+    results: dict[str, list[dict]],
+    output_path: str,
+) -> None:
+    """Plot frame processing time distribution."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    has_data = False
+    for scenario_name, scenario_results in results.items():
+        for result in scenario_results:
+            frame_times = result.get("frame_times_ms", [])
+            if frame_times:
+                has_data = True
+                config = result.get("config", "unknown")
+                color = COLORS.get(config, "#95a5a6")
+                label = f"{CONFIG_LABELS.get(config, config)} ({scenario_name})"
+
+                frames = np.arange(len(frame_times))
+                ax.plot(frames, frame_times, "-", color=color, label=label, linewidth=1.5, alpha=0.8)
+
+                # Add rolling average
+                if len(frame_times) > 5:
+                    window = 5
+                    rolling_avg = np.convolve(frame_times, np.ones(window) / window, mode="valid")
+                    ax.plot(
+                        frames[window - 1 :],
+                        rolling_avg,
+                        "-",
+                        color=color,
+                        linewidth=2.5,
+                        alpha=1.0,
+                    )
+
+    if not has_data:
+        ax.text(
+            0.5,
+            0.5,
+            "No frame processing time data available",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax.transAxes,
+        )
+    else:
+        ax.set_xlabel("Frame Index", fontsize=12)
+        ax.set_ylabel("Processing Time (ms)", fontsize=12)
+        ax.set_title("Frame Processing Time Over Video", fontsize=14)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved frame processing time chart to: {output_path}")
+
+
+def plot_concurrent_query_throughput(
+    results: dict[str, list[dict]],
+    output_path: str,
+) -> None:
+    """Plot concurrent query throughput comparison."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Collect data across scenarios
+    scenario_names = []
+    hybrid_qps = []
+    standard_qps = []
+    hybrid_latencies = []
+    standard_latencies = []
+
+    for scenario_name, scenario_results in results.items():
+        hybrid = next((r for r in scenario_results if r.get("config") == "hybrid_attention"), None)
+        standard = next((r for r in scenario_results if r.get("config") == "standard_attention"), None)
+
+        if hybrid and standard:
+            scenario_names.append(scenario_name.replace("-", "\n"))
+            hybrid_qps.append(hybrid.get("queries_per_second", 0) or 0)
+            standard_qps.append(standard.get("queries_per_second", 0) or 0)
+            hybrid_latencies.append((hybrid.get("avg_query_latency_seconds", 0) or 0) * 1000)
+            standard_latencies.append((standard.get("avg_query_latency_seconds", 0) or 0) * 1000)
+
+    if not scenario_names:
+        for ax in axes:
+            ax.text(
+                0.5,
+                0.5,
+                "No concurrent query data available",
+                ha="center",
+                va="center",
+                fontsize=12,
+                transform=ax.transAxes,
+            )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved concurrent query chart to: {output_path}")
+        return
+
+    x = np.arange(len(scenario_names))
+    width = 0.35
+
+    # Left plot: Queries per second
+    ax1 = axes[0]
+    bars1 = ax1.bar(
+        x - width / 2,
+        standard_qps,
+        width,
+        label="Standard Attention",
+        color=COLORS["standard_attention"],
+        edgecolor="white",
+    )
+    bars2 = ax1.bar(
+        x + width / 2,
+        hybrid_qps,
+        width,
+        label="Hybrid SSM + SW",
+        color=COLORS["hybrid_attention"],
+        edgecolor="white",
+    )
+
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax1.annotate(
+                    f"{height:.2f}",
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
+
+    ax1.set_xlabel("Scenario", fontsize=12)
+    ax1.set_ylabel("Queries per Second", fontsize=12)
+    ax1.set_title("Query Throughput Comparison", fontsize=14)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(scenario_names, fontsize=10)
+    ax1.legend(fontsize=10)
+
+    # Right plot: Query latency
+    ax2 = axes[1]
+    bars1 = ax2.bar(
+        x - width / 2,
+        standard_latencies,
+        width,
+        label="Standard Attention",
+        color=COLORS["standard_attention"],
+        edgecolor="white",
+    )
+    bars2 = ax2.bar(
+        x + width / 2,
+        hybrid_latencies,
+        width,
+        label="Hybrid SSM + SW",
+        color=COLORS["hybrid_attention"],
+        edgecolor="white",
+    )
+
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax2.annotate(
+                    f"{height:.1f}",
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
+
+    ax2.set_xlabel("Scenario", fontsize=12)
+    ax2.set_ylabel("Avg Query Latency (ms)", fontsize=12)
+    ax2.set_title("Query Latency Comparison", fontsize=14)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(scenario_names, fontsize=10)
+    ax2.legend(fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved concurrent query chart to: {output_path}")
+
+
+def plot_streaming_memory_comparison(
+    results: dict[str, list[dict]],
+    output_path: str,
+) -> None:
+    """Plot memory comparison bar chart for streaming benchmarks."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Collect data
+    scenarios = []
+    hybrid_memory = []
+    standard_memory = []
+    savings_pct = []
+
+    for scenario_name, scenario_results in results.items():
+        hybrid = next((r for r in scenario_results if r.get("config") == "hybrid_attention"), None)
+        standard = next((r for r in scenario_results if r.get("config") == "standard_attention"), None)
+
+        if hybrid and standard:
+            h_mem = hybrid.get("peak_memory_gib", 0) or 0
+            s_mem = standard.get("peak_memory_gib", 0) or 0
+
+            if s_mem > 0 and h_mem > 0:
+                scenarios.append(scenario_name.replace("-", "\n"))
+                hybrid_memory.append(h_mem)
+                standard_memory.append(s_mem)
+                savings_pct.append((s_mem - h_mem) / s_mem * 100)
+
+    if not scenarios:
+        ax.text(
+            0.5,
+            0.5,
+            "No memory comparison data available",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax.transAxes,
+        )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved memory comparison chart to: {output_path}")
+        return
+
+    x = np.arange(len(scenarios))
+    width = 0.35
+
+    bars1 = ax.bar(
+        x - width / 2,
+        standard_memory,
+        width,
+        label="Standard Attention",
+        color=COLORS["standard_attention"],
+        edgecolor="white",
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        hybrid_memory,
+        width,
+        label="Hybrid SSM + SW",
+        color=COLORS["hybrid_attention"],
+        edgecolor="white",
+    )
+
+    # Add savings annotations
+    for i, (std, hyb, save) in enumerate(zip(standard_memory, hybrid_memory, savings_pct)):
+        ax.annotate(
+            f"{save:.1f}% saved",
+            xy=(x[i], max(std, hyb)),
+            xytext=(0, 10),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+            color="#27ae60" if save > 0 else "#e74c3c",
+        )
+
+    ax.set_xlabel("Scenario", fontsize=12)
+    ax.set_ylabel("Peak Memory (GiB)", fontsize=12)
+    ax.set_title("Peak Memory Usage Comparison", fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(scenarios, fontsize=10)
+    ax.legend(fontsize=11)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved memory comparison chart to: {output_path}")
+
+
+def create_streaming_summary_table(
+    results: dict[str, list[dict]],
+    output_path: str,
+) -> None:
+    """Create a summary table for streaming benchmark results."""
+    lines = [
+        "# Streaming Video Benchmark Summary\n",
+        "## SSM + Sliding Window vs Standard Attention\n",
+        "### Key Insight: SSM provides O(1) memory scaling vs O(n) for full attention\n",
+    ]
+
+    for scenario_name, scenario_results in results.items():
+        hybrid = next((r for r in scenario_results if r.get("config") == "hybrid_attention"), None)
+        standard = next((r for r in scenario_results if r.get("config") == "standard_attention"), None)
+
+        if not hybrid or not standard:
+            continue
+
+        lines.append(f"\n## Scenario: {scenario_name}\n")
+        lines.append(f"**Frames:** {hybrid.get('num_frames', 'N/A')}  ")
+        lines.append(f"**Concurrent Queries:** {hybrid.get('concurrent_queries', 'N/A')}\n")
+
+        # Memory comparison
+        lines.append("\n### Memory Performance\n")
+        lines.append("| Metric | Standard | Hybrid | Improvement |")
+        lines.append("|--------|----------|--------|-------------|")
+
+        std_peak = standard.get("peak_memory_gib", 0) or 0
+        hyb_peak = hybrid.get("peak_memory_gib", 0) or 0
+        mem_save = ((std_peak - hyb_peak) / std_peak * 100) if std_peak > 0 else 0
+        lines.append(f"| Peak Memory (GiB) | {std_peak:.2f} | {hyb_peak:.2f} | {mem_save:.1f}% less |")
+
+        std_growth = (standard.get("memory_growth_rate_gib_per_frame", 0) or 0) * 1000
+        hyb_growth = (hybrid.get("memory_growth_rate_gib_per_frame", 0) or 0) * 1000
+        growth_ratio = std_growth / hyb_growth if hyb_growth > 0 else 0
+        lines.append(f"| Growth Rate (MiB/frame) | {std_growth:.3f} | {hyb_growth:.3f} | {growth_ratio:.1f}x better |")
+
+        # Query performance
+        lines.append("\n### Query Performance\n")
+        lines.append("| Metric | Standard | Hybrid | Delta |")
+        lines.append("|--------|----------|--------|-------|")
+
+        std_lat = (standard.get("avg_query_latency_seconds", 0) or 0) * 1000
+        hyb_lat = (hybrid.get("avg_query_latency_seconds", 0) or 0) * 1000
+        lat_delta = ((hyb_lat - std_lat) / std_lat * 100) if std_lat > 0 else 0
+        lines.append(f"| Avg Query Latency (ms) | {std_lat:.1f} | {hyb_lat:.1f} | {lat_delta:+.1f}% |")
+
+        std_qps = standard.get("queries_per_second", 0) or 0
+        hyb_qps = hybrid.get("queries_per_second", 0) or 0
+        qps_delta = ((hyb_qps - std_qps) / std_qps * 100) if std_qps > 0 else 0
+        lines.append(f"| Queries/Second | {std_qps:.2f} | {hyb_qps:.2f} | {qps_delta:+.1f}% |")
+
+    lines.append("\n---\n")
+    lines.append("*Generated by vLLM Streaming Video Benchmark*\n")
+
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines))
+
+    print(f"Saved streaming summary to: {output_path}")
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> None:
@@ -449,6 +957,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         choices=["png", "pdf", "svg"],
         help="Output format for plots",
     )
+    parser.add_argument(
+        "--streaming-mode",
+        action="store_true",
+        help="Generate visualizations for streaming video benchmarks",
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -457,7 +970,47 @@ def main(args: argparse.Namespace) -> None:
     output_dir = args.output_dir or os.path.join(args.results_dir, "plots")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load results
+    if args.streaming_mode:
+        # Load and visualize streaming benchmark results
+        print(f"Loading streaming results from: {args.results_dir}")
+        streaming_results = load_streaming_results(args.results_dir)
+
+        if not streaming_results:
+            print(f"No streaming result files found in {args.results_dir}")
+            return
+
+        print(f"Found {len(streaming_results)} scenarios: {list(streaming_results.keys())}")
+
+        # Generate streaming-specific plots
+        plot_memory_scaling(
+            streaming_results,
+            os.path.join(output_dir, f"memory_scaling.{args.format}"),
+        )
+
+        plot_frame_processing_time(
+            streaming_results,
+            os.path.join(output_dir, f"frame_processing_time.{args.format}"),
+        )
+
+        plot_concurrent_query_throughput(
+            streaming_results,
+            os.path.join(output_dir, f"concurrent_query_throughput.{args.format}"),
+        )
+
+        plot_streaming_memory_comparison(
+            streaming_results,
+            os.path.join(output_dir, f"memory_comparison.{args.format}"),
+        )
+
+        create_streaming_summary_table(
+            streaming_results,
+            os.path.join(output_dir, "streaming_summary.md"),
+        )
+
+        print(f"\nAll streaming visualizations saved to: {output_dir}")
+        return
+
+    # Standard video benchmark visualization
     print(f"Loading results from: {args.results_dir}")
     results = load_results(args.results_dir)
 
