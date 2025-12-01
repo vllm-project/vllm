@@ -20,6 +20,16 @@ def torch_dtype_to_tl(dtype: torch.dtype):
         raise ValueError(f"Unsupported dtype: {dtype}")
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"ROWS_PER_PID": r}, num_warps=num_warps, num_stages=num_stages)
+        for r in [1, 2, 4, 8, 16, 32, 64, 128]
+        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_stages in [1, 2, 3]
+    ],
+    key=["N", "topk"],
+    cache_results=True,
+)
 @triton.jit
 def _topk_softmax_kernel(
     logits_ptr,
@@ -37,8 +47,8 @@ def _topk_softmax_kernel(
     stride_ik,
     BLOCK_N: tl.constexpr,
     RENORM: tl.constexpr,
-    num_stages: tl.constexpr,
     ROWS_PER_PID: tl.constexpr,
+    num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -48,8 +58,8 @@ def _topk_softmax_kernel(
     mask_n = offs_n < N
     store_mask = offs_k < topk
 
-    # specify topk<=2 and RENORM specialization by tl.constexpr,
-    # similar as `constexpr if` in C++17
+    # impl topk<=2 and RENORM specialization by tl.constexpr,
+    # same as constexpr if in C++17
     if topk == 1:
         for row_idx in tl.range(pid, M, num_programs, num_stages):
             logits = tl.load(
@@ -64,14 +74,11 @@ def _topk_softmax_kernel(
                 denominator = tl.sum(numerator, axis=0)
                 logits = numerator / denominator
 
-            cur_max = tl.max(logits, axis=0)
+            cur_max = 1 if RENORM else tl.max(logits, axis=0)
             cur_idx = tl.argmax(logits, axis=0)
 
-            if RENORM:
-                cur_max = 1
-
             tl.store(weights_ptr + row_idx * stride_wm + 0 * stride_wk, cur_max)
-            tl.store(indices_ptr + row_idx * stride_im + 0 * stride_wk, cur_idx)
+            tl.store(indices_ptr + row_idx * stride_im + 0 * stride_ik, cur_idx)
 
     elif topk == 2:
         for row_idx in tl.range(pid, M, num_programs, num_stages):
@@ -103,7 +110,7 @@ def _topk_softmax_kernel(
             tl.store(weights_ptr + row_idx * stride_wm, val0)
             tl.store(indices_ptr + row_idx * stride_im, idx0)
             tl.store(weights_ptr + row_idx * stride_wm + 1 * stride_wk, val1)
-            tl.store(indices_ptr + row_idx * stride_im + 1 * stride_wk, idx1)
+            tl.store(indices_ptr + row_idx * stride_im + 1 * stride_ik, idx1)
 
     else:
         topk_vals = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.float32) + float(
@@ -113,7 +120,10 @@ def _topk_softmax_kernel(
 
         rows = tl.arange(0, ROWS_PER_PID)
         for row_idx in tl.range(
-            pid * ROWS_PER_PID, M, num_programs * ROWS_PER_PID, num_stages
+            pid * ROWS_PER_PID,
+            M,
+            num_programs * ROWS_PER_PID,
+            num_stages,
         ):
             row_indices = row_idx + rows  # [ROWS_PER_POD,]
             row_mask = row_indices < M
@@ -183,16 +193,15 @@ def fused_topk_softmax(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = router_logits.shape  # num_tokens, num_experts
 
-    weights = torch.empty(
-        (M, topk), device=router_logits.device, dtype=router_logits.dtype
-    )
+    weights = torch.empty((M, topk), device=router_logits.device, dtype=torch.float32)
     indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int32)
 
     BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
     topk_padded = triton.next_power_of_2(topk)
-    grid = (M,)
-    num_stages = 2
-    ROWS_PER_PID = 4
+
+    # enable autotune to find correct num threadblock,
+    # refer to https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+    grid = lambda META: (triton.cdiv(M, META["ROWS_PER_PID"]),)
 
     _topk_softmax_kernel[grid](
         logits_ptr=router_logits,
@@ -210,8 +219,6 @@ def fused_topk_softmax(
         stride_ik=indices.stride(1),
         BLOCK_N=BLOCK_N,
         RENORM=renormalize,
-        num_stages=num_stages,
-        ROWS_PER_PID=ROWS_PER_PID,
     )
 
     return weights, indices
