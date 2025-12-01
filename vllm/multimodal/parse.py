@@ -85,11 +85,11 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         """Get all data items."""
         return [self.get(idx) for idx in range(self.get_count())]
 
-    def get_hash_item(self, index: int) -> object:
+    def get_item_for_hash(self, index: int) -> object:
         return self.get(index)
 
-    def get_all_hash_items(self) -> list[object]:
-        return [self.get_hash_item(idx) for idx in range(self.get_count())]
+    def get_all_items_for_hash(self) -> list[object]:
+        return [self.get_item_for_hash(idx) for idx in range(self.get_count())]
 
     @abstractmethod
     def get_processor_data(self) -> Mapping[str, object]:
@@ -115,7 +115,7 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
     def get(self, index: int) -> _T:
         return self._unwrap(self.data[index])
 
-    def get_hash_item(self, index: int) -> _T | MediaWithBytes[_T]:
+    def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
         # Return raw item for hashing (preserves original_bytes if present)
         return self.data[index]
 
