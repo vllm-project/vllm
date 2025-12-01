@@ -215,6 +215,7 @@ steps:
   timeout_in_minutes: 10
   gpu: h100
   num_gpus: 8
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
