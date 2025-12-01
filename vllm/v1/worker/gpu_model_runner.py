@@ -2688,11 +2688,41 @@ class GPUModelRunner(
                     for kv_cache_part in kv_cache:
                         kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
 
-    def _preprocess_mamba(self):
+    def _preprocess_mamba(self, scheduler_output: "SchedulerOutput"):
         # TODO(Chen): we need to optimize this function a lot
         assert self.cache_config.enable_prefix_caching
         block_size = self.cache_config.block_size
-        for i, req_id in enumerate(self.input_batch.req_ids):
+        preprocess_req_index: list[int] = []
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            if new_req_data.num_computed_tokens > 0:
+                # NOTE(hhy): prefix should be block aligned
+                assert new_req_data.num_computed_tokens % block_size == 0
+                preprocess_req_index.append(
+                    self.input_batch.req_id_to_index[new_req_data.req_id]
+                )
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            new_block_ids = cached_reqs.new_block_ids[i]
+            if not new_block_ids:
+                continue
+            for kv_cache_gid, kv_cache_group in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                if not isinstance(
+                    kv_cache_group.kv_cache_spec, MambaSpec
+                ):
+                    continue
+                # NOTE(hhy): assume all mamba groups are the same
+                if new_block_ids[kv_cache_gid]:
+                    preprocess_req_index.append(
+                        self.input_batch.req_id_to_index[req_id]
+                    )
+                break
+
+        if is_global_first_rank():
+            logger.info(f'>>> [DEBUG] Worker: preprocess mamba: {preprocess_req_index=}')
+        for i in preprocess_req_index:
+            req_id = self.input_batch.req_ids[i]
             if is_global_first_rank():
                 logger.info(f'>>> [DEBUG] Worker: preprocess mamba for RUN: {i=} {req_id=}')
             req_state = self.requests[req_id]
@@ -2859,7 +2889,7 @@ class GPUModelRunner(
                     and self.cache_config.enable_prefix_caching
                 ):
                     # TODO: add limition: preprocess only have new blocks
-                    self._preprocess_mamba()
+                    self._preprocess_mamba(scheduler_output)
 
                 total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
