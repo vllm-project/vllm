@@ -28,7 +28,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     RerankResponse,
