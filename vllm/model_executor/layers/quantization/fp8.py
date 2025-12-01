@@ -1099,9 +1099,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert not self.block_quant
                 register_moe_scaling_factors(layer)
                 w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                w2_weight = layer.w2_weight.data
                 if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                 layer.w13_weight.data = w13_weight.data
+                layer.w2_weight.data = w2_weight.data
 
         if self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(
@@ -1241,7 +1243,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"
             )
-
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
@@ -1276,7 +1277,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert (
                     not layer.renormalize and layer.custom_routing_function is not None
                 )
-                result = apply_flashinfer_per_tensor_scale_fp8(
+                return apply_flashinfer_per_tensor_scale_fp8(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,

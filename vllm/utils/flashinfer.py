@@ -391,7 +391,7 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+        from flashinfer.gemm import mm_fp4 as flashinfer_mm_fp4_
 
         return flashinfer_mm_fp4_(
             A, B, A_scale, B_scale, g_scale, dtype, block_size=16, backend=backend

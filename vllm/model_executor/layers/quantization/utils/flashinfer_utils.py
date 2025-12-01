@@ -121,18 +121,21 @@ def apply_flashinfer_per_tensor_scale_fp8(
     assert layer.output1_scales_scalar is not None, (
         "Expected output1_scales_scalar to be initialized"
     )
-    assert layer.output1_scales_scalar is not None, (
+    assert layer.output1_scales_gate_scalar is not None, (
         "Expected output1_scales_gate_scalar to be initialized"
     )
-    assert layer.output1_scales_scalar is not None, (
+    assert layer.output2_scales_scalar is not None, (
         "Expected output2_scales_scalar to be initialized"
     )
 
     from vllm.model_executor.models.llama4 import Llama4MoE
 
-    assert layer.custom_routing_function == Llama4MoE.custom_routing_function, (
-        "FusedMoE flashinfer kernels are only supported for Llama4"
-    )
+    if layer.routing_method_type == RoutingMethodType.Llama4:
+        assert (
+            not layer.renormalize
+            and layer.custom_routing_function == Llama4MoE.custom_routing_function
+        )
+
     return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
         routing_logits=router_logits,
         routing_bias=routing_bias,
@@ -151,7 +154,7 @@ def apply_flashinfer_per_tensor_scale_fp8(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         use_routing_scales_on_input=apply_router_weight_on_input,
-        routing_method_type=RoutingMethodType.Llama4,
+        routing_method_type=layer.routing_method_type,
     )
 
 

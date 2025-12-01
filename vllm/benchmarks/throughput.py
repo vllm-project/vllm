@@ -706,11 +706,25 @@ def main(args: argparse.Namespace):
         # mistral_common tokenizer is only supported on vllm and vllm-chat backends;
         # for hf and mii backends, we use hf tokenizer
         args.tokenizer_mode = "hf"
-    tokenizer = get_tokenizer(
-        args.tokenizer,
-        tokenizer_mode=args.tokenizer_mode,
-        trust_remote_code=args.trust_remote_code,
-    )
+        tokenizer = get_tokenizer(
+            args.tokenizer,
+            tokenizer_mode=args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
+    elif args.tokenizer_mode == "mistral":
+        try:
+            from vllm.transformers_utils.tokenizer import MistralTokenizer
+        except ImportError as e:
+            raise ImportError(
+                "MistralTokenizer requires vllm package.\n"
+                "Please install it with `pip install vllm` "
+                "to use mistral tokenizer mode."
+            ) from e
+        tokenizer = MistralTokenizer.from_pretrained(str(args.tokenizer))
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.tokenizer, trust_remote_code=args.trust_remote_code
+        )
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
     request_outputs: list[RequestOutput] | None = None
