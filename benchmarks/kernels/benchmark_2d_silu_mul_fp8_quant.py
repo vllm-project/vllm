@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _per_token_group_quant_fp8_colmajor,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
-from vllm.utils import triton
+from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 from .utils import ArgPool, Bench, CudaGraphBenchParams
@@ -105,16 +105,16 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized impl_type {impl_type}")
 
 
-def reference_quant(x: torch.Tensor, use_ue8m0: bool):
+def reference_quant(x: torch.Tensor, quant_out: torch.Tensor, use_ue8m0: bool):
     """
     Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
     """
-
     # Allocate output tensors
-    x_q = torch.empty_like(x, device=x.device, dtype=FLOAT8_T)
+    assert quant_out.size() == x.size()
     # Allocate the scale tensor column-major format.
     shape = (x.shape[-1] // GROUP_SIZE,) + x.shape[:-1]
+    x_q = quant_out
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
 
     M = x.numel() // GROUP_SIZE
@@ -154,7 +154,7 @@ def reference(
     use_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     torch.ops._C.silu_and_mul(act_out, input)
-    return reference_quant(act_out, use_ue8m0)
+    return reference_quant(act_out, quant_out, use_ue8m0)
 
 
 def bench_impl(
