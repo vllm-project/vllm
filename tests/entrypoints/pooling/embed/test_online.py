@@ -15,10 +15,8 @@ import torch.nn.functional as F
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import (
-    EmbeddingResponse,
-    PoolingResponse,
-)
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.serial_utils import (
