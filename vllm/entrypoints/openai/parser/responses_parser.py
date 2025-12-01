@@ -41,9 +41,8 @@ class ResponsesParser:
         self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
 
     def process(self, output: CompletionOutput) -> "ResponsesParser":
-        # type: ignore
         reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
-            output.text, request=None
+            output.text, request=self.request
         )
         if reasoning_content:
             self.response_messages.append(
