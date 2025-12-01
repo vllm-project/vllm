@@ -13,7 +13,7 @@ class EAGLEConfig(PretrainedConfig):
         self,
         model: PretrainedConfig | dict | None = None,
         truncated_vocab_size: int | None = None,
-        method: str | None = None,
+        method: str | None = "eagle",
         **kwargs,
     ):
         model_config: PretrainedConfig | DeepseekV2Config | None
