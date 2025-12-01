@@ -7,76 +7,50 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
-    from ray import serve
+    from ray import serve as ray_serve
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
-    serve = None
+    ray_serve = None
 import regex as re
 
 
 def _get_replica_id() -> str | None:
     """Get the current Ray Serve replica ID, or None if not in a Serve context."""
-    if serve is None:
+    if ray_serve is None:
         return None
     try:
-        ctx = serve.get_replica_context()
-        return ctx.replica_id.unique_id
-    except RuntimeError:
+        return ray_serve.get_replica_context().replica_id.unique_id
+    except ray_serve.exceptions.RayServeException:
         return None
 
 
 class RayPrometheusMetric:
-    """Base class for Ray metric wrappers.
-
-    Automatically adds ReplicaId tag when running in a Ray Serve context.
-    """
-
-    # Cache replica ID at class level (same for all metrics in a replica)
-    _replica_id: str | None = None
-    _replica_id_checked: bool = False
-
     def __init__(self):
         if ray_metrics is None:
             raise ImportError("RayPrometheusMetric requires Ray to be installed.")
-
         self.metric: Metric = None
 
-        # Cache replica ID on first metric creation
-        if not RayPrometheusMetric._replica_id_checked:
-            RayPrometheusMetric._replica_id = _get_replica_id()
-            RayPrometheusMetric._replica_id_checked = True
-
-    @classmethod
-    def _get_tag_keys(cls, labelnames: list[str] | None) -> tuple[str, ...] | None:
-        """Build tag keys, adding ReplicaId if in a Serve context."""
+    @staticmethod
+    def _get_tag_keys(labelnames: list[str] | None) -> tuple[str, ...] | None:
         labels = list(labelnames) if labelnames else []
-        if cls._replica_id is not None:
-            labels.append("ReplicaId")
-        return tuple(labels) if labels else None
-
-    def _set_replica_tag(self):
-        """Set ReplicaId as a default tag if in a Serve context."""
-        if RayPrometheusMetric._replica_id is not None:
-            self.metric.set_default_tags({"ReplicaId": RayPrometheusMetric._replica_id})
+        labels.append("ReplicaId")
+        return tuple(labels)
 
     def labels(self, *labels, **labelskwargs):
+        replica_id = _get_replica_id()
+
+        if labels:
+            labelskwargs.update(zip(self.metric._tag_keys, labels))
+
+        labelskwargs["ReplicaId"] = replica_id or ""
+
         if labelskwargs:
             for k, v in labelskwargs.items():
                 if not isinstance(v, str):
                     labelskwargs[k] = str(v)
             self.metric.set_default_tags(labelskwargs)
-
-        if labels:
-            if len(labels) != len(self.metric._tag_keys):
-                raise ValueError(
-                    "Number of labels must match the number of tag keys. "
-                    f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
-                )
-
-            self.metric.set_default_tags(dict(zip(self.metric._tag_keys, labels)))
-
         return self
 
     @staticmethod
@@ -116,9 +90,10 @@ class RayGaugeWrapper(RayPrometheusMetric):
         name = self._get_sanitized_opentelemetry_name(name)
 
         self.metric = ray_metrics.Gauge(
-            name=name, description=documentation, tag_keys=tag_keys
+            name=name,
+            description=documentation,
+            tag_keys=tag_keys,
         )
-        self._set_replica_tag()
 
     def set(self, value: int | float):
         return self.metric.set(value)
@@ -141,11 +116,11 @@ class RayCounterWrapper(RayPrometheusMetric):
         super().__init__()
         tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
-
         self.metric = ray_metrics.Counter(
-            name=name, description=documentation, tag_keys=tag_keys
+            name=name,
+            description=documentation,
+            tag_keys=tag_keys,
         )
-        self._set_replica_tag()
 
     def inc(self, value: int | float = 1.0):
         if value == 0:
@@ -175,7 +150,6 @@ class RayHistogramWrapper(RayPrometheusMetric):
             tag_keys=tag_keys,
             boundaries=boundaries,
         )
-        self._set_replica_tag()
 
     def observe(self, value: int | float):
         return self.metric.observe(value)
