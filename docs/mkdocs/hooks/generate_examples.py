@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Literal
 
@@ -48,71 +49,65 @@ class Example:
     Attributes:
         path (Path): The path to the main directory or file.
         category (str): The category of the document.
-        main_file (Path): The main file in the directory.
-        other_files (list[Path]): list of other files in the directory.
-        title (str): The title of the document.
+
+    Properties::
+        main_file() -> Path | None: Determines the main file in the given path.
+        other_files() -> list[Path]: Determines other files in the directory excluding
+        the main file.
+        title() -> str: Determines the title of the document.
 
     Methods:
-        __post_init__(): Initializes the main_file, other_files, and title attributes.
-        determine_main_file() -> Path: Determines the main file in the given path.
-        determine_other_files() -> list[Path]: Determines other files in the directory excluding the main file.
-        determine_title() -> str: Determines the title of the document.
         generate() -> str: Generates the documentation content.
-    """  # noqa: E501
+    """
 
     path: Path
-    category: str = None
-    main_file: Path = field(init=False)
-    other_files: list[Path] = field(init=False)
-    title: str = field(init=False)
+    category: str
 
-    def __post_init__(self):
-        self.main_file = self.determine_main_file()
-        self.other_files = self.determine_other_files()
-        self.title = self.determine_title()
+    @cached_property
+    def main_file(self) -> Path | None:
+        """Determines the main file in the given path.
 
-    @property
-    def is_code(self) -> bool:
-        return self.main_file.suffix != ".md"
+        If path is a file, it returns the path itself. If path is a directory, it
+        searches for Markdown files (*.md) in the directory and returns the first one
+        found. If no Markdown files are found, it returns None."""
+        # Single file example
+        if self.path.is_file():
+            return self.path
+        # Multi file example with a README
+        if md_paths := list(self.path.glob("*.md")):
+            return md_paths[0]
+        # Multi file example without a README
+        return None
 
-    def determine_main_file(self) -> Path:
-        """
-        Determines the main file in the given path.
-        If the path is a file, it returns the path itself. Otherwise, it searches
-        for Markdown files (*.md) in the directory and returns the first one found.
-        Returns:
-            Path: The main file path, either the original path if it's a file or the first
-            Markdown file found in the directory.
-        Raises:
-            IndexError: If no Markdown files are found in the directory.
-        """  # noqa: E501
-        return self.path if self.path.is_file() else list(self.path.glob("*.md")).pop()
+    @cached_property
+    def other_files(self) -> list[Path]:
+        """Determine other files in the directory excluding the main file.
 
-    def determine_other_files(self) -> list[Path]:
-        """
-        Determine other files in the directory excluding the main file.
-
-        This method checks if the given path is a file. If it is, it returns an empty list.
-        Otherwise, it recursively searches through the directory and returns a list of all
-        files that are not the main file.
-
-        Returns:
-            list[Path]: A list of Path objects representing the other files in the directory.
-        """  # noqa: E501
+        If path is a file, it returns an empty list. Otherwise, it returns every file
+        in the directory except the main file in a list."""
+        # Single file example
         if self.path.is_file():
             return []
+        # Multi file example
         is_other_file = lambda file: file.is_file() and file != self.main_file
         return [file for file in self.path.rglob("*") if is_other_file(file)]
 
-    def determine_title(self) -> str:
-        if not self.is_code:
-            # Specify encoding for building on Windows
-            with open(self.main_file, encoding="utf-8") as f:
-                first_line = f.readline().strip()
-            match = re.match(r"^#\s+(?P<title>.+)$", first_line)
-            if match:
-                return match.group("title")
-        return fix_case(self.path.stem.replace("_", " ").title())
+    @cached_property
+    def is_code(self) -> bool:
+        return self.main_file is not None and self.main_file.suffix != ".md"
+
+    @cached_property
+    def title(self) -> str:
+        # Generate title from filename if no main md file found
+        if self.main_file is None or self.is_code:
+            return fix_case(self.path.stem.replace("_", " ").title())
+        # Specify encoding for building on Windows
+        with open(self.main_file, encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        match = re.match(r"^#\s+(?P<title>.+)$", first_line)
+        if match:
+            return match.group("title")
+        raise ValueError(f"Title not found in {self.main_file}")
 
     def fix_relative_links(self, content: str) -> str:
         """
@@ -162,8 +157,8 @@ class Example:
                 f'--8<-- "{self.main_file}"\n'
                 f"{code_fence}\n"
             )
-        else:
-            with open(self.main_file) as f:
+        elif self.main_file is not None:
+            with open(self.main_file, encoding="utf-8") as f:
                 # Skip the title from md snippets as it's been included above
                 main_content = f.readlines()[1:]
             content += self.fix_relative_links("".join(main_content))
@@ -200,11 +195,13 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     glob_patterns = ["*.py", "*.md", "*.sh"]
     # Find categorised examples
     for category in categories:
+        logger.info("Processing category: %s", category.stem)
         globs = [category.glob(pattern) for pattern in glob_patterns]
         for path in itertools.chain(*globs):
             examples.append(Example(path, category.stem))
         # Find examples in subdirectories
-        for path in category.glob("*/*.md"):
+        globs = [category.glob(f"*/{pattern}") for pattern in glob_patterns]
+        for path in itertools.chain(*globs):
             examples.append(Example(path.parent, category.stem))
 
     # Generate the example documentation
@@ -217,3 +214,4 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         with open(doc_path, "w+", encoding="utf-8") as f:
             f.write(example.generate())
         logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))
+    logger.info("Total examples generated: %d", len(examples))
