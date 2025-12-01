@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any
@@ -20,6 +21,64 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensors
 
 logger = init_logger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class CUDAGraphStats:
+    num_unpadded_tokens: int
+    num_padded_tokens: int
+    runtime_mode: str
+
+
+class CUDAGraphLogging:
+    """Aggregate and log cudagraph metrics"""
+
+    def __init__(self, cg_mode: CUDAGraphMode, cg_capture_sizes: list[int] | None):
+        self.reset()
+        self.cg_mode = str(cg_mode)
+        self.cg_capture_sizes = str(cg_capture_sizes or [])
+
+    def reset(self):
+        self.rows: list[tuple[int, int, int, str]] = []
+
+    def observe(self, cudagraph_stats: CUDAGraphStats):
+        self.rows.append(
+            (
+                cudagraph_stats.num_unpadded_tokens,
+                cudagraph_stats.num_padded_tokens,
+                cudagraph_stats.num_padded_tokens - cudagraph_stats.num_unpadded_tokens,
+                cudagraph_stats.runtime_mode,
+            )
+        )
+
+    def generate_metric_table(self) -> str:
+        # Count occurrences of each unique row
+        row_counts = Counter(self.rows)
+
+        # Create header
+        header = (
+            "CUDAGraph Config Settings:\n"
+            f"Mode: {self.cg_mode}\n"
+            f"Capture sizes: {self.cg_capture_sizes}\n\n"
+            "CUDAGraph Stats:\n"
+            f"{'Padded Tokens':<15}\t{'Unpadded Tokens':<17}\t"
+            f"{'Num Padding':<12}\t{'Runtime Mode':<15}\t{'Count':<6}"
+        )
+
+        # Create data rows
+        data_rows = []
+        for row, count in sorted(row_counts.items()):
+            data_rows.append(
+                f"{row[0]:<15}\t{row[1]:<17}\t{row[2]:<12}\t{row[3]:<15}\t{count:<6}"
+            )
+
+        return header + "\n" + "\n".join(data_rows) + "\n"
+
+    def log(self, log_fn=logger.info):
+        if not self.rows:
+            return
+        log_fn(self.generate_metric_table())
+        self.reset()
 
 
 @dataclasses.dataclass

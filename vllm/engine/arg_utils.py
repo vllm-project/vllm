@@ -1104,6 +1104,9 @@ class EngineArgs:
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
+        compilation_group.add_argument(
+            "--log-cudagraph-info", **compilation_kwargs["log_cudagraph_info"]
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

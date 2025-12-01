@@ -500,6 +500,11 @@ class CompilationConfig:
     capture ignores all partitioning.
     """
 
+    log_cudagraph_info: bool = False
+    """Whether to enable logging information about cudagraph dispatch, e.g. 
+    number of tokens with and without padding and cudagraph dispatch modes
+    """
+
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
