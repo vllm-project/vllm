@@ -113,7 +113,6 @@ class UniProcExecutor(Executor):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         values = self.collective_rpc("take_draft_token_ids", single_value=True)
-        logger.info(f"EXECUTOR TAKE DRAFT TOKEN IDS RETURNED VALUES: {values}")
         return values
 
     def check_health(self) -> None:

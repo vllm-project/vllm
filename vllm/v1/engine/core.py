@@ -457,8 +457,6 @@ class EngineCore:
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
             ):
-                num_reject_spec_tokens[req_id] = 0
-                # Add newly generated spec token ids to the request.
                 request = self.scheduler.requests.get(req_id)
                 if request is None or request.is_finished():
                     # The request may have been finished. Skip.
@@ -470,9 +468,7 @@ class EngineCore:
                     spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
                         spec_token_ids
                     )
-                logger.info(
-                    f"Updated draft token ids for request {req_id}: {spec_token_ids} (from {deferred_scheduler_output.scheduled_spec_decode_tokens[req_id]})")
-                num_reject_spec_tokens[req_id] = len(spec_token_ids)
+                num_reject_spec_tokens[req_id] = orig_num_draft_tokens - len(spec_token_ids)
                 while len(spec_token_ids) < orig_num_draft_tokens:
                     spec_token_ids.append(-2)
                     # Now, we delegate a clear meaning to token -2:

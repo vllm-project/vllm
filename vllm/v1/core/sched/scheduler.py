@@ -1244,12 +1244,8 @@ class Scheduler(SchedulerInterface):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
-                logger.info(f"Ignoring draft token ids for finished request {req_id}")
                 continue
 
-            logger.info(
-                f"Updating draft token ids for request {req_id}: {spec_token_ids}")
-            prev_spec_token_ids = request.spec_token_ids
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
@@ -1259,8 +1255,6 @@ class Scheduler(SchedulerInterface):
                 )
             else:
                 request.spec_token_ids = spec_token_ids
-            logger.info(
-                f"Updated draft token ids for request {req_id}: {request.spec_token_ids} (from {prev_spec_token_ids})")
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
