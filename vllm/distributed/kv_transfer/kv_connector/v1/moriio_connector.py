@@ -19,7 +19,7 @@ import msgspec
 import numpy as np
 import torch
 import zmq
-
+from vllm import envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
@@ -201,9 +201,9 @@ class TransferError(MoRIIOError):
 
 
 def get_moriio_mode() -> MoRIIOMode:
-    read_mode = os.environ.get("MORIIO_CONNECTOR_READ_MODE", "false").lower()
+    read_mode=envs.VLLM_MORIIO_CONNECTOR_READ_MODE
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
-    if read_mode in ("true", "1", "yes", "on"):
+    if read_mode:
         return MoRIIOMode.READ
     else:
         return MoRIIOMode.WRITE
@@ -575,9 +575,9 @@ class MoRIIOWrapper:
 
     def set_backend_type(self, backend_type):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = int(os.getenv("VLLM_MORI_QP_PER_TRANSFER", "1"))
-        post_batch_size = int(os.getenv("VLLM_MORI_POST_BATCH_SIZE", "-1"))
-        num_worker_threads = int(os.getenv("VLLM_MORI_NUM_WORKERS", "1"))
+        qp_per_transfer=envs.VLLM_MORIIO_QP_PER_TRANSFER
+        post_batch_size=envs.VLLM_MORIIO_POST_BATCH_SIZE
+        num_worker_threads=envs.VLLM_MORIIO_NUM_WORKERS
         poll_mode = PollCqMode.POLLING
         rdma_cfg = RdmaBackendConfig(
             qp_per_transfer,
