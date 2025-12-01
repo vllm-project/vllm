@@ -21,18 +21,30 @@ def __getattr__(name: str):
         )
 
         return TokenizerLike
-    if name == "get_cached_tokenizer":
-        from vllm.tokenizers.hf import get_cached_tokenizer
+    if name == "get_tokenizer":
+        from vllm.tokenizers import get_tokenizer
 
         warnings.warn(
-            "`vllm.transformers_utils.tokenizer.get_cached_tokenizer` "
-            "has been moved to `vllm.tokenizers.hf.get_cached_tokenizer`. "
+            "`vllm.transformers_utils.tokenizer.get_tokenizer` "
+            "has been moved to `vllm.tokenizers.get_tokenizer`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,
         )
 
-        return get_cached_tokenizer
+        return get_tokenizer
+    if name == "cached_get_tokenizer":
+        from vllm.tokenizers import cached_get_tokenizer
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.cached_get_tokenizer` "
+            "has been moved to `vllm.tokenizers.cached_get_tokenizer`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return cached_get_tokenizer
     if name == "cached_tokenizer_from_config":
         from vllm.tokenizers import cached_tokenizer_from_config
 
