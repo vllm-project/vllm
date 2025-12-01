@@ -14,7 +14,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config.model import RunnerOption
 from vllm.logprobs import SampleLogprobs
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import (
     AUDIO_ASSETS,
@@ -126,7 +126,7 @@ class VLMTestInfo(NamedTuple):
     vllm_runner_kwargs: dict[str, Any] | None = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Callable[[AnyTokenizer], list[int]] | None = None
+    get_stop_token_ids: Callable[[TokenizerLike], list[int]] | None = None
     # Optional list of strings to stop generation, useful when stop tokens are
     # not special tokens in the tokenizer
     stop_str: list[str] | None = None

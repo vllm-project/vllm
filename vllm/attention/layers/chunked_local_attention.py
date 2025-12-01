@@ -5,6 +5,7 @@ import functools
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
@@ -21,8 +22,6 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     KVCacheSpec,
 )
-
-from ..layer import Attention
 
 
 @functools.lru_cache
