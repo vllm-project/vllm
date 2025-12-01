@@ -263,6 +263,29 @@ record:
 - End-to-end latency - the interval between frontend `arrival_time`
   and the frontend receiving the final token.
 
+### KV Cache Residency Metrics
+
+We also emit a set of histograms that describe how long sampled KV cache
+blocks stay resident and how often they are reused. Sampling
+(`--kv-cache-metrics-sample`) keeps the overhead tiny; when a block is
+chosen we record:
+
+- `lifetime` – allocation ⟶ eviction
+- `idle before eviction` – last touch ⟶ eviction
+- `reuse gaps` – the pauses between touches when the block gets reused
+
+Those map directly to the Prometheus metrics:
+
+- `vllm:kv_block_lifetime_seconds` – how long each sampled block exists.
+- `vllm:kv_block_idle_before_evict_seconds` – idle tail after the final access.
+- `vllm:kv_block_reuse_gap_seconds` – time between consecutive touches.
+
+The engine core only ships raw eviction events via `SchedulerStats`; the
+frontend drains them, turns them into Prometheus observations, and also
+exposes the same data through `LLM.get_metrics()` when logging is on.
+Looking at lifetime and idle time on one chart makes it easy to spot
+stranded cache or workloads that pin prompts for a long decode.
+
 ### Metrics Publishing - Logging
 
 The `LoggingStatLogger` metrics publisher outputs a log `INFO` message
