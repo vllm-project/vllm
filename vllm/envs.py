@@ -100,6 +100,8 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_PROFILER_DELAY_ITERS: int = 0
     VLLM_PROFILER_MAX_ITERS: int = 0
+    VLLM_TORCH_PROFILER_USE_GZIP: bool = True
+    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: bool = True
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -890,6 +892,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
     # If set to 0, will not limit the number of iterations.
     "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
+    # Control whether torch profiler gzip-compresses profiling files.
+    # Set VLLM_TORCH_PROFILER_USE_GZIP=0 to disable gzip (enabled by default).
+    "VLLM_TORCH_PROFILER_USE_GZIP": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_USE_GZIP", "1") != "0"
+    ),
+    # Control whether torch profiler dumps the self_cuda_time_total table.
+    # Set VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL=0 to disable dumping
+    # (enabled by default).
+    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL", "1") != "0"
+    ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,
