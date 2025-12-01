@@ -190,7 +190,9 @@ class AsyncLLM(EngineClient):
                 ],
                 with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
                 ),
             )
         else:
