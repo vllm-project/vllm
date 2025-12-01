@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# import os
 
-# os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 PROMPTS = [
