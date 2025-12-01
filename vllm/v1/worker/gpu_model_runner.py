@@ -893,7 +893,9 @@ class GPUModelRunner(
                 if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
                     and self.speculative_config):
                     num_poped_blocks = []
-                    for kv_cache_group in self.kv_cache_config.kv_cache_groups:
+                    for kv_cache_gid, kv_cache_group in enumerate(
+                        self.kv_cache_config.kv_cache_groups
+                    ):
                         if (isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
                             and new_block_ids[kv_cache_gid]
                         ):
