@@ -16,15 +16,17 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
     ErrorResponse,
-    GenerateRequest,
-    GenerateResponse,
-    GenerateResponseChoice,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.serve.disagg.protocol import (
+    GenerateRequest,
+    GenerateResponse,
+    GenerateResponseChoice,
+)
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
