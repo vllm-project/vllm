@@ -500,7 +500,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     M,  # num tokens
     N,  # intermediate size
     # Stride
-    y_s_col_stride,
+    y_s_col_stride: tl.int64,
     # Information for float8
     eps,
     fp8_min,
@@ -527,8 +527,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     if m_offset >= M:
         return
 
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
+    offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
 
     base_y_ptr = y_ptr + m_offset * N + n_offset
 
