@@ -79,8 +79,37 @@ def plot_memory_comparison(
             kv_cache_memory.append(kv_mem or 0)
             model_memory.append(model_mem or 0)
 
-    if not configs:
-        print("No memory data available for plotting")
+    # Check if we have any meaningful memory data (not all zeros/None)
+    has_meaningful_data = (
+        configs
+        and (any(v > 0 for v in kv_cache_memory) or any(v > 0 for v in model_memory))
+    )
+
+    if not has_meaningful_data:
+        # Display a message instead of empty bars
+        ax.text(
+            0.5,
+            0.5,
+            "No memory data collected\n\n"
+            "(Memory stats require GPU execution.\n"
+            "Run benchmarks on GPU to collect memory metrics.)",
+            ha="center",
+            va="center",
+            fontsize=12,
+            transform=ax.transAxes,
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+        )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(
+            f"Memory Footprint Comparison (Input Length: {input_length})", fontsize=14
+        )
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved memory comparison chart (no data) to: {output_path}")
         return
 
     x = np.arange(len(configs))
