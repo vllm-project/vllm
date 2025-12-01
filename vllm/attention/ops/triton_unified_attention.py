@@ -54,12 +54,7 @@ def find_seq_idx(
 
 
 @triton.jit
-def unified_attention_2d(
-    kv_head_idx,  # int
-    seq_idx,  # int
-    q_block_local_idx,  # int
-    cur_batch_in_all_start_index,  # int
-    cur_batch_query_len,  # int
+def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
     key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
@@ -104,10 +99,37 @@ def unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     q_block_offset,  # int
+    decode_only: tl.constexpr,
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
+    q_block_global_idx = tl.program_id(0) + q_block_offset
+    kv_head_idx = tl.program_id(1)
+
+    if not decode_only:
+        seq_idx = find_seq_idx(
+            query_start_len_ptr,
+            q_block_global_idx,
+            num_seqs + q_block_offset,
+            BLOCK_Q,
+            True,
+        )
+        q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
+    else:
+        seq_idx = q_block_global_idx
+        q_block_start_idx = seq_idx
+
+    q_block_local_idx = q_block_global_idx - q_block_start_idx
+
+    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
+    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
+
+    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
+
+    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
+        return
+
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
@@ -336,255 +358,6 @@ def unified_attention_2d(
         output_ptr + output_offset,
         acc,
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-    )
-
-
-@triton.jit
-def kernel_mixed_attention_2d(
-    output_ptr,  # [num_tokens, num_query_heads, head_size]
-    query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    sink_ptr,  # [num_query_heads]
-    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    seq_lens_ptr,  # [num_seqs]
-    alibi_slopes_ptr,  # [num_query_heads]
-    qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
-    out_scale,  # float32
-    softcap,  # float32
-    num_query_heads: tl.constexpr,  # int
-    num_queries_per_kv: tl.constexpr,  # int
-    block_table_stride: tl.int64,  # int
-    query_stride_0: tl.int64,  # int
-    query_stride_1: tl.int64,  # int, should be equal to head_size
-    output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
-    qq_bias_stride_0: tl.int64,  # int
-    BLOCK_SIZE: tl.constexpr,  # int
-    TILE_SIZE: tl.constexpr,  # int must be power of 2
-    HEAD_SIZE: tl.constexpr,  # int
-    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-    USE_ALIBI_SLOPES: tl.constexpr,  # bool
-    USE_QQ_BIAS: tl.constexpr,  # bool
-    USE_SOFTCAP: tl.constexpr,  # bool
-    USE_SINKS: tl.constexpr,  # bool
-    SLIDING_WINDOW: tl.constexpr,  # int
-    stride_k_cache_0: tl.int64,  # int
-    stride_k_cache_1: tl.int64,  # int
-    stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.constexpr,  # int
-    stride_v_cache_0: tl.int64,  # int
-    stride_v_cache_1: tl.int64,  # int
-    stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
-    BLOCK_Q: tl.constexpr,  # int
-    num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,  # int
-    q_block_offset,  # int
-    USE_FP8: tl.constexpr,  # bool
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
-):
-    q_block_global_idx = tl.program_id(0) + q_block_offset
-    kv_head_idx = tl.program_id(1)
-
-    seq_idx = find_seq_idx(
-        query_start_len_ptr,
-        q_block_global_idx,
-        num_seqs + q_block_offset,
-        BLOCK_Q,
-        True,
-    )
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
-
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-
-    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
-        return
-
-    unified_attention_2d(
-        kv_head_idx=kv_head_idx,
-        seq_idx=seq_idx,
-        q_block_local_idx=q_block_local_idx,
-        cur_batch_in_all_start_index=cur_batch_in_all_start_index,
-        cur_batch_query_len=cur_batch_query_len,
-        output_ptr=output_ptr,
-        query_ptr=query_ptr,
-        key_cache_ptr=key_cache_ptr,
-        value_cache_ptr=value_cache_ptr,
-        sink_ptr=sink_ptr,
-        block_tables_ptr=block_tables_ptr,
-        seq_lens_ptr=seq_lens_ptr,
-        alibi_slopes_ptr=alibi_slopes_ptr,
-        qq_bias_ptr=qq_bias_ptr,
-        scale=scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        out_scale=out_scale,
-        softcap=softcap,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        block_table_stride=block_table_stride,
-        query_stride_0=query_stride_0,
-        query_stride_1=query_stride_1,
-        output_stride_0=output_stride_0,
-        output_stride_1=output_stride_1,
-        qq_bias_stride_0=qq_bias_stride_0,
-        BLOCK_SIZE=BLOCK_SIZE,
-        TILE_SIZE=TILE_SIZE,
-        HEAD_SIZE=HEAD_SIZE,
-        HEAD_SIZE_PADDED=HEAD_SIZE_PADDED,
-        USE_ALIBI_SLOPES=USE_ALIBI_SLOPES,
-        USE_QQ_BIAS=USE_QQ_BIAS,
-        USE_SOFTCAP=USE_SOFTCAP,
-        USE_SINKS=USE_SINKS,
-        SLIDING_WINDOW=SLIDING_WINDOW,
-        stride_k_cache_0=stride_k_cache_0,
-        stride_k_cache_1=stride_k_cache_1,
-        stride_k_cache_2=stride_k_cache_2,
-        stride_k_cache_3=stride_k_cache_3,
-        stride_v_cache_0=stride_v_cache_0,
-        stride_v_cache_1=stride_v_cache_1,
-        stride_v_cache_2=stride_v_cache_2,
-        stride_v_cache_3=stride_v_cache_3,
-        query_start_len_ptr=query_start_len_ptr,
-        BLOCK_Q=BLOCK_Q,
-        num_seqs=num_seqs,
-        BLOCK_M=BLOCK_M,
-        q_block_offset=q_block_offset,
-        USE_FP8=USE_FP8,
-        FP8_MIN=FP8_MIN,
-        FP8_MAX=FP8_MAX,
-    )
-
-
-@triton.jit
-def kernel_decode_attention_2d(
-    output_ptr,  # [num_tokens, num_query_heads, head_size]
-    query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    sink_ptr,  # [num_query_heads]
-    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    seq_lens_ptr,  # [num_seqs]
-    alibi_slopes_ptr,  # [num_query_heads]
-    qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
-    out_scale,  # float32
-    softcap,  # float32
-    num_query_heads: tl.constexpr,  # int
-    num_queries_per_kv: tl.constexpr,  # int
-    block_table_stride: tl.int64,  # int
-    query_stride_0: tl.int64,  # int
-    query_stride_1: tl.int64,  # int, should be equal to head_size
-    output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
-    qq_bias_stride_0: tl.int64,  # int
-    BLOCK_SIZE: tl.constexpr,  # int
-    TILE_SIZE: tl.constexpr,  # int must be power of 2
-    HEAD_SIZE: tl.constexpr,  # int
-    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-    USE_ALIBI_SLOPES: tl.constexpr,  # bool
-    USE_QQ_BIAS: tl.constexpr,  # bool
-    USE_SOFTCAP: tl.constexpr,  # bool
-    USE_SINKS: tl.constexpr,  # bool
-    SLIDING_WINDOW: tl.constexpr,  # int
-    stride_k_cache_0: tl.int64,  # int
-    stride_k_cache_1: tl.int64,  # int
-    stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.constexpr,  # int
-    stride_v_cache_0: tl.int64,  # int
-    stride_v_cache_1: tl.int64,  # int
-    stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
-    BLOCK_Q: tl.constexpr,  # int
-    num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,  # int
-    q_block_offset,  # int
-    USE_FP8: tl.constexpr,  # bool
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
-):
-    q_block_global_idx = tl.program_id(0) + q_block_offset
-    kv_head_idx = tl.program_id(1)
-
-    seq_idx = q_block_global_idx
-    q_block_start_idx = seq_idx
-
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
-
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-
-    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
-        return
-
-    unified_attention_2d(
-        kv_head_idx=kv_head_idx,
-        seq_idx=seq_idx,
-        q_block_local_idx=q_block_local_idx,
-        cur_batch_in_all_start_index=cur_batch_in_all_start_index,
-        cur_batch_query_len=cur_batch_query_len,
-        output_ptr=output_ptr,
-        query_ptr=query_ptr,
-        key_cache_ptr=key_cache_ptr,
-        value_cache_ptr=value_cache_ptr,
-        sink_ptr=sink_ptr,
-        block_tables_ptr=block_tables_ptr,
-        seq_lens_ptr=seq_lens_ptr,
-        alibi_slopes_ptr=alibi_slopes_ptr,
-        qq_bias_ptr=qq_bias_ptr,
-        scale=scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        out_scale=out_scale,
-        softcap=softcap,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        block_table_stride=block_table_stride,
-        query_stride_0=query_stride_0,
-        query_stride_1=query_stride_1,
-        output_stride_0=output_stride_0,
-        output_stride_1=output_stride_1,
-        qq_bias_stride_0=qq_bias_stride_0,
-        BLOCK_SIZE=BLOCK_SIZE,
-        TILE_SIZE=TILE_SIZE,
-        HEAD_SIZE=HEAD_SIZE,
-        HEAD_SIZE_PADDED=HEAD_SIZE_PADDED,
-        USE_ALIBI_SLOPES=USE_ALIBI_SLOPES,
-        USE_QQ_BIAS=USE_QQ_BIAS,
-        USE_SOFTCAP=USE_SOFTCAP,
-        USE_SINKS=USE_SINKS,
-        SLIDING_WINDOW=SLIDING_WINDOW,
-        stride_k_cache_0=stride_k_cache_0,
-        stride_k_cache_1=stride_k_cache_1,
-        stride_k_cache_2=stride_k_cache_2,
-        stride_k_cache_3=stride_k_cache_3,
-        stride_v_cache_0=stride_v_cache_0,
-        stride_v_cache_1=stride_v_cache_1,
-        stride_v_cache_2=stride_v_cache_2,
-        stride_v_cache_3=stride_v_cache_3,
-        query_start_len_ptr=query_start_len_ptr,
-        BLOCK_Q=BLOCK_Q,
-        num_seqs=num_seqs,
-        BLOCK_M=BLOCK_M,
-        q_block_offset=q_block_offset,
-        USE_FP8=USE_FP8,
-        FP8_MIN=FP8_MIN,
-        FP8_MAX=FP8_MAX,
     )
 
 
@@ -999,6 +772,7 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    num_prefills=None,
     num_decodes=None,
     seq_threshold_3D=None,
     split_launch=None,
@@ -1029,11 +803,31 @@ def unified_attention(
     # function. However, it is recommended to include these assignments in the
     # attention metadata itself, as performing them here may negatively impact
     # performance.
-    if seq_threshold_3D is None or split_launch is None or num_decodes is None:
+    if (
+        seq_threshold_3D is None
+        or split_launch is None
+        or num_prefills is None
+        or num_decodes is None
+    ):
         seq_threshold_3D = 128 // num_kv_heads
         split_launch = False
         seq_lens = torch.diff(cu_seqlens_q)
+        num_prefills = (seq_lens > 1).sum().item()
         num_decodes = (seq_lens == 1).sum().item()
+
+    # Assigning Q Block dimensions for prefill and decode.
+    BLOCK_M_2D_PREFILL = (
+        64 if num_queries_per_kv <= 64 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    BLOCK_M_2D_DECODE = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    BLOCK_M_3D_DECODE = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    BLOCK_Q_2D_PREFILL = BLOCK_M_2D_PREFILL // num_queries_per_kv
+    BLOCK_Q_2D_DECODE = BLOCK_M_2D_DECODE // num_queries_per_kv
+    BLOCK_Q_3D_DECODE = BLOCK_M_3D_DECODE // num_queries_per_kv
 
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
@@ -1042,15 +836,8 @@ def unified_attention(
     TILE_SIZE_2D_DECODE = 32
     TILE_SIZE_3D_DECODE = 16 if q.element_size() >= 2 else 32
 
-    if num_seqs > num_decodes:
+    if num_prefills > 0:
         # batch contains prefills
-
-        BLOCK_M = (
-            64
-            if num_queries_per_kv <= 64
-            else triton.next_power_of_2(num_queries_per_kv)
-        )
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
 
         # Ideally we would launch with kernel with:
         # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -1062,12 +849,12 @@ def unified_attention(
         #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
         #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
         total_num_q_blocks = (
-            (q.shape[0] - num_decodes) // BLOCK_Q + num_seqs - num_decodes
+            (q.shape[0] - num_decodes) // BLOCK_Q_2D_PREFILL + num_seqs - num_decodes
             if split_launch
-            else q.shape[0] // BLOCK_Q + num_seqs
+            else q.shape[0] // BLOCK_Q_2D_PREFILL + num_seqs
         )
 
-        kernel_mixed_attention_2d[
+        kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
                 num_kv_heads,
@@ -1113,26 +900,20 @@ def unified_attention(
             stride_v_cache_2=v.stride(2),
             stride_v_cache_3=v.stride(3),
             query_start_len_ptr=cu_seqlens_q,
-            BLOCK_Q=BLOCK_Q,
+            BLOCK_Q=BLOCK_Q_2D_PREFILL,
             num_seqs=num_seqs - num_decodes if split_launch else num_seqs,
-            BLOCK_M=BLOCK_M,
+            BLOCK_M=BLOCK_M_2D_PREFILL,
             q_block_offset=num_decodes if split_launch else 0,
+            decode_only=False,
             USE_FP8=output_scale is not None,
         )
 
-    if num_decodes > 0 or (num_seqs > num_decodes and split_launch):
+    if (num_decodes > 0) and ((num_prefills == 0) or split_launch):
         # batch contains decodes that are not processed in unified fashion
-
-        BLOCK_M = (
-            16
-            if num_queries_per_kv <= 16
-            else triton.next_power_of_2(num_queries_per_kv)
-        )
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
 
         if num_decodes > seq_threshold_3D:
             # use 2D kernel
-            kernel_decode_attention_2d[
+            kernel_unified_attention_2d[
                 (
                     num_decodes,
                     num_kv_heads,
@@ -1178,10 +959,11 @@ def unified_attention(
                 stride_v_cache_2=v.stride(2),
                 stride_v_cache_3=v.stride(3),
                 query_start_len_ptr=cu_seqlens_q,
-                BLOCK_Q=BLOCK_Q,
+                BLOCK_Q=BLOCK_Q_2D_DECODE,
                 num_seqs=num_decodes,
-                BLOCK_M=BLOCK_M,
+                BLOCK_M=BLOCK_M_2D_DECODE,
                 q_block_offset=0,
+                decode_only=True,
                 USE_FP8=output_scale is not None,
             )
         else:
@@ -1254,9 +1036,9 @@ def unified_attention(
                 stride_v_cache_2=v.stride(2),
                 stride_v_cache_3=v.stride(3),
                 query_start_len_ptr=cu_seqlens_q,
-                BLOCK_Q=BLOCK_Q,
+                BLOCK_Q=BLOCK_Q_3D_DECODE,
                 num_seqs=num_decodes,
-                BLOCK_M=BLOCK_M,
+                BLOCK_M=BLOCK_M_3D_DECODE,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
                 q_block_offset=0,
                 decode_only=True,
@@ -1278,7 +1060,7 @@ def unified_attention(
                 HEAD_SIZE=head_size,
                 HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
                 query_start_len_ptr=cu_seqlens_q,
-                BLOCK_Q=BLOCK_Q,
+                BLOCK_Q=BLOCK_Q_3D_DECODE,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
                 query_token_idx_offset=0,
                 decode_only=True,

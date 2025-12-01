@@ -59,6 +59,7 @@ class TritonAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    num_prefills: int
     num_decodes: int
     seq_threshold_3D: int
     split_launch: bool
@@ -199,6 +200,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            num_prefills=num_prefills,
             num_decodes=num_decodes,
             seq_threshold_3D=self.seq_threshold_3D,
             split_launch=self.split_launch,
@@ -409,6 +411,7 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        num_prefills = attn_metadata.num_prefills
         num_decodes = attn_metadata.num_decodes
         seq_threshold_3D = attn_metadata.seq_threshold_3D
         split_launch = attn_metadata.split_launch
@@ -433,6 +436,7 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            num_prefills=num_prefills,
             num_decodes=num_decodes,
             seq_threshold_3D=seq_threshold_3D,
             split_launch=split_launch,

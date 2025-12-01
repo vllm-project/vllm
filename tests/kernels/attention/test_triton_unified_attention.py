@@ -168,6 +168,7 @@ def test_triton_unified_attn(
         v_descale = torch.rand(scale_shape, dtype=torch.float32)
 
     num_decodes = num_seqs if max_query_len == 1 else query_lens.count(1)
+    num_prefills = num_seqs - num_decodes
 
     unified_attention(
         q=maybe_quantized_query,
@@ -178,7 +179,6 @@ def test_triton_unified_attn(
         seqused_k=kv_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
-        num_decodes=num_decodes,
         softmax_scale=scale,
         causal=True,
         window_size=window_size,
@@ -187,6 +187,8 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
         seq_threshold_3D=seq_threshold_3D,
         split_launch=split_launch,
     )
