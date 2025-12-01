@@ -717,18 +717,24 @@ if envs.VLLM_USE_PRECOMPILED:
 "platform_tag": "manylinux1_x86_64",
 "variant": null,
 "filename": "vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl",
-"path": "../vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
+"path": "../vllm-0.11.2.dev278%2Bgdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
 },
 ...]"""
         for wheel in wheels:
+            # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
             if wheel.get("package_name") == "vllm" and arch in wheel.get(
                 "platform_tag", ""
             ):
                 logger.info("Found precompiled wheel metadata: {}", wheel)
                 if "path" not in wheel:
                     raise ValueError(f"Wheel metadata missing path: {wheel}")
-                # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
-                wheel_url = repo_url + wheel["path"]
+                path = wheel["path"]
+                # path may contain '+' which needs to be URL-encoded
+                if '+' in path:
+                    from urllib.parse import quote
+                    path = quote(path, safe=":%/")
+                    logger.info("Encoded wheel path to {}", path)
+                wheel_url = repo_url + path
                 logger.info("Using precompiled wheel URL: {}", wheel_url)
                 break
         else:
