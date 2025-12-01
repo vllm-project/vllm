@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -27,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -58,6 +59,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
+        # Flashinfer TRTLLM MoE is only supported on Blackwell and later GPUS
+        self.flashinfer_trtllm_moe_enabled = (
+            has_flashinfer()
+            and envs.VLLM_USE_FLASHINFER_MOE_FP16
+            and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
+            and current_platform.get_device_capability()[0] >= 10
+        )
+
         # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
         self.flashinfer_cutlass_moe_enabled = (
             has_flashinfer_cutlass_fused_moe()
@@ -66,7 +75,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             and self.moe.moe_parallel_config.dp_size == 1
             and current_platform.get_device_capability()[0] >= 9
         )
-        if self.flashinfer_cutlass_moe_enabled:
+
+        if self.flashinfer_trtllm_moe_enabled:
+            logger.info_once(
+                "Enabling FlashInfer TRTLLM MoE for UnquantizedFusedMoEMethod"
+            )
+            # Import the module to register the custom op
+            import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
+
+            self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+            self.flashinfer_trtllm_moe = torch.ops.vllm.flashinfer_fused_moe_bf16
+        elif self.flashinfer_cutlass_moe_enabled:
             logger.info_once(
                 "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
             )
@@ -219,6 +238,67 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
 
+        if self.flashinfer_trtllm_moe_enabled:
+            from flashinfer.fused_moe.core import (
+                _maybe_get_cached_w3_w1_permute_indices,
+                convert_to_block_layout,
+                get_w2_permute_indices_with_cache,
+            )
+
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
+            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+            layer.w13_weight.data = w13_weight_swapped.contiguous()
+            epilogue_tile_m = 128
+            block_k = 128
+            # Reorder rows of W1 for fused gated activation
+            w13_weights_bf16_shuffled = []
+            w2_weights_bf16_shuffled = []
+            for i in range(layer.local_num_experts):
+                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                    self._cache_permute_indices,
+                    layer.w13_weight.data[i].view(torch.uint8),
+                    epilogue_tile_m,
+                )
+                tmp_weights1 = (
+                    layer.w13_weight.data[i]
+                    .clone()
+                    .view(torch.uint8)[permute_indices.to(layer.w13_weight.data.device)]
+                    .contiguous()
+                )
+
+                permute_indices = get_w2_permute_indices_with_cache(
+                    self._cache_permute_indices,
+                    layer.w2_weight.data[i].view(torch.uint8),
+                    epilogue_tile_m,
+                )
+                tmp_weights2 = (
+                    layer.w2_weight.data[i]
+                    .clone()
+                    .view(torch.uint8)[permute_indices.to(layer.w2_weight.data.device)]
+                    .contiguous()
+                )
+
+                tmp_weights1 = convert_to_block_layout(
+                    tmp_weights1.view(torch.uint8), block_k
+                )
+                tmp_weights2 = convert_to_block_layout(
+                    tmp_weights2.view(torch.uint8), block_k
+                )
+
+                w13_weights_bf16_shuffled.append(tmp_weights1.view(torch.bfloat16))
+                w2_weights_bf16_shuffled.append(tmp_weights2.view(torch.bfloat16))
+
+            # Stack weights for all experts
+            w13_weights_bf16_shuffled = (
+                torch.stack(w13_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
+            )
+            w2_weights_bf16_shuffled = (
+                torch.stack(w2_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
+            )
+            layer.w13_weight = Parameter(w13_weights_bf16_shuffled, requires_grad=False)
+            layer.w2_weight = Parameter(w2_weights_bf16_shuffled, requires_grad=False)
+
         if self.flashinfer_cutlass_moe_enabled:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
@@ -357,6 +437,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             router_logits=router_logits,
         )
 
+        if self.flashinfer_trtllm_moe_enabled:
+            return self.flashinfer_trtllm_moe(
+                routing_logits=router_logits,
+                routing_bias=e_score_correction_bias,
+                hidden_states=x,
+                gemm1_weights=layer.w13_weight,
+                gemm2_weights=layer.w2_weight,
+                num_experts=global_num_experts,
+                top_k=top_k,
+                n_group=num_expert_group,
+                topk_group=topk_group,
+                intermediate_size=layer.intermediate_size_per_partition,
+                local_expert_offset=layer.ep_rank * layer.local_num_experts,
+                local_num_experts=layer.local_num_experts,
+                routing_method_type=layer.routing_method_type,
+                tune_max_num_tokens=8192,
+            )
         if self.rocm_aiter_moe_enabled:
             result = self.rocm_aiter_fused_experts(
                 hidden_states=x,

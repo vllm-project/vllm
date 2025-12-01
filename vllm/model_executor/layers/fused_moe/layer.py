@@ -9,7 +9,7 @@ from typing import Literal, cast, get_args, overload
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
