@@ -44,6 +44,7 @@ NKM_FACTORS_WVSPLITK = [
 ]
 
 NKM_FACTORS_WVSPLITKRC = [
+    (32, 2880, 25136),
     (32, 2880, 128),
     (32, 2880, 640),
     (32, 512, 2880),
@@ -68,6 +69,7 @@ NKM_FACTORS_WVSPLITK_FP8 = [
 
 SEEDS = [0]
 
+
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -86,7 +88,6 @@ def test_rocm_wvsplitkrc_bias2D_kernel(n, k, m, dtype, seed):
 
     assert torch.allclose(out, ref_out, rtol=0.01)
 
-""""
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
@@ -224,4 +225,3 @@ def test_rocm_wvsplitk_fp8_bias1D_kernel(n, k, m, dtype, seed):
     )
 
     assert torch.allclose(out, ref_out, rtol=0.01)
-    """
