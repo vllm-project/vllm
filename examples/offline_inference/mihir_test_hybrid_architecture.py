@@ -32,7 +32,6 @@ from vllm import LLM, SamplingParams
 from vllm.v1.attention.backends.hybrid_attn import HybridAttentionImpl
 from vllm.model_executor.layers.hybrid_ssm_adapter import HybridSSMAdapter
 from vllm.config import ModelConfig, CacheConfig, VllmConfig
-from vllm.utils import is_hip
 
 # Mocking utilities to avoid needing a full model config for the synthetic test
 from unittest.mock import MagicMock
@@ -208,10 +207,11 @@ def run_integration_test(model_name: str):
 
 if __name__ == "__main__":
     # 1. Run the synthetic verification (no model required)
+    import traceback
     try:
         run_synthetic_verification()
     except Exception as e:
-        print(f"Synthetic verification failed: {e}")
+        traceback.print_exc()
         sys.exit(1)
         
     # 2. Run integration test if a model is provided

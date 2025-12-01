@@ -153,26 +153,26 @@ def run_benchmark(
     if max_model_len is not None:
         engine_kwargs["max_model_len"] = max_model_len
 
-    # Configure for hybrid attention if needed
-    if config["use_hybrid"]:
-        # Override the model architecture to use HybridLlamaForCausalLM
-        # This is done via hf_overrides to set use_hybrid_attention in config
-        engine_kwargs["hf_overrides"] = {"use_hybrid_attention": True}
-
+    # Configure hf_overrides for sliding window and hybrid attention
+    hf_overrides = {}
+    
     # Set sliding window if configured
     if config["sliding_window"] is not None:
-        engine_kwargs["override_neuron_config"] = {
-            "sliding_window": config["sliding_window"]
-        }
+        hf_overrides["sliding_window"] = config["sliding_window"]
 
-    # Clear GPU memory before starting
+    # Configure for hybrid attention if needed
+    if config["use_hybrid"]:
+        hf_overrides["use_hybrid_attention"] = True
+
+    if hf_overrides:
+        engine_kwargs["hf_overrides"] = hf_overrides
+
+    # Don't touch CUDA before vLLM starts - it uses multiprocessing spawn
+    # which requires CUDA to not be initialized in the parent process
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-    # Record baseline memory
-    baseline_memory = get_gpu_memory_info()
+    
+    # Record baseline memory AFTER engine init to avoid CUDA init conflicts
+    baseline_memory = {"free_memory_gib": 0, "total_memory_gib": 0, "used_memory_gib": 0}
 
     # Initialize the engine
     print(f"\nInitializing engine for config: {config['name']}")
@@ -473,11 +473,10 @@ def main(args: argparse.Namespace) -> None:
         args.model, trust_remote_code=args.trust_remote_code
     )
 
-    # Set random seed
+    # Set random seed (avoid CUDA init before vLLM starts)
     random.seed(args.seed)
     np.random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
+    torch.manual_seed(args.seed)  # CPU seed only - vLLM handles GPU seeding
 
     # Run benchmarks by input length
     results = run_benchmark_by_input_length(
