@@ -60,11 +60,49 @@ def long_wait_time_msg(threshold: int) -> str:
 
 
 class SpinTimer:
+    """Base spin timer that yields to the scheduler on each spin."""
+
     def record_activity(self):
         pass
 
     def spin(self):
         sched_yield()
+
+
+class SpinBackoffTimer(SpinTimer):
+    """
+    Spin timer with periodic backoff to prevent livelock under high contention.
+
+    Under sustained high load, pure sched_yield() can cause livelock when
+    multiple processes are spinning on shared memory. This timer adds a small
+    sleep every N spins to break potential livelock patterns.
+
+    The backoff interval is tuned to add ~1us of delay per spin on average,
+    which is enough to break livelocks without significantly impacting latency.
+    """
+
+    def __init__(self, backoff_interval: int = 1000, backoff_sleep_us: float = 1000):
+        """
+        Args:
+            backoff_interval: Number of spins between backoff sleeps
+            backoff_sleep_us: Backoff sleep duration in microseconds
+        """
+        self._spin_count = 0
+        self._backoff_interval = backoff_interval
+        self._backoff_sleep_s = backoff_sleep_us / 1_000_000
+
+    def record_activity(self):
+        # Reset spin count on activity to maintain low latency during normal ops
+        self._spin_count = 0
+
+    def spin(self):
+        self._spin_count += 1
+        if self._spin_count >= self._backoff_interval:
+            # Periodic backoff to break potential livelock
+            time.sleep(self._backoff_sleep_s)
+            self._spin_count = 0
+        else:
+            sched_yield()
 
 
 class SpinSleepTimer(SpinTimer):
@@ -312,7 +350,8 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer = SpinTimer()
+        self._read_spin_timer = SpinBackoffTimer()
+        self._write_spin_timer = SpinBackoffTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -352,7 +391,7 @@ class MessageQueue:
             self.remote_socket = None
 
             self._read_spin_timer = (
-                SpinSleepTimer() if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
+                SpinSleepTimer() if envs.VLLM_SLEEP_WHEN_IDLE else SpinBackoffTimer()
             )
         else:
             self.buffer = None  # type: ignore
@@ -422,7 +461,8 @@ class MessageQueue:
                     # we need to wait until it is read by all readers
 
                     # Release the processor to other threads
-                    sched_yield()
+                    # Use spin timer with backoff to prevent livelock under high contention
+                    self._write_spin_timer.spin()
 
                     # if we time out, raise an exception
                     elapsed = time.monotonic() - start_time
