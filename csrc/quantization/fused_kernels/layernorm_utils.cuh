@@ -223,11 +223,10 @@ namespace vectorized {
 
 // Compute 1.0/rms(input)
 // hidden_size must be a multiple of 4
-template <typename scalar_t, bool has_residual = false>
+template <typename scalar_t, bool has_residual = false, int32_t group_size = 0>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
-                            scalar_t const* __restrict__ residual = nullptr,
-                            int32_t const group_size = 0) {
+                            scalar_t const* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output to better utilize memory bandwidth.
@@ -273,7 +272,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   __shared__ typename BlockReduce::TempStorage reduceStore;
   ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
-  if (group_size > 0) {
+  if constexpr (group_size > 0) {
     if (threadIdx.x == 0) {
       *rms = rsqrtf(ss / hidden_size + epsilon);
     }
@@ -292,13 +291,13 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false>
+          bool is_scale_transposed = false, int32_t group_size = 0>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    int32_t const hidden_size, scalar_t const* __restrict__ residual = nullptr,
-    int32_t const group_size = 0) {
+    int32_t const hidden_size,
+    scalar_t const* __restrict__ residual = nullptr) {
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
 
   const int VEC_SIZE = 4;
@@ -309,11 +308,11 @@ __device__ void compute_dynamic_per_token_scales(
   vec4_t<scalar_t> const* vec_weight = nullptr;
   vec4_t<scalar_t> const* vec_residual = nullptr;
 
-  if (group_size > 0) {
+  if constexpr (group_size > 0) {
     __shared__ float s_max_vals[1024];
 
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-    int64_t num_groups = hidden_size / group_size;
+    int64_t const num_groups = hidden_size / group_size;
     int64_t const threads_per_group = blockDim.x / num_groups;
     int64_t const thread_in_group = threadIdx.x % threads_per_group;
     int64_t const group_offset =
@@ -467,14 +466,14 @@ __device__ void compute_dynamic_per_token_scales(
 
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false, bool is_scale_transposed = false>
+          bool has_residual = false, bool is_scale_transposed = false,
+          int32_t group_size = 0>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
                                float const rms, float* const scale,
                                int32_t const hidden_size,
-                               scalar_t* __restrict__ residual = nullptr,
-                               int32_t const group_size = 0) {
+                               scalar_t* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
@@ -521,9 +520,9 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 
     q8x4_t<scalar_out_t> out;
 
-    int64_t num_groups = hidden_size / group_size;
+    int64_t const num_groups = hidden_size / group_size;
     int64_t scale_idx = 0;
-    if (group_size > 0) {
+    if constexpr (group_size > 0) {
       if constexpr (is_scale_transposed) {
         scale_idx = (i * VEC_SIZE / group_size) * gridDim.x + blockIdx.x;
       } else {
@@ -531,10 +530,14 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       }
     }
 
-    auto scale_val =
-        (group_size > 0
-             ? (is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx])
-             : *scale);
+    float scale_val;
+
+    if constexpr (group_size > 0) {
+      scale_val =
+          is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx];
+    } else {
+      scale_val = *scale;
+    }
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
       out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
