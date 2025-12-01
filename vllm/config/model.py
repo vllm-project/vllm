@@ -708,9 +708,6 @@ class ModelConfig:
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
 
-        if not self.skip_tokenizer_init:
-            self._verify_tokenizer_mode()
-
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
 
