@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 class JinaVLScorer(nn.Module):
     def __init__(self, model_config: "ModelConfig"):
         super().__init__()
-        config = model_config.hf_config
+        config = model_config.hf_config.get_text_config()
         head_dtype = model_config.head_dtype
         self.dense = ColumnParallelLinear(
             config.hidden_size, config.hidden_size, params_dtype=head_dtype, bias=True
