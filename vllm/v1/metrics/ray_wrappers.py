@@ -40,6 +40,13 @@ class RayPrometheusMetric:
 
     def labels(self, *labels, **labelskwargs):
         if labels:
+            # -1 because ReplicaId was added automatically
+            expected = len(self.metric._tag_keys) - 1
+            if len(labels) != expected:
+                raise ValueError(
+                    "Number of labels must match the number of tag keys. "
+                    f"Expected {expected}, got {len(labels)}"
+                )
             labelskwargs.update(zip(self.metric._tag_keys, labels))
 
         labelskwargs["ReplicaId"] = _get_replica_id() or ""
