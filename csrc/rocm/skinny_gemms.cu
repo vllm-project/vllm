@@ -1353,45 +1353,38 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-
-
-
-#if defined(__gfx950__) // TODO: Add NAVI support
+#if defined(__gfx950__)  // TODO: Add NAVI support
 // This version targets big A[] cases, where it is much larger than LDS capacity
 
 __device__ inline int min__(int a, int b) {
-	  int tmp;
-	  asm("v_min_i32_e32 %0, %2, %3 "
-               : "=v"(tmp)
-               : "0"(tmp), "v"(a), "v"(b));
-          return tmp;
+  int tmp;
+  asm("v_min_i32_e32 %0, %2, %3 " : "=v"(tmp) : "0"(tmp), "v"(a), "v"(b));
+  return tmp;
 }
 
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 
-__global__ void __launch_bounds__(WvPrGrp*THRDS)
-__attribute__((amdgpu_waves_per_eu(1, 1)))
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    __attribute__((amdgpu_waves_per_eu(1, 1)))
     wvSplitKrc_(const int K, const int M, const int Bx, const int By,
-                     const scalar_t* __restrict__ B, const scalar_t* __restrict__ A,
-                     const scalar_t* __restrict__ BIAS,
-		     float* glbl,
-		     //int* cntr,
-                     scalar_t* C,
-                     const int CuCount) {
-  int* cntr = (int*)(&glbl[M*N]);
+                const scalar_t* __restrict__ B, const scalar_t* __restrict__ A,
+                const scalar_t* __restrict__ BIAS, float* glbl, scalar_t* C,
+                const int CuCount) {
+  // Use upper half of glbl buffer for atomic reduce counting
+  int* cntr = (int*)(&glbl[M * N]);
 
+  constexpr bool FAST_UNSAFE_RDC_INIT = false;
   constexpr int GrpsShrB = 2;
   constexpr int NTILE = 16;
-  constexpr int WVLDS_ = (NTILE*THRDS*A_CHUNK);
+  constexpr int WVLDS_ = (NTILE * THRDS * A_CHUNK);
   constexpr int APAD = 2;
   constexpr int ASTRD = 64;
   constexpr int BPAD = 2;
   constexpr int BSTRD = 64;
-  constexpr int WVLDS = ((WVLDS_+(WVLDS_/BSTRD)*BPAD));
+  constexpr int WVLDS = ((WVLDS_ + (WVLDS_ / BSTRD) * BPAD));
 
   constexpr int max_lds_len = LDS_SIZE / 2;
-  //constexpr bool use_mfma = true;//(std::is_same_v<scalar_t, __hip_bfloat16>);
 
   using scalar16 =
       __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
@@ -1409,292 +1402,316 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
     half4 h4[A_CHUNK / 4];
     scalar8 h8;
   };
-  using big4 =
-      __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
+  using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
 
-  __shared__ scalar_t stg[WvPrGrp*WVLDS/GrpsShrB];
-  unsigned int* myStg = (unsigned int*)(&stg[WVLDS*(threadIdx.y/GrpsShrB)]);
-  __shared__ scalar_t s[max_lds_len-WvPrGrp*WVLDS/GrpsShrB];
+  __shared__ scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+  unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
+  __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
-  constexpr uint32_t kFit__ = (max_lds_len-WvPrGrp*WVLDS/GrpsShrB) / N;
-  constexpr uint32_t kFit_ = (kFit__*ASTRD)/(APAD + ASTRD);
-  uint32_t kFit = kFit_ - (kFit_ % TUC_); // round down
-  uint32_t kfitsPerRdc = (K+kFit-1)/kFit;
-  uint32_t numCuwithFullK = ((M + (WvPrGrp*YTILE/GrpsShrB)-1)/(WvPrGrp*YTILE/GrpsShrB));
-  uint32_t Mmod = numCuwithFullK*(WvPrGrp*YTILE/GrpsShrB);
+  constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
+  constexpr uint32_t kFit_ = (kFit__ * ASTRD) / (APAD + ASTRD);
+  uint32_t kFit = kFit_ - (kFit_ % TUC_);
+  uint32_t kfitsPerRdc = (K + kFit - 1) / kFit;
+  uint32_t numCuWithFullK =
+      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
+  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
 
-  if ( ((K+kfitsPerRdc*kFit-1)/(kfitsPerRdc*kFit)) * numCuwithFullK <= CuCount )
-  while (true) {
-   while (kFit>TUC_) {
-    uint32_t kFit_ = kFit-TUC_;
-    if ( ((K+(kfitsPerRdc*kFit_-1))/(kfitsPerRdc*kFit_)) * numCuwithFullK > CuCount) break;
-    kFit = kFit_;
-   }
-   if ( ((K+((kfitsPerRdc-1)*kFit-1))/((kfitsPerRdc-1)*kFit)) * numCuwithFullK <= CuCount) kfitsPerRdc--;
-   else break;
-  }
+  // find best k split to fill the CUs
+  if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
+      CuCount)
+    while (true) {
+      while (kFit > TUC_) {
+        uint32_t kFit_ = kFit - TUC_;
+        if (((K + (kfitsPerRdc * kFit_ - 1)) / (kfitsPerRdc * kFit_)) *
+                numCuWithFullK >
+            CuCount)
+          break;
+        kFit = kFit_;
+      }
+      if (((K + ((kfitsPerRdc - 1) * kFit - 1)) / ((kfitsPerRdc - 1) * kFit)) *
+              numCuWithFullK <=
+          CuCount)
+        kfitsPerRdc--;
+      else
+        break;
+    }
 
-  bool doRdc = (kfitsPerRdc*kFit < K);
+  bool doRdc = (kfitsPerRdc * kFit < K);
 
-  uint32_t kFitPdd = kFit + (kFit/ASTRD)*APAD;
+  // given above k-split, find this wave's postion
+  uint32_t kFitPdd = kFit + (kFit / ASTRD) * APAD;
   uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
   uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
   uint32_t m = (m0 + m1) % Mmod;
-  uint32_t k_str = (m0 / Mmod) * kFit *kfitsPerRdc;
-  uint32_t k_end_ = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
-  uint32_t k_end = k_end_;//(uint32_t)min_((uint32_t)K, (uint32_t)k_end_);
-  //uint32_t k_len = kFit*kfitsPerRdc;// k_end-k_str;
-  uint32_t k_rnd = K / (kFit*kfitsPerRdc) + ((K % (kFit*kfitsPerRdc)) ? 1 : 0);// k_end-k_str;
+  uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+  uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  uint32_t k_rnd =
+      K / (kFit * kfitsPerRdc) + ((K % (kFit * kfitsPerRdc)) ? 1 : 0);
 
-  scalar8 sum4[N/NTILE/GrpsShrB][1];
-  //----------------------------------------------------
-  bigType bigB_[YTILE/GrpsShrB][UNRL];
+  scalar8 sum4[N / NTILE / GrpsShrB][1];
+  bigType bigB_[YTILE / GrpsShrB][UNRL];
   bool noreloada = false;
-  uint32_t rmnd = 0;//(WvPrGrp*YTILE)%((WvPrGrp*YTILE)-(M%(WvPrGrp*YTILE)));
   const uint32_t bLoader = (threadIdx.y % GrpsShrB);
   uint32_t kBase = 0;
   if (k_str >= K) return;
-  while (m < Mmod + rmnd) {
 
-#if 0
-    if (m + (threadIdx.x%16) < M)
-    if (doRdc)
-    if (k_str == 0) {
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-        for (uint32_t j=0; j<4; j++) {
-          const int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
-	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
+  while (m < Mmod) {
+    if constexpr (FAST_UNSAFE_RDC_INIT) {
+      if (m + (threadIdx.x % 16) < M)
+        if (doRdc)
+          if (k_str == 0) {
+            for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+              for (uint32_t j = 0; j < 4; j++) {
+                const int adr = m + (threadIdx.x % 16) +
+                                (j + (threadIdx.x / 16) * 4) * M +
+                                nt * NTILE * M +
+                                (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
 
-          __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-          __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-        }
-      }
+                __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                   __HIP_MEMORY_SCOPE_AGENT);
+                __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED,
+                                   __HIP_MEMORY_SCOPE_AGENT);
+              }
+            }
+          }
     }
-#endif
-
-      //if (threadIdx.y % GrpsShrB == bLoader)
+    // Load first B[] chunk
   #pragma unroll
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k_str + k2 * THRDS * A_CHUNK;
-        uint32_t k_ = k + threadIdx.x * A_CHUNK;
-	//bool v1 = (k_ < K);
-
-        const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      uint32_t k = k_str + k2 * THRDS * A_CHUNK;
+      uint32_t k_ = k + threadIdx.x * A_CHUNK;
+      const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
   #pragma unroll
-        for (uint32_t y = 0; y < YTILE/GrpsShrB; y++) {
-		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*GrpsShrB+bLoader+m, M-1) * K])));
-	}
-      }
+      for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
+        bigB_[y][k2].h8 = (loadnt(
+            (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
+    }
 
     for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
-      // Fetch the weight matrix from memory!
-      const bool reloada = (!noreloada) && ((k1 == k_str) || (k1 == k_str + kBase + kFit)) && (k1 < k_end);
-      if (reloada) {  // load next chunk of A[] to LDS
+      const bool reloada = (!noreloada) &&
+                           ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
+                           (k1 < k_end);
+      // load next chunk of A[] to LDS
+      if (reloada) {
         if (k1 != k_str) kBase += kFit;
         __syncthreads();
         constexpr int sprdN = 4;
-        const uint32_t thrd = ((threadIdx.y/sprdN) * THRDS + threadIdx.x);
-	//printf("[%d]", kFit);
-#pragma unroll
-        for (int k = 0; k < kFit; // min_(K, max_lds_len/N);
-                      k += THRDS * (WvPrGrp/sprdN) * A_CHUNK) {
-          //const uint32_t kOff = k + (thrd * A_CHUNK);//min_(kFit-1, k + (thrd * A_CHUNK));
-          unsigned int kOff = min__(kFit-1, k + (thrd * A_CHUNK));
-    
-	  if (kBase + kOff < K) {
-	  //if ((kOff < kFit) && (kBase + kOff < K)) {
-	    constexpr int unrl = 8;
-            //bigType tmp[unrl];// = {0};
-//#pragma unroll
-//	    for(uint32_t n=0; n<unrl; n++) tmp[n].h8 = {0};
-            for (int nt=0; nt<N/sprdN; nt+=NTILE) {
-	      for (int n8=0; n8<NTILE/unrl; n8++) {
-               const unsigned int k_in = k_str + kBase + kOff + (n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*K;
-               const unsigned int k_ot = kOff + (n8*unrl+nt+(N/sprdN)*(threadIdx.y%sprdN))*kFitPdd;
-               bigType tmp[unrl];
-               for (unsigned int n=0; n<unrl; n++)
-                tmp[n].h8 = *((scalar8*)(&A[k_in+n*K]));
-               for (unsigned int n=0; n<unrl; n++)
-                *((scalar8*)(&s[k_ot+n*kFitPdd])) = tmp[n].h8;
-	      }
-	    }
-	  }
-	}
-        //__syncthreads();
+        const uint32_t thrd = ((threadIdx.y / sprdN) * THRDS + threadIdx.x);
+  #pragma unroll
+        for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
+          unsigned int kOff = min__(kFit - 1, k + (thrd * A_CHUNK));
+          if (kBase + kOff < K) {
+            constexpr int unrl = 8;
+            for (int nt = 0; nt < N / sprdN; nt += NTILE) {
+              for (int n8 = 0; n8 < NTILE / unrl; n8++) {
+                const unsigned int k_in =
+                    k_str + kBase + kOff +
+                    (n8 * unrl + nt + (N / sprdN) * (threadIdx.y % sprdN)) * K;
+                const unsigned int k_ot =
+                    kOff +
+                    (n8 * unrl + nt + (N / sprdN) * (threadIdx.y % sprdN)) *
+                        kFitPdd;
+                bigType tmp[unrl];
+                for (unsigned int n = 0; n < unrl; n++)
+                  tmp[n].h8 = *((scalar8*)(&A[k_in + n * K]));
+                for (unsigned int n = 0; n < unrl; n++)
+                  *((scalar8*)(&s[k_ot + n * kFitPdd])) = tmp[n].h8;
+              }
+            }
+          }
+        }
       }
+
+      // Stage loaded B[] to LDS for MFMA swizzling...
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        //zero out if oob
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const bool oob_k = (k_ >= K);
-        for (uint32_t d=0; d<2; d++)
-          for (uint32_t j=0; j<2; j++)
-            for (uint32_t y=0; y<YTILE/GrpsShrB; y++) {
-              uint32_t idx = (threadIdx.x*YTILE+y*GrpsShrB+bLoader)*8+(d*2+j)*2;
-              idx += ((uint32_t)(idx/BSTRD))*BPAD;
-              //myStg[idx+(WVLDS/8)*(d*2+j)] = (oob_k || (y*2+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
-              myStg[idx/2] = (oob_k || (y*GrpsShrB+bLoader + m >= M)) ? 0 : bigB_[y][k2].i[d*2+j];
+        for (uint32_t d = 0; d < 2; d++)
+          for (uint32_t j = 0; j < 2; j++)
+            for (uint32_t y = 0; y < YTILE / GrpsShrB; y++) {
+              uint32_t idx =
+                  (threadIdx.x * YTILE + y * GrpsShrB + bLoader) * 8 +
+                  (d * 2 + j) * 2;
+              idx += ((uint32_t)(idx / BSTRD)) * BPAD;
+              // zero out if oob
+              myStg[idx / 2] = (oob_k || (y * GrpsShrB + bLoader + m >= M))
+                                   ? 0
+                                   : bigB_[y][k2].i[d * 2 + j];
             }
       }
 
+      // Fire load of next B[] chunk...
       if (k1 + THRDS * A_CHUNK * UNRL < k_end)
-      if (k1 + THRDS * A_CHUNK * UNRL < K)
+        if (k1 + THRDS * A_CHUNK * UNRL < K)
   #pragma unroll
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
-        uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        const scalar_t* B_ = &B[min__(k_, K-A_CHUNK)];
+          for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+            uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
+            uint32_t k_ = k + threadIdx.x * A_CHUNK;
+            const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
   #pragma unroll
-        for (uint32_t y = 0; y < YTILE/GrpsShrB; y++) {
-		 bigB_[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y*GrpsShrB+bLoader+m, M-1) * K])));
-	}
-      }
+            for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
+              bigB_[y][k2].h8 = (loadnt(
+                  (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) *
+                                 K])));
+          }
 
+      // B[] staging is cooperative across GrpsShrB, so sync here before reading
+      // back
       __syncthreads();
 
+      // read back B[] swizzled for MFMA...
       bigType bigB[YTILE][UNRL];
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        //zero out if oob
-        //uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-        //uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        //const bool oob_k = (k_ >= K);
-        for (uint32_t d=0; d<2; d++)
-          for (uint32_t j=0; j<2; j++)
-            for (uint32_t y=0; y<YTILE; y++) {
-              uint32_t idx = (threadIdx.x+64*y)*8+(d*2+j)*2;
-              idx += ((uint32_t)(idx/BSTRD))*BPAD;
-              bigB[y][k2].i[d*2+j] = myStg[idx/2];//+(WVLDS/4)*(d*2+j)];
+        for (uint32_t d = 0; d < 2; d++)
+          for (uint32_t j = 0; j < 2; j++)
+            for (uint32_t y = 0; y < YTILE; y++) {
+              uint32_t idx = (threadIdx.x + 64 * y) * 8 + (d * 2 + j) * 2;
+              idx += ((uint32_t)(idx / BSTRD)) * BPAD;
+              bigB[y][k2].i[d * 2 + j] = myStg[idx / 2];
             }
       }
 
-      //if (reloada)  __syncthreads();
-
-      bigType bigA[N/GrpsShrB][UNRL];
-#pragma unroll
+      // rReadback A[] swizzled for MFMA...
+      bigType bigA[N / GrpsShrB][UNRL];
+  #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 /*+ THRDS * A_CHUNK * UNRL*/ + k2 * THRDS * A_CHUNK;
-#pragma unroll
-        for (uint32_t nt=0; nt<N/GrpsShrB; nt+=NTILE)
-#pragma unroll
-         for (uint32_t n = 0; n < NTILE; n++) {
-	  uint32_t idxa = (nt+(threadIdx.x%NTILE) + (N/GrpsShrB)*(threadIdx.y%GrpsShrB))*kFitPdd + A_CHUNK*((threadIdx.x/NTILE)+n*4)+ ((uint32_t)(k-kBase-k_str));
-          bigA[nt+n][k2] = *((const bigType*)(&(s[idxa])));
-         }
+        uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
+  #pragma unroll
+        for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+  #pragma unroll
+          for (uint32_t n = 0; n < NTILE; n++) {
+            uint32_t idxa = (nt + (threadIdx.x % NTILE) +
+                             (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) *
+                                kFitPdd +
+                            A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
+            bigA[nt + n][k2] = *((const bigType*)(&(s[idxa])));
+          }
       }
 
+      // Do the MFMAs
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
   #pragma unroll
-        for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           if constexpr (std::is_same_v<scalar_t, half>) {
-           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-             bigA[nt*NTILE+0][k2].h4[0], bigB[0][k2].h4[0], (k1==k_str)?((scalar8){0}):sum4[nt][0], 0, 0, 0);
-           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-             bigA[nt*NTILE+0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0, 0, 0);
-	  } else { // bf16
-           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-             bigA[nt*NTILE+0][k2].h4[0], bigB[0][k2].h4[0], (k1==k_str)?((scalar8){0}):sum4[nt][0], 0, 0, 0);
-           sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-             bigA[nt*NTILE+0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0, 0, 0);
-	  }
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+                bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
+                (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+                bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0],
+                0, 0, 0);
+          } else {  // bf16
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+                bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
+                (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+                bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0],
+                0, 0, 0);
+          }
   #pragma unroll
-         for (uint32_t j=1; j<YTILE; j++) {
-           if constexpr (std::is_same_v<scalar_t, half>) {
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-              bigA[nt*NTILE+j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0], 0, 0, 0);
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-              bigA[nt*NTILE+j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0], 0, 0, 0);
-	   } else { //bf16
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-              bigA[nt*NTILE+j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0], 0, 0, 0);
-            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-              bigA[nt*NTILE+j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0], 0, 0, 0);
-	   }
-         }
+          for (uint32_t j = 1; j < YTILE; j++) {
+            if constexpr (std::is_same_v<scalar_t, half>) {
+              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+                  bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0],
+                  sum4[nt][0], 0, 0, 0);
+              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+                  bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1],
+                  sum4[nt][0], 0, 0, 0);
+            } else {  // bf16
+              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+                  bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0],
+                  sum4[nt][0], 0, 0, 0);
+              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+                  bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1],
+                  sum4[nt][0], 0, 0, 0);
+            }
+          }
         }
       }
     }
 
     if (!doRdc) {
-     if (m + (threadIdx.x%16) < M) {
-      scalar_t biases[N/NTILE/GrpsShrB][4] = {};
-      if (BIAS)
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-       for (uint32_t j=0; j<4; j++) {
-        int mindx = m + (threadIdx.x%16);
-        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
-        biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-       }
-      }
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-       for (uint32_t j=0; j<4; j++) {
-        int mindx = m + (threadIdx.x%16);
-        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
-        int adr = mindx+M*nindx;
-        if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-	  if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
-	  C[adr] = __float2bfloat16(sum4[nt][0][j]);
-	}
-	else {
-	  if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
-	  C[adr] = __float2half(sum4[nt][0][j]);
-	}
-       }
-      }
-     }
-    } else {
-     if (m + (threadIdx.x%16) < M) {
-      int my_cntr[N/NTILE/GrpsShrB][4];
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-       for (uint32_t j=0; j<4; j++) {
-        int adr = m + (threadIdx.x%16) + (j+(threadIdx.x/16)*4) * M + nt * NTILE * M +
-	              (N/GrpsShrB)*M*(threadIdx.y%GrpsShrB);
-	atomicAdd(&glbl[adr], sum4[nt][0][j]);
-        my_cntr[nt][j] = atomicAdd(&cntr[adr], 1);
-       }
-      }
-      float vals[N/NTILE/GrpsShrB][4];
-      scalar_t biases[N/NTILE/GrpsShrB][4];
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-       for (uint32_t j=0; j<4; j++) {
-       	int mindx = m + (threadIdx.x%16);
-        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
-        int adr = mindx+M*nindx;
-	// read-back glbl[] here, can't use return from atomic above
-	if (my_cntr[nt][j] + 1 == k_rnd) {
-	  vals[nt][j] = glbl[adr];
-	  if (BIAS)
-            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-	}
-       }
-      }
-      for (uint32_t nt=0; nt<N/NTILE/GrpsShrB; nt++) {
-       for (uint32_t j=0; j<4; j++) {
-       	int mindx = m + (threadIdx.x%16);
-        int nindx = (j+(threadIdx.x/16)*4) + nt * NTILE + (N/GrpsShrB)*(threadIdx.y%GrpsShrB);
-        int adr = mindx+M*nindx;
-        if (my_cntr[nt][j] + 1 == k_rnd) {
-          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-	    if (BIAS) vals[nt][j] += __bfloat162float(biases[nt][j]);
-            C[adr] = __float2bfloat16(vals[nt][j]);
-	  }
-          else {
-	    if (BIAS) vals[nt][j] += __half2float(biases[nt][j]);
-            C[adr] = __float2half(vals[nt][j]);
-	  }
+      if (m + (threadIdx.x % 16) < M) {
+        scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+        if (BIAS)
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int mindx = m + (threadIdx.x % 16);
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+            }
+          }
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr = mindx + M * nindx;
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(sum4[nt][0][j]);
+            } else {
+              if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(sum4[nt][0][j]);
+            }
+          }
         }
-       }
       }
-     }
+    } else {
+      if (m + (threadIdx.x % 16) < M) {
+        int my_cntr[N / NTILE / GrpsShrB][4];
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int adr = m + (threadIdx.x % 16) +
+                      (j + (threadIdx.x / 16) * 4) * M + nt * NTILE * M +
+                      (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
+            atomicAdd(&glbl[adr], sum4[nt][0][j]);
+            my_cntr[nt][j] = atomicAdd(&cntr[adr], 1);
+          }
+        }
+        float vals[N / NTILE / GrpsShrB][4];
+        scalar_t biases[N / NTILE / GrpsShrB][4];
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr = mindx + M * nindx;
+            // read-back glbl[] here, can't use return from atomic above
+            if (my_cntr[nt][j] + 1 == k_rnd) {
+              vals[nt][j] = glbl[adr];
+              if (BIAS) biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+            }
+          }
+        }
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr = mindx + M * nindx;
+            if (my_cntr[nt][j] + 1 == k_rnd) {
+              if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                if (BIAS) vals[nt][j] += __bfloat162float(biases[nt][j]);
+                C[adr] = __float2bfloat16(vals[nt][j]);
+              } else {
+                if (BIAS) vals[nt][j] += __half2float(biases[nt][j]);
+                C[adr] = __float2half(vals[nt][j]);
+              }
+            }
+          }
+        }
+      }
     }
 
     m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
-    m = (m0 + m1)%Mmod;
-    k_str = (m0/Mmod) * kFit * kfitsPerRdc;
-    k_end_ = (m0/Mmod+1) * kFit * kfitsPerRdc;
-    k_end = k_end_;
+    m = (m0 + m1) % Mmod;
+    k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+    k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
     if (k_str >= K) break;
 
     kBase = 0;
@@ -1704,21 +1721,16 @@ __attribute__((amdgpu_waves_per_eu(1, 1)))
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void wvSplitKrc_(const int K, const int M, const int Bx,
-                                 const int By, const scalar_t* B,
-                                 const scalar_t* __restrict__ A,
-                                 const scalar_t* __restrict__ BIAS,
-				 float* glbl,
-				 //int* cntr,
-				 scalar_t* C,
-                                 const int CuCount) {
-  UNREACHABLE_CODE
-}
+                            const int By, const scalar_t* B,
+                            const scalar_t* __restrict__ A,
+                            const scalar_t* __restrict__ BIAS, float* glbl,
+                            // int* cntr,
+                            scalar_t* C, const int CuCount){UNREACHABLE_CODE}
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
 
-
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const std::optional<at::Tensor>& in_bias,
-                       const int64_t CuCount) {
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t CuCount) {
   auto M_in = in_a.size(0);
   auto N_in = in_b.size(0);
   auto K_in = in_a.size(1);
@@ -1741,24 +1753,21 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   auto axl_glbl = torch::zeros(
-      {N_in, M_in*2},
+      {N_in, M_in * 2},
       torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
-  /*auto axl_cntr = torch::zeros(
-      {N_in, M_in},
-      torch::TensorOptions().dtype(torch::kInt).device(in_b.device()));*/
 
   dim3 grid(CuCount);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  //const int max_lds_len = get_lds_size() / 2;
+  // const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N)                               \
-  {                                                                           \
-    dim3 block(64, _WvPrGrp);                                                 \
-    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N>                   \
-          <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
-                                       biasf4, glbl, c, CuCount);       \
+#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N)                          \
+  {                                                                      \
+    dim3 block(64, _WvPrGrp);                                            \
+    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N>              \
+        <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
+                                     biasf4, glbl, c, CuCount);          \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitKrc", [&] {
@@ -1771,27 +1780,21 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     auto glbl = axl_glbl.data_ptr<float>();
-    //auto cntr = axl_cntr.data_ptr<int>();
     switch (N_in) {
       case 32:
-        WVSPLITKrc(4, 16, 1, 32)
-        break;
+        WVSPLITKrc(4, 16, 1, 32) break;
       case 64:
-        WVSPLITKrc(4, 16, 1, 64)
-        break;
+        WVSPLITKrc(4, 16, 1, 64) break;
       case 128:
-        WVSPLITKrc(4, 16, 1, 128)
-        break;
+        WVSPLITKrc(4, 16, 1, 128) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
             std::to_string(K_in) + "," + std::to_string(N_in));
     }
   });
-  //printf("MADEIT");
   return out_c;
 }
-
 
 #if defined(__HIP__MI3XX__)  // TODO: Add NAVI support
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
