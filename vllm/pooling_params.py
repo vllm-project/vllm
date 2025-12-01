@@ -94,6 +94,8 @@ class PoolingParams(
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
+            if self.skip_reading_prefix_cache is None:
+                self.skip_reading_prefix_cache = True
             return
 
         # NOTE: Task validation needs to done against the model instance,
