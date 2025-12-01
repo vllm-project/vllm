@@ -538,6 +538,7 @@ class Qwen3_VisionTransformer(nn.Module):
             grid_thw_list = grid_thw
             grid_thw = np.array(grid_thw, dtype=np.int32)
         else:
+            grid_thw = grid_thw.to("cpu")
             grid_thw_list = grid_thw.tolist()
             grid_thw = grid_thw.numpy()
 
