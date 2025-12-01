@@ -4582,11 +4582,13 @@ class GPUModelRunner(
             if local_layer_names != kv_cache_group_spec.layer_names:
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    pruned_specs = {
+                        name: layer_kv_cache_spec.kv_cache_specs[name]
+                        for name in local_layer_names
+                    }
                     kv_cache_group_spec.kv_cache_spec = UniformTypeKVCacheSpecs(
-                        {
-                            name: layer_kv_cache_spec.kv_cache_specs[name]
-                            for name in local_layer_names
-                        }
+                        block_size=layer_kv_cache_spec.block_size,
+                        kv_cache_specs=pruned_specs,
                     )
                 kv_cache_group_spec.layer_names = local_layer_names
 

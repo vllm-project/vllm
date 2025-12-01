@@ -50,8 +50,12 @@ def _prune_kv_cache_group_layers(
     kv_cache_group_spec.layer_names = local_layer_names
     kv_cache_spec = kv_cache_group_spec.kv_cache_spec
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        pruned_specs = {
+            name: kv_cache_spec.kv_cache_specs[name] for name in local_layer_names
+        }
         kv_cache_group_spec.kv_cache_spec = UniformTypeKVCacheSpecs(
-            {name: kv_cache_spec.kv_cache_specs[name] for name in local_layer_names}
+            block_size=kv_cache_spec.block_size,
+            kv_cache_specs=pruned_specs,
         )
 
 
