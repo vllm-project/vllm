@@ -11,6 +11,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
+    UsageInfo,
+)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.pooling.score.protocol import (
     RerankDocument,
     RerankRequest,
     RerankResponse,
@@ -19,10 +24,7 @@ from vllm.entrypoints.openai.protocol import (
     ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
-    UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -36,7 +38,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -60,7 +62,7 @@ class ServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         texts_1: list[str],
         texts_2: list[str],
         request: RerankRequest | ScoreRequest,
@@ -153,7 +155,7 @@ class ServingScores(OpenAIServing):
     def _preprocess_score(
         self,
         request: RerankRequest | ScoreRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         tokenization_kwargs: dict[str, Any],
         data_1: str | ScoreContentPartParam,
         data_2: str | ScoreContentPartParam,
@@ -175,7 +177,7 @@ class ServingScores(OpenAIServing):
 
     async def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
         request: RerankRequest | ScoreRequest,

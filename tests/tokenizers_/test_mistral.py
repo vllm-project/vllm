@@ -7,7 +7,7 @@ import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.transformers_utils.tokenizers.mistral import (
+from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _prepare_apply_chat_template_tools_and_messages,
 )
@@ -308,25 +308,6 @@ class TestMistralTokenizer:
     def test_get_added_vocab(self, mistral_tokenizer: MistralTokenizer):
         assert mistral_tokenizer.get_added_vocab() == {}
 
-    def test_encode_one(self, mistral_tokenizer: MistralTokenizer):
-        token_ids = (
-            [22177, 4304, 2662] if mistral_tokenizer.is_tekken else [23325, 2294, 1686]
-        )
-
-        assert mistral_tokenizer.encode_one("Hello world !") == token_ids
-        assert mistral_tokenizer.encode_one("Hello world !", max_length=1) == token_ids
-        assert (
-            mistral_tokenizer.encode_one("Hello world !", truncation=True, max_length=1)
-            == token_ids[:-2]
-        )
-        assert (
-            mistral_tokenizer.encode_one(
-                "Hello world !", truncation=False, max_length=1
-            )
-            == token_ids
-        )
-        assert mistral_tokenizer.encode_one("") == []
-
     def test_encode(self, mistral_tokenizer: MistralTokenizer):
         token_ids = (
             [1, 22177, 4304, 2662]
@@ -375,8 +356,8 @@ class TestMistralTokenizer:
         )
         attn_mask = [1 for _ in range(len(token_ids))]
 
-        # Test 1: default
-        assert mistral_tokenizer("Hello world !") == {
+        # Test 1: no special tokens
+        assert mistral_tokenizer("Hello world !", add_special_tokens=False) == {
             "attention_mask": attn_mask[1:],
             "input_ids": token_ids[1:],
         }
@@ -400,7 +381,7 @@ class TestMistralTokenizer:
             "input_ids": token_ids,
         }
         # Test 5: empty string
-        assert mistral_tokenizer("") == {
+        assert mistral_tokenizer("", add_special_tokens=False) == {
             "attention_mask": [],
             "input_ids": [],
         }
