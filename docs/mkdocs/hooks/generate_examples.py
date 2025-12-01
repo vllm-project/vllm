@@ -17,13 +17,18 @@ EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/examples"
 
 
-def fix_case(text: str) -> str:
+def title(text: str) -> str:
+    # Default title case
+    text = text.replace("_", " ").replace("/", " - ").title()
+    # Custom substitutions
     subs = {
+        "io": "IO",
         "api": "API",
         "cli": "CLI",
         "cpu": "CPU",
         "llm": "LLM",
         "mae": "MAE",
+        "ner": "NER",
         "tpu": "TPU",
         "gguf": "GGUF",
         "lora": "LoRA",
@@ -90,7 +95,7 @@ class Example:
             return []
         # Multi file example
         is_other_file = lambda file: file.is_file() and file != self.main_file
-        return [file for file in self.path.rglob("*") if is_other_file(file)]
+        return sorted(file for file in self.path.rglob("*") if is_other_file(file))
 
     @cached_property
     def is_code(self) -> bool:
@@ -100,7 +105,7 @@ class Example:
     def title(self) -> str:
         # Generate title from filename if no main md file found
         if self.main_file is None or self.is_code:
-            return fix_case(self.path.stem.replace("_", " ").title())
+            return title(self.path.stem)
         # Specify encoding for building on Windows
         with open(self.main_file, encoding="utf-8") as f:
             first_line = f.readline().strip()
@@ -151,24 +156,35 @@ class Example:
         # included files containing code fences too
         code_fence = "``````"
 
-        if self.is_code:
-            content += (
-                f"{code_fence}{self.main_file.suffix[1:]}\n"
-                f'--8<-- "{self.main_file}"\n'
-                f"{code_fence}\n"
-            )
-        elif self.main_file is not None:
-            with open(self.main_file, encoding="utf-8") as f:
-                # Skip the title from md snippets as it's been included above
-                main_content = f.readlines()[1:]
-            content += self.fix_relative_links("".join(main_content))
-        content += "\n"
+        if self.main_file is not None:
+            # Single file example or multi file example with a README
+            if self.is_code:
+                content += (
+                    f"{code_fence}{self.main_file.suffix[1:]}\n"
+                    f'--8<-- "{self.main_file}"\n'
+                    f"{code_fence}\n"
+                )
+            else:
+                with open(self.main_file, encoding="utf-8") as f:
+                    # Skip the title from md snippets as it's been included above
+                    main_content = f.readlines()[1:]
+                content += self.fix_relative_links("".join(main_content))
+            content += "\n"
+        else:
+            # Multi file example without a README
+            for file in self.other_files:
+                file_title = title(str(file.relative_to(self.path).with_suffix("")))
+                content += f"## {file_title}\n\n"
+                content += (
+                    f'{code_fence}{file.suffix[1:]}\n--8<-- "{file}"\n{code_fence}\n\n'
+                )
+            return content
 
         if not self.other_files:
             return content
 
         content += "## Example materials\n\n"
-        for file in sorted(self.other_files):
+        for file in self.other_files:
             content += f'??? abstract "{file.relative_to(self.path)}"\n'
             if file.suffix != ".md":
                 content += f"    {code_fence}{file.suffix[1:]}\n"
