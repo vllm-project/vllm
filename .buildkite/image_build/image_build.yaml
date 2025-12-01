@@ -2,6 +2,7 @@ group: Abuild
 steps:
   - label: ":docker: Build image"
     key: image-build
+    depends_on: ~
     commands:
     - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
@@ -54,8 +55,15 @@ steps:
           limit: 2
   
   - label: ":docker: Build CPU arm64 image"
-    key: image-build-cpu-arm64
+    key: cpu-arm64-image-build
     optional: true
     commands:
     - .buildkite/image_build/image_build_cpu_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2

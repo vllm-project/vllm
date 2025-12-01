@@ -1,6 +1,9 @@
 steps:
 - group: Abuild
   steps:
+  - block: 'Run :docker: Build CPU arm64 image'
+    depends_on: image-build
+    key: block--docker--build-cpu-arm64-image
   - label: ':docker: Build CPU arm64 image'
     key: image-build-cpu-arm64
     agents:
@@ -8,6 +11,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_cpu_arm64.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
+    depends_on: block--docker--build-cpu-arm64-image
     soft_fail: false
   - label: ':docker: Build CPU image'
     key: image-build-cpu
@@ -109,47 +113,46 @@ steps:
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
 - group: Basic Correctness
   steps:
   - label: Basic Correctness
@@ -282,14 +285,16 @@ steps:
         mount_buildkite_agent: true
 - group: Compile
   steps:
+  - block: Run Fusion E2E (2 GPUs)(B200)
+    depends_on: image-build
+    key: block-fusion-e2e-2-gpusb200
   - label: Fusion E2E (2 GPUs)(B200)
     agents:
       queue: gpu_4_queue
     commands:
     - nvidia-smi
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
-    depends_on:
-    - image-build
+    depends_on: block-fusion-e2e-2-gpusb200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -469,6 +474,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Distributed Tests (2 GPUs)(B200)
+    depends_on: image-build
+    key: block-distributed-tests-2-gpusb200
   - label: Distributed Tests (2 GPUs)(B200)
     agents:
       queue: gpu_4_queue
@@ -476,8 +484,7 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
-    depends_on:
-    - image-build
+    depends_on: block-distributed-tests-2-gpusb200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -495,6 +502,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Distributed Tests (2 GPUs)(H200)
+    depends_on: image-build
+    key: block-distributed-tests-2-gpush200
   - label: Distributed Tests (2 GPUs)(H200)
     agents:
       queue: gpu_4_queue
@@ -509,8 +519,7 @@ steps:
       VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py
       --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
-    depends_on:
-    - image-build
+    depends_on: block-distributed-tests-2-gpush200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -573,6 +582,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Distributed Tests (4 GPUs)(A100)
+    depends_on: image-build
+    key: block-distributed-tests-4-gpusa100
   - label: Distributed Tests (4 GPUs)(A100)
     agents:
       queue: gpu_4_queue
@@ -581,53 +593,51 @@ steps:
     - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
     - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
     - pytest -v -s -x lora/test_mixtral.py
-    depends_on:
-    - image-build
+    depends_on: block-distributed-tests-4-gpusa100
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            priorityClassName: ci
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-            volumes:
+        podSpec:
+          priorityClassName: ci
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   - label: Distributed Tests (8 GPUs)(H100)
     agents:
       queue: gpu_1_queue
@@ -640,47 +650,46 @@ steps:
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   - label: Pipeline + Context Parallelism (4 GPUs))
     agents:
       queue: gpu_4_queue
@@ -708,65 +717,68 @@ steps:
         mount_buildkite_agent: true
 - group: E2E Integration
   steps:
+  - block: Run DeepSeek V2-Lite Accuracy
+    depends_on: image-build
+    key: block-deepseek-v2-lite-accuracy
   - label: DeepSeek V2-Lite Accuracy
     agents:
       queue: gpu_4_queue
     commands:
     - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh
       0.25 200 8010
-    depends_on:
-    - image-build
+    depends_on: block-deepseek-v2-lite-accuracy
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
+  - block: Run Prime-RL Integration (2 GPUs)
+    depends_on: image-build
+    key: block-prime-rl-integration-2-gpus
   - label: Prime-RL Integration (2 GPUs)
     agents:
       queue: gpu_4_queue
     commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
-    depends_on:
-    - image-build
+    depends_on: block-prime-rl-integration-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -784,58 +796,59 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Qwen3-30B-A3B-FP8-block Accuracy
+    depends_on: image-build
+    key: block-qwen3-30b-a3b-fp8-block-accuracy
   - label: Qwen3-30B-A3B-FP8-block Accuracy
     agents:
       queue: gpu_4_queue
     commands:
     - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh
       0.8 200 8020
-    depends_on:
-    - image-build
+    depends_on: block-qwen3-30b-a3b-fp8-block-accuracy
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
 - group: Engine
   steps:
   - label: Engine
@@ -1202,47 +1215,46 @@ steps:
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   - label: Kernels Mamba Test
     agents:
       queue: gpu_1_queue
@@ -1317,6 +1329,9 @@ steps:
         mount_buildkite_agent: true
 - group: LM Eval
   steps:
+  - block: Run LM Eval Large Models (4 GPUs)(A100)
+    depends_on: image-build
+    key: block-lm-eval-large-models-4-gpusa100
   - label: LM Eval Large Models (4 GPUs)(A100)
     agents:
       queue: gpu_4_queue
@@ -1324,53 +1339,54 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
       --tp-size=4
-    depends_on:
-    - image-build
+    depends_on: block-lm-eval-large-models-4-gpusa100
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            priorityClassName: ci
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-            volumes:
+        podSpec:
+          priorityClassName: ci
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
+  - block: Run LM Eval Large Models (4 GPUs)(H100)
+    depends_on: image-build
+    key: block-lm-eval-large-models-4-gpush100
   - label: LM Eval Large Models (4 GPUs)(H100)
     agents:
       queue: gpu_4_queue
@@ -1378,52 +1394,50 @@ steps:
     - export VLLM_USE_DEEP_GEMM=0
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
       --tp-size=4
-    depends_on:
-    - image-build
+    depends_on: block-lm-eval-large-models-4-gpush100
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              node.kubernetes.io/instance-type: gpu-h100-sxm
-            volumes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            node.kubernetes.io/instance-type: gpu-h100-sxm
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
   - label: LM Eval Small Models
     agents:
       queue: gpu_1_queue
@@ -1449,14 +1463,16 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run LM Eval Small Models (B200)
+    depends_on: image-build
+    key: block-lm-eval-small-models-b200
   - label: LM Eval Small Models (B200)
     agents:
       queue: gpu_1_queue
     commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
       --tp-size=1
-    depends_on:
-    - image-build
+    depends_on: block-lm-eval-small-models-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1636,6 +1652,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run GPT-OSS Eval (B200)
+    depends_on: image-build
+    key: block-gpt-oss-eval-b200
   - label: GPT-OSS Eval (B200)
     agents:
       queue: gpu_1_queue
@@ -1643,8 +1662,7 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b
       --metric 0.58
-    depends_on:
-    - image-build
+    depends_on: block-gpt-oss-eval-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1931,6 +1949,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Transformers Nightly Models
+    depends_on: image-build
+    key: block-transformers-nightly-models
   - label: Transformers Nightly Models
     agents:
       queue: gpu_1_queue
@@ -1945,8 +1966,7 @@ steps:
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py
       --model-type whisper
-    depends_on:
-    - image-build
+    depends_on: block-transformers-nightly-models
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1998,6 +2018,9 @@ steps:
         mount_buildkite_agent: true
 - group: Models - Language
   steps:
+  - block: Run Language Models Test (Extended Generation)
+    depends_on: image-build
+    key: block-language-models-test-extended-generation
   - label: Language Models Test (Extended Generation)
     agents:
       queue: gpu_1_queue
@@ -2005,8 +2028,7 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
-    depends_on:
-    - image-build
+    depends_on: block-language-models-test-extended-generation
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2024,13 +2046,15 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Language Models Test (Extended Pooling)
+    depends_on: image-build
+    key: block-language-models-test-extended-pooling
   - label: Language Models Test (Extended Pooling)
     agents:
       queue: gpu_1_queue
     commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
-    depends_on:
-    - image-build
+    depends_on: block-language-models-test-extended-pooling
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2048,13 +2072,15 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Language Models Test (MTEB)
+    depends_on: image-build
+    key: block-language-models-test-mteb
   - label: Language Models Test (MTEB)
     agents:
       queue: gpu_1_queue
     commands:
     - pytest -v -s models/language/pooling_mteb_test
-    depends_on:
-    - image-build
+    depends_on: block-language-models-test-mteb
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2072,13 +2098,15 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Language Models Test (PPL)
+    depends_on: image-build
+    key: block-language-models-test-ppl
   - label: Language Models Test (PPL)
     agents:
       queue: gpu_1_queue
     commands:
     - pytest -v -s models/language/generation_ppl_test
-    depends_on:
-    - image-build
+    depends_on: block-language-models-test-ppl
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2176,13 +2204,15 @@ steps:
         mount_buildkite_agent: true
 - group: Models - Multimodal
   steps:
+  - block: Run Custom Models
+    depends_on: image-build
+    key: block-custom-models
   - label: Custom Models
     agents:
       queue: gpu_1_queue
     commands:
     - echo 'Testing custom models...'
-    depends_on:
-    - image-build
+    depends_on: block-custom-models
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2225,6 +2255,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Models (Extended) 1
+    depends_on: image-build
+    key: block-multi-modal-models-extended-1
   - label: Multi-Modal Models (Extended) 1
     agents:
       queue: gpu_1_queue
@@ -2232,8 +2265,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py
       --ignore models/multimodal/processing
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-models-extended-1
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2251,6 +2283,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Models (Extended) 2
+    depends_on: image-build
+    key: block-multi-modal-models-extended-2
   - label: Multi-Modal Models (Extended) 2
     agents:
       queue: gpu_1_queue
@@ -2258,8 +2293,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0)
       and not core_model'
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-models-extended-2
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2277,6 +2311,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Models (Extended) 3
+    depends_on: image-build
+    key: block-multi-modal-models-extended-3
   - label: Multi-Modal Models (Extended) 3
     agents:
       queue: gpu_1_queue
@@ -2284,8 +2321,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1)
       and not core_model'
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-models-extended-3
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2628,13 +2664,15 @@ steps:
         mount_buildkite_agent: true
 - group: Weight Loading
   steps:
+  - block: Run Weight Loading Multiple GPU
+    depends_on: image-build
+    key: block-weight-loading-multiple-gpu
   - label: Weight Loading Multiple GPU
     agents:
       queue: gpu_4_queue
     commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
-    depends_on:
-    - image-build
+    depends_on: block-weight-loading-multiple-gpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2652,55 +2690,56 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Weight Loading Multiple GPU - Large Models
+    depends_on: image-build
+    key: block-weight-loading-multiple-gpu---large-models
   - label: Weight Loading Multiple GPU - Large Models
     agents:
       queue: gpu_4_queue
     commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
-    depends_on:
-    - image-build
+    depends_on: block-weight-loading-multiple-gpu---large-models
     soft_fail: false
     plugins:
     - kubernetes:
-        kubernetes:
-          podSpec:
-            priorityClassName: ci
-            containers:
-            - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-              command:
-              - bash
-              - -c
-              - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-                && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-                && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-                --tp-size=4
-              resources:
-                limits:
-                  nvidia.com/gpu: 4
-              volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: /root/.cache/huggingface
-              env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: '0'
-              - name: HF_HOME
-                value: /root/.cache/huggingface
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-            nodeSelector:
-              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-            volumes:
+        podSpec:
+          priorityClassName: ci
+          containers:
+          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+            command:
+            - bash
+            - -c
+            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
+              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
+              --tp-size=4
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+            volumeMounts:
             - name: devshm
-              emptyDir:
-                medium: Memory
+              mountPath: /dev/shm
             - name: hf-cache
-              hostPath:
-                path: /mnt/hf-cache
-                type: DirectoryOrCreate
+              mountPath: /root/.cache/huggingface
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: NCCL_CUMEM_HOST_ENABLE
+              value: '0'
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+          - name: hf-cache
+            hostPath:
+              path: /mnt/hf-cache
+              type: DirectoryOrCreate
