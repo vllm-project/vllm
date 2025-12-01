@@ -23,9 +23,8 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -87,7 +86,7 @@ class LLMEngine:
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_configs(self.model_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(

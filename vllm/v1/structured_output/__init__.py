@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import init_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -61,7 +61,7 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = init_tokenizer_from_configs(
+            self.tokenizer = init_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
             reasoning_parser = (
