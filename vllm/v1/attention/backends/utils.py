@@ -886,7 +886,7 @@ def split_decodes_and_prefills(
 
     if require_uniform:
         # check if we are in a padded uniform batch; this is used for full-CGs, some
-        # requests may have a query lenght of 0 but since they are padding its fine
+        # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
         if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
             assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
