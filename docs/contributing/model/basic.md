@@ -113,8 +113,6 @@ See [this page](registration.md) for instructions on how to register your new mo
 
 ### How to support models with interleaving sliding windows?
 
-For models with interleaving sliding windows (e.g. `google/gemma-2-2b-it` and `mistralai/Ministral-8B-Instruct-2410`), the scheduler will treat the model as a full-attention model, i.e., kv-cache of all tokens will not be dropped. This is to make sure prefix caching works with these models. Sliding window only appears as a parameter to the attention kernel computation.
-
 To support a model with interleaving sliding windows, we need to take care of the following details:
 
 - Make sure the model's `config.json` contains `layer_types`.
