@@ -4,10 +4,6 @@
 
 from fastapi import FastAPI
 
-from vllm.logger import init_logger
-
-logger = init_logger("vllm.entrypoints.serve")
-
 
 def register_vllm_serve_api_routers(app: FastAPI):
     from vllm.entrypoints.serve.lora.api_router import (
