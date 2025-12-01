@@ -654,8 +654,9 @@ def _fetch_metadata_for_variant(variant: str | None) -> tuple[list[dict], str]:
     variant_dir = f"{variant}/" if variant is not None else ""
     repo_url = f"https://wheels.vllm.ai/{base_commit}/{variant_dir}vllm/"
     meta_url = repo_url + "metadata.json"
-    print(f"Trying to fetch metadata from {meta_url}")
+    logger.info("Trying to fetch metadata from {}", meta_url)
     from urllib.request import urlopen
+
     with urlopen(meta_url) as resp:
         # urlopen raises HTTPError on unexpected status code
         wheels = json.loads(resp.read().decode("utf-8"))
@@ -664,29 +665,43 @@ def _fetch_metadata_for_variant(variant: str | None) -> tuple[list[dict], str]:
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
-    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+    # Attempts:
+    # 1. user-specified wheel location (can be either local or remote, via
+    #    VLLM_PRECOMPILED_WHEEL_LOCATION)
+    # 2. user-specified variant from nightly repo (current main commit via
+    #    VLLM_PRECOMPILED_WHEEL_VARIANT)
+    # 3. the variant corresponding to VLLM_MAIN_CUDA_VERSION from nightly repo
+    # 4. the default variant from nightly repo (current main commit)
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
+        logger.info("Using user-specified precompiled wheel location: {}", wheel_url)
     else:
         import platform
 
         arch = platform.machine()
         # try to fetch the wheel metadata from the nightly wheel repo
-        variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        main_variant = envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
+        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
+        logger.info("Using precompiled wheel variant: {}", variant)
         try_default = False
+        wheels, repo_url = None, None
         try:
             wheels, repo_url = _fetch_metadata_for_variant(variant)
         except Exception as e:
-            print(
-                f"Failed to fetch precompiled wheel metadata for variant {variant}: {e}"
+            logger.warning(
+                "Failed to fetch precompiled wheel metadata for variant {}",
+                variant,
+                exc_info=e,
             )
-            try_default = True # try outside handler to keep the stacktrace simple
+            try_default = True  # try outside handler to keep the stacktrace simple
         if try_default:
-            print("Warning: Trying the default nightly wheel variant.")
+            logger.info("Trying the default variant from /nightly/")
             wheels, repo_url = _fetch_metadata_for_variant(None)
             # if this also fails, then we have nothing more to try / cache
-
+        assert wheels is not None and repo_url is not None, (
+            "Failed to fetch precompiled wheel metadata"
+        )
         # The metadata.json has the following format:
         # see .buildkite/scripts/generate-nightly-index.py for details
         """[{
@@ -705,15 +720,17 @@ if envs.VLLM_USE_PRECOMPILED:
             if wheel.get("package_name") == "vllm" and arch in wheel.get(
                 "platform_tag", ""
             ):
-                print(f"Found precompiled wheel metadata: {wheel}")
-                assert "path" in wheel, f"Wheel metadata missing path: {wheel}"
+                logger.info("Found precompiled wheel metadata: {}", wheel)
+                if "path" not in wheel:
+                    raise ValueError(f"Wheel metadata missing path: {wheel}")
+                # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
                 wheel_url = repo_url + wheel["path"]
-                print(f"Using precompiled wheel URL: {wheel_url}")
+                logger.info("Using precompiled wheel URL: {}", wheel_url)
                 break
         else:
             raise ValueError(
                 f"No precompiled vllm wheel found for architecture {arch} "
-                f"from repo {repo_url}"
+                f"from repo {repo_url}. All available wheels: {wheels}"
             )
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
     for pkg, files in patch.items():
