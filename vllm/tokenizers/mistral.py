@@ -97,6 +97,8 @@ def _prepare_apply_chat_template_tools_and_messages(
     continue_final_message: bool = False,
     add_generation_prompt: bool = False,
 ) -> tuple[list["ChatCompletionMessageParam"], list[dict[str, Any]] | None]:
+    from mistral_common.protocol.instruct.tool_calls import Function, Tool
+
     if add_generation_prompt and continue_final_message:
         raise ValueError(
             "Cannot set both `add_generation_prompt` and "
@@ -130,6 +132,8 @@ def _prepare_apply_chat_template_tools_and_messages(
     # The Mistral client, in comparison to the OpenAI client, requires the
     # "parameters" dict and the "description" string to be present
     # even if they are empty.
+    tools_fields = set(Tool.model_fields.keys())
+    function_fields = set(Function.model_fields.keys())
     if tools:
         for function in [
             tool["function"] for tool in tools if tool["type"] == "function"
@@ -138,6 +142,31 @@ def _prepare_apply_chat_template_tools_and_messages(
                 function["parameters"] = {}
             if function.get("description") is None:
                 function["description"] = ""
+
+        # We filter not supported arguments to avoid throwing an error.
+        # TODO(juliendenize): remove this once OpenAI API is better supported by
+        # `mistral-common`.
+        for tool in tools:
+            tool_keys = set(tool.keys())
+            for tool_key in tool_keys:
+                if tool_key not in tools_fields:
+                    tool.pop(tool_key)
+                    logger.warning_once(
+                        f"'{tool_key}' is not supported by mistral-common for tools. "
+                        "It has been poped from the tool definition."
+                    )
+                if tool["type"] == "function":
+                    function_keys = set(tool["function"].keys())
+                    for function_key in function_keys:
+                        if function_key not in function_fields:
+                            tool["function"].pop(function_key)
+                            logger.warning_once(
+                                f"'{function_key}' is not supported by mistral-common "
+                                "for function tools. It has been poped from the "
+                                "function definition."
+                            )
+                else:
+                    raise ValueError("mistral-common only supports function tools.")
 
     return messages, tools
 

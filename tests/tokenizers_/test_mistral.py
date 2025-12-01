@@ -91,6 +91,118 @@ from vllm.tokenizers.mistral import (
                 ],
             ),
         ),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the current local date and time?",
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "unsupported_field": False,
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "unsupported_field2": False,
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                ],
+            },
+            (
+                [
+                    {
+                        "role": "user",
+                        "content": "What is the current local date and time?",
+                    }
+                ],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                ],
+            ),
+        ),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the current local date and time?",
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "unsupported_field": False,
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "unsupported_field2": False,
+                        "function": {
+                            "description": "Fetch the current local date and time 2.",
+                            "name": "get_current_time2",
+                            "parameters": {"a": "1"},
+                        },
+                    },
+                ],
+            },
+            (
+                [
+                    {
+                        "role": "user",
+                        "content": "What is the current local date and time?",
+                    }
+                ],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time.",
+                            "name": "get_current_time",
+                            "parameters": {},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "description": "Fetch the current local date and time 2.",
+                            "name": "get_current_time2",
+                            "parameters": {"a": "1"},
+                        },
+                    },
+                ],
+            ),
+        ),
     ],
 )
 def test_prepare_apply_chat_template_tools_and_messages(
