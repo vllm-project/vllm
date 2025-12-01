@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
+from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -67,6 +68,7 @@ def get_cached_tokenizer(
     return cached_tokenizer  # type: ignore
 
 
+@TokenizerRegistry.register("hf")
 class HfTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
