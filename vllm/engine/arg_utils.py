@@ -77,15 +77,16 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
+from vllm.config.vllm import OptimizationLevel
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import (
-    get_model_path,
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage, is_gguf
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
@@ -560,6 +561,7 @@ class EngineArgs:
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    optimization_level: OptimizationLevel = VllmConfig.optimization_level
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend | None = (
@@ -579,15 +581,26 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
-        # when use hf offline,replace model id to local model path
+        # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             model_id = self.model
             self.model = get_model_path(self.model, self.revision)
-            logger.info(
-                "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                model_id,
-                self.model,
-            )
+            if model_id is not self.model:
+                logger.info(
+                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
+                    model_id,
+                    self.model,
+                )
+            if self.tokenizer is not None:
+                tokenizer_id = self.tokenizer
+                self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
+                if tokenizer_id is not self.tokenizer:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace tokenizer_id [%s] "
+                        "to tokenizer_path [%s]",
+                        tokenizer_id,
+                        self.tokenizer,
+                    )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1105,13 +1118,17 @@ class EngineArgs:
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
         vllm_group.add_argument(
-            "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
+            "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
+        )
+
+        vllm_group.add_argument(
+            "--optimization-level", **vllm_kwargs["optimization_level"]
         )
 
         # Other arguments
@@ -1343,30 +1360,10 @@ class EngineArgs:
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
-
-        # Set default arguments for V1 Engine.
-        self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/s390x/RISCV CPUs in V1
-        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
-            CpuArchEnum.RISCV,
-        ):
-            logger.info(
-                "Chunked prefill is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_chunked_prefill = False
-            logger.info(
-                "Prefix caching is not supported for ARM and POWER, "
-                "S390X and RISC-V CPUs; "
-                "disabling it for V1 backend."
-            )
-            self.enable_prefix_caching = False
-
-        assert self.enable_chunked_prefill is not None
+        self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
+        self._set_default_max_num_seqs_and_batched_tokens_args(
+            usage_context, model_config
+        )
 
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
@@ -1733,7 +1730,6 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1750,6 +1746,7 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
+            optimization_level=self.optimization_level,
         )
 
         return config
@@ -1798,34 +1795,6 @@ class EngineArgs:
                     "launcher"
                 )
                 _raise_unsupported_error(feature_name=name)
-
-    @classmethod
-    def get_chunked_prefill_prefix_caching_defaults(
-        cls,
-        model_config: ModelConfig,
-    ) -> tuple[bool, bool]:
-        if model_config.runner_type != "pooling":
-            default_chunked_prefill = True
-
-            # Disable prefix caching default for hybrid models and mamba-only
-            # models since the feature is still experimental.
-            default_prefix_caching = not (
-                model_config.is_hybrid or model_config.is_attention_free
-            )
-        else:
-            assert model_config.pooler_config is not None
-
-            pooling_type = model_config.pooler_config.pooling_type
-            incremental_prefill_supported = (
-                pooling_type is not None
-                and pooling_type.lower() == "last"
-                and getattr(model_config.hf_config, "is_causal", True)
-            )
-
-            default_chunked_prefill = incremental_prefill_supported
-            default_prefix_caching = incremental_prefill_supported
-
-        return default_chunked_prefill, default_prefix_caching
 
     @classmethod
     def get_batch_defaults(
@@ -1910,14 +1879,11 @@ class EngineArgs:
 
         return default_max_num_batched_tokens, default_max_num_seqs
 
-    def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+    def _set_default_chunked_prefill_and_prefix_caching_args(
+        self, model_config: ModelConfig
     ) -> None:
-        """Set Default Arguments for V1 Engine."""
-        (
-            default_chunked_prefill,
-            default_prefix_caching,
-        ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
+        default_chunked_prefill = model_config.is_chunked_prefill_supported
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.prefill_context_parallel_size > 1:
             default_chunked_prefill = False
@@ -1978,6 +1944,31 @@ class EngineArgs:
                 scope="local",
             )
 
+        # Disable chunked prefill and prefix caching for:
+        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+            CpuArchEnum.POWERPC,
+            CpuArchEnum.S390X,
+            CpuArchEnum.RISCV,
+        ):
+            logger.info(
+                "Chunked prefill is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
+            logger.info(
+                "Prefix caching is not supported for ARM and POWER, "
+                "S390X and RISC-V CPUs; "
+                "disabling it for V1 backend."
+            )
+            self.enable_prefix_caching = False
+
+    def _set_default_max_num_seqs_and_batched_tokens_args(
+        self,
+        usage_context: UsageContext | None,
+        model_config: ModelConfig,
+    ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
             default_max_num_batched_tokens,
