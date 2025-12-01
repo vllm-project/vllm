@@ -439,6 +439,13 @@ class MistralTokenizer(TokenizerLike):
             ids, skip_special_tokens=skip_special_tokens
         )
 
+    def batch_decode(
+        self, ids: list[list[int]] | list[int], skip_special_tokens: bool = False
+    ) -> str:
+        return self.transformers_tokenizer.batch_decode(
+            ids, skip_special_tokens=skip_special_tokens
+        )
+
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         from mistral_common.tokens.tokenizers.base import (
             SpecialTokenPolicy,
