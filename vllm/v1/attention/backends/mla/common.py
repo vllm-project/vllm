@@ -2043,16 +2043,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
                 decode_q0[..., : ql_nope_shape[2]].copy_(decode_ql_nope)
                 decode_q0[..., ql_nope_shape[2] :].copy_(decode_q_pe)
-                decode_q = torch.empty(
-                    decode_q_shape,
-                    device=decode_ql_nope.device,
-                    dtype=torch.float8_e4m3fn,
-                )
 
                 decode_q, _ = ops.scaled_fp8_quant(
                     decode_q0.view(decode_q_shape[0], -1),
                     layer._q_scale,
-                    output=decode_q.view(decode_q_shape[0], -1),
                 )
                 decode_q = decode_q.view(decode_q_shape)
             else:
