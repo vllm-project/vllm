@@ -22,9 +22,9 @@ def reference_quant(x: torch.Tensor, use_ue8m0: bool):
     vllm.model_executor.layers.quantization.utils.fp8_utils
     """
 
-    # Allocate output tensors
     x_q = torch.empty_like(x, device=x.device, dtype=FLOAT8_DTYPE)
-    # Allocate the scale tensor column-major format.
+
+    # Allocate the scale tensor in column-major format.
     shape = (x.shape[-1] // GROUP_SIZE,) + x.shape[:-1]
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
 

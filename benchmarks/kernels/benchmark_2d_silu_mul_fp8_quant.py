@@ -110,7 +110,6 @@ def reference_quant(x: torch.Tensor, quant_out: torch.Tensor, use_ue8m0: bool):
     Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
     """
-    # Allocate output tensors
     assert quant_out.size() == x.size()
     # Allocate the scale tensor column-major format.
     shape = (x.shape[-1] // GROUP_SIZE,) + x.shape[:-1]
