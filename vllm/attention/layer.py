@@ -44,7 +44,11 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backends.mla.common import MLACommonImpl, reorg_kvcache
+from vllm.v1.attention.backends.mla.common import (
+    MLACommonImpl,
+    MLACommonMetadata,
+    reorg_kvcache,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -820,9 +824,9 @@ def _compute_prefill_context_impl(
     impl: MLACommonImpl,
     q: torch.Tensor,
     kv_c_and_k_pe_cache: torch.Tensor,
-    attn_metadata,
+    attn_metadata: MLACommonMetadata,
     k_scale: torch.Tensor,
-):
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute prefill context implementation.
 
     This function computes attention over the existing context during
@@ -903,10 +907,10 @@ def _context_parallel_compute_prefill_context_impl(
     impl: MLACommonImpl,
     q: torch.Tensor,
     kv_c_and_k_pe_cache: torch.Tensor,
-    attn_metadata,
+    attn_metadata: MLACommonMetadata,
     k_scale: torch.Tensor,
     dcp_world_size: int,
-):
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Context parallel compute prefill context implementation.
 
     This function computes attention over the existing context during
@@ -1099,7 +1103,7 @@ def forward_prefill(
     k_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     kv_cache: torch.Tensor,
-    attn_metadata,
+    attn_metadata: MLACommonMetadata | None,
     output: torch.Tensor,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
