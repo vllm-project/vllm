@@ -310,9 +310,6 @@ class cmake_build_ext(build_ext):
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
 
-    def run(self) -> None:
-        assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
-
     def build_extensions(self) -> None:
         print("Skipping build_ext: using precompiled extensions.")
         return
@@ -649,10 +646,11 @@ package_data = {
 }
 
 
-def _fetch_metadata_for_variant(variant: str | None) -> tuple[list[dict], str]:
-    base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+def _fetch_metadata_for_variant(
+    commit: str, variant: str | None
+) -> tuple[list[dict], str]:
     variant_dir = f"{variant}/" if variant is not None else ""
-    repo_url = f"https://wheels.vllm.ai/{base_commit}/{variant_dir}vllm/"
+    repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
     meta_url = repo_url + "metadata.json"
     logger.info("Trying to fetch metadata from {}", meta_url)
     from urllib.request import urlopen
@@ -683,11 +681,17 @@ if envs.VLLM_USE_PRECOMPILED:
         # try to fetch the wheel metadata from the nightly wheel repo
         main_variant = envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
         variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
-        logger.info("Using precompiled wheel variant: {}", variant)
+        commit = os.getenv(
+            "VLLM_PRECOMPILED_WHEEL_COMMIT",
+            precompiled_wheel_utils.get_base_commit_in_main_branch(),
+        )
+        logger.info(
+            "Using precompiled wheel commit {} with variant {}", commit, variant
+        )
         try_default = False
         wheels, repo_url = None, None
         try:
-            wheels, repo_url = _fetch_metadata_for_variant(variant)
+            wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
         except Exception as e:
             logger.warning(
                 "Failed to fetch precompiled wheel metadata for variant {}",
@@ -696,8 +700,8 @@ if envs.VLLM_USE_PRECOMPILED:
             )
             try_default = True  # try outside handler to keep the stacktrace simple
         if try_default:
-            logger.info("Trying the default variant from /nightly/")
-            wheels, repo_url = _fetch_metadata_for_variant(None)
+            logger.info("Trying the default variant")
+            wheels, repo_url = _fetch_metadata_for_variant(commit, None)
             # if this also fails, then we have nothing more to try / cache
         assert wheels is not None and repo_url is not None, (
             "Failed to fetch precompiled wheel metadata"
