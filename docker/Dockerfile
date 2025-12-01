@@ -193,6 +193,7 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
+ARG VLLM_PRECOMPILED_WHEEL_LOCATION=""
 ARG VLLM_MAIN_CUDA_VERSION=""
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
@@ -211,6 +212,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && sccache --show-stats \
@@ -229,6 +231,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         rm -rf .deps && \
         mkdir -p .deps && \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
+        export VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
