@@ -319,14 +319,17 @@ class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
     @staticmethod
-    def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
+    def extract_precompiled_and_patch_package(
+        wheel_url_or_path: str, download_filename: str | None
+    ) -> dict:
         import tempfile
         import zipfile
 
         temp_dir = None
         try:
             if not os.path.isfile(wheel_url_or_path):
-                wheel_filename = wheel_url_or_path.split("/")[-1]
+                # use provided filename first, then derive from URL
+                wheel_filename = download_filename or wheel_url_or_path.split("/")[-1]
                 temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
                 wheel_path = os.path.join(temp_dir, wheel_filename)
                 print(f"Downloading wheel from {wheel_url_or_path} to {wheel_path}")
@@ -673,7 +676,8 @@ if envs.VLLM_USE_PRECOMPILED:
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
-        logger.info("Using user-specified precompiled wheel location: {}", wheel_url)
+        download_filename = None
+        logger.info("Using user-specified precompiled wheel location: %s", wheel_url)
     else:
         import platform
 
@@ -689,7 +693,7 @@ if envs.VLLM_USE_PRECOMPILED:
             "Using precompiled wheel commit %s with variant %s", commit, variant
         )
         try_default = False
-        wheels, repo_url = None, None
+        wheels, repo_url, download_filename = None, None, None
         try:
             wheels, repo_url = _fetch_metadata_for_variant(commit, variant)
         except Exception:
@@ -728,14 +732,8 @@ if envs.VLLM_USE_PRECOMPILED:
                 logger.info("Found precompiled wheel metadata: %s", wheel)
                 if "path" not in wheel:
                     raise ValueError(f"Wheel metadata missing path: {wheel}")
-                path = wheel["path"]
-                # path may contain '+' which needs to be URL-encoded
-                if "+" in path:
-                    from urllib.parse import quote
-
-                    path = quote(path, safe=":%/")
-                    logger.info("Encoded wheel path to %s", path)
-                wheel_url = repo_url + path
+                wheel_url = repo_url + wheel["path"]
+                download_filename = wheel.get("filename")
                 logger.info("Using precompiled wheel URL: %s", wheel_url)
                 break
         else:
@@ -743,7 +741,9 @@ if envs.VLLM_USE_PRECOMPILED:
                 f"No precompiled vllm wheel found for architecture {arch} "
                 f"from repo {repo_url}. All available wheels: {wheels}"
             )
-    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
+        wheel_url, download_filename
+    )
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 

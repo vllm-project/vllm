@@ -113,10 +113,9 @@ def generate_package_index_and_metadata(
             wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
         )
         # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
+        # NOTE: this is AWS S3 specific behavior!
         file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
-        href_tags.append(
-            f'    <a href="{file_path_quoted}">{file.filename}</a><br/>'
-        )
+        href_tags.append(f'    <a href="{file_path_quoted}">{file.filename}</a><br/>')
         file_meta = asdict(file)
         file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
