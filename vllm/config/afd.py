@@ -18,7 +18,7 @@ class AFDConfig:
 
     afd_connector: str = "dummy"
     """The AFD connector for vLLM to communicate between attention and FFN
-    nodes. Available connectors: 'dummy', 'stepmesh'"""
+    nodes. Available connectors: 'dummy', 'p2pconnector'"""
 
     afd_role: Literal["attention", "ffn"] = "attention"
     """Role of this vLLM instance in AFD. 'attention' for attention workers,

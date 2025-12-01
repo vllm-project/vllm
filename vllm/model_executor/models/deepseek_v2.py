@@ -1326,14 +1326,7 @@ class DeepseekV2Model(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             afd_connector = afd_metadata.afd_connector
             afd_metadata.afd_stage_idx = dbo_current_ubatch_id()
-            start_idx = afd_metadata.afd_tokens_start_loc[afd_metadata.afd_stage_idx]
-            end_idx = start_idx + afd_metadata.afd_tokens_lens[afd_metadata.afd_stage_idx]
-            logger.info(f"jcz deepseekv2 layer_idx:{layer.layer_idx} start_loc:{afd_metadata.afd_tokens_start_loc} "
-                        f"start_idx:{start_idx} end_idx:{end_idx} "
-                        f"stage_idx:{afd_metadata.afd_stage_idx} "
-                        f"hidden_states:{hidden_states.shape} "
-                        f"positions:{positions.shape} "
-                        f"afd_tokens_lens:{afd_metadata.afd_tokens_lens}")
+            
             if layer.layer_idx > 0:
                 hidden_states, recv_metadata = afd_connector.recv_ffn_output()
                 if recv_metadata.recv_handle_list is not None:

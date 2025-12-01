@@ -81,10 +81,6 @@ class AFDConnectorFactory:
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
 # only load the files corresponding to the current connector.
-AFDConnectorFactory.register_connector(
-    "stepmesh",
-    "vllm.distributed.afd_transfer.afd_connector.stepmesh_connector",
-    "StepMeshAFDConnector")
 
 AFDConnectorFactory.register_connector(
     "dummy", "vllm.distributed.afd_transfer.afd_connector.dummy_connector",
