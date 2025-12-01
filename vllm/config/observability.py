@@ -28,11 +28,6 @@ class ObservabilityConfig:
     you migrate to new metrics. The metric is likely to be removed completely
     in an upcoming release."""
 
-    log_runtime_cudagraph_metadata: bool = False
-    """Enable logging of runtime cudagraph metadata, including cudagraph mode,
-    batch descriptor, ubatch slices, and num tokens across dp.
-    """
-
     @cached_property
     def show_hidden_metrics(self) -> bool:
         """Check if the hidden metrics should be shown."""

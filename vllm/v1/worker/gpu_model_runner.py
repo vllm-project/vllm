@@ -2928,15 +2928,14 @@ class GPUModelRunner(
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
 
-                if self.observability_config.log_runtime_cudagraph_metadata:
-                    logger.debug(
-                        "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                        "ubatch_slices: %s, num_tokens_across_dp: %s",
-                        cudagraph_mode,
-                        batch_desc,
-                        ubatch_slices,
-                        num_tokens_across_dp,
-                    )
+                logger.debug(
+                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "ubatch_slices: %s, num_tokens_across_dp: %s",
+                    cudagraph_mode,
+                    batch_desc,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                )
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = (
