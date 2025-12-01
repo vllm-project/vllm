@@ -193,10 +193,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
-    VLLM_MORIIO_CONNECTOR_READ_MODE:bool=False
-    VLLM_MORIIO_QP_PER_TRANSFER:int=1
-    VLLM_MORIIO_POST_BATCH_SIZE:int=-1
-    VLLM_MORIIO_NUM_WORKERS:int=1
+    VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
+    VLLM_MORIIO_QP_PER_TRANSFER: int = 1
+    VLLM_MORIIO_POST_BATCH_SIZE: int = -1
+    VLLM_MORIIO_NUM_WORKERS: int = 1
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1349,23 +1349,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
-        os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower()
-        in ("true", "1")
+        os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
     ),
     # Controls the QP (Queue Pair) per transfer configuration for the Mori-IO connector
     "VLLM_MORIIO_QP_PER_TRANSFER": lambda: int(
         os.getenv("VLLM_MORIIO_QP_PER_TRANSFER", "1")
     ),
-
     # Controls the post-processing batch size for the Mori-IO connector
     "VLLM_MORIIO_POST_BATCH_SIZE": lambda: int(
         os.getenv("VLLM_MORIIO_POST_BATCH_SIZE", "-1")
     ),
-
     # Controls the number of workers for Mori operations for the Mori-IO connector
-    "VLLM_MORIIO_NUM_WORKERS": lambda: int(
-        os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")
-    ),
+    "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL": lambda: bool(
         int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))
