@@ -88,6 +88,7 @@ def test_rocm_wvsplitkrc_bias2D_kernel(n, k, m, dtype, seed):
 
     assert torch.allclose(out, ref_out, rtol=0.01)
 
+
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
@@ -161,6 +162,7 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
+
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
