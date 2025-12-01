@@ -647,8 +647,6 @@ def invoke_fused_moe_kernel(
                 bit,
             )
             return
-
-        print("fused_moe_kernel_gptq_awq")
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
@@ -686,9 +684,6 @@ def invoke_fused_moe_kernel(
             use_int8_w8a16=use_int8_w8a16,
             **config,
         )
-        print("fused_moe_kernel_gptq_awq done")
-
-        print("C shape: ", C.shape, "C dtype: ", C.dtype, "C tensor: ", C)
     else:
         config = config.copy()
         config["SPLIT_K"] = 1

@@ -36,7 +36,6 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
-    SWIGLU = 2
 
 
 aiter_topK_meta_data = None

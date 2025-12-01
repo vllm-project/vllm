@@ -1871,18 +1871,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             self.num_bits == 4 and rocm_aiter_ops.is_fused_moe_enabled()
         )
 
-        # Reconfigure packed weights and scales to match moe_wna16 format
-        # IMPORTANT: Force convert to uint8 for int4 quantization
-        w13_transposed = layer.w13_weight_packed.transpose(1, 2).contiguous()
-        w2_transposed = layer.w2_weight_packed.transpose(1, 2).contiguous()
-
-        # Force view as uint8 (works for both int4 packed and mxfp4)
         layer.w13_weight_packed = torch.nn.Parameter(
-            w13_transposed.view(torch.uint8),
+            layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
             requires_grad=False,
         )
         layer.w2_weight_packed = torch.nn.Parameter(
-            w2_transposed.view(torch.uint8),
+            layer.w2_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
             requires_grad=False,
         )
 
