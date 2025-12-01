@@ -50,6 +50,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
+                getattr(moe_layer, "shared_experts_stream", None),
             ),
         )
 
@@ -64,6 +65,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     @property
     def allow_inplace(self) -> bool:
         return self.old_quant_method.allow_inplace
+
+    @property
+    def method_name(self) -> str:
+        return self.old_quant_method.method_name
 
     def create_weights(
         self,
@@ -83,7 +88,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,

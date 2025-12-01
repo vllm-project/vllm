@@ -10,8 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
@@ -51,80 +54,30 @@ else:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
-USE_XFORMERS_OPS = None
-
-
-def check_xformers_availability():
-    global USE_XFORMERS_OPS
-    if USE_XFORMERS_OPS is not None:
-        return USE_XFORMERS_OPS
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        try:
-            from importlib.util import find_spec
-
-            find_spec("xformers.ops")
-            USE_XFORMERS_OPS = True
-        except ImportError:
-            USE_XFORMERS_OPS = False
-
-    # the warning only needs to be shown once
-    if not USE_XFORMERS_OPS:
-        logger.warning("Xformers is not available, falling back.")
-
-    return USE_XFORMERS_OPS
-
-
-def check_upstream_fa_availability(dtype: torch.dtype):
-    if (
-        dtype in (torch.float16, torch.bfloat16)
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(80)
-    ):
-        from transformers.utils import is_flash_attn_2_available
-
-        return is_flash_attn_2_available()
-    if current_platform.is_rocm():
-        from importlib.util import find_spec
-
-        return find_spec("flash_attn") is not None
-    return False
 
 
 def maybe_get_vit_flash_attn_backend(
     attn_backend: AttentionBackendEnum,
-    use_upstream_fa: bool,
     attn_backend_override: AttentionBackendEnum | None = None,
 ) -> tuple[AttentionBackendEnum, Callable | None]:
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = AttentionBackendEnum.ROCM_AITER_FA
-
         elif (
-            check_upstream_fa_availability(torch.get_default_dtype())
+            attn_backend_override is None
             and on_gfx9()
-            and attn_backend_override is None
+            and attn_backend == AttentionBackendEnum.FLASH_ATTN
         ):
-            attn_backend = AttentionBackendEnum.FLASH_ATTN
-            use_upstream_fa = True
+            pass
         else:
             return AttentionBackendEnum.TORCH_SDPA, None
-
     elif current_platform.is_cuda():
-        if (
-            attn_backend != AttentionBackendEnum.FLASH_ATTN
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            attn_backend = AttentionBackendEnum.FLASH_ATTN
-            use_upstream_fa = True
+        pass
     elif current_platform.is_xpu():
         assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
-        use_upstream_fa = False
+        pass
     else:
         return AttentionBackendEnum.TORCH_SDPA, None
 
@@ -135,10 +88,7 @@ def maybe_get_vit_flash_attn_backend(
         if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -523,17 +473,11 @@ class MultiHeadAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        # Some auto-selected backends can be upgraded
-        # to upstream flash attention if available.
-        # If vllm native fa is selected, we use it directly.
-        use_upstream_fa = False
-
         self.attn_backend = (
             backend
             if backend
             in {
                 AttentionBackendEnum.TORCH_SDPA,
-                AttentionBackendEnum.XFORMERS,
                 AttentionBackendEnum.PALLAS,
                 AttentionBackendEnum.ROCM_AITER_FA,
                 AttentionBackendEnum.FLASH_ATTN,
@@ -544,33 +488,17 @@ class MultiHeadAttention(nn.Module):
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
-
-        if (
-            self.attn_backend == AttentionBackendEnum.XFORMERS
-            and not check_xformers_availability()
-        ):
-            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        # this condition is just to make sure that the
-        # use_upstream_fa in the log is correct
-        if (
-            current_platform.is_rocm()
-            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-        ):
-            use_upstream_fa = True
-
         logger.info_once(
-            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
-            f"use_upstream_fa: {use_upstream_fa}"
+            f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
 
     def forward(
@@ -613,12 +541,6 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
-            )
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(
-                query, key, value, scale=self.scale
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))

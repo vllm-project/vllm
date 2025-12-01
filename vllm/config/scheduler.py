@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -61,15 +61,6 @@ class SchedulerConfig:
     long_prefill_token_threshold: int = 0
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
-
-    num_lookahead_slots: int = Field(default=0, ge=0)
-    """The number of slots to allocate per sequence per
-    step, beyond the known token ids. This is used in speculative
-    decoding to store KV activations of tokens which may or may not be
-    accepted.
-
-    NOTE: This will be replaced by speculative config in the future; it is
-    present to enable correctness tests until then."""
 
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
@@ -187,7 +178,7 @@ class SchedulerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
@@ -232,19 +223,6 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
-
-    @property
-    @deprecated(
-        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
-        "`SchedulerConfig.enable_chunked_prefill`. "
-        "The old name will be removed in v0.12."
-    )
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
