@@ -39,12 +39,10 @@ class RayPrometheusMetric:
         return tuple(labels)
 
     def labels(self, *labels, **labelskwargs):
-        replica_id = _get_replica_id()
-
         if labels:
             labelskwargs.update(zip(self.metric._tag_keys, labels))
 
-        labelskwargs["ReplicaId"] = replica_id or ""
+        labelskwargs["ReplicaId"] = _get_replica_id() or ""
 
         if labelskwargs:
             for k, v in labelskwargs.items():
@@ -80,7 +78,6 @@ class RayGaugeWrapper(RayPrometheusMetric):
         labelnames: list[str] | None = None,
         multiprocess_mode: str | None = "",
     ):
-        super().__init__()
         # All Ray metrics are keyed by WorkerId, so multiprocess modes like
         # "mostrecent", "all", "sum" do not apply. This logic can be manually
         # implemented at the observability layer (Prometheus/Grafana).
@@ -113,7 +110,6 @@ class RayCounterWrapper(RayPrometheusMetric):
         documentation: str | None = "",
         labelnames: list[str] | None = None,
     ):
-        super().__init__()
         tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Counter(
@@ -139,7 +135,6 @@ class RayHistogramWrapper(RayPrometheusMetric):
         labelnames: list[str] | None = None,
         buckets: list[float] | None = None,
     ):
-        super().__init__()
         tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
 
