@@ -147,9 +147,7 @@ class PriorityRequestQueue(RequestQueue):
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
-        heapq.heappush(
-            self._heap, (request.priority, request.arrival_time, id(request))
-        )
+        heapq.heappush(self._heap, (request.priority, request.arrival_time, request))
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
