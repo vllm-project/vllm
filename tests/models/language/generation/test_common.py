@@ -10,13 +10,6 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-# These have unsupported head_dim for FA. We do not
-# have a clean way to fall back, so we fail with
-# a clear msg when it happens.
-# https://github.com/vllm-project/vllm/issues/14524
-# NOTE(woosuk): Skipping these tests until V1 supports them.
-# REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
-
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
 # When more AITER kernels are added, this list will not be

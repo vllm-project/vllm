@@ -68,11 +68,11 @@ class MemorySnapshot:
     timestamp: float = 0.0
     auto_measure: bool = True
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.auto_measure:
             self.measure()
 
-    def measure(self):
+    def measure(self) -> None:
         from vllm.platforms import current_platform
 
         # we measure the torch peak memory usage via allocated_bytes,

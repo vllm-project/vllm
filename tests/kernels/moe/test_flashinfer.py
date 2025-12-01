@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8,
     flashinfer_cutlass_moe_fp8,
@@ -22,7 +21,14 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+
+try:
+    from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "flashinfer not supported for vLLM on ROCm", allow_module_level=True
+        )
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
@@ -144,14 +150,11 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=True)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids = Llama4MoE.custom_routing_function(
             hidden_states=td.hidden_states,
-            router_logits=score,
-            use_grouped_topk=False,
-            top_k=topk,
+            gating_output=score,
+            topk=topk,
             renormalize=False,
-            custom_routing_function=Llama4MoE.custom_routing_function,
-            scoring_func="softmax",
         )
 
         quant_config = fp8_w8a8_moe_quant_config(
@@ -212,14 +215,11 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         )
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids = Llama4MoE.custom_routing_function(
             hidden_states=td.hidden_states,
-            router_logits=score,
-            use_grouped_topk=False,
-            top_k=topk,
+            gating_output=score,
+            topk=topk,
             renormalize=False,
-            custom_routing_function=Llama4MoE.custom_routing_function,
-            scoring_func="softmax",
         )
 
         quant_config = fp8_w8a8_moe_quant_config(

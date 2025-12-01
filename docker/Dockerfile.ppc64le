@@ -8,8 +8,8 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS openbl
 
 ARG MAX_JOBS
 ARG OPENBLAS_VERSION=0.3.30
-RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
-    && source /opt/rh/gcc-toolset-13/enable \
+RUN microdnf install -y dnf && dnf install -y gcc-toolset-14 make wget unzip \
+    && source /opt/rh/gcc-toolset-14/enable \
     && wget https://github.com/OpenMathLib/OpenBLAS/releases/download/v$OPENBLAS_VERSION/OpenBLAS-$OPENBLAS_VERSION.zip \
     && unzip OpenBLAS-$OPENBLAS_VERSION.zip \
     && cd OpenBLAS-$OPENBLAS_VERSION \
@@ -57,7 +57,7 @@ COPY --from=openblas-builder /tmp/control /dev/null
 RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     dnf install -y openssl-devel \
     && dnf install -y \
-       git tar gcc-toolset-13 automake libtool \
+       git tar gcc-toolset-14 automake libtool \
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \
        libtiff-devel libjpeg-devel zlib-devel freetype-devel libwebp-devel \
        harfbuzz-devel libraqm-devel libimagequant-devel libxcb-devel \
@@ -84,7 +84,7 @@ ARG _GLIBCXX_USE_CXX11_ABI=1
 ARG OPENBLAS_VERSION=0.3.30
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable &&  \
+    source /opt/rh/gcc-toolset-14/enable &&  \
     git clone --recursive https://github.com/pytorch/pytorch.git -b v${TORCH_VERSION} && \
     cd pytorch && \
     uv pip install -r requirements.txt && \
@@ -97,7 +97,7 @@ ARG TORCHVISION_VERSION=0.22.0
 ARG TORCHVISION_USE_NVJPEG=0
 ARG TORCHVISION_USE_FFMPEG=0
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/pytorch/vision.git -b v${TORCHVISION_VERSION} && \
     cd vision && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
@@ -113,7 +113,7 @@ ARG USE_ROCM=0
 ARG USE_CUDA=0
 ARG TORCHAUDIO_TEST_ALLOW_SKIP_IF_NO_FFMPEG=1
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/pytorch/audio.git -b v${TORCHAUDIO_VERSION} && \
     cd audio && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
@@ -130,7 +130,7 @@ ARG MAX_JOBS
 ARG PYARROW_PARALLEL
 ARG PYARROW_VERSION=21.0.0
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/apache/arrow.git -b apache-arrow-${PYARROW_VERSION} && \
     cd arrow/cpp && \
     mkdir build && cd build && \
@@ -162,7 +162,7 @@ ARG OPENCV_VERSION=86
 ARG OPENCV_PATCH=97f3f39
 ARG ENABLE_HEADLESS=1
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
     cd opencv-python && \
     sed -i -E -e 's/"setuptools.+",/"setuptools",/g' pyproject.toml && \
@@ -196,7 +196,7 @@ ARG MAX_JOBS
 ARG NUMBA_VERSION=0.61.2
 
 # Clone all required dependencies
-RUN dnf install ninja-build llvm15 llvm15-devel -y && source /opt/rh/gcc-toolset-13/enable && export PATH=$PATH:/usr/lib64/llvm15/bin && \
+RUN dnf install ninja-build llvm15 llvm15-devel -y && source /opt/rh/gcc-toolset-14/enable && export PATH=$PATH:/usr/lib64/llvm15/bin && \
     git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
     cd ./numba && \
     if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
@@ -210,6 +210,9 @@ RUN dnf install ninja-build llvm15 llvm15-devel -y && source /opt/rh/gcc-toolset
 ###############################################################
 
 FROM base-builder AS vllmcache-builder
+
+ENV LLVM_CONFIG=/usr/lib64/llvm15/bin/llvm-config
+ENV PATH=/usr/lib64/llvm15/bin:$PATH
 
 COPY --from=torch-builder /tmp/control /dev/null
 COPY --from=arrow-builder /tmp/control /dev/null
@@ -225,10 +228,13 @@ ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 RUN --mount=type=cache,target=/root/.cache/uv \
     dnf install llvm15 llvm15-devel -y && \
     rpm -ivh --nodeps https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-16.el9.ppc64le.rpm && \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
     uv pip install maturin && \
     uv build --wheel --out-dir /hf_wheels/
+
+ENV CXXFLAGS="-fno-lto -Wno-error=free-nonheap-object" \
+    CFLAGS="-fno-lto"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
     --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
@@ -236,7 +242,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
     --mount=type=bind,from=numba-builder,source=/numbawheels/,target=/numbawheels/,ro \
     --mount=type=bind,src=.,dst=/src/,rw \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     export PATH=$PATH:/usr/lib64/llvm15/bin && \
     uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /numbawheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
@@ -260,7 +266,7 @@ FROM base-builder AS lapack-builder
 ARG MAX_JOBS
 ARG LAPACK_VERSION=3.12.1
 RUN git clone --recursive https://github.com/Reference-LAPACK/lapack.git -b v${LAPACK_VERSION} \
-    && cd lapack && source /opt/rh/gcc-toolset-13/enable \
+    && cd lapack && source /opt/rh/gcc-toolset-14/enable \
     && cmake -B build -S . \
     && cmake --build build -j ${MAX_JOBS:-$(nproc)}
 
@@ -299,7 +305,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
-    libomp tar findutils openssl llvm15 llvm15-devel \
+    libomp libicu tar findutils openssl llvm15 llvm15-devel \
     pkgconfig xsimd g++ gcc-fortran libsndfile \
     libtiff libjpeg openjpeg2 zlib zeromq \
     freetype lcms2 libwebp tcl tk utf8proc \

@@ -15,8 +15,9 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers.seed_oss_tool_parser import SeedOssToolParser
-from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -256,7 +257,7 @@ def test_streaming_tool_calls_no_tools(seed_oss_tool_parser):
 
 def stream_delta_message_generator(
     seed_oss_tool_parser: SeedOssToolParser,
-    seed_oss_tokenizer: AnyTokenizer,
+    seed_oss_tokenizer: TokenizerLike,
     model_output: str,
     request: ChatCompletionRequest | None = None,
 ) -> Generator[DeltaMessage, None, None]:

@@ -1,16 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import random
 
 import pytest
 import torch
 
+from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 skip_unsupported = pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
     reason="Requires CUDA and >= Hopper (SM90)",
 )
+
+BACKENDS: list[str] = [
+    "FLASH_ATTN",
+]
+
+if has_flashinfer():
+    BACKENDS.append("FLASHINFER")
+
+if flash_attn_supports_mla():
+    BACKENDS.append("FLASH_ATTN_MLA")
+
+DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
+MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+
+
+def resolve_model_name(backend: str) -> str:
+    """Resolve the model name for the given backend."""
+    model = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
+    if backend.endswith("MLA") and model == DEFAULT_MODEL:
+        return MLA_MODEL
+    return model
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
