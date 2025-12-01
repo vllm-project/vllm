@@ -121,7 +121,47 @@ def test_shm_broadcast():
 
 
 @worker_fn_wrapper
-def worker_fn_test_shutdown():
+def worker_fn_test_shutdown_busy():
+    rank = dist.get_rank()
+    writer_rank = 2
+    message_queue = MessageQueue.create_from_process_group(
+        dist.group.WORLD, 40 * 1024, 2, writer_rank
+    )
+
+    if not message_queue._is_writer:
+        # Put into busy mode
+        message_queue._spin_condition.busy_loop_s = 9999
+
+        shutdown_event = threading.Event()
+
+        def shutdown_thread(mq, shutdown_event):
+            shutdown_event.wait()
+            mq.shutdown()
+
+        threading.Thread(
+            target=shutdown_thread, args=(message_queue, shutdown_event)
+        ).start()
+
+        with pytest.raises(TimeoutError):
+            message_queue.dequeue(timeout=0.01)
+
+        shutdown_event.set()
+
+        with pytest.raises(RuntimeError, match="cancelled"):
+            message_queue.dequeue(timeout=1)
+
+        assert message_queue.shutting_down
+
+    print(f"torch distributed passed the test! Rank {rank}")
+    dist.barrier()
+
+
+def test_message_queue_shutdown_busy():
+    distributed_run(worker_fn_test_shutdown_busy, 4)
+
+
+@worker_fn_wrapper
+def worker_fn_test_shutdown_idle():
     rank = dist.get_rank()
     writer_rank = 2
     message_queue = MessageQueue.create_from_process_group(
@@ -156,8 +196,8 @@ def worker_fn_test_shutdown():
     dist.barrier()
 
 
-def test_message_queue_shutdown():
-    distributed_run(worker_fn_test_shutdown, 4)
+def test_message_queue_shutdown_idle():
+    distributed_run(worker_fn_test_shutdown_idle, 4)
 
 
 @worker_fn_wrapper
