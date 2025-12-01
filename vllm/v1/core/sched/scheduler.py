@@ -256,7 +256,7 @@ class Scheduler(SchedulerInterface):
                 self.max_model_len,
             )
             num_new_tokens = min(
-                num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
+                num_new_tokens, max_total_tokens - request.num_computed_tokens
             )
 
             # Schedule encoder inputs.
