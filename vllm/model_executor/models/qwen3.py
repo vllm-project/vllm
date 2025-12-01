@@ -40,8 +40,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
@@ -294,30 +293,19 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
-        # Calculate unpadded vocab size (with LoRA extra vocab if applicable)
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config and not config.tie_word_embeddings:
-            # Only add extra vocab if weights are not tied
-            # (tied weights can't support extra vocab)
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = ParallelLMHead(
-                    self.unpadded_vocab_size,
-                    config.hidden_size,
-                    org_num_embeddings=config.vocab_size,
-                    padding_size=(DEFAULT_VOCAB_PADDING_SIZE if not lora_config
-                                  else lora_config.lora_vocab_padding_size),
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"))
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                              config.hidden_size,
+                                              quant_config=quant_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
