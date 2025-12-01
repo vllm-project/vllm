@@ -51,14 +51,7 @@ class MultiModalHasher:
             ):
                 return (exif[Image.ExifTags.Base.ImageID].bytes,)
 
-            data = {"mode": obj.media.mode, "data": obj.original_bytes}
-            palette = obj.media.palette
-            if palette is not None:
-                data["palette"] = palette.palette
-                if palette.rawmode is not None:
-                    data["palette_rawmode"] = palette.rawmode
-
-            return cls.iter_item_to_bytes("image", data)
+            return cls.iter_item_to_bytes("image", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
