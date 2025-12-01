@@ -113,7 +113,7 @@ WARNING: The benchmarking script will save json results by itself, so please do 
 We can specify default parameters in a JSON field with key `defaults`. Parameters defined in the field are applied globally to all serving tests, and can be overridden in test case fields. Here is an example:
 
 <details>
-<summary> An Example of New JSON Format </summary>
+<summary> An Example of default parameters field </summary>
 
 ```json
 {
