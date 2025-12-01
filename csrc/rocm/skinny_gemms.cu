@@ -287,6 +287,11 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
     V0 += (s.x + s.y);                                                        \
   }
 
+// To avoid LLVM silently upcasting to double
+__device__ inline int min__(int a, int b) {
+  return min(a, b); 
+}
+
 #if defined(__HIP__GFX9__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -334,11 +339,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = 0; k < min(K * N, max_lds_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min(K * N, max_lds_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -633,11 +638,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = 0; k < min(K * N, max_lds_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min(K * N, max_lds_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -954,11 +959,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   #define PCML
   #ifndef PCML
-  for (uint32_t k = 0; k < min(K * N, max_lds_len);
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
 
-    if (k_in >= min(K * N, max_lds_len)) break;
+    if (k_in >= min__(K * N, max_lds_len)) break;
 
     *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
   }
@@ -975,7 +980,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
              ? kFit
              : (kFit - kFit % TUC);  // round up to multiple of TUC
   // if (kFit == 0) kFit = TUC;
-  kFit = min(kFit, K);
+  kFit = min__(kFit, K);
 
   float sum[N][YTILE];
   scalar8 sum4[N][YTILE];
@@ -1355,12 +1360,6 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 
 #if defined(__gfx950__)  // TODO: Add NAVI support
 // This version targets big A[] cases, where it is much larger than LDS capacity
-
-__device__ inline int min__(int a, int b) {
-  int tmp;
-  asm("v_min_i32_e32 %0, %2, %3 " : "=v"(tmp) : "0"(tmp), "v"(a), "v"(b));
-  return tmp;
-}
 
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
@@ -1825,7 +1824,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
     *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
   }
   __syncthreads();
@@ -2014,7 +2013,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(K * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
     *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
   }
   __syncthreads();
