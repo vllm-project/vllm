@@ -278,7 +278,9 @@ ENV VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX=1
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl) && \
+    if [ "${vllm_target_device}" = "cuda" ]; then \
+        export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
+    fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 # Install DeepGEMM from source
