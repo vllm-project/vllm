@@ -230,6 +230,8 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
+        is_padded: bool = False,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -409,6 +411,15 @@ class EagleProposer:
             self.token_arange_np[: batch_size + 1]
         ).clone()
         for token_index in range(self.num_speculative_tokens - 1):
+            # In padded drafter batch, we need to adjust the sequence lengths
+            # to remove the "padding" (i.e. rejected tokens).
+            if token_index == 0 and is_padded:
+                assert num_rejected_tokens_gpu is not None
+                common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+                # TODO: remove seq_lens_cpu adjustment once
+                # https://github.com/vllm-project/vllm/pull/29624 lands
+                common_attn_metadata.seq_lens_cpu -= num_rejected_tokens_gpu.to("cpu")
+
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -622,13 +633,14 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
         used as padding and filtered out later by `token_indices_to_sample`.
+        No blocking CPU operations should be introduced in this function.
         """
         num_reqs = common_attn_metadata.num_reqs
         device = valid_sampled_tokens_count.device
@@ -645,6 +657,20 @@ class EagleProposer:
             common_attn_metadata.query_start_loc,
             token_indices_to_sample,
             num_reqs,
+        )
+
+        # Calculate num_rejected_tokens_gpu for seq_lens adjustment in propose()
+        num_draft_tokens_gpu = torch.cat(
+            [
+                spec_decode_metadata.cu_num_draft_tokens[0:1],
+                spec_decode_metadata.cu_num_draft_tokens[1:]
+                - spec_decode_metadata.cu_num_draft_tokens[:-1],
+            ]
+        )
+        num_rejected_tokens_gpu = torch.where(
+            num_draft_tokens_gpu > 0,
+            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+            torch.zeros_like(num_draft_tokens_gpu),
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -668,7 +694,11 @@ class EagleProposer:
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
-        return spec_common_attn_metadata, token_indices_to_sample
+        return (
+            spec_common_attn_metadata,
+            token_indices_to_sample,
+            num_rejected_tokens_gpu,
+        )
 
     def propose_tree(
         self,
