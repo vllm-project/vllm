@@ -170,15 +170,15 @@ def get_tokenizer(
 
     if tokenizer_mode == "custom":
         logger.warning_once(
-            "`tokenizer_mode='custom'` is deprecated and will be replaced with "
-            "`tokenizer_mode=<tokenizer_name>`, where `tokenizer_name=%s`. "
+            "TokenizerRegistry now uses `tokenizer_mode` as the registry key "
+            "instead of `tokenizer_name`. "
             "Please update the definition of `.from_pretrained` in "
-            "the custom tokenizer for `tokenizer_mode=%r` "
-            "to accept `args=%s`, `tuple(kwargs.items())=%s`.",
-            tokenizer_name,
-            tokenizer_mode,
+            "your custom tokenizer to accept `args=%s`, `tuple(kwargs.items())=%s`. "
+            "Then, you can pass `tokenizer_mode=%r` instead of "
+            "`tokenizer_mode='custom'` when initializing vLLM.",
             tokenizer_args,
             tuple(tokenizer_kwargs.items()),
+            tokenizer_mode,
         )
 
         tokenizer_mode = str(tokenizer_name)
