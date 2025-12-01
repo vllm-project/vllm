@@ -44,7 +44,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backends.mla.common import reorg_kvcache
+from vllm.v1.attention.backends.mla.common import MLACommonImpl, reorg_kvcache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -708,7 +708,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 else:
                     forward_prefill(
                         self,
-                        self.impl,
+                        cast(MLACommonImpl, self.impl),
                         q,
                         kv_c_normed,
                         k_pe,
@@ -728,7 +728,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                     return forward_prefill(
                         self,
-                        self.impl,
+                        cast(MLACommonImpl, self.impl),
                         q,
                         kv_c_normed,
                         k_pe,
@@ -798,7 +798,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
 
 def _v_up_proj_impl(
-    impl: MLAAttentionImpl,
+    impl: MLACommonImpl,
     x: torch.Tensor,
     out: torch.Tensor,
 ) -> None:
@@ -817,7 +817,7 @@ def _v_up_proj_impl(
 
 def _compute_prefill_context_impl(
     layer: MLAAttention,
-    impl: MLAAttentionImpl,
+    impl: MLACommonImpl,
     q: torch.Tensor,
     kv_c_and_k_pe_cache: torch.Tensor,
     attn_metadata,
@@ -900,7 +900,7 @@ def _compute_prefill_context_impl(
 
 def _context_parallel_compute_prefill_context_impl(
     layer: MLAAttention,
-    impl: MLAAttentionImpl,
+    impl: MLACommonImpl,
     q: torch.Tensor,
     kv_c_and_k_pe_cache: torch.Tensor,
     attn_metadata,
@@ -1021,7 +1021,7 @@ def _context_parallel_compute_prefill_context_impl(
 
 def _forward_prefill_impl(
     layer: MLAAttention,
-    impl: MLAAttentionImpl,
+    impl: MLACommonImpl,
     prefill_q: torch.Tensor,
     prefill_k_c_normed: torch.Tensor,
     prefill_k_pe: torch.Tensor,
@@ -1094,7 +1094,7 @@ def _forward_prefill_impl(
 
 def forward_prefill(
     layer: MLAAttention,
-    impl: MLAAttentionImpl,
+    impl: MLACommonImpl,
     q: torch.Tensor,
     k_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
@@ -1444,7 +1444,14 @@ def unified_mla_attention(
     else:
         output = torch.empty_like(q)
         output = forward_prefill(
-            self, self.impl, q, kv_c_normed, k_pe, kv_cache, attn_metadata, output
+            self,
+            cast(MLACommonImpl, self.impl),
+            q,
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata,
+            output,
         )
 
     return output
@@ -1496,7 +1503,7 @@ def unified_mla_attention_with_output(
     else:
         forward_prefill(
             self,
-            self.impl,
+            cast(MLACommonImpl, self.impl),
             q,
             kv_c_normed,
             k_pe,
