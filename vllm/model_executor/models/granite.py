@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import GraniteConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -400,7 +400,6 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

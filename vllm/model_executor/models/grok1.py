@@ -31,7 +31,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -239,7 +239,7 @@ class Grok1DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=getattr(config, "rope_parameters", None),
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",

@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import torch
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
@@ -135,6 +135,11 @@ class Platform:
     _global_graph_pool: Any | None = None
 
     @property
+    def pass_key(self) -> str:
+        """Inductor config key for the PassManager custom pass"""
+        return "post_grad_custom_post_pass"
+
+    @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
         # Be careful with the order of the dtypes. The first dtype will
@@ -178,6 +183,21 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """
+        Get the pass manager class for this platform.
+        It will be registered as a custom pass under the current_platform.pass_key.
+        """
+        return "vllm.compilation.pass_manager.PostGradPassManager"
+
+    @classmethod
+    def get_compile_backend(cls) -> str:
+        """
+        Get the custom compile backend for current platform.
+        """
+        return cls.simple_compile_backend
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
@@ -206,9 +226,6 @@ class Platform:
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
-        # Import AttentionBackendEnum here to avoid circular import.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod

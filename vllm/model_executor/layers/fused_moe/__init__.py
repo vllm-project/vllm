@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.triton_utils import HAS_TRITON
 
@@ -41,6 +44,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",

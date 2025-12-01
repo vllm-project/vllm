@@ -33,8 +33,8 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import Attention
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config

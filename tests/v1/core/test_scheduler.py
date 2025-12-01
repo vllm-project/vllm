@@ -641,6 +641,34 @@ def test_schedule_concurrent_batches(
     scheduler.update_from_output(scheduler_output1, model_runner_output)
 
 
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+def test_schedule_order(enable_chunked_prefill: bool):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_num_seqs=3,
+        enable_chunked_prefill=enable_chunked_prefill,
+    )
+
+    # long requests
+    requests = create_requests(num_requests=2, num_tokens=800)
+    # short requests
+    requests += create_requests(num_requests=2, num_tokens=10)
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler_output1 = scheduler.schedule()
+
+    if enable_chunked_prefill:
+        # When enable chunked prefill, long requests will be chunked.
+        assert len(scheduler_output1.scheduled_new_reqs) == 2
+    else:
+        # When disable chunked prefill, should not skip the long requests,
+        # and scheduling subsequent short requests in advance,
+        # even though there is still token budgets remaining.
+        assert len(scheduler_output1.scheduled_new_reqs) == 1
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.

@@ -249,7 +249,11 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
         )
         output_context, lse_context = cp_lse_ag_out_rs(
-            output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
+            output_context_tmp,
+            lse_context_tmp,
+            get_dcp_group(),
+            return_lse=True,
+            is_lse_base_on_e=False,
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
@@ -930,31 +934,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             if num_decodes > 0:
                 pure_decode = num_prefills == 0
-                # possible required padding for cudagraph replay
                 use_cudagraph = (
                     self.enable_cuda_graph
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                if use_cudagraph:
-                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                        num_decode_tokens
-                    )
-                    # Carefully fulfill the padding region with reasonable value
-                    # on cpu.
-                    # Make sure paged_kv_indptr_cpu is not decreasing
-                    self.paged_kv_indptr_cpu[
-                        1 + num_decodes : 1 + num_input_tokens
-                    ].fill_(paged_kv_indptr_cpu[-1])
-                    # Fill the remaining paged_kv_last_page_len_cpu with 1.
-                    # This is because flashinfer treats 0 as a full page
-                    # instead of empty.
-                    self.paged_kv_last_page_len_cpu[num_decodes:num_input_tokens].fill_(
-                        1
-                    )
-
-                else:
-                    num_input_tokens = num_decode_tokens
+                num_input_tokens = num_decode_tokens
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph
@@ -1354,7 +1339,10 @@ class FlashInferImpl(AttentionImpl):
                         return_lse=True,
                     )
                     output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                        output_tmp, lse, get_dcp_group()
+                        output_tmp,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=False,
                     )
                 else:
                     decode_wrapper.run(
@@ -1527,7 +1515,7 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 18 arguments for tensor core version
+        # Make sure we pass exactly 19 arguments for tensor core version
         self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1547,6 +1535,7 @@ def fast_plan_decode(
             window_left,
             fixed_split_size,
             disable_split_kv,
+            0,
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e

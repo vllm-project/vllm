@@ -19,7 +19,12 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-MODELS = ["google/siglip-base-patch16-224", "google/siglip2-base-patch16-224"]
+MODELS = [
+    "google/siglip-base-patch16-224",
+    "google/siglip2-base-patch16-224",
+    # Different image embedding dim than text_config.hidden_size
+    "google/siglip2-giant-opt-patch16-384",
+]
 
 
 def _run_test(

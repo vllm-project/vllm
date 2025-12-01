@@ -45,7 +45,6 @@ from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoP
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.config import VllmConfig
@@ -92,7 +91,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -335,12 +334,10 @@ class Qwen2VisionAttention(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
 
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
@@ -657,11 +654,6 @@ class Qwen2VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if (
-            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1541,7 +1533,7 @@ class Tarsier2Processor(Qwen2VLProcessor):
     def __init__(
         self,
         vision_config: dict,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         **kwargs,
     ):
         self.image_processor = Tarsier2ImageProcessor(**vision_config)

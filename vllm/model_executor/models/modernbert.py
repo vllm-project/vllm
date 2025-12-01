@@ -28,7 +28,7 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -396,6 +396,7 @@ class ModernBertPredictionHead(nn.Module):
         return self.norm(self.act(self.dense(hidden_states)))
 
 
+@attn_type("encoder_only")
 @default_pooling_type("ALL")
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True

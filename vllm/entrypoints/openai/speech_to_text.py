@@ -201,10 +201,10 @@ class OpenAISpeechToText(OpenAIServing):
                 self.engine_client.generate(
                     prompt,
                     sampling_params,
-                    request_id,
+                    f"{request_id}_{i}",
                     lora_request=lora_request,
                 )
-                for prompt in prompts
+                for i, prompt in enumerate(prompts)
             ]
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error

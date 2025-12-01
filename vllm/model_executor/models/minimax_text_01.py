@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
