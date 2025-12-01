@@ -33,7 +33,7 @@ class RayPrometheusMetric:
         self.metric: Metric = None
 
     @staticmethod
-    def _get_tag_keys(labelnames: list[str] | None) -> tuple[str, ...] | None:
+    def _get_tag_keys(labelnames: list[str] | None) -> tuple[str, ...]:
         labels = list(labelnames) if labelnames else []
         labels.append("ReplicaId")
         return tuple(labels)
