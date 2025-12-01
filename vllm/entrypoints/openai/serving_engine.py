@@ -18,6 +18,11 @@ from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.context import (
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
+)
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -39,7 +44,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.context import HarmonyContext, StreamingHarmonyContext
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -1319,26 +1323,15 @@ class OpenAIServing:
                 prompt_token_ids = context.render_for_completion()
                 engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
                 request_prompt = prompt_token_ids
-            else:
-                [
-                    request,
-                    tokenizer,
-                    messages,
-                    tool_dicts,
-                    tool_parser,
-                    chat_template,
-                    chat_template_content_format,
-                ] = context.render_for_completion()
-
-                # HACK
+            elif isinstance(context, ParsableContext):
                 request_prompts, engine_prompts = await self._render_next_turn(
-                    request,
-                    tokenizer,
-                    messages,
-                    tool_dicts,
-                    tool_parser,
-                    chat_template,
-                    chat_template_content_format,
+                    context.request,
+                    context.tokenizer,
+                    context.parser.response_messages,
+                    context.tool_dicts,
+                    context.tool_parser_cls,
+                    context.chat_template,
+                    context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
                 request_prompt = request_prompts[0]

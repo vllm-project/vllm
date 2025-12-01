@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
+from vllm.utils import random_uuid
 
 
 def make_response_output_items_from_parsable_context(
@@ -39,7 +40,7 @@ def make_response_output_items_from_parsable_context(
         else:
             if isinstance(output_messages[-1], ResponseFunctionToolCall):
                 mcp_message = McpCall(
-                    id="lol",
+                    id=f"mcp_{random_uuid()}",
                     arguments=output_messages[-1].arguments,
                     name=output_messages[-1].name,
                     server_label=output_messages[-1].name,  # TODO

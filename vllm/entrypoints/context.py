@@ -243,7 +243,6 @@ class ParsableContext(ConversationContext):
         self.chat_template_content_format = chat_template_content_format
 
     def append_output(self, output: RequestOutput) -> None:
-        # TODO: output.prompt / output.prompt_token_id doesn't update correctly
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])

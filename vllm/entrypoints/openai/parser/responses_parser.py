@@ -37,7 +37,6 @@ class ResponsesParser:
             response_messages
         )
         self.num_init_messages = len(response_messages)
-        self.tokens: list[int] = []
         self.tokenizer = tokenizer
         self.request = request
 
@@ -49,7 +48,6 @@ class ResponsesParser:
             output.text, request=self.request
         )
         if reasoning_content:
-            # HACK
             self.response_messages.append(
                 ResponseReasoningItem(
                     type="reasoning",
