@@ -1034,20 +1034,5 @@ class rocm_aiter_ops:
 
         return shuffle_scale_a16w4(tensor, experts_cnt=experts_cnt, gate_up=gate_up)
 
-    @staticmethod
-    def f32_to_e8m0(tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Convert float32 tensor to e8m0 format.
-
-        Args:
-            tensor: Float32 tensor
-
-        Returns:
-            Tensor in e8m0 format
-        """
-        from aiter.utility import fp4_utils
-
-        return fp4_utils.f32_to_e8m0(tensor)
-
 
 rocm_aiter_ops.register_ops_once()
