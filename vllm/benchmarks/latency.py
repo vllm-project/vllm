@@ -127,8 +127,8 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: str | None = None):
-        if profile_dir:
+    def run_to_completion(do_profile: bool = False):
+        if do_profile:
             llm.start_profile()
             llm_generate()
             llm.stop_profile()
@@ -141,18 +141,28 @@ def main(args: argparse.Namespace):
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion(do_profile=False)
 
     if args.profile:
-        profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            print(
+                "Profiling with torch profiler (results will be saved to"
+                f" {envs.VLLM_TORCH_PROFILER_DIR})..."
+            )
+        elif envs.VLLM_TORCH_CUDA_PROFILE:
+            print("Profiling with nsys ...")
+        else:
+            raise ValueError(
+                "Profiling is enabled but no profiler is set in envs. Please set either"
+                " VLLM_TORCH_PROFILER_DIR or VLLM_TORCH_CUDA_PROFILE."
+            )
+        run_to_completion(do_profile=True)
         return
 
     # Benchmark.
     latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+        latencies.append(run_to_completion(do_profile=False))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
