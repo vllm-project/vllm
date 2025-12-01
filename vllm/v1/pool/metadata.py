@@ -16,6 +16,7 @@ class PoolingCursor:
     first_token_indices_gpu: torch.Tensor
     last_token_indices_gpu: torch.Tensor
     prompt_lens_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
 
     def __getitem__(self, indices: slice):
@@ -24,11 +25,15 @@ class PoolingCursor:
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
+            seq_lens_cpu=self.seq_lens_cpu[indices],
             num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
         )
 
     def is_partial_prefill(self):
         return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
+
+    def is_finished(self):
+        return self.prompt_lens_cpu == self.seq_lens_cpu
 
 
 @dataclass
@@ -53,30 +58,37 @@ class PoolingMetadata:
         )
 
     def build_pooling_cursor(
-        self, num_scheduled_tokens: list[int], device: torch.device
+        self,
+        num_scheduled_tokens: list[int],
+        seq_lens_cpu: torch.Tensor,
+        device: torch.device,
     ):
         self.pooling_cursor = build_pooling_cursor(
-            num_scheduled_tokens, self.prompt_lens, device
+            num_scheduled_tokens, seq_lens_cpu, self.prompt_lens, device
         )
 
 
 def build_pooling_cursor(
-    num_scheduled_tokens: list[int], prompt_lens: torch.Tensor, device: torch.device
+    num_scheduled_tokens: list[int],
+    seq_lens_cpu: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    device: torch.device,
 ):
     assert len(prompt_lens) == len(num_scheduled_tokens)
 
     n_seq = len(num_scheduled_tokens)
     index = list(range(n_seq))
-    num_scheduled_tokens_cpu = torch.tensor(num_scheduled_tokens, device="cpu")
+    num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")
     cumsum = torch.zeros(
         n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
     )
-    torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
+    torch.cumsum(num_scheduled_tokens, dim=0, out=cumsum[1:])
     cumsum = cumsum.to(device, non_blocking=True)
     return PoolingCursor(
         index=index,
         first_token_indices_gpu=cumsum[:n_seq],
         last_token_indices_gpu=cumsum[1:] - 1,
         prompt_lens_cpu=prompt_lens,
-        num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+        seq_lens_cpu=seq_lens_cpu,
+        num_scheduled_tokens_cpu=num_scheduled_tokens,
     )
