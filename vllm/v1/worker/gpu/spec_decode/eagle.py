@@ -18,9 +18,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.sampler import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
-from vllm.v1.worker.gpu.states import SamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -44,6 +44,7 @@ class EagleSpeculator:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.pin_memory = is_pin_memory_available()
         self.dtype = vllm_config.model_config.dtype
@@ -51,7 +52,7 @@ class EagleSpeculator:
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            hidden_size=self.hidden_size,
+            inputs_embeds_size=self.inputs_embeds_size,
             vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=device,
@@ -121,7 +122,7 @@ class EagleSpeculator:
             num_tokens_across_dp=num_tokens_across_dp,
         ):
             ret_hidden_states = self.model(
-                input_ids=self.input_buffers.input_ids.gpu[:num_tokens],
+                input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
@@ -194,7 +195,7 @@ class EagleSpeculator:
         num_sampled: torch.Tensor,
         # [num_reqs]
         num_rejected: torch.Tensor,
-        # [max_num_reqs, 1]
+        # [num_reqs]
         last_sampled: torch.Tensor,
         # [num_reqs]
         next_prefill_tokens: torch.Tensor,
@@ -316,7 +317,6 @@ def _prepare_eagle_inputs_kernel(
     eagle_positions_ptr,
     target_input_ids_ptr,
     target_positions_ptr,
-    idx_mapping_ptr,
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     num_sampled_ptr,
@@ -335,8 +335,7 @@ def _prepare_eagle_inputs_kernel(
 
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     if num_sampled > 0:
-        req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
-        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+        next_token = tl.load(last_sampled_ptr + batch_idx).to(tl.int32)
     else:
         # Chunked prefilling.
         # Get the next prefill token.
@@ -368,9 +367,9 @@ def prepare_eagle_inputs(
     num_sampled: torch.Tensor,
     # [num_reqs]
     num_rejected: torch.Tensor,
-    # [max_num_reqs, 1]
+    # [num_reqs]
     last_sampled: torch.Tensor,
-    # [max_num_reqs]
+    # [num_reqs]
     next_prefill_tokens: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
@@ -381,11 +380,10 @@ def prepare_eagle_inputs(
     )
     _prepare_eagle_inputs_kernel[(num_reqs,)](
         last_token_indices,
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         input_batch.input_ids,
         input_batch.positions,
-        input_batch.idx_mapping,
         last_sampled,
         next_prefill_tokens,
         num_sampled,
@@ -485,7 +483,7 @@ def prepare_eagle_decode(
         last_token_indices,
         target_seq_lens,
         num_rejected,
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         input_hidden_states,
         input_hidden_states.stride(0),
@@ -553,7 +551,7 @@ def update_eagle_inputs(
 ):
     num_reqs, hidden_size = output_hidden_states.shape
     _update_eagle_inputs_kernel[(num_reqs,)](
-        input_buffers.input_ids.gpu,
+        input_buffers.input_ids,
         input_buffers.positions,
         hidden_states,
         hidden_states.stride(0),
