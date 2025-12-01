@@ -13,12 +13,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EmbeddingBytesResponse,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-    EmbeddingRequest,
-    EmbeddingResponse,
-    EmbeddingResponseData,
     ErrorResponse,
     UsageInfo,
 )
@@ -29,6 +23,14 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    EmbeddingResponseData,
+)
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
