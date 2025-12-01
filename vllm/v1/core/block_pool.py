@@ -11,8 +11,11 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    BlockHashList,
+    BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
@@ -133,18 +136,26 @@ class BlockPool:
     Args:
         num_gpu_blocks: The number of blocks in the pool.
         enable_caching: Whether to enable prefix caching.
+        hash_block_size: The block size of which the block hashes are computed.
+            The actual block size usually equals hash_block_size, but in cases
+            where different KV cache groups have different block sizes, the
+            actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
+        metrics_collector: Optional metrics collector for tracking block residency.
     """
 
     def __init__(
         self,
         num_gpu_blocks: int,
         enable_caching: bool,
+        hash_block_size: int,
         enable_kv_cache_events: bool = False,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+        self.hash_block_size = hash_block_size
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -165,6 +176,8 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+
+        self.metrics_collector = metrics_collector
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -223,8 +236,20 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
-        new_block_hashes = request.block_hashes[num_cached_blocks:]
+        if block_size == self.hash_block_size:
+            # Common case.
+            block_hashes: BlockHashList = request.block_hashes
+        else:
+            # block_size is a multiple of hash_block_size. This happens when
+            # different KV cache groups have different block sizes.
+            assert block_size % self.hash_block_size == 0
+            # Recalculate block_hashes at the granularity of block_size, using
+            # the original block_hashes (at the granularity of hash_block_size).
+            block_hashes = BlockHashListWithBlockSize(
+                request.block_hashes, self.hash_block_size, block_size
+            )
 
+        new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -288,10 +313,14 @@ class BlockPool:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -305,6 +334,10 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        # Clean up metrics tracking first to prevent leaks
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
+
         block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
@@ -345,6 +378,8 @@ class BlockPool:
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_accessed(block)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
@@ -386,6 +421,9 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+
+        if self.metrics_collector:
+            self.metrics_collector.reset()
 
         logger.info("Successfully reset prefix cache")
 
