@@ -611,10 +611,11 @@ class FlexAttentionMetadata:
         self.transformed_score_mod = self.get_transformed_score_mod()
 
         # Create block_mask based on available information
-        if self.direct_build and self.causal:
-            self.block_mask = self._build_block_mask_direct()
-        else:
-            self.block_mask = self.build_block_mask()
+        # self.block_mask = self._build_block_mask_direct()
+        # if self.direct_build and self.causal:
+        #     self.block_mask = self._build_block_mask_direct()
+        # else:
+        #     self.block_mask = self.build_block_mask()
 
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
@@ -852,21 +853,18 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if (
-            self.attn_type
-            in (
-                AttentionType.ENCODER,
-                AttentionType.ENCODER_DECODER,
-                AttentionType.ENCODER_ONLY,
-            )
-            and attn_metadata.causal
+        if self.attn_type in (
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
         ):
             attn_metadata.causal = False
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             attn_metadata.block_mask = attn_metadata.build_block_mask()
-        elif self.attn_type == AttentionType.DECODER and not attn_metadata.causal:
+        elif self.attn_type == (AttentionType.DECODER):
             attn_metadata.causal = True
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
 
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             assert not attn_metadata.causal
