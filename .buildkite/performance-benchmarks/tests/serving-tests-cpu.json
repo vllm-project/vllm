@@ -55,7 +55,6 @@
       "test_name": "serving_llama8B_tp1_random_128_128",
       "server_parameters": {
         "tensor_parallel_size": 1,
-        "enable_chunked_prefill": ""
       },
       "client_parameters": {
         "dataset_name": "random",
