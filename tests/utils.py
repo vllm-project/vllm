@@ -1227,7 +1227,7 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
 
             attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():
