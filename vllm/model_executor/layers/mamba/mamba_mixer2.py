@@ -570,7 +570,9 @@ class MambaMixer2(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        prefix_caching_enabled = (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and self.cache_config.enable_prefix_caching
+        )
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -622,7 +624,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE and prefix_caching_enabled:
+        if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -815,7 +817,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE and prefix_caching_enabled:
+            if prefix_caching_enabled:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
