@@ -136,6 +136,7 @@ async def test_streaming_response(winning_call, whisper_client):
         language="en",
         temperature=0.0,
     )
+    winning_call.seek(0)
     res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
