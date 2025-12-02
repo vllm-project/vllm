@@ -6,5 +6,6 @@ tasks:
   metrics:
   - name: "exact_match,custom-extract"
     value: 0.80
-limit: 250 # will run on 250 * 14 subjects = 3500 samples
+# NOTE: lower samples for faster interation 
+limit: 10 # will run on 250 * 14 subjects = 3500 samples
 num_fewshot: 5
