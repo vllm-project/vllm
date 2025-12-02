@@ -1131,19 +1131,20 @@ class OpenAIServing:
                 messages=messages,
                 **_chat_template_kwargs,
             )
-        elif isinstance(tokenizer, DeepseekV32Tokenizer):
-            request_prompt = tokenizer.apply_chat_template(
-                messages=messages,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
         else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
+            try:
+                request_prompt = apply_hf_chat_template(
+                    tokenizer=tokenizer,
+                    conversation=conversation,
+                    model_config=model_config,
+                    **_chat_template_kwargs,
+                )
+            except ValueError:
+                request_prompt = tokenizer.apply_chat_template(
+                    messages=messages,
+                    model_config=model_config,
+                    **_chat_template_kwargs,
+                )
 
         mm_data = await mm_data_future
 

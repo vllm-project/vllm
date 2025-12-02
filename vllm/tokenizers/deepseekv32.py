@@ -470,7 +470,6 @@ class DeepseekV32Tokenizer(HfTokenizer):
             download_dir=download_dir,
             **kwargs,
         )
-        tokenizer.__class__ = DeepseekV32Tokenizer
         return tokenizer
 
     def apply_chat_template(self, messages, tools=None, **kwargs):
