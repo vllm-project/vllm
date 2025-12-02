@@ -132,8 +132,12 @@ class CommonAttentionMetadata:
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            _seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            _num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
+            if self._seq_lens_cpu is not None
+            else None,
+            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
+            if self._num_computed_tokens_cpu is not None
+            else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
