@@ -185,3 +185,6 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
         return None
+
+    def balance_gather(self, dp_group) -> None:
+        raise NotImplementedError
