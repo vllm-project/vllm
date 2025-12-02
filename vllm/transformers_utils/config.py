@@ -89,6 +89,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_text="Step3TextConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
+    tarsier2="Tarsier2Config",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -127,6 +128,8 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
+        model_type = kwargs.pop("hf_overrides", {}).get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -587,6 +590,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
+        hf_overrides=hf_overrides_kw,
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
