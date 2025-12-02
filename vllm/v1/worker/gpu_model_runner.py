@@ -3365,10 +3365,9 @@ class GPUModelRunner(
                     self.drafter.update_token_ids_ngram(
                         sampled_token_ids,
                         self.input_batch,
-                        self.discard_request_indices.gpu,
-                        self.num_discarded_requests,
                         self.token_ids_gpu_tensor,
                         self.num_tokens_no_spec_gpu,
+                        self.discard_request_mask.gpu,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -3531,10 +3530,9 @@ class GPUModelRunner(
             ) = self.drafter.update_token_ids_ngram(
                 sampled_token_ids,
                 self.input_batch,
-                self.discard_request_indices.gpu,
-                self.num_discarded_requests,
                 self.token_ids_gpu_tensor,
                 self.num_tokens_no_spec_gpu,
+                self.discard_request_mask.gpu,
             )
             self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count

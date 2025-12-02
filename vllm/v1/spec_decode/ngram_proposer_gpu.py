@@ -387,10 +387,9 @@ class NgramProposerGPU:
         self,
         sampled_token_ids: torch.Tensor,
         gpu_input_batch: InputBatch,
-        discard_request_indices: torch.Tensor,
-        num_discarded_requests: int,
         token_ids_gpu: torch.Tensor,
         num_tokens_no_spec: torch.Tensor,
+        discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -411,15 +410,13 @@ class NgramProposerGPU:
             token_ids_gpu[:num_reqs], dim=1, index=backup_indices.unsqueeze(1)
         ).squeeze(1)
 
-        # Mask out the sampled tokens indices that should not be sampled.
-        discard_sampled_tokens_req_indices = discard_request_indices[
-            :num_discarded_requests
-        ]
-
         valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu.index_fill_(
-            0, discard_sampled_tokens_req_indices, -1
-        )
+        # Use discard_request_mask to invalidate sampled tokens for discarded
+        # requests (e.g., chunked prefill partial requests that should not be
+        # sampled). Expand mask to match [num_reqs, num_tokens] shape.
+        # Use masked_fill_ to avoid creating new tensors (no CPU-GPU sync).
+        discard_mask_expanded = discard_request_mask[:num_reqs].unsqueeze(1)
+        valid_sampled_token_ids_gpu.masked_fill_(discard_mask_expanded, -1)
 
         # Generate a mask for all valid tokens within those requests
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (
