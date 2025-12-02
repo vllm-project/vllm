@@ -44,8 +44,8 @@ class CUDAGraphLogging:
     def observe(self, cudagraph_stats: CUDAGraphStats):
         self.rows.append(
             (
-                cudagraph_stats.num_unpadded_tokens,
                 cudagraph_stats.num_padded_tokens,
+                cudagraph_stats.num_unpadded_tokens,
                 cudagraph_stats.num_padded_tokens - cudagraph_stats.num_unpadded_tokens,
                 cudagraph_stats.runtime_mode,
             )
