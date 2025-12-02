@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .hf import HfTokenizer
-from .protocol import TokenizerLike
+from .registry import TokenizerRegistry
 
 TOOLS_SYSTEM_TEMPLATE = """## Tools
 You have access to a set of tools you can use to answer the user's question.
@@ -450,6 +450,7 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
     }
 
 
+@TokenizerRegistry.register("deepseek_v32")
 class DeepseekV32Tokenizer(HfTokenizer):
     def apply_chat_template(self, messages, tools=None, **kwargs):
         encode_config = dict(
