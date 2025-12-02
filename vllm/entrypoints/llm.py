@@ -1335,9 +1335,6 @@ class LLM:
 
             prompts.append(engine_prompt)
 
-        # tokenization_kwargs has already been consumed by get_score_prompt()
-        # above to tokenize and truncate the prompts, should not pass the same
-        # tokenization_kwargs again to avoid potential duplicate truncation.
         self._validate_and_add_requests(
             prompts=prompts,
             params=pooling_params_list,
