@@ -484,18 +484,19 @@ def test_encoder_instance_zero_kv_cache(
     vision encoder, so they don't need KV cache for text generation.
     """
     # Form vllm config
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-        disable_hybrid_kv_cache_manager=True,
-    )
     model_config = ModelConfig(
         model="llava-hf/llava-1.5-7b-hf",  # Multimodal model
         enforce_eager=True,
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        disable_hybrid_kv_cache_manager=True,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=16,
