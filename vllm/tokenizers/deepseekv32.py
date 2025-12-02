@@ -452,6 +452,27 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
 
 @TokenizerRegistry.register("deepseek_v32")
 class DeepseekV32Tokenizer(HfTokenizer):
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo_id: str | Path,
+        *args,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        download_dir: str | None = None,
+        **kwargs,
+    ) -> "TokenizerLike":
+        tokenizer = super().from_pretrained(
+            path_or_repo_id,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
+        )
+        tokenizer.__class__ = DeepseekV32Tokenizer
+        return tokenizer
+
     def apply_chat_template(self, messages, tools=None, **kwargs):
         encode_config = dict(
             thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True
