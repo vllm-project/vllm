@@ -55,8 +55,8 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         self._aggregator.reset_workers()
         return self
 
-    def increment_workers(self, count: int = 1) -> None:
-        self._aggregator.increment_workers(count)
+    def set_workers(self, count: int = 1) -> None:
+        self._aggregator.set_workers(count)
 
     def get_all_events(self) -> list[KVCacheEvent]:
         return self._aggregator.get_all_events()

@@ -134,15 +134,15 @@ class KVEventAggregator:
         """
         self._event_counter.clear()
 
-    def increment_workers(self, count: int = 1) -> None:
+    def set_workers(self, count: int = 1) -> None:
         """
-        Increment the number of workers contributing events.
+        Set the number of workers contributing events.
 
         :param count: Number of workers to add.
         """
         if count <= 0:
             raise ValueError("count must be positive.")
-        self._num_workers += count
+        self._num_workers = count
 
     def reset_workers(self) -> None:
         """
@@ -172,7 +172,7 @@ class KVConnectorKVEvents(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def increment_workers(self, count: int = 1) -> None:
+    def set_workers(self, count: int = 1) -> None:
         raise NotImplementedError
 
     @abstractmethod
