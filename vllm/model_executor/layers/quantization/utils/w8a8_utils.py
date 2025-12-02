@@ -527,20 +527,20 @@ class MXFp8LinearOp:
         """
         Apply linear layer in fake MXFP8 with block-wise matmul and dequantization.
         """
-        fake = True
+        fake = False
         if fake:
-            q_input, input_scales = torch.ops.vllm.mxfp8_quantize(input, True)
-            dq_input = dequant_mxfp8_to_bf16(q_input, input_scales)
-            dq_weight = dequant_mxfp8_to_bf16(weight.T, weight_scale).T
+            # q_input, input_scales = mxfp8_e4m3_quantize_python(input, False)
+            # dq_input = dequant_mxfp8_to_bf16(q_input, input_scales)
+            # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale)
 
-            output = torch.matmul(dq_input, dq_weight)
+            output = torch.matmul(input, weight.T)
             return output
         
         q_input, input_scales = torch.ops.vllm.mxfp8_quantize(input, True)
         output = torch.ops.vllm.block_scaled_matmul2(
             q_input,
             input_scales,
-            weight.T,
+            weight,
             weight_scale,
             out_dtype,
             "mxfp8",

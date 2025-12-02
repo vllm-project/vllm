@@ -549,7 +549,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 if self.act_q_static:
                     assert input_scale is not None
                     input_scale = input_scale.max()
-            weight = weight.t()
+            if not self.quant_config.is_mx:
+                weight = weight.t()
 
         # Update layer with new values.
         layer.weight = Parameter(weight.data, requires_grad=False)
@@ -562,6 +563,9 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_mx:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
+            # from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
+            # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+            # layer.weight = Parameter(dq_weight.data, requires_grad=False)
          
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
@@ -1035,7 +1039,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # We take the max then dequant and requant each expert.
             if self.quant_config.is_mx:
                 # MX format already has single scale per expert
+                weight = layer.w13_weight
+                weight_scale = layer.w13_weight_scale
+                from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
+                dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+                layer.w13_weight = Parameter(dq_weight.data, requires_grad=False)
                 return
+            
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
