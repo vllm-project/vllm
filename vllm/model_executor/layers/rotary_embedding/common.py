@@ -189,7 +189,6 @@ class ApplyRotaryEmb(CustomOp):
 
     @staticmethod
     def forward_static(
-        self,
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -251,5 +250,5 @@ class ApplyRotaryEmb(CustomOp):
         if apply_rotary_emb is None:
             apply_rotary_emb = self.default
 
-        output = apply_rotary_emb(x, cos, sin).type_as(x)
+        output = apply_rotary_emb(x, cos, sin, self.is_neox_style).type_as(x)
         return output
