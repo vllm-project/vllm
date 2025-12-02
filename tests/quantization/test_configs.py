@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -45,11 +46,22 @@ MODEL_ARG_EXPTYPES = [
 def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
+    # Marlin is not supported on ROCm (NVIDIA CUTLASS-based)
+    if current_platform.is_rocm() and quantization_arg == "marlin":
+        pytest.skip("Marlin quantization is not supported on ROCm (NVIDIA-only)")
+
     try:
         model_config = ModelConfig(model_path, quantization=quantization_arg)
         found_quantization_type = model_config.quantization
     except ValueError:
         found_quantization_type = "ERROR"
+
+    # On ROCm, Marlin variants fall back to base implementations
+    if current_platform.is_rocm():
+        if expected_type == "gptq_marlin":
+            expected_type = "gptq"
+        elif expected_type == "awq_marlin":
+            expected_type = "awq"
 
     assert found_quantization_type == expected_type, (
         f"Expected quant_type == {expected_type} for {model_path}, "
