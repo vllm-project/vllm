@@ -9,8 +9,7 @@ from triton.tools.tensor_descriptor import TensorDescriptor
 from vllm.logger import init_logger
 logger = init_logger(__name__)
 
-
-def mxfp8_e4m3_quantize_python(data: torch.Tensor):
+def mxfp8_e4m3_quantize_python(data: torch.Tensor, is_sf_swizzled_layout: bool=False) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(data.shape) == 2, "Only 2d input tensor is supported"
     block_size1 = 32
     block_size0 = 1
@@ -61,12 +60,17 @@ def mxfp8_e4m3_quantize_python(data: torch.Tensor):
     # remove the padding
     if data.shape != shape_before_padding:
         fp_data = fp_data[: shape_before_padding[0], : shape_before_padding[1]]
-
+    if is_sf_swizzled_layout:   
+        exponent = swizzle_blockscale(exponent) 
     # Convert to target format, but still in original precision container
     return fp_data, exponent
 
+def compute_swizzled_layout_sf_size(total_row, total_column, row_size=128):
+    padded_row = (total_row + row_size - 1) // row_size * row_size
+    padded_column = (total_column + 3) // 4 * 4
+    return padded_row, padded_column
 
-def mxfp8_e4m3_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def mxfp8_e4m3_quantize(x: torch.Tensor, is_sf_swizzled_layout: bool=False) -> tuple[torch.Tensor, torch.Tensor]:
     try:
         from flashinfer import mxfp8_quantize as mxfp8_e4m3_quantize
     except ImportError as err:
@@ -76,8 +80,13 @@ def mxfp8_e4m3_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             "`pip install flashinfer`"
         ) from err
 
-    x_q, x_scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
-    if x_scales.ndim == 1:
+    x_q, x_scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=is_sf_swizzled_layout)
+    
+    if is_sf_swizzled_layout:
+        padded_row, padded_col = compute_swizzled_layout_sf_size(x.shape[0], x.shape[1] // 32, 128)
+        x_scales = x_scales.view(padded_row, padded_col)
+        
+    if x_scales.ndim == 1 and not is_sf_swizzled_layout:
         x_scales = x_scales.view(x.size(0), -1)
     return x_q, x_scales
 
@@ -99,23 +108,24 @@ def _cast_mxfp8_scales_to_bf16(scales: torch.Tensor) -> torch.Tensor:
     return (scales.to(torch.int16) << 7).view(torch.bfloat16)
 
 
-def dequant_mxfp8_to_bf16(
-    x: torch.Tensor, scales: torch.Tensor
-) -> torch.Tensor:
+def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """
     Dequantize MXFP8 tensor to BF16.
-    
+
     Args:
         x: FP8 E4M3 tensor to dequantize
         scales: uint8 tensor containing MXFP8 scales
-        
+
     Returns:
         BF16 dequantized tensor
     """
     scales_bf16 = _cast_mxfp8_scales_to_bf16(scales)
     # Repeat scales along the last dimension to match the block size
-    scales_expanded = scales_bf16.reshape(*x.shape[:-1], -1).repeat_interleave(32, dim=-1)
+    scales_expanded = scales_bf16.reshape(*x.shape[:-1], -1).repeat_interleave(
+        32, dim=-1
+    )
     return x.to(torch.bfloat16) * scales_expanded
+
 
 def _matmul_launch_metadata(grid, kernel, args):
     ret = {}
@@ -134,6 +144,7 @@ def _matmul_launch_metadata(grid, kernel, args):
     ret["name"] = f"{kernel_name} [M={M}, N={N}, K={K}]"
     ret["flops"] = 2.0 * M * N * K
     return ret
+
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def block_scaled_matmul_kernel(  #
@@ -203,8 +214,8 @@ def block_scaled_matmul_kernel(  #
 
     c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
 
-
-def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxfp8", is_swizzled=False):
+def block_scaled_matmul(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor, b_scale: torch.Tensor, 
+                        dtype_dst: torch.dtype, block_scale_type: str="mxfp8", is_swizzled: bool=False) -> torch.Tensor:
     assert block_scale_type in ["mxfp4", "mxfp8", "mixed"], f"Invalid block scale type: {block_scale_type}"
 
     M = a.shape[0]
@@ -227,12 +238,12 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
     rep_n = BLOCK_N // 128
     rep_k = BLOCK_K // VEC_SIZE // 4
 
-    # Use 5D TMA descriptor [1, rep_m, rep_k, 2, 256] with uint8 elements.
-    # With 256 elements we better utilize the L2 and don't require the TMA
-    # engine to emit many small messages (16B) messages as with 32x16xu8.
     def _round_up(x: int, m: int) -> int:
         return (x + m - 1) // m
     
+    # Use 5D TMA descriptor [1, rep_m, rep_k, 2, 256] with uint8 elements.
+    # With 256 elements we better utilize the L2 and don't require the TMA
+    # engine to emit many small messages (16B) messages as with 32x16xu8.
     a_scale_shape = [1,_round_up(M,128), _round_up(K // VEC_SIZE, 4), 2, 256]
     b_scale_shape = [1, _round_up(N,128), _round_up(K // VEC_SIZE, 4), 2, 256]
     a_scale_block_shape = [1, rep_m, rep_k, 2, 256]
@@ -242,7 +253,7 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
         a_scale = a_scale.view(a_scale_shape)
         b_scale = b_scale.view(b_scale_shape)
     else:
-        a_scale = swizzle_blockscale(a_scale).view(a_scale_shape)
+        a_scale = a_scale.view(a_scale_shape)
         b_scale = swizzle_blockscale(b_scale).view(b_scale_shape)
 
     a_scale_desc = TensorDescriptor.from_tensor(a_scale, block_shape=a_scale_block_shape)
@@ -285,3 +296,8 @@ def block_scaled_matmul(a, a_scale, b, b_scale, dtype_dst, block_scale_type="mxf
     )
 
     return output
+
+
+def block_scaled_matmul_fake(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor, b_scale: torch.Tensor, 
+                        dtype_dst: torch.dtype, block_scale_type: str="mxfp8", is_swizzled: bool=False) -> torch.Tensor:
+    return a.to(torch.bfloat16) @ b.T.to(torch.bfloat16)

@@ -76,6 +76,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
@@ -558,7 +559,10 @@ class Fp8LinearMethod(LinearMethodBase):
             if input_scale is not None
             else None
         )
-
+        if self.quant_config.is_mx:
+            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
+         
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
             # Activations not quantized for marlin.
