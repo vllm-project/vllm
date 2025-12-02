@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -32,7 +33,11 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 __all__ = ["QuarkLinearMethod"]
 
@@ -68,11 +73,36 @@ class QuarkConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "quark"
 
+    def apply_vllm_mapper(  # noqa: B027
+        self, hf_to_vllm_mapper: "WeightsMapper"
+    ):
+        """
+        Interface for models to update module names referenced in
+        quantization configs in order to reflect the vllm model structure
+
+        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
+            structure of the qconfig) to vllm model structure
+        """
+        quant_config_with_hf_to_vllm_mapper = {}
+
+        for k, v in self.quant_config.items():
+            if isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, dict):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
+            else:
+                if isinstance(v, str):
+                    mapped_v_list = hf_to_vllm_mapper.apply_list([v])
+                    if mapped_v_list:
+                        quant_config_with_hf_to_vllm_mapper[k] = mapped_v_list[0]
+                else:
+                    quant_config_with_hf_to_vllm_mapper[k] = v
+
+        self.quant_config = quant_config_with_hf_to_vllm_mapper
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(

@@ -2,19 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
-
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm.attention import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -36,9 +30,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -122,11 +113,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
         return "linear_attention"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
-
-        return LinearAttentionBackend
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None

@@ -32,11 +32,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
     MultiModalFeatureSpec = object
+    _ProcessorFactories = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -85,6 +87,11 @@ class SupportsMultiModal(Protocol):
     multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
     """
     A set indicating CPU-only multimodal fields.
+    """
+
+    _processor_factory: ClassVar[_ProcessorFactories]
+    """
+    Set internally by `MultiModalRegistry.register_processor`.
     """
 
     @classmethod
@@ -336,10 +343,10 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+    is_3d_moe_weight: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: dict[str, list[str]] = {}
 
 
@@ -351,7 +358,6 @@ class _SupportsLoRAType(Protocol):
 
     packed_modules_mapping: dict[str, list[str]]
     embedding_modules: dict[str, str]
-    embedding_padding_modules: list[str]
 
 
 @overload
@@ -371,7 +377,6 @@ def supports_lora(
         lora_attrs = (
             "packed_modules_mapping",
             "embedding_modules",
-            "embedding_padding_modules",
         )
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
@@ -586,13 +591,11 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -932,13 +935,73 @@ def supports_transcription(
 
 
 @runtime_checkable
-class SupportsEagle3(Protocol):
+class SupportsEagleBase(Protocol):
+    """Base interface for models that support EAGLE-based speculative decoding."""
+
+    has_own_lm_head: bool = False
+    """
+    A flag that indicates this model has trained its own lm_head.
+    """
+
+    has_own_embed_tokens: bool = False
+    """
+    A flag that indicates this model has trained its own input embeddings.
+    """
+
+
+@overload
+def supports_any_eagle(model: type[object]) -> TypeIs[type[SupportsEagleBase]]: ...
+
+
+@overload
+def supports_any_eagle(model: object) -> TypeIs[SupportsEagleBase]: ...
+
+
+def supports_any_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
+    """Check if model supports any EAGLE variant (1, 2, or 3)."""
+    return supports_eagle(model) or supports_eagle3(model)
+
+
+@runtime_checkable
+class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE3 speculative decoding."""
+    EAGLE-1 and EAGLE-2 speculative decoding."""
+
+    supports_eagle: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_eagle(model: type[object]) -> TypeIs[type[SupportsEagle]]: ...
+
+
+@overload
+def supports_eagle(model: object) -> TypeIs[SupportsEagle]: ...
+
+
+def supports_eagle(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEagle]] | TypeIs[SupportsEagle]:
+    return isinstance(model, SupportsEagle)
+
+
+@runtime_checkable
+class SupportsEagle3(SupportsEagleBase, Protocol):
+    """The interface required for models that support
+    EAGLE-3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE3 
+    A flag that indicates this model supports EAGLE-3 
     speculative decoding.
 
     Note:
@@ -949,7 +1012,7 @@ class SupportsEagle3(Protocol):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
         Set which layers should output auxiliary
-        hidden states for EAGLE3.
+        hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
@@ -960,7 +1023,7 @@ class SupportsEagle3(Protocol):
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
         Get the layer indices that should output auxiliary hidden states
-        for EAGLE3.
+        for EAGLE-3.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
@@ -989,7 +1052,7 @@ class SupportsMRoPE(Protocol):
     supports_mrope: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports M-RoPE.
-    
+
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
@@ -1030,3 +1093,52 @@ def supports_mrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMRoPE]] | TypeIs[SupportsMRoPE]:
     return isinstance(model, SupportsMRoPE)
+
+
+@runtime_checkable
+class SupportsXDRoPE(Protocol):
+    """The interface required for all models that support XD-RoPE."""
+
+    supports_xdrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports XD-RoPE.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        XDRope of your model class.
+    """
+
+    def get_xdrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> torch.Tensor:
+        """
+        Get XD-RoPE input positions and delta value for this specific model.
+
+        This method should be implemented by each model that supports XD-RoPE
+        to provide model-specific logic for computing input positions.
+
+        Args:
+            input_tokens: List of input token IDs
+            mm_features: Information about each multi-modal data item
+
+        Returns:
+            llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
+            4D(P/W/H/T) or 3D(W/H/T) positions.
+        """
+        ...
+
+
+@overload
+def supports_xdrope(model: type[object]) -> TypeIs[type[SupportsXDRoPE]]: ...
+
+
+@overload
+def supports_xdrope(model: object) -> TypeIs[SupportsXDRoPE]: ...
+
+
+def supports_xdrope(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
+    return isinstance(model, SupportsXDRoPE)

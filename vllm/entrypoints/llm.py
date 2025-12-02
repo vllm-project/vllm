@@ -32,7 +32,6 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -72,11 +71,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    MistralTokenizer,
-    get_cached_tokenizer,
-)
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -175,9 +171,6 @@ class LLM:
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
             model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
-        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
-            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
-            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -195,7 +188,7 @@ class LLM:
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
         tokenizer: str | None = None,
-        tokenizer_mode: TokenizerMode = "auto",
+        tokenizer_mode: TokenizerMode | str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
@@ -215,7 +208,6 @@ class LLM:
         hf_overrides: HfOverrides | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         pooler_config: PoolerConfig | None = None,
-        override_pooler_config: PoolerConfig | None = None,
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
@@ -331,7 +323,6 @@ class LLM:
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
-            override_pooler_config=override_pooler_config,
             structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
@@ -340,7 +331,6 @@ class LLM:
 
         log_non_default_args(engine_args)
 
-        # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -354,14 +344,14 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
+        self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
     @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
@@ -371,7 +361,7 @@ class LLM:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
@@ -412,6 +402,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list of integers matching the length
+                of `prompts`, where each priority value corresponds to the prompt
+                at the same index.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -467,7 +460,7 @@ class LLM:
         ):
             return lora_request
 
-        if not isinstance(prompts, Sequence):
+        if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
         optional_loras = (
@@ -1248,7 +1241,7 @@ class LLM:
 
     def _embedding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         text_1: list[str | TextPrompt | TokensPrompt],
         text_2: list[str | TextPrompt | TokensPrompt],
         truncate_prompt_tokens: int | None = None,
@@ -1280,7 +1273,7 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
         truncate_prompt_tokens: int | None = None,
@@ -1499,8 +1492,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> None:
-        self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
         """
@@ -1678,7 +1671,7 @@ class LLM:
             tokenization_kwargs,
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,

@@ -23,7 +23,8 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -155,25 +156,30 @@ class Gemma3Attention(nn.Module):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        layer_type = config.layer_types[layer_idx]
+        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize the rotary embedding.
-        if self.is_sliding:
-            # Local attention. Override the values in config.json.
-            self.rope_theta = config.rope_local_base_freq
-            self.rope_scaling = {"rope_type": "default"}
+        if layer_type in config.rope_parameters:
+            # Transformers v5 rope config.
+            rope_parameters = config.rope_parameters[layer_type]
         else:
+            # Transformers v4 rope config.
             # Global attention. Use the values in config.json.
-            self.rope_theta = config.rope_theta
-            self.rope_scaling = config.rope_scaling
+            rope_parameters = config.rope_parameters
+            # Local attention. Override the values in config.json.
+            if self.is_sliding:
+                rope_parameters = dict(
+                    rope_type="default", rope_theta=config.rope_local_base_freq
+                )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
-            rope_scaling=self.rope_scaling,
         )
 
         if getattr(config, "is_causal", True):

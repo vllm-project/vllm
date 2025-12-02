@@ -49,7 +49,8 @@ We currently support the following OpenAI APIs:
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
-    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+    - *Note: `user` parameter is ignored.*
+    - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -293,7 +294,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
             base_url="http://localhost:8000/v1",
             api_key="EMPTY",
         )
-        image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
         response = create_chat_embeddings(
             client,
@@ -350,7 +351,7 @@ The following extra parameters are supported by default:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:embedding-extra-params"
     ```
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
@@ -358,7 +359,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/embed/protocol.py:chat-embedding-extra-params"
     ```
 
 ### Transcriptions API
@@ -628,7 +629,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
+--8<-- "vllm/entrypoints/pooling/classify/protocol.py:classification-extra-params"
 ```
 
 ### Score API
@@ -833,7 +834,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 ### Re-rank API
@@ -914,7 +915,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
+--8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM
