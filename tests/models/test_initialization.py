@@ -93,6 +93,17 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
+    if model_arch == "DeepseekV32ForCausalLM":
+        from vllm.platforms import current_platform
+
+        capability = current_platform.get_device_capability()
+        if capability and capability.major < 9:
+            pytest.skip(
+                f"DeepseekV32 requires Hopper (9.0+) or Blackwell (10.0+) "
+                f"for FLASHMLA_SPARSE backend. Current device has compute "
+                f"capability {capability.major}.{capability.minor}"
+            )
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,

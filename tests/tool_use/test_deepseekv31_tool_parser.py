@@ -3,8 +3,10 @@
 
 import pytest
 
-from vllm.entrypoints.openai.tool_parsers import DeepSeekV31ToolParser
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.entrypoints.openai.tool_parsers.deepseekv31_tool_parser import (
+    DeepSeekV31ToolParser,
+)
+from vllm.tokenizers import get_tokenizer
 
 MODEL = "deepseek-ai/DeepSeek-V3.1"
 

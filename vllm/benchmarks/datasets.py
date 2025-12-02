@@ -30,7 +30,6 @@ from io import BytesIO
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
-import cv2
 import numpy as np
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
@@ -40,7 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -294,7 +293,7 @@ def lora_path_on_disk(lora_path: str) -> str:
 
 
 # Global cache for LoRA tokenizers.
-lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 
 
 def process_image(image: Any) -> Mapping[str, Any]:
@@ -850,6 +849,8 @@ class RandomMultiModalDataset(RandomDataset):
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
         """
+        import cv2
+
         random_pixels = self._rng.integers(
             0,
             256,
@@ -1711,6 +1712,11 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_class = MTBenchDataset
             args.hf_split = "train"
         elif (
+            args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MultiModalConversationDataset
+        elif (
             args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -2271,11 +2277,70 @@ class HuggingFaceDataset(BenchmarkDataset):
 
 
 class ConversationDataset(HuggingFaceDataset):
-    """Dataset for conversation data with multimodal support."""
+    """Dataset for text-only conversation data."""
+
+    SUPPORTED_DATASET_PATHS = {
+        "Aeala/ShareGPT_Vicuna_unfiltered",
+    }
+    IS_MULTIMODAL = False
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list:
+        # Filter examples with at least 2 conversations
+        filtered_data = self.data.filter(lambda x: len(x["conversations"]) >= 2)
+        sampled_requests = []
+        ind = 0
+        dynamic_output = output_len is None
+
+        for item in filtered_data:
+            if len(sampled_requests) >= num_requests:
+                break
+            conv = item["conversations"]
+            prompt, completion = conv[0]["value"], conv[1]["value"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
+            if dynamic_output and not is_valid_sequence(prompt_len, completion_len):
+                continue
+            mm_content = process_image(item["image"]) if "image" in item else None
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len and output len
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+            ind += 1
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+class MultiModalConversationDataset(HuggingFaceDataset):
+    """Dataset for multimodal conversation data."""
 
     SUPPORTED_DATASET_PATHS = {
         "lmms-lab/LLaVA-OneVision-Data",
-        "Aeala/ShareGPT_Vicuna_unfiltered",
     }
     IS_MULTIMODAL = True
 

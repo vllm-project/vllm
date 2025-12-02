@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import init_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -61,9 +61,18 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = init_tokenizer_from_configs(
+            self.tokenizer = init_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
+            reasoning_parser_plugin = (
+                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
+            )
+            if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+                ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
             reasoning_parser = (
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
@@ -260,9 +269,10 @@ class StructuredOutputManager:
                         and token is not None
                         and not structured_output_request.grammar.is_terminated()
                     ):
-                        assert structured_output_request.grammar.accept_tokens(
+                        accepted = structured_output_request.grammar.accept_tokens(
                             req_id, [token]
                         )
+                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:

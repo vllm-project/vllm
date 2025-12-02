@@ -215,7 +215,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         assert M_sum % block_m == 0
 
-        workspace1 = (M_sum, max(N, K))
+        workspace1 = (M_sum, N)
         workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
         return (workspace1, workspace2, output)

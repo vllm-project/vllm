@@ -3,7 +3,7 @@
 
 import asyncio
 import atexit
-from collections.abc import Iterable
+from collections.abc import Generator, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
@@ -20,8 +20,9 @@ import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioMediaIO
+from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
@@ -46,7 +47,10 @@ atexit.register(global_thread_pool.shutdown)
 
 _M = TypeVar("_M")
 
+MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
+
+@MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
     def __init__(
         self,
@@ -338,6 +342,17 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
+    def fetch_audio_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load audio embedding from a URL.
+        """
+        audio_embedding_io = AudioEmbeddingMediaIO()
+
+        return audio_embedding_io.load_base64("", data)
+
 
 def encode_audio_base64(
     audio: np.ndarray,
@@ -398,7 +413,8 @@ def group_mm_kwargs_by_modality(
     device: torch.types.Device = None,
     pin_memory: bool = False,
     merge_by_field_config: bool | None = None,
-) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
+    multimodal_cpu_fields: Set[str] = frozenset(),
+) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
 
@@ -439,10 +455,17 @@ def group_mm_kwargs_by_modality(
             )
 
             if device is not None:
-                mm_kwargs_group = json_map_leaves(
-                    lambda x: x.to(device=device) if isinstance(x, torch.Tensor) else x,
-                    mm_kwargs_group,
-                )
+                mm_kwargs_group = {
+                    k: json_map_leaves(
+                        lambda x: x.to(device=device, non_blocking=True)
+                        if isinstance(x, torch.Tensor)
+                        else x,
+                        v,
+                    )
+                    if k not in multimodal_cpu_fields
+                    else v
+                    for k, v in mm_kwargs_group.items()
+                }
         else:
             mm_kwargs_group = MultiModalKwargs.as_kwargs(
                 MultiModalKwargs.batch(

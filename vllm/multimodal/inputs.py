@@ -249,6 +249,19 @@ class MultiModalFeatureSpec:
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
 
+    @staticmethod
+    def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
+        kwargs = defaultdict[str, list[NestedTensors]](list)
+
+        for f in features:
+            item = f.data
+            if item is not None:
+                for k in keys:
+                    if k in item:
+                        kwargs[k].append(item[k].data)
+
+        return dict(kwargs)
+
 
 @dataclass
 class MultiModalFieldElem:
@@ -708,12 +721,12 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     """
 
     @staticmethod
-    def dummy(modality: str):
+    def dummy(modality: str, nbytes: int = 1):
         """Convenience class for testing."""
         mm_elem = MultiModalFieldElem(
             modality=modality,
             key="dummy",
-            data=torch.empty(1),
+            data=torch.empty(nbytes, dtype=torch.uint8),
             field=MultiModalSharedField(1),
         )
         return MultiModalKwargsItem.from_elems([mm_elem])

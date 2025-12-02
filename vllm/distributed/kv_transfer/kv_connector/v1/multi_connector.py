@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -27,10 +28,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -84,7 +85,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
         vllm_config: "VllmConfig",
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
         prom_metrics: dict[str, KVConnectorPromMetrics],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
@@ -109,15 +110,22 @@ class MultiConnector(KVConnectorBase_V1):
     - Save to all connectors.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
 
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
         for connector_cls, temp_config in self._get_connector_classes_and_configs(
             vllm_config
         ):
-            self._connectors.append(connector_cls(temp_config, role))
+            self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to
@@ -163,16 +171,22 @@ class MultiConnector(KVConnectorBase_V1):
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.
+    #
+    # Note: Call the base class method to ensure metadata is also set on the
+    # MultiConnector instance itself; otherwise, `has_connector_metadata()` will
+    # always return False.
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
+        super().bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
         for c in self._connectors:
             c.clear_connector_metadata()
+        super().clear_connector_metadata()
 
     def shutdown(self):
         exception: Exception | None = None
@@ -202,7 +216,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         for c in self._connectors:
@@ -420,7 +434,7 @@ class MultiConnector(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(

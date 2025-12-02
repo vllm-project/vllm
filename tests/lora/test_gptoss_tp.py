@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -33,7 +35,6 @@ The Competition_ID of competition_record is the foreign key of Competition_ID of
 
 EXPECTED_LORA_OUTPUT = [
     "SELECT AVG(Working_Horses) FROM farm WHERE Total_Horses > 5000;",
-    "SELECT AVG(Working_Horses) FROM farm WHERE Total_Horses > 5000;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
 ]
@@ -41,9 +42,6 @@ EXPECTED_LORA_OUTPUT = [
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
-        PROMPT_TEMPLATE.format(
-            context="What is the average number of working horses of farms with more than 5000 total number of horses?"  # noqa: E501
-        ),  # noqa: E501
         PROMPT_TEMPLATE.format(
             context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
         ),  # noqa: E501
@@ -67,7 +65,6 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
@@ -89,14 +86,17 @@ def test_gpt_oss_lora(gptoss20b_lora_files):
 
 
 @multi_gpu_test(num_gpus=2)
-def test_gpt_oss_lora_tp2(gptoss20b_lora_files):
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
+def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=2,
         max_lora_rank=8,
+        max_num_seqs=16,
         tensor_parallel_size=2,
+        fully_sharded_loras=fully_sharded_loras,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),
