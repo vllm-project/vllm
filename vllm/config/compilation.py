@@ -106,19 +106,19 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = Field(default=False)
+    fuse_norm_quant: bool = Field(default=None)
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Field(default=False)
+    fuse_act_quant: bool = Field(default=None)
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Field(default=False)
+    fuse_attn_quant: bool = Field(default=None)
     """Fuse the custom attention + quant ops."""
-    eliminate_noops: bool = Field(default=False)
+    eliminate_noops: bool = Field(default=None)
     """Eliminate no-op ops."""
-    enable_sp: bool = Field(default=False)
+    enable_sp: bool = Field(default=None)
     """Enable sequence parallelism."""
-    fuse_gemm_comms: bool = Field(default=False)
+    fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Field(default=False)
+    fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
 
     # Deprecated flags
@@ -206,6 +206,12 @@ class PassConfig:
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
+        "enable_fusion",
+        "enable_attn_fusion",
+        "enable_noop",
+        "enable_sequence_parallelism",
+        "enable_async_tp",
+        "enable_fi_allreduce_fusion",
         mode="wrap",
     )
     @classmethod
