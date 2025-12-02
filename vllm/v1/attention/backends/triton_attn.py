@@ -77,7 +77,7 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -111,6 +111,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # Check if CUDA Graphs are enabled for prefill.
         self.prefill_cudagraph_enabled = (
             self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
+        )
+        speculative_config = vllm_config.speculative_config
+        self.num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+        assert not (self.prefill_cudagraph_enabled and (self.num_spec_tokens > 0)), (
+            "Triton Attention Backend does currently not support FULL CUDA Graph mode "
+            "when combined with speculative decoding."
         )
 
         self.split_launch = self.prefill_cudagraph_enabled
