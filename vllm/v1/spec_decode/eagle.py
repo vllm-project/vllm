@@ -649,29 +649,18 @@ class EagleProposer:
         token_indices_to_sample = torch.empty(
             (num_reqs,), dtype=torch.int32, device=device
         )
+        num_rejected_tokens_gpu = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+        )
 
-        # Kernel grid: one program per request (row)
         grid = (num_reqs,)
         eagle_prepare_inputs_padded_kernel[grid](
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,
             token_indices_to_sample,
+            num_rejected_tokens_gpu,
             num_reqs,
-        )
-
-        # Calculate num_rejected_tokens_gpu for seq_lens adjustment in propose()
-        num_draft_tokens_gpu = torch.cat(
-            [
-                spec_decode_metadata.cu_num_draft_tokens[0:1],
-                spec_decode_metadata.cu_num_draft_tokens[1:]
-                - spec_decode_metadata.cu_num_draft_tokens[:-1],
-            ]
-        )
-        num_rejected_tokens_gpu = torch.where(
-            num_draft_tokens_gpu > 0,
-            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-            torch.zeros_like(num_draft_tokens_gpu),
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
