@@ -101,8 +101,10 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
+        if os.getenv("VLLM_ENABLE_OPTIMIZE_TOPK_TOPP", "0") == "1" and k is not None and p is not None:
+            return optimized_top_k_top_p(logits, generators, k, p, self.logprobs_mode)
+        logits_to_return = None    
         logits = self.apply_top_k_top_p(logits, k, p)
-        logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
         elif self.logprobs_mode == "processed_logprobs":
@@ -278,6 +280,42 @@ def apply_top_k_top_p(
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
 
+def optimized_top_k_top_p_sample(
+    logits: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+    logprobs_mode: Optional[LogprobsMode] = None
+) -> torch.Tensor:
+    max_k = k.max().item()
+    topk_values, topk_indices = logits.topk(max_k, dim=1)
+    # soft selected topk_values
+    probs_sort = topk_values.softmax(dim=-1)
+    probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+    # select the kth largest value in probs_sum
+    probs_max = probs_sum.gather(1, (k - 1).to(torch.int64).unsqueeze(dim=1))
+    top_p_mask = probs_sum >= (p.unsqueeze(dim=1) * probs_max)
+    # when probs = [0.5, 0.3, 0.2], p = 0.6, we should include [0.5, 0.3]
+    # we set the first True in mask to False
+    first_true_indices = top_p_mask.int().argmax(dim=1, keepdim=True)
+    top_p_mask.scatter_(dim=1, index=first_true_indices, value=False)
+    topk_values.masked_fill_(top_p_mask, -float("inf"))
+    logits_to_return = None
+    if self.logprobs_mode == "processed_logits":
+        logits_to_return = topk_values
+    elif self.logprobs_mode == "processed_logprobs":
+        logits_to_return = topk_values.log_softmax(dim=-1, dtype=torch.float32)
+    probs = topk_values.softmax(dim=-1, dtype=torch.float32)
+    topk_indices = topk_indices
+    q = torch.empty_like(probs).exponential_()
+    if generators:
+        for i, generator in generators.items():
+            q[i].exponential_(generator=generator)
+    # find the largest value's index after random_sample and return
+    sampled_token_indices = torch.gather(
+        topk_indices, dim=1, index=probs.div_(q).argmax(dim=-1).unsqueeze(1)
+    ).squeeze(1)
+    return sampled_token_indices, logits_to_return
 
 def apply_top_k_only(
     logits: torch.Tensor,
