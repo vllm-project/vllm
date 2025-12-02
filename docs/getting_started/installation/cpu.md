@@ -138,6 +138,35 @@ vllm serve facebook/opt-125m --dtype=bfloat16
 
 Note, it is recommended to manually reserve 1 CPU for vLLM front-end process when `world_size == 1`.
 
+### What are supported models on CPU?
+
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+
+### How to find benchmark configuration examples for supported CPU models?
+
+For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](https://github.com/vllm-project/vllm/blob/main/.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks#performance-benchmark-details).
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+
+Below is an example command to benchmark all CPU-supported models using optimized configurations.
+
+```bash
+ON_CPU=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+The benchmark results will be saved in `./benchmark/results/`.
+In the directory, the generated `.commands` files contain all example commands for the benchmark.
+
+We recommend configuring tensor-parallel-size to match the number of NUMA nodes on your system. Note that the current release does not support tensor-parallel-size=6.
+To determine the number of NUMA nodes available, use the following command:
+
+```bash
+lscpu | grep "NUMA node(s):" | awk '{print $3}'
+```
+
+For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
+, which publishes default-model CPU results produced using the same Benchmark Suite.
+
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
 - Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to the same NUMA node respectively, and 1 CPU per rank will be reserved for other vLLM components when `world_size > 1`. If you have any performance problems or unexpected binding behaviours, please try to bind threads as following.
