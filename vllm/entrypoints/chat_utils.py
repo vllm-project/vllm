@@ -1753,6 +1753,15 @@ def apply_hf_chat_template(
         model_config=model_config,
     )
 
+    if hf_chat_template is None and model_config.hf_config.model_type == "deepseek_v32":
+        request_prompt = encode_dsv32_chat_messages(
+            tokenizer,
+            conversation=conversation,
+            model_config=model_config,
+            **kwargs,
+        )
+        return request_prompt
+
     if hf_chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "

@@ -58,7 +58,6 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     apply_hf_chat_template,
     apply_mistral_chat_template,
-    encode_dsv32_chat_messages,
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
@@ -1128,13 +1127,6 @@ class OpenAIServing:
             request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
-                **_chat_template_kwargs,
-            )
-        elif model_config.hf_config.model_type == "deepseek_v32":
-            request_prompt = encode_dsv32_chat_messages(
-                tokenizer,
-                conversation=conversation,
-                model_config=model_config,
                 **_chat_template_kwargs,
             )
         else:
