@@ -23,7 +23,6 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from copy import copy
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -89,7 +88,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -387,15 +385,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        use_audio_in_video = False
-        if "video" in mm_kwargs:
-            video_items = [item for item in mm_kwargs["video"] if item is not None]
-            # only check video items (if there are any)
-            if video_items:
-                use_audio_in_video = all(
-                    item["use_audio_in_video"].data for item in video_items
-                )
-
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
@@ -404,7 +393,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
@@ -414,7 +402,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
 
         return prompt_ids, mm_placeholders
@@ -603,7 +590,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     tokenization_kwargs=tokenization_kwargs,
                 )
             tokenizer = self.info.get_tokenizer()
-            prompt_ids = encode_tokens(tokenizer, prompt)
+            prompt_ids = tokenizer.encode(prompt)
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
@@ -639,19 +626,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         )
 
         return mm_processed_data
-
-    def _validate_mm_placeholders(
-        self,
-        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
-        mm_item_counts: Mapping[str, int],
-        use_audio_in_video: bool = False,
-    ) -> None:
-        if use_audio_in_video:
-            mm_item_counts = copy(mm_item_counts)
-            if "video" in mm_item_counts:
-                assert "audio" in mm_item_counts
-                mm_item_counts["audio"] -= mm_item_counts["video"]
-        super()._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
 
 class Qwen2_5OmniConditionalGenerationMixin:

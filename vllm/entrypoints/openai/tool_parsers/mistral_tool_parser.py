@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 )
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -46,7 +46,7 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
-def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
+def _is_fn_name_regex_support(model_tokenizer: TokenizerLike) -> bool:
     return (
         isinstance(model_tokenizer, MistralTokenizer) and model_tokenizer.version >= 11
     )
@@ -61,7 +61,7 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         if not isinstance(self.model_tokenizer, MistralTokenizer):
@@ -80,7 +80,7 @@ class MistralToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if _is_fn_name_regex_support(self.model_tokenizer):
             self.fn_name_regex = re.compile(
-                r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)", re.DOTALL
+                r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)?", re.DOTALL
             )
         else:
             self.fn_name_regex = None

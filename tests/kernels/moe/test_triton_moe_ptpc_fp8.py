@@ -19,6 +19,12 @@ if current_platform.get_device_capability() < (9, 0):
 
 vllm_config = VllmConfig()
 
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
+
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
     """Matrix multiplication function that supports per-token input

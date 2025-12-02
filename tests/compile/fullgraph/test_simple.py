@@ -55,7 +55,7 @@ class SillyModel(nn.Module):
 def _run_simple_model(
     splitting_ops,
     use_inductor_graph_partition,
-    use_inductor,
+    backend,
     expected_num_piecewise_graphs_seen,
     expected_num_piecewise_capturable_graphs_seen,
     expected_num_backend_compilations,
@@ -64,7 +64,7 @@ def _run_simple_model(
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_inductor=use_inductor,
+            backend=backend,
             splitting_ops=splitting_ops,
             use_inductor_graph_partition=use_inductor_graph_partition,
             cudagraph_copy_inputs=True,
@@ -124,14 +124,14 @@ def _run_simple_model(
         assert torch.allclose(output.cpu(), torch.tensor([19.0, 19.0]))
 
 
-@pytest.mark.parametrize("use_inductor", [True, False])
+@pytest.mark.parametrize("backend", ["inductor", "eager"])
 @torch.inference_mode()
 @create_new_process_for_each_test("spawn")
-def test_simple_piecewise_compile(use_inductor):
+def test_simple_piecewise_compile(backend):
     _run_simple_model(
         splitting_ops=["silly::attention"],
         use_inductor_graph_partition=False,
-        use_inductor=use_inductor,
+        backend=backend,
         # 2 * num_layers + 1
         expected_num_piecewise_graphs_seen=5,
         # 1 + num_layers
@@ -155,7 +155,7 @@ def test_simple_inductor_graph_partition(monkeypatch):
     _run_simple_model(
         splitting_ops=["silly::attention"],
         use_inductor_graph_partition=True,
-        use_inductor=True,
+        backend="inductor",
         # Since not splitting at fx graph level
         expected_num_piecewise_graphs_seen=1,
         # Since not splitting at fx graph level
