@@ -1452,6 +1452,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.use_marlin = True
+        self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
 
     def create_weights(
         self,
