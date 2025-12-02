@@ -203,7 +203,7 @@ class TestGGUFModelLoader:
     @patch("vllm.config.model.get_hf_image_processor_config", return_value=None)
     @patch("vllm.config.model.get_config")
     @patch("vllm.config.model.is_gguf", return_value=False)
-    @patch("vllm.transformers_utils.utils.check_gguf_file", return_value=False)
+    @patch("vllm.transformers_utils.gguf_utils.check_gguf_file", return_value=False)
     @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_invalid_format(
         self,
