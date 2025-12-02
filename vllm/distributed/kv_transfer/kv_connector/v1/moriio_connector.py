@@ -295,7 +295,6 @@ class MoRIIOWriter:
         Args:
             worker: Reference to the parent worker
         """
-        # self.worker = worker
         self._worker_ref: weakref_ref[MoRIIOConnectorWorker] = weakref_ref(worker)
         self._write_task_q: Queue[WriteTask] = Queue()
         self._write_worker_started = False
