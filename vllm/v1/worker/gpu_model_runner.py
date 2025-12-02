@@ -1100,7 +1100,12 @@ class GPUModelRunner(
                     self.input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
                     non_blocking=True,
                 )
-                self.num_tokens_no_spec_gpu[new_req_idx] = num_tokens
+                self.num_tokens_no_spec_gpu[new_req_idx : new_req_idx + 1].copy_(
+                    self.input_batch.num_tokens_no_spec_cpu_tensor[
+                        new_req_idx : new_req_idx + 1
+                    ],
+                    non_blocking=True,
+                )
 
     def _ngram_gpu_full_init(self) -> None:
         """Initialize all GPU tensors for ngram proposer from scratch.
@@ -1116,7 +1121,10 @@ class GPUModelRunner(
                     self.input_batch.token_ids_cpu_tensor[idx, :num_tokens],
                     non_blocking=True,
                 )
-                self.num_tokens_no_spec_gpu[idx] = num_tokens
+                self.num_tokens_no_spec_gpu[idx : idx + 1].copy_(
+                    self.input_batch.num_tokens_no_spec_cpu_tensor[idx : idx + 1],
+                    non_blocking=True,
+                )
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
