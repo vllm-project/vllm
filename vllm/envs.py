@@ -235,7 +235,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = ""
     VLLM_USE_V2_MODEL_RUNNER: bool = False
 
 
@@ -1549,7 +1549,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     NOT multiprocess safe - race conditions may occur with multiple processes.
     #     Allows viewing and setting breakpoints in Inductor's code output files.
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
-        "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
+        "VLLM_COMPILE_CACHE_SAVE_FORMAT", "", ["binary", "unpacked"]
     ),
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(

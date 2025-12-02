@@ -59,7 +59,8 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         ):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
-                compilation_config.compile_cache_save_format
+                envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
+                or compilation_config.compile_cache_save_format
             )
         else:
             logger.debug("Using InductorAdaptor")

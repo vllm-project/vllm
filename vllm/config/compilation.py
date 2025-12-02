@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -337,14 +336,11 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
-    compile_cache_save_format: Literal["binary", "unpacked"] = field(
-        default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
-    )
+    compile_cache_save_format: Literal["binary", "unpacked"] = "binary"
     """Format for saving torch compile cache:\n
-    - "binary": saves as binary file (multiprocess safe)\n
+    - "binary": saves as binary file (multiprocess safe, default)\n
     - "unpacked": saves as directory structure for inspection/debugging
     (NOT multiprocess safe)\n
-    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
     """
     backend: str = ""
     """The backend for compilation. It needs to be a string:
