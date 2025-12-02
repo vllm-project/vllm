@@ -378,7 +378,7 @@ run_serving_tests() {
       continue
     fi
 
-    # get client and server arguments (after jq merge for new-format)
+    # get client and server arguments (after merged the default parameters)
     server_params=$(echo "$params" | jq -r '.server_parameters')
     server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
