@@ -1305,8 +1305,8 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
 
         _validate_truncation_size(
             model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
@@ -1681,8 +1681,9 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
         _validate_truncation_size(
             self.model_config.max_model_len,
             params.truncate_prompt_tokens,
