@@ -319,23 +319,13 @@ run_serving_tests() {
   # $1: a json file specifying serving test cases
   #
   # Supported JSON formats:
-  # 1) Old format: top-level array
+  # 1) Plain format: top-level array
   #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
   #
-  # 2) New format: object with defaults + tests
+  # 2) Default parameters field + plain format tests
   #    {
   #      "defaults": { ... },
-  #      "tests": [
-  #        {
-  #          "test_name": "...",
-  #          "server_parameters": {...},
-  #          "client_parameters": {...},
-  #          "server_environment_variables": {...},
-  #          "qps_list": [...],
-  #          "max_concurrency_list": [...]
-  #        },
-  #        ...
-  #      ]
+  #      "tests": [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
   #    }
 
   local serving_test_file
