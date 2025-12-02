@@ -178,7 +178,7 @@ class SchedulerConfig:
         factors: list[Any] = []
 
         # max_num_batched_tokens need to be included in the hash due
-        # to two reaons:
+        # to two reasons:
         # 1. LoRA creates static buffers based on max_num_batched_tokens.
         #   The tensor sizes and strides get captured in the torch.compile
         #   graph explicitly.
