@@ -78,8 +78,9 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        # enable TF32 tensor cores when available (Ampere+ GPUs).
-        torch.set_float32_matmul_precision("high")
+        # configure float32 matmul precision according to vLLM env.
+        precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
+        torch.set_float32_matmul_precision(precision)
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
