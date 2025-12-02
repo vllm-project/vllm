@@ -716,16 +716,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             assert state_indices_prefill is not None
             assert non_spec_state_indices_runtime is not None
 
-        # 1. Set up dimensions for reshapes later
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states[:num_actual_tokens])
-        projected_states_ba, _ = self.in_proj_ba(hidden_states[:num_actual_tokens])
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
