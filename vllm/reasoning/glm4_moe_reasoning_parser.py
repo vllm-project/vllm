@@ -90,9 +90,9 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         # Ignore chunks that are only special tags
         if delta_text in (self.think_start_token, self.think_end_token):
             return None
-        if (
-            len(delta_token_ids) == 1
-            and delta_token_ids[0] in (self.think_start_token_id, self.think_end_token_id)
+        if len(delta_token_ids) == 1 and delta_token_ids[0] in (
+            self.think_start_token_id,
+            self.think_end_token_id,
         ):
             return None
 
