@@ -22,7 +22,14 @@ def get_model_args(
         "num_speculative_tokens": 1,
         "max_model_len": model_max_len,
     }
-
+    eplb_config = {
+        "num_redundant_experts": tp_size,
+        "window_size": 128,
+        "step_interval": 1024,
+        "log_balancedness": False,
+    }
+    if use_async:
+        eplb_config["use_async"] = True
     model_args = {
         "pretrained": model_name,
         "dtype": "auto",
@@ -31,15 +38,10 @@ def get_model_args(
         "gpu_memory_utilization": 0.7,
         "speculative_config": speculative_config,
         "enable_expert_parallel": True,
-        "num_redundant_experts": tp_size,
-        "eplb_window_size": 128,
-        "eplb_step_interval": 1024,
-        "eplb_log_balancedness": False,
+        "eplb_config": eplb_config,
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
-    if use_async:
-        model_args["eplb_config"] = {"use_async": True}
     return model_args
 
 

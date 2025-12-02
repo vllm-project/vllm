@@ -423,10 +423,6 @@ class EngineArgs:
     )
     _api_process_count: int = ParallelConfig._api_process_count
     _api_process_rank: int = ParallelConfig._api_process_rank
-    num_redundant_experts: int = EPLBConfig.num_redundant_experts
-    eplb_window_size: int = EPLBConfig.window_size
-    eplb_step_interval: int = EPLBConfig.step_interval
-    eplb_log_balancedness: bool = EPLBConfig.log_balancedness
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
@@ -1587,16 +1583,6 @@ class EngineArgs:
                 "Disabling NCCL for DP synchronization when using async scheduling."
             )
             self.disable_nccl_for_dp_synchronization = True
-
-        # Forward the deprecated CLI args to the EPLB config.
-        if self.num_redundant_experts is not None:
-            self.eplb_config.num_redundant_experts = self.num_redundant_experts
-        if self.eplb_window_size is not None:
-            self.eplb_config.window_size = self.eplb_window_size
-        if self.eplb_step_interval is not None:
-            self.eplb_config.step_interval = self.eplb_step_interval
-        if self.eplb_log_balancedness is not None:
-            self.eplb_config.log_balancedness = self.eplb_log_balancedness
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
