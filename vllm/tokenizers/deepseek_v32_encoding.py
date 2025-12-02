@@ -45,7 +45,7 @@ user_msg_template: str = "<｜User｜>{content}<｜Assistant｜>"
 assistant_msg_template: str = "{reasoning}{content}{tool_calls}<｜end▁of▁sentence｜>"
 thinking_template = "{reasoning_content}"
 
-response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"
+response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"  # noqa: E501
 tool_call_template: str = (
     '<{dsml_token}invoke name="{name}">\n{arguments}\n</{dsml_token}invoke>'
 )
@@ -127,7 +127,7 @@ def decode_dsml_to_arguments(
     return dict(name=tool_name, arguments=tool_args_json)
 
 
-def render_tools(tools: list[dict[str, Union[str, dict[str, Any]]]]) -> str:
+def render_tools(tools: list[dict[str, str | dict[str, Any]]]) -> str:
     tools_json = [to_json(t) for t in tools]
 
     return TOOLS_SYSTEM_TEMPLATE.format(
@@ -164,7 +164,7 @@ def render_message(
     tools = msg.get("tools")
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
-    reasoning_content = msg.get("reasoning_content")
+    reasoning_content = msg.get("reasoning") or msg.get("reasoning_content")
 
     if tools:
         tools = tools_from_openai_format(tools)
@@ -262,7 +262,7 @@ def render_message(
 
         if thinking_mode == "thinking" and index > last_user_idx:
             assert reasoning_content or tool_calls, (
-                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"
+                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"  # noqa: E501
             )
             thinking_part = (
                 thinking_template.format(reasoning_content=reasoning_content or "")
@@ -296,6 +296,7 @@ def drop_thinking_messages(
         elif role == "assistant":
             msg_wo_thinking = copy.copy(msg)
             msg_wo_thinking.pop("reasoning_content", None)
+            msg_wo_thinking.pop("reasoning", None)
             messages_wo_thinking.append(msg_wo_thinking)
 
     return messages_wo_thinking
@@ -449,5 +450,6 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
         "role": "assistant",
         "content": summary_content,
         "reasoning_content": reasoning_content,
+        "reasoning": reasoning_content,
         "tool_calls": tool_calls_to_openai_format(tool_calls),
     }

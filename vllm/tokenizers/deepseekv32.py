@@ -13,9 +13,10 @@ from .registry import TokenizerRegistry
 @TokenizerRegistry.register("deepseek_v32")
 class DeepseekV32Tokenizer(HfTokenizer):
     def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
         self.tokenizer = tokenizer
-        self.name_or_path = tokenizer.name_or_path
+        self.name_or_path = (
+            tokenizer.name_or_path if hasattr(tokenizer, "name_or_path") else ""
+        )
 
     @classmethod
     def from_pretrained(
@@ -41,8 +42,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
         encode_config = dict(
             thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True
         )
-        # messages -> string
-        prompt_str = encode_messages(messages, **encode_config)
+        prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
 
     @property
