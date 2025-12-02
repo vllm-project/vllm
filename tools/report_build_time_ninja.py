@@ -83,9 +83,9 @@ class Target:
         """
         # Allow for modest floating-point errors
         epsilon = 0.000002
-        if (self.weighted_duration > self.Duration() + epsilon):
-            print('{} > {}?'.format(self.weighted_duration, self.Duration()))
-        assert (self.weighted_duration <= self.Duration() + epsilon)
+        if self.weighted_duration > self.Duration() + epsilon:
+            print("{} > {}?".format(self.weighted_duration, self.Duration()))
+        assert self.weighted_duration <= self.Duration() + epsilon
         return self.weighted_duration
 
     def DescribeTargets(self):
@@ -93,10 +93,10 @@ class Target:
         # Some build steps generate dozens of outputs - handle them sanely.
         # The max_length was chosen so that it can fit most of the long
         # single-target names, while minimizing word wrapping.
-        result = ', '.join(self.targets)
+        result = ", ".join(self.targets)
         max_length = 65
         if len(result) > max_length:
-            result = result[:max_length] + '...'
+            result = result[:max_length] + "..."
         return result
 
 
@@ -106,12 +106,13 @@ def ReadTargets(log, show_all):
 
     The result is a list of Target objects."""
     header = log.readline()
-    assert header == '# ninja log v5\n', \
-           'unrecognized ninja log version {!r}'.format(header)
+    assert header == "# ninja log v5\n", "unrecognized ninja log version {!r}".format(
+        header
+    )
     targets_dict = {}
     last_end_seen = 0.0
     for line in log:
-        parts = line.strip().split('\t')
+        parts = line.strip().split("\t")
         if len(parts) != 5:
             # If ninja.exe is rudely halted then the .ninja_log file may be
             # corrupt. Silently continue.
@@ -150,17 +151,17 @@ def ReadTargets(log, show_all):
 def GetExtension(target, extra_patterns):
     """Return the file extension that best represents a target.
 
-  For targets that generate multiple outputs it is important to return a
-  consistent 'canonical' extension. Ultimately the goal is to group build steps
-  by type."""
+    For targets that generate multiple outputs it is important to return a
+    consistent 'canonical' extension. Ultimately the goal is to group build steps
+    by type."""
     for output in target.targets:
         if extra_patterns:
-            for fn_pattern in extra_patterns.split(';'):
-                if fnmatch.fnmatch(output, '*' + fn_pattern + '*'):
+            for fn_pattern in extra_patterns.split(";"):
+                if fnmatch.fnmatch(output, "*" + fn_pattern + "*"):
                     return fn_pattern
         # Not a true extension, but a good grouping.
-        if output.endswith('type_mappings'):
-            extension = 'type_mappings'
+        if output.endswith("type_mappings"):
+            extension = "type_mappings"
             break
 
         # Capture two extensions if present. For example: file.javac.jar should
@@ -170,26 +171,26 @@ def GetExtension(target, extra_patterns):
         extension = ext2 + ext1  # Preserve the order in the file name.
 
         if len(extension) == 0:
-            extension = '(no extension found)'
+            extension = "(no extension found)"
 
-        if ext1 in ['.pdb', '.dll', '.exe']:
-            extension = 'PEFile (linking)'
+        if ext1 in [".pdb", ".dll", ".exe"]:
+            extension = "PEFile (linking)"
             # Make sure that .dll and .exe are grouped together and that the
             # .dll.lib files don't cause these to be listed as libraries
             break
-        if ext1 in ['.so', '.TOC']:
-            extension = '.so (linking)'
+        if ext1 in [".so", ".TOC"]:
+            extension = ".so (linking)"
             # Attempt to identify linking, avoid identifying as '.TOC'
             break
         # Make sure .obj files don't get categorized as mojo files
-        if ext1 in ['.obj', '.o']:
+        if ext1 in [".obj", ".o"]:
             break
         # Jars are the canonical output of java targets.
-        if ext1 == '.jar':
+        if ext1 == ".jar":
             break
         # Normalize all mojo related outputs to 'mojo'.
-        if output.count('.mojom') > 0:
-            extension = 'mojo'
+        if output.count(".mojom") > 0:
+            extension = "mojo"
             break
     return extension
 
@@ -214,8 +215,8 @@ def SummarizeEntries(entries, extra_step_types):
         if target.end > latest:
             latest = target.end
         total_cpu_time += target.Duration()
-        task_start_stop_times.append((target.start, 'start', target))
-        task_start_stop_times.append((target.end, 'stop', target))
+        task_start_stop_times.append((target.start, "start", target))
+        task_start_stop_times.append((target.end, "stop", target))
     length = latest - earliest
     weighted_total = 0.0
 
@@ -241,10 +242,10 @@ def SummarizeEntries(entries, extra_step_types):
         if num_running > 0:
             # Update the total weighted time up to this moment.
             last_weighted_time += (time - last_time) / float(num_running)
-        if action_name == 'start':
+        if action_name == "start":
             # Record the total weighted task time when this task starts.
             running_tasks[target] = last_weighted_time
-        if action_name == 'stop':
+        if action_name == "stop":
             # Record the change in the total weighted task time while this task
             # ran.
             weighted_duration = last_weighted_time - running_tasks[target]
@@ -252,13 +253,16 @@ def SummarizeEntries(entries, extra_step_types):
             weighted_total += weighted_duration
             del running_tasks[target]
         last_time = time
-    assert (len(running_tasks) == 0)
+    assert len(running_tasks) == 0
 
     # Warn if the sum of weighted times is off by more than half a second.
     if abs(length - weighted_total) > 500:
-        print('Warning: Possible corrupt ninja log, results may be '
-              'untrustworthy. Length = {:.3f}, weighted total = {:.3f}'.format(
-                  length, weighted_total))
+        print(
+            "Warning: Possible corrupt ninja log, results may be "
+            "untrustworthy. Length = {:.3f}, weighted total = {:.3f}".format(
+                length, weighted_total
+            )
+        )
 
     entries_by_ext = defaultdict(list)
     for target in entries:
@@ -266,32 +270,38 @@ def SummarizeEntries(entries, extra_step_types):
         entries_by_ext[extension].append(target)
 
     for key, values in entries_by_ext.items():
-        print('    Longest build steps for {}:'.format(key))
+        print("    Longest build steps for {}:".format(key))
         values.sort(key=lambda x: x.WeightedDuration())
         for target in values[-long_count:]:
             print(
-                '      {:8.1f} weighted s to build {} ({:.1f} s elapsed time)'.
-                format(target.WeightedDuration(), target.DescribeTargets(),
-                       target.Duration()))
+                "      {:8.1f} weighted s to build {} ({:.1f} s elapsed time)".format(
+                    target.WeightedDuration(),
+                    target.DescribeTargets(),
+                    target.Duration(),
+                )
+            )
 
-    print('    {:.1f} s weighted time ({:.1f} s elapsed time sum, {:1.1f}x '
-          'parallelism)'.format(length, total_cpu_time,
-                                total_cpu_time * 1.0 / length))
-    print('    {} build steps completed, average of {:1.2f}/s'.format(
-        len(entries),
-        len(entries) / (length)))
+    print(
+        "    {:.1f} s weighted time ({:.1f} s elapsed time sum, {:1.1f}x "
+        "parallelism)".format(length, total_cpu_time, total_cpu_time * 1.0 / length)
+    )
+    print(
+        "    {} build steps completed, average of {:1.2f}/s".format(
+            len(entries), len(entries) / (length)
+        )
+    )
 
 
 def main():
-    log_file = '.ninja_log'
+    log_file = ".ninja_log"
     parser = argparse.ArgumentParser()
-    parser.add_argument('-C', dest='build_directory', help='Build directory.')
+    parser.add_argument("-C", dest="build_directory", help="Build directory.")
     parser.add_argument(
-        '-s',
-        '--step-types',
-        help='semicolon separated fnmatch patterns for build-step grouping')
-    parser.add_argument('--log-file',
-                        help="specific ninja log file to analyze.")
+        "-s",
+        "--step-types",
+        help="semicolon separated fnmatch patterns for build-step grouping",
+    )
+    parser.add_argument("--log-file", help="specific ninja log file to analyze.")
     args, _extra_args = parser.parse_known_args()
     if args.build_directory:
         log_file = os.path.join(args.build_directory, log_file)
@@ -300,17 +310,16 @@ def main():
     if args.step_types:
         # Make room for the extra build types.
         global long_ext_count
-        long_ext_count += len(args.step_types.split(';'))
+        long_ext_count += len(args.step_types.split(";"))
 
     try:
         with open(log_file) as log:
             entries = ReadTargets(log, False)
             SummarizeEntries(entries, args.step_types)
     except OSError:
-        print('Log file {!r} not found, no build summary created.'.format(
-            log_file))
+        print("Log file {!r} not found, no build summary created.".format(log_file))
         return errno.ENOENT
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

@@ -24,7 +24,14 @@ cleanup() {
     exit 0
 }
 
-export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+
+if [[ -z "${VLLM_HOST_IP:-}" ]]; then
+    export VLLM_HOST_IP=127.0.0.1
+    echo "Using default VLLM_HOST_IP=127.0.0.1 (override by exporting VLLM_HOST_IP before running this script)"
+else
+    echo "Using provided VLLM_HOST_IP=${VLLM_HOST_IP}"
+fi
+
 
 # install quart first -- required for disagg prefill proxy serve
 if python3 -c "import quart" &> /dev/null; then
@@ -38,7 +45,7 @@ fi
 wait_for_server() {
   local port=$1
   timeout 1200 bash -c "
-    until curl -s localhost:${port}/v1/completions > /dev/null; do
+    until curl -i localhost:${port}/v1/models > /dev/null; do
       sleep 1
     done" && return 0 || return 1
 }
@@ -48,21 +55,23 @@ wait_for_server() {
 
 # prefilling instance, which is the KV producer
 CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL_NAME \
+    --host 0.0.0.0 \
     --port 8100 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"14579","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8100","send_type":"PUT_ASYNC"}}' &
 
-# decoding instance, which is the KV consumer
+# decoding instance, which is the KV consumer  
 CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL_NAME \
+    --host 0.0.0.0 \
     --port 8200 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"14580","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8200","send_type":"PUT_ASYNC"}}' &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100

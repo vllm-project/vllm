@@ -21,97 +21,97 @@ def deepseek_r1_qwen_tokenizer():
 
 SIMPLE_REASONING = {
     "output": "This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 COMPLETE_REASONING = {
     "output": "This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": True,
 }
 NO_CONTENT = {
     "output": "This is content",
-    "reasoning_content": "This is content",
+    "reasoning": "This is content",
     "content": None,
     "is_reasoning_end": False,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 MULTIPLE_LINES = {
     "output": "This\nThat</think>This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_NO_STREAMING = {
     "output": "</think>This is the rest",
-    "reasoning_content": "",
+    "reasoning": "",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 REASONING_WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 COMPLETE_REASONING_WITH_THINK = {
     "output": "<think>This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": True,
 }
 MULTIPLE_LINES_WITH_THINK = {
     "output": "<think>This\nThat</think>This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
     "output": "</think>This is the rest",
-    "reasoning_content": "",
+    "reasoning": "",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 SHORTEST_REASONING_WITH_THINK = {
     "output": "</think>This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 THINK_NO_END = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
 EMPTY = {
     "output": "",
-    "reasoning_content": "",
+    "reasoning": "",
     "content": None,
     "is_reasoning_end": False,
 }
 EMPTY_STREAMING = {
     "output": "",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
     "is_reasoning_end": False,
 }
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
@@ -121,7 +121,7 @@ NEW_LINE = {
 # or not.
 NEW_LINE_STREAMING = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
-    "reasoning_content": "\nThis is a reasoning section",
+    "reasoning": "\nThis is a reasoning section",
     "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
@@ -259,17 +259,17 @@ def test_reasoning(
     output = deepseek_r1_qwen_tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [
-        deepseek_r1_qwen_tokenizer.convert_tokens_to_string([token])
-        for token in output
+        deepseek_r1_qwen_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(deepseek_r1_qwen_tokenizer)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        deepseek_r1_qwen_tokenizer
+    )
 
-    reasoning, content = run_reasoning_extraction(parser,
-                                                  output_tokens,
-                                                  streaming=streaming)
+    reasoning, content = run_reasoning_extraction(
+        parser, output_tokens, streaming=streaming
+    )
 
-    assert reasoning == param_dict["reasoning_content"]
+    assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
 
     # Test is_reasoning_end
@@ -281,7 +281,8 @@ def test_reasoning(
     if param_dict["content"] is not None:
         content = parser.extract_content_ids(output_ids)
         assert content == deepseek_r1_qwen_tokenizer.convert_tokens_to_ids(
-            deepseek_r1_qwen_tokenizer.tokenize(param_dict["content"]))
+            deepseek_r1_qwen_tokenizer.tokenize(param_dict["content"])
+        )
     else:
         content = parser.extract_content_ids(output)
         assert content == []

@@ -52,15 +52,6 @@
 #define VLLM_DISPATCH_FP8_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FP8_TYPES(__VA_ARGS__))
 
-#define AT_DISPATCH_BYTE_CASE(enum_type, ...) \
-  AT_PRIVATE_CASE_TYPE_USING_HINT(enum_type, byte_t, __VA_ARGS__)
-
-#define VLLM_DISPATCH_CASE_BYTE_TYPES(...) \
-  AT_DISPATCH_BYTE_CASE(at::ScalarType::Byte, __VA_ARGS__)
-
-#define VLLM_DISPATCH_BYTE_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_BYTE_TYPES(__VA_ARGS__))
-
 #define VLLM_DISPATCH_QUANT_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_QUANT_TYPES(__VA_ARGS__))
 
@@ -97,3 +88,53 @@
 #define VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(                                              \
       TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))
+
+#define VLLM_DISPATCH_VEC_SIZE(VEC_SIZE, ...) \
+  switch (VEC_SIZE) {                         \
+    case 16: {                                \
+      constexpr int vec_size = 16;            \
+      __VA_ARGS__();                          \
+      break;                                  \
+    }                                         \
+    case 8: {                                 \
+      constexpr int vec_size = 8;             \
+      __VA_ARGS__();                          \
+      break;                                  \
+    }                                         \
+    case 4: {                                 \
+      constexpr int vec_size = 4;             \
+      __VA_ARGS__();                          \
+      break;                                  \
+    }                                         \
+    case 2: {                                 \
+      constexpr int vec_size = 2;             \
+      __VA_ARGS__();                          \
+      break;                                  \
+    }                                         \
+    default: {                                \
+      constexpr int vec_size = 1;             \
+      __VA_ARGS__();                          \
+      break;                                  \
+    }                                         \
+  }
+
+#define VLLM_DISPATCH_RANK234(NUM_DIMS, ...)                                   \
+  switch (NUM_DIMS) {                                                          \
+    case 2: {                                                                  \
+      constexpr int tensor_rank = 2;                                           \
+      __VA_ARGS__();                                                           \
+      break;                                                                   \
+    }                                                                          \
+    case 3: {                                                                  \
+      constexpr int tensor_rank = 3;                                           \
+      __VA_ARGS__();                                                           \
+      break;                                                                   \
+    }                                                                          \
+    case 4: {                                                                  \
+      constexpr int tensor_rank = 4;                                           \
+      __VA_ARGS__();                                                           \
+      break;                                                                   \
+    }                                                                          \
+    default:                                                                   \
+      TORCH_CHECK(false, "Expects rank 2, 3 or 4 tensors but got ", NUM_DIMS); \
+  }

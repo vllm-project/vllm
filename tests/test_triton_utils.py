@@ -5,8 +5,7 @@ import sys
 import types
 from unittest import mock
 
-from vllm.triton_utils.importing import (TritonLanguagePlaceholder,
-                                         TritonPlaceholder)
+from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
 
 def test_triton_placeholder_is_module():
@@ -52,8 +51,7 @@ def test_triton_placeholder_decorators_with_args():
     def bar(x):
         return x
 
-    @triton.heuristics(
-        {"BLOCK_SIZE": lambda args: 128 if args["x"] > 1024 else 64})
+    @triton.heuristics({"BLOCK_SIZE": lambda args: 128 if args["x"] > 1024 else 64})
     def baz(x):
         return x
 
@@ -69,6 +67,8 @@ def test_triton_placeholder_language():
     assert lang.constexpr is None
     assert lang.dtype is None
     assert lang.int64 is None
+    assert lang.int32 is None
+    assert lang.tensor is None
 
 
 def test_triton_placeholder_language_from_parent():
@@ -87,6 +87,7 @@ def test_no_triton_fallback():
     # mock triton not being installed
     with mock.patch.dict(sys.modules, {"triton": None}):
         from vllm.triton_utils import HAS_TRITON, tl, triton
+
         assert HAS_TRITON is False
         assert triton.__class__.__name__ == "TritonPlaceholder"
         assert triton.language.__class__.__name__ == "TritonLanguagePlaceholder"

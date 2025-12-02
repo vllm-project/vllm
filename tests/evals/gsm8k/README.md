@@ -19,7 +19,7 @@ pytest -s -v tests/gsm8k/test_gsm8k_correctness.py \
 vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8000
 
 # Run evaluation
-python tests/gsm8k/gsm8k_eval.py --port 8000
+python tests/evals/gsm8k/gsm8k_eval.py --port 8000
 ```
 
 ## Configuration Format
