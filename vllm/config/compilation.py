@@ -7,11 +7,12 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -110,10 +111,51 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: float | None = None
+    """The threshold of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    float in MB.
+    Unspecified will fallback to default values 
+    which are compute capability and world size dependent.
+        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
+            90: {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            100: {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }, where key is the device capability"""
 
     # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> int | None:
+        """
+        Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Returns None if world size
+        is not supported by configs as it's not supported by flashinfer.
+        """
+
+        MiB = 1024 * 1024
+        max_size_mb = self.fi_allreduce_fusion_max_size_mb
+        if max_size_mb is None:
+            max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+
+        return int(max_size_mb * MiB) if max_size_mb is not None else None
+
+    @staticmethod
+    def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
+        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
+            current_platform.get_device_capability().to_int(), {}
+        )
 
     def uuid(self):
         """
@@ -135,6 +177,11 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+            if self.enable_fi_allreduce_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Allreduce + rms norm + quant (fp8) fusion might not work"
+                )
 
 
 @config
@@ -149,11 +196,14 @@ class CompilationConfig:
         - [`backend`][vllm.config.CompilationConfig.backend]
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+        - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
     - CudaGraph capture:
         - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`max_cudagraph_capture_size`]
+        [vllm.config.CompilationConfig.max_cudagraph_capture_size]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
@@ -206,6 +256,15 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
+    compile_cache_save_format: Literal["binary", "unpacked"] = field(
+        default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
+    )
+    """Format for saving torch compile cache:\n
+    - "binary": saves as binary file (multiprocess safe)\n
+    - "unpacked": saves as directory structure for inspection/debugging
+    (NOT multiprocess safe)\n
+    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
+    """
     backend: str = ""
     """The backend for compilation. It needs to be a string:
 
@@ -255,6 +314,9 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = True
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl`."""
 
     # Inductor capture
     use_inductor: bool | None = None
@@ -327,18 +389,16 @@ class CompilationConfig:
     more modes may be added.
     """
     use_cudagraph: bool = True
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
+    """Whether to use cudagraph inside compilation:
+
+    - False: cudagraph inside compilation is not used.\n
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationMode.VLLM_COMPILE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
+
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
-    instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
+    _PIECEWISE instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -398,8 +458,22 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_capture_size: int = field(default=None, init=False)  # type: ignore
-    """not configurable, computed after init"""
+    max_cudagraph_capture_size: int | None = field(default=None)
+    """The maximum cudagraph capture size.
+    
+    If cudagraph_capture_sizes is specified, this will be set to the largest 
+    size in that list (or checked for consistency if specified). If
+    cudagraph_capture_sizes is not specified, the list of sizes is generated
+    automatically following the pattern:
+
+        [1, 2, 4] + list(range(8, 256, 8)) + list(
+        range(256, max_cudagraph_capture_size + 1, 16))
+
+    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
+    512) by default. This voids OOM in tight memory scenarios with small 
+    max_num_seqs, and prevents capture of many large graphs (>512) that would
+    greatly increase startup time with limited performance benefit.
+    """
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
     bs_to_padded_graph_size: list[int] = field(
@@ -408,7 +482,7 @@ class CompilationConfig:
     )
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_capture_size],
+    since we know all keys are in a range [0, max_cudagraph_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
@@ -438,7 +512,8 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention",
+        "vllm::gdn_attention_core",
+        "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
     ]
 
@@ -464,6 +539,7 @@ class CompilationConfig:
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
+        factors.append(self.compile_cache_save_format)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __repr__(self) -> str:
@@ -503,6 +579,16 @@ class CompilationConfig:
         """
         if isinstance(value, str):
             return CUDAGraphMode[value.upper()]
+        return value
+
+    @field_validator("compile_cache_save_format")
+    @classmethod
+    def validate_compile_cache_save_format(cls, value: str) -> str:
+        if value not in ("binary", "unpacked"):
+            raise ValueError(
+                f"compile_cache_save_format must be 'binary' or 'unpacked', "
+                f"got: {value}"
+            )
         return value
 
     def __post_init__(self) -> None:
@@ -670,27 +756,16 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
+        # TODO[@lucaskabela]: See if we can forward prefix
+        # https://github.com/vllm-project/vllm/issues/27045
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, cudagraph_capture_sizes: list[int]) -> None:
-        """To complete the initialization of config,
-        we need to know the cudagraph sizes."""
-
-        if self.cudagraph_capture_sizes is None:
-            self.cudagraph_capture_sizes = cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            dedup_sizes = list(set(self.cudagraph_capture_sizes))
-            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(
-                    (
-                        "cudagraph sizes specified by model runner"
-                        " %s is overridden by config %s"
-                    ),
-                    cudagraph_capture_sizes,
-                    dedup_sizes,
-                )
-            self.cudagraph_capture_sizes = dedup_sizes
+    def post_init_cudagraph_sizes(self) -> None:
+        """To complete the initialization after cudagraph related
+        configs are set. This includes:
+        - initialize compile_sizes
+        - pre-compute the mapping bs_to_padded_graph_size
+        """
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -708,23 +783,24 @@ class CompilationConfig:
                     computed_compile_sizes.append(x)
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
-        # sort to make sure cudagraph capture sizes are in descending order
-        self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = (
-            self.cudagraph_capture_sizes[0] if self.cudagraph_capture_sizes else 0
-        )
+        # make sure the sizes are in ascending order
+        self.cudagraph_capture_sizes.sort()
+        if self.cudagraph_capture_sizes:
+            assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [0 for i in range(self.max_capture_size + 1)]
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_cudagraph_capture_size + 1)
+        ]
         for end, start in zip(
-            self.cudagraph_capture_sizes, self.cudagraph_capture_sizes[1:] + [0]
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
         ):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is

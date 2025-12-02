@@ -37,7 +37,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -53,6 +60,7 @@ class BambaMLP(nn.Module):
         config: BambaConfig,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -60,12 +68,14 @@ class BambaMLP(nn.Module):
             output_sizes=[config.intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         if config.hidden_act != "silu":
             raise ValueError(
@@ -111,7 +121,9 @@ class BambaMixerDecoderLayer(nn.Module):
             prefix=f"{prefix}.mixer",
         )
 
-        self.feed_forward = BambaMLP(config, quant_config=quant_config)
+        self.feed_forward = BambaMLP(
+            config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -195,12 +207,14 @@ class BambaAttentionDecoderLayer(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.attn = Attention(
@@ -212,7 +226,9 @@ class BambaAttentionDecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.feed_forward = BambaMLP(config, quant_config=quant_config)
+        self.feed_forward = BambaMLP(
+            config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -394,7 +410,13 @@ class BambaModel(nn.Module):
 
 
 class BambaForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": [

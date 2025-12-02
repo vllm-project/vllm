@@ -206,6 +206,7 @@ class Ernie4_5_VisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
@@ -1366,6 +1367,23 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+        if getattr(self.config, "im_patch_id", None):
+            visual_token_ids = [
+                token_id
+                for token_id in [
+                    self.config.im_patch_id,
+                    getattr(self.config, "image_start_token_id", None),
+                    getattr(self.config, "image_end_token_id", None),
+                    getattr(self.config, "video_start_token_id", None),
+                    getattr(self.config, "video_end_token_id", None),
+                ]
+                if token_id is not None
+            ]
+            self._visual_token_ids_tensor_cache = torch.tensor(
+                visual_token_ids, dtype=torch.long
+            )
+        else:
+            self._visual_token_ids_tensor_cache = None
 
     def compute_logits(
         self,
@@ -1397,22 +1415,26 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return image_features
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        if getattr(self.config, "im_patch_id", None) is not None:
-            self.visual_token_mask = (input_ids == self.config.im_patch_id).reshape(
-                -1, 1
-            )
-        else:
+        """Set mask for visual tokens (image/video patches and delimiters)."""
+        if self._visual_token_ids_tensor_cache is None:
             self.visual_token_mask = None
+            return
+        # Create tensor on the correct device
+        visual_token_ids_tensor = self._visual_token_ids_tensor_cache.to(
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
 
-    @classmethod
+        self.visual_token_mask = torch.isin(input_ids, visual_token_ids_tensor).reshape(
+            -1, 1
+        )
+
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
         video_grid_thw: list[list[int]] | torch.Tensor,
-        context_len: int = 0,
-        seq_len: int | None = None,
         second_per_grid_ts: list[float] | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
@@ -1545,7 +1567,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        llm_positions = llm_positions[:, context_len:seq_len]
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 

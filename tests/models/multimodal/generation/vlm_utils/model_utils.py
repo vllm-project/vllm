@@ -328,6 +328,16 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
 
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, **kwargs):
+        # FIXME: https://github.com/huggingface/transformers/issues/38333
+        kwargs["disable_compile"] = True
+
+        return orig_generate(*args, **kwargs)
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
     return hf_model
 
 
@@ -892,6 +902,54 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     thinker = hf_model.model.thinker
     thinker.get_output_embeddings = lambda: thinker.lm_head
     hf_model.model = thinker
+    return hf_model
+
+
+def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, videos=None, **kwargs):
+        if videos is not None and is_list_of(videos, tuple):
+            # batched multi videos
+            do_sample_frames = {video[1]["do_sample_frames"] for video in videos}
+            assert len(do_sample_frames) == 1
+            if kwargs.get("do_sample_frames") is None:
+                kwargs["do_sample_frames"] = do_sample_frames
+            video_metadata = [
+                [
+                    VideoMetadata(
+                        **{k: v for k, v in video[1].items() if k != "do_sample_frames"}
+                    )
+                ]
+                for video in videos
+            ]
+            videos = [[video[0]] for video in videos]
+        elif videos is not None and isinstance(videos, tuple):
+            # single video
+            do_sample_frames = videos[1]["do_sample_frames"]
+            if kwargs.get("do_sample_frames") is None:
+                kwargs["do_sample_frames"] = do_sample_frames
+            video_metadata = [
+                [
+                    VideoMetadata(
+                        **{
+                            k: v
+                            for k, v in videos[1].items()
+                            if k != "do_sample_frames"
+                        }
+                    )
+                ]
+            ]
+            videos = [[videos[0]]]
+        else:
+            video_metadata = None
+
+        return hf_processor(
+            *args, videos=videos, video_metadata=video_metadata, **kwargs
+        )
+
+    hf_model.processor = processor
     return hf_model
 
 

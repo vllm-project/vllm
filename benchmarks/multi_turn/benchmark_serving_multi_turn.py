@@ -1429,8 +1429,6 @@ async def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    if not os.path.exists(args.model):
-        raise OSError(f"Path does not exist: {args.model}")
     logger.info("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 

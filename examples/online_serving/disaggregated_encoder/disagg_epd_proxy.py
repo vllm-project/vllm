@@ -15,19 +15,6 @@ For MM input we:
        (one request per item, with **all text removed**).
     3. Wait for all of them to succeed.
     4. Forward the *original* request to a decode server.
-
-Usage
-For E + PD setup:
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8002" \
-      --prefill-servers-urls "disable" \
-      --decode-servers-urls "http://pd1:8003,http://pd2:8004"
-
-For E + P + D setup:
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8001" \
-      --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
-      --decode-servers-urls "http://d1:8005,http://d2:8006"
 """
 
 from __future__ import annotations
@@ -49,7 +36,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # FastAPI app & global state
 ###############################################################################
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s"
+)
 logger = logging.getLogger("proxy")
 
 app = FastAPI()
@@ -87,16 +76,21 @@ def extract_mm_items(request_data: dict) -> list[dict]:
 async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
-    request_id: str,
+    req_id: str,
 ) -> None:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
     """
+    logger.info("[%s] Processing multimodal items...", req_id)
+
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
+        logger.info("[%s] No multimodal items, skipping encoder", req_id)
         return  # nothing to do
+
+    logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
     tasks = []
 
@@ -105,7 +99,7 @@ async def fanout_encoder_primer(
 
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
         # Derive a *child* request id:  <parent>:<index>:<random-short>
-        child_req_id = f"{request_id}:{idx}:{uuid.uuid4().hex[:6]}"
+        child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
         headers = {"x-request-id": child_req_id}
 
         encoder_req = {
@@ -129,20 +123,38 @@ async def fanout_encoder_primer(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Fail fast if any sub-request failed
-    for r in results:
+    for idx, r in enumerate(results):
         if isinstance(r, Exception):
-            logger.error("Encoder request raised: %s", r)
-            raise HTTPException(status_code=502, detail=str(r))
+            logger.error(
+                "[%s] Encoder request #%d raised exception: %s",
+                req_id,
+                idx,
+                r,
+                exc_info=r,
+            )
+            raise HTTPException(
+                status_code=502, detail=f"Encoder request failed: {str(r)}"
+            )
         if r.status != 200:
             try:
                 detail = await r.text()
             except Exception:
                 detail = "<unable to read body>"
-            logger.error("Encoder request returned %s: %s", r.status, detail)
+            logger.error(
+                "[%s] Encoder request #%d returned status %s: %s",
+                req_id,
+                idx,
+                r.status,
+                detail,
+            )
             raise HTTPException(
                 status_code=r.status,
                 detail=f"Encoder request failed: {detail}",
             )
+
+    logger.info(
+        "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
+    )
 
 
 async def maybe_prefill(
@@ -156,13 +168,14 @@ async def maybe_prefill(
     - Else, skip and return the original request data for decode
     """
     if p_url:
+        logger.info("[%s] Processing through prefill: %s", req_id, p_url)
+
         prefill_response = await process_prefill_stage(req_data, p_url, req_id)
         # for nixl connector to facilitate kv transfer...
         prefill_response_json = await prefill_response.json()
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
-            logger.debug("kv_transfer_params: %s", kv_transfer_params)
 
         return req_data
     else:
@@ -175,7 +188,7 @@ async def process_prefill_stage(
     req_id: str,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
-    logger.debug("Processing through prefill for req_id: %s/ url: %s", req_id, p_url)
+    logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
 
     prefill_request = req_data.copy()
     prefill_request["kv_transfer_params"] = {
@@ -202,11 +215,17 @@ async def process_prefill_stage(
 
         if prefill_response.status != 200:
             error_text = await prefill_response.text()
+            logger.error(
+                "[%s] Prefill request failed with status %d: %s",
+                req_id,
+                prefill_response.status,
+                error_text,
+            )
             raise HTTPException(
                 status_code=prefill_response.status,
                 detail={"error": "Prefill request failed", "message": error_text},
             )
-        logger.debug("Prefill processing completed successfully for req_id: %s", req_id)
+        logger.info("[%s] Prefill request completed successfully", req_id)
 
         return prefill_response
 
@@ -216,6 +235,51 @@ async def process_prefill_stage(
             status_code=500,
             detail={"error": "Prefill processing error", "message": str(e)},
         ) from e
+
+
+###############################################################################
+# Middleware for request/response logging
+###############################################################################
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Middleware to log all incoming requests and responses"""
+    req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+
+    # Log incoming request
+    logger.info(
+        ">>> [%s] %s %s from %s",
+        req_id,
+        request.method,
+        request.url.path,
+        request.client.host if request.client else "unknown",
+    )
+
+    try:
+        # Process request
+        response = await call_next(request)
+
+        # Log response
+        logger.info(
+            "<<< [%s] %s %s completed with status %d",
+            req_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+        )
+
+        return response
+    except Exception as e:
+        # Log errors
+        logger.exception(
+            "!!! [%s] %s %s failed with error: %s",
+            req_id,
+            request.method,
+            request.url.path,
+            str(e),
+        )
+        raise
 
 
 ###############################################################################
@@ -254,49 +318,66 @@ async def on_shutdown() -> None:
 async def forward_non_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> dict:
-    # Step 1: Process through Encoder instance (if has MM input)
-    await fanout_encoder_primer(req_data, e_urls, req_id)
+    try:
+        # Step 1: Process through Encoder instance (if has MM input)
+        await fanout_encoder_primer(req_data, e_urls, req_id)
 
-    # Step 2: Process through Prefill instance
-    req_data = await maybe_prefill(req_data, p_url, req_id)
+        # Step 2: Process through Prefill instance
+        req_data = await maybe_prefill(req_data, p_url, req_id)
 
-    # Step 3: Process through Decode instance
-    logger.debug("Getting response from decode for req_id: %s/ url: %s", req_id, d_url)
-    headers = {"x-request-id": req_id}
+        # Step 3: Process through Decode instance
+        logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
+        headers = {"x-request-id": req_id}
 
-    # Non-streaming response
-    async with decode_session.post(
-        f"{d_url}/v1/chat/completions", json=req_data, headers=headers
-    ) as resp:
-        resp.raise_for_status()
-        return await resp.json()
+        # Non-streaming response
+        async with decode_session.post(
+            f"{d_url}/v1/chat/completions", json=req_data, headers=headers
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[%s] Error in forward_non_stream: %s", req_id, str(e))
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
 async def forward_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> AsyncIterator[str]:
-    # Step 1: Process through Encoder instance (if has MM input)
-    await fanout_encoder_primer(req_data, e_urls, req_id)
+    try:
+        # Step 1: Process through Encoder instance (if has MM input)
+        await fanout_encoder_primer(req_data, e_urls, req_id)
 
-    # Step 2: Process through Prefill instance
-    req_data = await maybe_prefill(req_data, p_url, req_id)
+        # Step 2: Process through Prefill instance
+        req_data = await maybe_prefill(req_data, p_url, req_id)
 
-    # Step 3: Process through Decode instance
-    logger.debug(
-        "Streaming response from decode for req_id: %s/ url: %s", req_id, d_url
-    )
-    headers = {"x-request-id": req_id}
+        # Step 3: Process through Decode instance
+        logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
+        headers = {"x-request-id": req_id}
 
-    # Streaming response
-    async with decode_session.post(
-        f"{d_url}/v1/chat/completions",
-        json=req_data,
-        headers=headers,
-    ) as resp:
-        resp.raise_for_status()
-        async for chunk in resp.content.iter_chunked(1024):
-            if chunk:
-                yield chunk.decode("utf-8", errors="ignore")
+        # Streaming response
+        async with decode_session.post(
+            f"{d_url}/v1/chat/completions",
+            json=req_data,
+            headers=headers,
+        ) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.content.iter_chunked(1024):
+                if chunk:
+                    yield chunk.decode("utf-8", errors="ignore")
+
+        logger.info("[%s] Streaming completed", req_id)
+
+    except HTTPException:
+        logger.exception("[%s] HTTPException in forward_stream", req_id)
+        raise
+    except Exception as e:
+        logger.exception("[%s] Error in forward_stream: %s", req_id, str(e))
+        raise HTTPException(
+            status_code=500, detail=f"Proxy streaming error: {str(e)}"
+        ) from e
 
 
 ###############################################################################
@@ -306,22 +387,31 @@ async def forward_stream(
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    req_data = await request.json()
-    req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    try:
+        req_data = await request.json()
+        req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
-    e_urls = app.state.e_urls  # we want the full list for fan-out
-    p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
-    d_url = random.choice(app.state.d_urls)
+        e_urls = app.state.e_urls  # we want the full list for fan-out
+        p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
+        d_url = random.choice(app.state.d_urls)
 
-    is_streaming = req_data.get("stream", False)
+        is_streaming = req_data.get("stream", False)
 
-    if is_streaming:
-        return StreamingResponse(
-            forward_stream(req_data, req_id, e_urls, p_url, d_url),
-            media_type="text/event-stream",
-        )
-    result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
-    return JSONResponse(content=result)
+        if is_streaming:
+            return StreamingResponse(
+                forward_stream(req_data, req_id, e_urls, p_url, d_url),
+                media_type="text/event-stream",
+            )
+        result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
+        return JSONResponse(content=result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in chat_completions endpoint: %s", str(e))
+        raise HTTPException(
+            status_code=500, detail=f"Request processing error: {str(e)}"
+        ) from e
 
 
 @app.get("/v1/models")
@@ -512,5 +602,5 @@ if __name__ == "__main__":
         port=args.port,
         log_level="info",
         loop="uvloop",
-        access_log=False,
+        access_log=True,
     )

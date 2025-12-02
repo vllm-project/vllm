@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import SeedOssToolParser
+from vllm.entrypoints.openai.tool_parsers.seed_oss_tool_parser import SeedOssToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 

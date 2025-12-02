@@ -5,6 +5,7 @@ import glob
 import tempfile
 
 import huggingface_hub.constants
+import pytest
 import torch
 
 from vllm.model_executor.model_loader.weight_utils import (
@@ -12,8 +13,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     fastsafetensors_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.platforms import current_platform
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="fastsafetensors requires CUDA/NVIDIA GPUs"
+)
 def test_fastsafetensors_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False

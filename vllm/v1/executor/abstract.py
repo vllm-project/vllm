@@ -5,19 +5,25 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 
@@ -165,7 +171,7 @@ class Executor(ABC):
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: Literal[True] = True,
-    ) -> list[Future[_R]]:
+    ) -> Future[list[_R]]:
         pass
 
     @abstractmethod
@@ -174,27 +180,48 @@ class Executor(ABC):
     ):
         raise NotImplementedError
 
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
+
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[False] = False,
-    ) -> ModelRunnerOutput:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput | None:
         pass
 
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[True] = True,
-    ) -> Future[ModelRunnerOutput]:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput | None]:
         pass
 
     def execute_model(
         self, scheduler_output: SchedulerOutput, non_block: bool = False
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "execute_model", args=(scheduler_output,), non_block=non_block
+        )
+        return output[0]
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput:
+        pass
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput]:
+        pass
+
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        output = self.collective_rpc(  # type: ignore[call-overload]
+            "sample_tokens", args=(grammar_output,), non_block=non_block
         )
         return output[0]
 
@@ -233,10 +260,10 @@ class Executor(ABC):
         """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
-    def init_kv_output_aggregator(self, finished_count: int | None) -> None:
+    def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
-        self.kv_output_aggregator = KVOutputAggregator(
-            finished_count or self.parallel_config.world_size
+        self.kv_output_aggregator = KVOutputAggregator.from_connector(
+            connector, self.parallel_config.world_size
         )
 
     @cached_property  # Avoid unnecessary RPC calls

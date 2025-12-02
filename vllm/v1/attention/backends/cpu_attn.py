@@ -67,10 +67,6 @@ class TorchSDPABackend(AttentionBackend):
         return TorchSDPABackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TorchSDPAMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["TorchSDPAMetadataBuilderV1"]:
         return TorchSDPAMetadataBuilderV1
 

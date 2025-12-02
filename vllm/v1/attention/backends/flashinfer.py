@@ -34,12 +34,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -195,10 +196,6 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashInferMetadata"]:
-        return FlashInferMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
@@ -323,7 +320,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ] = {}
             self._decode_cudagraph_max_bs = min(
                 (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_capture_size,
+                self.compilation_config.max_cudagraph_capture_size,
             )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
@@ -400,6 +397,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
+
+        if self.head_dim == 256 and current_platform.is_device_capability(100):
+            # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
+            # head size 256 and block size 16 is not supported on blackwell.
+            assert kv_cache_spec.block_size != 16, (
+                "There is a bug in FlashInfer "
+                "block_size 16 head size 256 support. Please avoid this combination by "
+                "passing --block-size 32 or --block-size 64."
+            )
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:

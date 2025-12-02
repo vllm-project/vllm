@@ -472,7 +472,7 @@ class Fp8LinearOp:
         # Example:
         # When the number of token is 1, per-token scale is [[1]]
         # When per-tensor scale is [1] or ().
-        per_tensor_weights = (weight_scale.numel() == 1) and weight_scale.dim() < 2
+        per_tensor_weights = weight_scale.numel() == 1
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)

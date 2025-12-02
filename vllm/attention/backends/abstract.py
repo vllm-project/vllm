@@ -51,18 +51,9 @@ class AttentionBackend(ABC):
     def get_impl_cls() -> type["AttentionImpl"]:
         raise NotImplementedError
 
-    @staticmethod
-    @abstractmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError
-
     @classmethod
     def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         return cls.get_impl_cls().get_supported_kernel_block_size()
-
-    @classmethod
-    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
-        return cls.get_metadata_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod

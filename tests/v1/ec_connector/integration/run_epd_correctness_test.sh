@@ -23,12 +23,16 @@ MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 
 # Set 1 to use multimodal prompts; else to use text-only
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
+MM_FLAG=""
+if [ $USE_MM_PROMPTS = "1" ]; then
+    MM_FLAG="--use_mm_prompts"
+fi
 
 # GPU configuration
 GPU_E="${GPU_E:-0}"
 GPU_P="${GPU_P:-1}"
 GPU_D="${GPU_D:-2}"
-GPU_SINGLE="${GPU_SINGLE:-$GPU_E}"
+GPU_SINGLE="${GPU_SINGLE:-$GPU_P}"
 GPU_PD="${GPU_PD:-$GPU_P}"
 
 # Port
@@ -87,6 +91,7 @@ run_baseline() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         > $LOG_PATH/baseline.log 2>&1 &
     
     local BASELINE_PID=$!
@@ -99,11 +104,7 @@ run_baseline() {
     echo ""
     
     # Run test in baseline mode
-    echo "Running baseline correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
+    echo "Running baseline..."
 
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PORT" \
@@ -140,10 +141,12 @@ run_epd_1e_1pd() {
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
         --port $ENCODE_PORT \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
+        --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_producer",
@@ -162,6 +165,7 @@ run_epd_1e_1pd() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_consumer",
@@ -201,10 +205,6 @@ run_epd_1e_1pd() {
     
     # Run test in disagg mode
     echo "Running EPD (1E+1PD) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \
@@ -214,7 +214,7 @@ run_epd_1e_1pd() {
         $MM_FLAG
     
     # Cleanup
-    echo "✅✅ 1E+1PD Correctness Test PASSED"
+    echo "✓✓ 1E+1PD Correctness Test finished"
     echo "Stopping EPD (1E+1PD) instances..."
     for pid in "${PIDS[@]}"; do
         kill $pid 2>/dev/null || true
@@ -249,6 +249,7 @@ run_baseline_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_producer"
@@ -266,6 +267,7 @@ run_baseline_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
@@ -299,11 +301,7 @@ run_baseline_1p_1d() {
     echo "All PD (1P+1D) services are up!"
     
     # Run test in baseline mode
-    echo "Running EPD (1E+1P+1D) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
+    echo "Running PD disagg baseline..."
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \
@@ -343,10 +341,12 @@ run_epd_1e_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
         --port $ENCODE_PORT \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
+        --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_producer",
@@ -367,6 +367,7 @@ run_epd_1e_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_consumer",
@@ -391,6 +392,7 @@ run_epd_1e_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
@@ -429,10 +431,6 @@ run_epd_1e_1p_1d() {
     
     # Run test in disagg mode
     echo "Running EPD (1E+1P+1D) correctness test..."
-    MM_FLAG=""
-    if [ $USE_MM_PROMPTS = "1" ]; then
-        MM_FLAG="--use_mm_prompts"
-    fi
     
     python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
         --service_url "http://localhost:$PROXY_PORT" \
@@ -442,7 +440,7 @@ run_epd_1e_1p_1d() {
         $MM_FLAG
     
     # Cleanup
-    echo "✅✅ 1E+1P+1D Correctness Test PASSED"
+    echo "✓✓ 1E+1P+1D Correctness Test finished"
     echo "Stopping EPD (1E+1P+1D) instances..."
     for pid in "${PIDS[@]}"; do
         kill $pid 2>/dev/null || true
@@ -474,5 +472,5 @@ rm -f "$BASELINE_FILE"
 rm -f "$BASELINE_PD_FILE"
 
 echo "================================"
-echo "✅✅✅ All EPD correctness tests passed!"
+echo "✓✓ All EPD correctness tests finished!"
 echo "================================"

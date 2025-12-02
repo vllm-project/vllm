@@ -25,6 +25,9 @@ NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
 ###############################################################################
 # Helpers
 ###############################################################################
+# Find the git repository root directory
+GIT_ROOT=$(git rev-parse --show-toplevel)
+
 START_TIME=$(date +"%Y%m%d_%H%M%S")
 ENC_LOG=$LOG_PATH/encoder_${START_TIME}.log
 PD_LOG=$LOG_PATH/pd_${START_TIME}.log
@@ -84,13 +87,14 @@ mkdir -p $EC_SHARED_STORAGE_PATH
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.7 \
+    --gpu-memory-utilization 0.01 \
     --port "$ENCODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 114688 \
     --max-num-seqs 128 \
+    --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_producer",
@@ -105,12 +109,13 @@ PIDS+=($!)
 ###############################################################################
 # Prefill+Decode worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MODEL" \
+CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$PREFILL_DECODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs 128 \
+    --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_consumer",
@@ -144,6 +149,8 @@ echo "All services are up!"
 
 ###############################################################################
 # Benchmark
+###############################################################################
+echo "Running benchmark (stream)..."
 vllm bench serve \
   --model               $MODEL \
   --backend             openai-chat \
@@ -155,7 +162,24 @@ vllm bench serve \
   --port                $PROXY_PORT
 
 PIDS+=($!)
+
 ###############################################################################
+# Single request with local image
+###############################################################################
+echo "Running single request with local image (non-stream)..."
+curl http://127.0.0.1:${PROXY_PORT}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "'${MODEL}'",
+    "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "file://'"${GIT_ROOT}"'/tests/v1/ec_connector/integration/hato.jpg"}},
+        {"type": "text", "text": "What is in this image?"}
+    ]}
+    ]
+    }'
+
 
 # cleanup
 echo "cleanup..."

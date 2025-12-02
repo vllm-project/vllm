@@ -15,7 +15,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
 )
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 
 def distributed_run(fn, world_size):

@@ -4,17 +4,14 @@
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_torch
-from .rocm_aiter_rope_ops import (
-    is_rocm_triton_rotary_embedding_enabled,
-    rocm_aiter_rotary_emb,
-)
 
 
 @CustomOp.register("rotary_embedding")
-class RotaryEmbedding(CustomOp):
+class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
 
     def __init__(
@@ -48,8 +45,8 @@ class RotaryEmbedding(CustomOp):
             cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.is_rocm_triton_rotary_embedding_enabled = (
-            is_rocm_triton_rotary_embedding_enabled()
+        self.is_rocm_triton_rotary_embed_enabled = (
+            rocm_aiter_ops.is_triton_rotary_embed_enabled()
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
@@ -85,6 +82,21 @@ class RotaryEmbedding(CustomOp):
             or self.cos_sin_cache.dtype != query.dtype
         ):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+
+
+class RotaryEmbedding(RotaryEmbeddingBase):
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(
+            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+        )
 
     def forward_native(
         self,
@@ -154,9 +166,9 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.is_rocm_triton_rotary_embedding_enabled:
+        if self.is_rocm_triton_rotary_embed_enabled:
             self._match_cos_sin_cache_dtype(query)
-            rocm_aiter_rotary_emb(
+            rocm_aiter_ops.triton_rotary_embed(
                 positions,
                 query,
                 key,
@@ -165,11 +177,8 @@ class RotaryEmbedding(CustomOp):
                 self.rotary_dim,
                 self.is_neox_style,
             )
-        else:
-            # ops.rotary_embedding() is an in-place operation
-            # that updates the query and key tensors.
-            self.forward_cuda(positions, query, key)
-        return query, key
+            return query, key
+        return self.forward_cuda(positions, query, key)
 
     def forward_xpu(
         self,

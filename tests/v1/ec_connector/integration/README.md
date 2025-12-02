@@ -22,6 +22,15 @@ Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_en
 
 ## Usage
 
+### Multimodal Prompts (Default)
+
+```bash
+cd vllm
+./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+```
+
+This runs the test with actual multimodal (image) prompts.
+
 ### Text-Only Prompts
 
 ```bash
@@ -31,29 +40,20 @@ USE_MM_PROMPTS=0 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 This runs a quick test with text-only prompts to verify the setup works.
 
-### Full Test (With Multimodal Prompts)
-
-```bash
-cd vllm
-./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
-```
-
-This runs the full test with actual multimodal (image) prompts.
-
 ### Custom Configuration
 
 ```bash
 # Use specific GPUs
-GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific ports
-ENDPOINT_PORT=10001 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+ENDPOINT_PORT=10001 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific model
-MODEL="Qwen/Qwen2.5-VL-3B-Instruct" ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific storage path
-EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 ```
 
 ## How It Works
@@ -158,12 +158,14 @@ python test_epd_correctness.py \
     --service_url http://localhost:8000 \
     --model_name Qwen/Qwen2.5-VL-3B-Instruct \
     --mode baseline \
-    --baseline_file test_output.txt
+    --baseline_file test_output.txt \
+    --use_mm_prompts
 
-# Disagg only (requires baseline output file)
+# Disagg only (requires baseline output file!)
 python test_epd_correctness.py \
     --service_url http://localhost:8000 \
     --model_name Qwen/Qwen2.5-VL-3B-Instruct \
     --mode disagg \
-    --baseline_file test_output.txt
+    --baseline_file test_output.txt \
+    --use_mm_prompts
 ```

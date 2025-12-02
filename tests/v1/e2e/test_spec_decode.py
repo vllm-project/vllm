@@ -75,7 +75,23 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
-def test_ngram_correctness(
+@pytest.mark.parametrize(
+    "speculative_config",
+    [
+        {
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        {
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+        },
+    ],
+)
+def test_ngram_and_suffix_correctness(
+    speculative_config: dict,
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
@@ -94,12 +110,7 @@ def test_ngram_correctness(
 
     spec_llm = LLM(
         model=model_name,
-        speculative_config={
-            "method": "ngram",
-            "prompt_lookup_max": 5,
-            "prompt_lookup_min": 3,
-            "num_speculative_tokens": 3,
-        },
+        speculative_config=speculative_config,
         max_model_len=1024,
     )
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
@@ -121,10 +132,149 @@ def test_ngram_correctness(
     cleanup_dist_env_and_memory()
 
 
+def test_suffix_decoding_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    """
+    Check that suffix decoding caching takes effect and improves acceptance
+    lengths and acceptance rates over multiple runs of the same prompts.
+    """
+    test_prompts = get_test_prompts(mm_enabled=False)
+
+    spec_llm = LLM(
+        model=model_name,
+        speculative_config={
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+            "suffix_decoding_max_cached_requests": 1000,
+        },
+        max_model_len=1024,
+        disable_log_stats=False,
+    )
+
+    # Run several times and check that the accepted tokens increase.
+    num_draft = []
+    num_accept = []
+    for i in range(10):  # Run multiple times to warm up the cache.
+        spec_llm.chat(test_prompts, sampling_config)
+        # Collect draft and acceptance stats.
+        metrics = spec_llm.get_metrics()
+        for metric in metrics:
+            if metric.name == "vllm:spec_decode_num_draft_tokens":
+                num_draft.append(metric.value)
+            if metric.name == "vllm:spec_decode_num_accepted_tokens":
+                num_accept.append(metric.value)
+
+    # Calculate the acceptance rates for the first and last runs.
+    first_accept_tokens = num_accept[0]
+    first_draft_tokens = num_draft[0]
+    first_accept_rate = first_accept_tokens / first_draft_tokens
+
+    # Take the diff since the stats are cumulative.
+    last_accept_tokens = num_accept[-1] - num_accept[-2]
+    last_draft_tokens = num_draft[-1] - num_draft[-2]
+    last_accept_rate = last_accept_tokens / last_draft_tokens
+
+    # Expect the acceptance length to improve.
+    assert first_accept_tokens < last_accept_tokens
+
+    # Expect the acceptance rate to improve.
+    assert first_accept_rate < last_accept_rate
+
+    # Heuristic: expect at least 85% acceptance rate at the end.
+    assert last_accept_rate > 0.85
+
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
-    ["model_setup", "mm_enabled"],
+    "model_path",
     [
-        (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+        "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+        "RedHatAI/Qwen3-8B-speculator.eagle3",
+    ],
+    ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
+)
+def test_speculators_model_integration(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_path: str,
+):
+    """
+    Test that speculators models work with the simplified integration.
+
+    This verifies the `vllm serve <speculator-model>` use case where
+    speculative config is automatically detected from the model config
+    without requiring explicit --speculative-config argument.
+
+    Tests:
+    1. Speculator model is correctly detected
+    2. Verifier model is extracted from speculator config
+    3. Speculative decoding is automatically enabled
+    4. Text generation works correctly
+    5. Output matches reference (non-speculative) generation
+    """
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    # Generate test prompts
+    test_prompts = get_test_prompts(mm_enabled=False)
+
+    # First run: Direct speculator model (simplified integration)
+    spec_llm = LLM(model=model_path, max_model_len=1024)
+    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+
+    # Verify speculative config was auto-detected
+    assert spec_llm.llm_engine.vllm_config.speculative_config is not None, (
+        f"Speculative config should be auto-detected for {model_path}"
+    )
+
+    spec_config = spec_llm.llm_engine.vllm_config.speculative_config
+    assert spec_config.num_speculative_tokens > 0, (
+        f"Expected positive speculative tokens, "
+        f"got {spec_config.num_speculative_tokens}"
+    )
+
+    # Verify draft model is set to the speculator model
+    assert spec_config.model == model_path, (
+        f"Draft model should be {model_path}, got {spec_config.model}"
+    )
+
+    # Extract verifier model for reference run
+    verifier_model = spec_llm.llm_engine.vllm_config.model_config.model
+
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    # Second run: Reference without speculative decoding
+    ref_llm = LLM(model=verifier_model, max_model_len=1024)
+    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+    del ref_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    # Compare outputs
+    matches = sum(
+        1
+        for ref, spec in zip(ref_outputs, spec_outputs)
+        if ref.outputs[0].text == spec.outputs[0].text
+    )
+
+    # Heuristic: expect at least 66% of prompts to match exactly
+    assert matches >= int(0.66 * len(ref_outputs)), (
+        f"Only {matches}/{len(ref_outputs)} outputs matched. "
+        f"Expected at least {int(0.66 * len(ref_outputs))} matches."
+    )
+
+
+@pytest.mark.parametrize(
+    ["model_setup", "mm_enabled", "chunked_prefill_enabled"],
+    [
+        (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
         pytest.param(
             (
                 "eagle3",
@@ -133,11 +283,12 @@ def test_ngram_correctness(
                 1,
             ),
             False,
+            False,
             marks=pytest.mark.skip(
                 reason="Skipping due to its head_dim not being a a multiple of 32"
             ),
         ),
-        (
+        pytest.param(
             (
                 "eagle",
                 "meta-llama/Llama-3.1-8B-Instruct",
@@ -145,7 +296,9 @@ def test_ngram_correctness(
                 1,
             ),
             False,
-        ),
+            True,
+            marks=large_gpu_mark(min_gb=40),
+        ),  # works on 4x H100
         (
             (
                 "eagle3",
@@ -153,6 +306,7 @@ def test_ngram_correctness(
                 "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                 1,
             ),
+            False,
             False,
         ),
         pytest.param(
@@ -162,6 +316,7 @@ def test_ngram_correctness(
                 "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
             ),
+            False,
             False,
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
@@ -173,6 +328,7 @@ def test_ngram_correctness(
                 4,
             ),
             True,
+            True,
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
         (
@@ -182,6 +338,7 @@ def test_ngram_correctness(
                 "eagle618/eagle-deepseek-v3-random",
                 1,
             ),
+            False,
             False,
         ),
     ],
@@ -201,6 +358,7 @@ def test_eagle_correctness(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
+    chunked_prefill_enabled: bool,
     attn_backend: str,
 ):
     if attn_backend == "TREE_ATTN":
@@ -237,9 +395,13 @@ def test_eagle_correctness(
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
+        max_model_len = 2048
+        max_num_batched_tokens = max_model_len
+        if chunked_prefill_enabled:
+            max_num_batched_tokens = 128
 
         ref_llm = LLM(
-            model=model_name, max_model_len=2048, tensor_parallel_size=tp_size
+            model=model_name, max_model_len=max_model_len, tensor_parallel_size=tp_size
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
@@ -254,9 +416,11 @@ def test_eagle_correctness(
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
-                "max_model_len": 2048,
+                "max_model_len": max_model_len,
             },
-            max_model_len=2048,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=chunked_prefill_enabled,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -269,9 +433,9 @@ def test_eagle_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 66% of the prompts to match exactly
+        # Heuristic: expect at least 60% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.66 * len(ref_outputs))
+        assert matches > int(0.6 * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()

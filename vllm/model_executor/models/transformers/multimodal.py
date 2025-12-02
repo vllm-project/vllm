@@ -371,8 +371,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         image_grid_thw: list[list[int]] | torch.Tensor | None,
         video_grid_thw: list[list[int]] | torch.Tensor | None,
         second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
@@ -390,7 +388,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw=video_grid_thw,
         )
 
-        mrope_positions = mrope_positions[:, 0, context_len:seq_len]
+        mrope_positions = mrope_positions[:, 0]
         mrope_position_delta = mrope_position_delta[0].item()
 
         return mrope_positions, mrope_position_delta

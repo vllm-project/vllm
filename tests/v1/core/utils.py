@@ -161,6 +161,7 @@ def create_requests(
     prompt_logprobs: int | None = None,
     same_prompt: bool = False,
     block_size: int = 16,
+    req_ids: list[str] | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -188,6 +189,11 @@ def create_requests(
         # Since same identifier would imply they are identical encoder output
         # Verify mm items with identical identifier are having mm_position.length
         seen_hashes: dict[str, int] = {}
+
+    if req_ids:
+        assert len(req_ids) == num_requests
+    else:
+        req_ids = [f"{i}" for i in range(num_requests)]
 
     for i in range(num_requests):
         mm_features = []
@@ -221,7 +227,7 @@ def create_requests(
 
         prompt_token_ids = [0] * num_tokens if same_prompt else [i] * num_tokens
         request = Request(
-            request_id=f"{i}",
+            request_id=req_ids[i],
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,

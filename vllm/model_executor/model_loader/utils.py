@@ -26,7 +26,7 @@ from vllm.model_executor.models.adapters import (
     try_create_mm_pooling_model_cls,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant, supports_multimodal
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 

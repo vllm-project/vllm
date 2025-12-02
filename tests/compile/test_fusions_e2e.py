@@ -54,11 +54,11 @@ if current_platform.is_cuda():
 
     MODELS_FP4 = [
         ModelBackendTestCase(
-            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=_Backend.FLASHINFER,
-            attention_fusions=48,
-            allreduce_fusions=96,
+            attention_fusions=32,
+            allreduce_fusions=65,
         ),
     ]
 
@@ -70,6 +70,13 @@ if current_platform.is_cuda():
             backend=_Backend.TRITON_ATTN,
             attention_fusions=0,
             allreduce_fusions=65,
+        ),
+        ModelBackendTestCase(
+            model_name="Qwen/Qwen3-30B-A3B",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.TRITON_ATTN,
+            attention_fusions=0,
+            allreduce_fusions=97,
         ),
     ]
 
@@ -95,8 +102,7 @@ elif current_platform.is_rocm():
         ),
     ]
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
+CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
@@ -132,6 +138,9 @@ def test_attn_quant(
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
         splitting_ops: list[str] | None = None
     else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
 
@@ -151,7 +160,7 @@ def test_attn_quant(
         cudagraph_mode=mode,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
@@ -168,8 +177,7 @@ def test_attn_quant(
     assert int(matches[0]) == attention_fusions
 
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
+CUSTOM_OPS_RMS_NORM = ["-rms_norm", "+rms_norm"]
 
 
 def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
@@ -236,7 +244,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         custom_ops=custom_ops_list,
         splitting_ops=splitting_ops,
         # Common
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
             enable_attn_fusion=True,
             enable_noop=True,
@@ -273,7 +281,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
-        else CompilationConfig(level=compile_config)
+        else CompilationConfig(mode=compile_config)
     )
 
     prompts = [

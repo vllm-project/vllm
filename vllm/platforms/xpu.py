@@ -66,16 +66,13 @@ class XPUPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
-        use_v1 = envs.VLLM_USE_V1
-        if not use_v1:
-            raise ValueError("XPU backend only supports V1.")
         TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
         FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
         if selected_backend == _Backend.TRITON_ATTN:
-            logger.info_once("Using Triton backend on V1 engine.")
+            logger.info_once("Using Triton backend.")
             return TRITON_ATTN
         elif selected_backend == _Backend.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
+            logger.info_once("Using Flash Attention backend.")
             return FLASH_ATTN
         elif selected_backend:
             raise ValueError(
@@ -83,24 +80,8 @@ class XPUPlatform(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}"
             )
 
-        logger.info("Using Flash Attention backend on V1 engine.")
+        logger.info("Using Flash Attention backend.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        """
-        Check if the kv_cache_dtype is supported.
-        XPU only support fp8 kv cache with triton backend.
-        """
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
-        ):
-            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
-
-        return False
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -132,6 +113,12 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
+        from vllm.attention.backends.registry import _Backend
+
+        return _Backend.FLASH_ATTN
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -160,6 +147,8 @@ class XPUPlatform(Platform):
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        if vllm_config.kv_transfer_config is not None:
+            vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
@@ -261,6 +250,10 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
         _src_cache = src_cache[:, src_block_indices]
+        if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            # To support TP_ratio, HOST KV might be initiated with HND
+            # while XPU device KV is with NHD
+            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
@@ -273,4 +266,8 @@ class XPUPlatform(Platform):
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
+        if _src_cache.shape[2:] != dst_cache.shape[2:]:
+            # XPU device KV is with NHD while HOST KV
+            # might be initiated with HND for TP_ratio support
+            _src_cache = _src_cache.permute(0, 1, 3, 2, 4)
         dst_cache[:, dst_block_indices] = _src_cache.cpu()

@@ -39,6 +39,8 @@ MAX_OUTPUT_LEN = 256
 image_1 = ImageAsset("stop_sign").pil_image.resize((1280, 720))
 image_2 = ImageAsset("cherry_blossom").pil_image.resize((1280, 720))
 
+image_local_path = f"{os.path.dirname(os.path.abspath(__file__))}/hato.jpg"
+
 SAMPLE_PROMPTS_MM: list[dict] = [
     {
         "messages": [
@@ -70,9 +72,7 @@ SAMPLE_PROMPTS_MM: list[dict] = [
                     },
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image;base64,{encode_image_base64(image_1)}"
-                        },
+                        "image_url": {"url": f"file://{image_local_path}"},
                     },
                     {"type": "text", "text": "Describe these 2 images in detail."},
                 ],
@@ -208,10 +208,10 @@ def main():
     if args.mode == "baseline":
         health_check_url = f"{args.service_url}/health"
     elif args.mode == "baseline_pd":
-        # Nixl toy proxy use  /healthcheck
+        # Nixl toy proxy use /healthcheck
         health_check_url = f"{args.service_url}/healthcheck"
     else:
-        # Disagg proxy uses /health
+        # Disagg EPD proxy uses /health
         health_check_url = f"{args.service_url}/health"
         if not os.path.exists(args.baseline_file):
             raise ValueError(
@@ -289,15 +289,16 @@ def main():
 
             disagg_output = output_strs[key]
             if baseline_output == disagg_output:
-                print(f"✓ {key}: MATCH")
+                print(f"✅ {key}: MATCH")
             else:
-                print(f"✗ {key}: MISMATCH")
+                print(f"❌ {key}: MISMATCH")
                 print(f"  Baseline: {baseline_output}")
                 print(f"  Disagg:   {disagg_output}")
                 all_match = False
 
-        assert all_match, "Disagg outputs do not match baseline!"
-        print("\n✅ All outputs match! Test PASSED")
+        assert all_match, "❌❌Disagg outputs do not match baseline!❌❌"
+        if all_match:
+            print("\n✅ All outputs match! Test PASSED")
 
 
 if __name__ == "__main__":

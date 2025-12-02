@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -66,50 +67,6 @@ def cutlass_scaled_mm(
         # SM90 block FP8 requires row-major scale_b, which we do ahead of time
         scale_b=Bs if block_size is not None and is_hopper else Bs.T,
     )
-
-
-def rocm_aiter_gemm_w8a8_blockscale_impl(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    import aiter as rocm_aiter
-
-    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
-
-
-def rocm_aiter_gemm_w8a8_blockscale_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    m = A.shape[0]
-    n = B.shape[0]
-    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
-    return Y
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_gemm_w8a8_blockscale",
-        op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-        fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
-    )
-    if (
-        envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
-    ):
-        import aiter as rocm_aiter
-        from aiter import get_hip_quant
-
-        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
 # TODO we should be able to change the type of block_size to GroupShape
@@ -293,7 +250,9 @@ class W8A8BlockFp8LinearOp:
         ):
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:
-            output = self.w8a8_blockscale_op(input_2d, weight, weight_scale)
+            output = self.w8a8_blockscale_op(
+                input_2d, weight, weight_scale, input_scale
+            )
 
         if bias is not None:
             output = output + bias
@@ -322,7 +281,9 @@ class W8A8BlockFp8LinearOp:
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
@@ -350,18 +311,43 @@ class W8A8BlockFp8LinearOp:
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        q_input, input_scale = aiter_per1x128_quant(
-            input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8
+
+        n, k = weight.shape
+
+        use_triton = (
+            not current_platform.is_fp8_fnuz()
+            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
+
+        if use_triton:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
+        else:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_w8a8_blockscale
+
+        if input_scale is not None:
+            q_input = input_2d
+        # MI350 case uses triton kernel
+        elif use_triton:
+            q_input, input_scale = per_token_group_quant_fp8(
+                input_2d,
+                self.act_quant_group_shape.col,
+                column_major_scales=False,
+                use_ue8m0=False,
+            )
+        # MI300 uses tuned AITER ASM/C++ kernel
+        else:
+            q_input, input_scale = rocm_aiter_ops.per_1x128_fp8_quant(input_2d)
+
+        return gemm_a8w8_blockscale_op(
             q_input,
             weight,
             input_scale,
             weight_scale,
             list(self.weight_group_shape),
-            input_2d.dtype,
+            output_dtype=input_2d.dtype,
         )
 
     def _run_triton(
@@ -369,7 +355,9 @@ class W8A8BlockFp8LinearOp:
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
@@ -391,6 +379,7 @@ class W8A8BlockFp8LinearOp:
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
+                torch.Tensor | None,
             ],
             torch.Tensor,
         ],
@@ -936,17 +925,6 @@ def requant_weight_ue8m0_inplace(
         # Write back the results in-place.
         w_q.copy_(w_requant)
         s_old.copy_(s_requant)
-
-
-def check_aiter_fp8_linear_support() -> bool:
-    """AITER is only supported on ROCm and only for FP8_FNUZ
-    and at the moment are MI300 series"""
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
-    )
 
 
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
