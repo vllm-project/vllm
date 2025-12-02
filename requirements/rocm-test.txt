@@ -83,3 +83,7 @@ pqdm==0.2.0
 arctic-inference == 0.1.1
 # Required for Nemotron test
 open-clip-torch==2.32.0
+# Required for Standard Multi-Modal test
+galileo==1.34.0
+# Required for Qwen-VL test
+qwen-vl-utils==0.0.14
