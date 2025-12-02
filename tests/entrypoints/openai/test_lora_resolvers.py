@@ -114,7 +114,7 @@ def mock_serving_setup():
     mock_engine.add_lora.reset_mock()
 
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     models = OpenAIServingModels(
