@@ -70,8 +70,8 @@ class CompilerInterface:
         """
         Compile the graph with the given example inputs and compiler config,
         with a range. The `compile_range` specifies the range of the inputs,
-        it could be concrete size (if compile_sizes is provided), e.g. [4, 4)
-        or a range [4, 5).
+        it could be concrete size (if compile_sizes is provided), e.g. [4, 4]
+        or a range [5, 8].
         Right now we only support one variable in ranges for all inputs,
          which is the batchsize (number of tokens) during inference.
 
