@@ -210,7 +210,9 @@ def run_headless(args: argparse.Namespace):
 
     try:
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            engine_manager.start_engine_core_monitor()
+            engine_manager.monitor_engine_process(
+                engine_down_callback=engine_manager.notify_engine_down
+            )
         else:
             engine_manager.join_first()
     finally:

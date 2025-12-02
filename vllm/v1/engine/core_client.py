@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import json
-import multiprocessing
 import queue
 import sys
 import threading
@@ -16,10 +15,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar, cast
 
 import msgspec.msgpack
-import regex as re
 import zmq
 import zmq.asyncio
 from ray.util.state import get_actor
@@ -822,68 +820,35 @@ class MPClient(EngineCoreClient):
             # No engine processes to monitor
             return
 
-        engine_processes = engine_manager.processes
+        engine_manager = cast(CoreEngineProcManager, self.resources.engine_manager)
         self_ref = weakref.ref(self)
 
-        # Monitor engine core process liveness. If any die unexpectedly,
-        # logs an error, shuts down the client and invokes the failure
-        # callback to inform the engine.
-        def monitor_engine_cores():
-            sentinels = [proc.sentinel for proc in engine_processes]
-
+        def shutdown_callback(engine_rank, died_proc):
+            """
+            Callback to shutdown the client.
+            """
             _self = self_ref()
-            if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                while sentinels:
-                    died = multiprocessing.connection.wait(sentinels)
-                    for sentinel in died:
-                        died_proc = next(
-                            proc
-                            for proc in engine_processes
-                            if proc.sentinel == sentinel
-                        )
+            if not _self:
+                return True  # Stop monitoring anyway if self is gone
+            logger.error(
+                "Engine core proc %s died unexpectedly, shutting down client.",
+                died_proc.name,
+            )
+            engine_manager.shutdown_monitor = True
+            _self.resources.engine_dead = True
+            _self.shutdown()
 
-                        match = re.match(r"EngineCore_DP(\d+)", died_proc.name)
-                        engine_rank = match.group(1)
-
-                        fault_info = FaultInfo(
-                            type="engine_core dead",
-                            message=f"Engine core proc {died_proc.pid} "
-                            f"(PID: {died_proc.name}) died unexpectedly.",
-                            engine_id=engine_rank,
-                            additional_info=None,
-                        )
-
-                        engine_manager.engine_down_socket.send_multipart(
-                            [b"", fault_info.serialize().encode("utf-8")]
-                        )
-
-                        sentinels.remove(sentinel)
-
-                        logger.error(
-                            "Engine core proc %s died unexpectedly",
-                            died_proc.name,
-                        )
-            else:
-                died = multiprocessing.connection.wait(sentinels)
-                _self = self_ref()
-                if not _self or _self.resources.engine_dead:
-                    return
-                proc_name = next(
-                    proc.name for proc in engine_processes if proc.sentinel == died[0]
-                )
-                logger.error(
-                    "Engine core proc %s died unexpectedly, shutting down client.",
-                    proc_name,
-                )
-            if _self and _self.resources:
-                _self.resources.engine_dead = True
-                _self.shutdown()
-            # Note: For MPClient, we don't have a failure callback mechanism
-            # like MultiprocExecutor, but we set engine_dead flag which will
-            # cause subsequent operations to raise EngineDeadError
+        engine_down_callback = (
+            shutdown_callback
+            if not self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+            else engine_manager.notify_engine_down
+        )
 
         Thread(
-            target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
+            target=engine_manager.monitor_engine_process,
+            args=(engine_down_callback,),
+            daemon=True,
+            name="MPClientEngineMonitor",
         ).start()
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:

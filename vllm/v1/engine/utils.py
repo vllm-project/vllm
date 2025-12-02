@@ -169,6 +169,7 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.shutdown_monitor = False
 
         self.vllm_config = vllm_config
 
@@ -212,34 +213,38 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
-    def start_engine_core_monitor(self):
+    def notify_engine_down(self, engine_rank, died_proc):
+        """
+        Send fault notification to the engine_down_socket
+        and log the failure event.
+        """
+        fault_info = FaultInfo(
+            type="engine_core dead",
+            message=f"Engine core proc {died_proc.name} died unexpectedly.",
+            engine_id=engine_rank,
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", fault_info.serialize().encode("utf-8")]
+        )
+        logger.error("Engine core proc %s died unexpectedly", died_proc.name)
+
+    def monitor_engine_process(self, engine_down_callback):
+        """
+        Monitor engine core process liveness.
+        """
         sentinels = [proc.sentinel for proc in self.processes]
-        while sentinels:
+        while sentinels and not self.shutdown_monitor:
             died = multiprocessing.connection.wait(sentinels)
             for sentinel in died:
+                sentinel = cast(int, sentinel)
                 died_proc = next(
                     proc for proc in self.processes if proc.sentinel == sentinel
                 )
-
-                match = re.match(r"EngineCore_DP(\d+)", died_proc.name)
-                engine_rank = match.group(1)
-
-                fault_info = FaultInfo(
-                    type="engine_core dead",
-                    message=f"Engine core proc {died_proc.pid} "
-                    f"(PID: {died_proc.name}) died unexpectedly.",
-                    engine_id=engine_rank,
-                    additional_info=None,
-                )
-                self.engine_down_socket.send_multipart(
-                    [b"", fault_info.serialize().encode("utf-8")]
-                )
-                if isinstance(sentinel, int) and sentinel in sentinels:
-                    sentinels.remove(sentinel)
-                logger.error(
-                    "Engine core proc %s died unexpectedly",
-                    died_proc.name,
-                )
+                engine_rank = re.match(r"EngineCore_DP(\d+)", died_proc.name).group(1)
+                engine_down_callback(engine_rank, died_proc)
+                sentinels.remove(sentinel)
 
     def join_first(self):
         connection.wait(proc.sentinel for proc in self.processes)
