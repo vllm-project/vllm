@@ -45,7 +45,10 @@ def basic_server_with_lora(smollm2_lora_files):
         "64",
     ]
 
-    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    envs = {
+        "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+        "SAGEMAKER_ENABLE_STATEFUL_SESSIONS": "True",
+    }
     with RemoteOpenAIServer(MODEL_NAME_SMOLLM, args, env_dict=envs) as remote_server:
         yield remote_server
 
