@@ -9,7 +9,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import msgpack
 import torch
@@ -175,6 +175,10 @@ class P2pNcclEngine:
             "nccl_num_channels", "8"
         )
 
+        self.enable_kv_quantization = bool(
+            self.config.get_from_extra_config("quantize_kv_on_transfer", False)
+        )
+
         self._listener_thread = threading.Thread(
             target=self.listen_for_requests, daemon=True
         )
@@ -188,7 +192,7 @@ class P2pNcclEngine:
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f, nccl_num_channels:%s",
+            "threshold:%.2f, nccl_num_channels:%s, quantize_kv_on_transfer:%s",
             self.rank,
             self.local_rank,
             self.http_address,
@@ -197,6 +201,7 @@ class P2pNcclEngine:
             self.send_type,
             self.buffer_size_threshold,
             self.nccl_num_channels,
+            self.enable_kv_quantization,
         )
 
     def create_connect(self, remote_address: str | None = None):
@@ -365,6 +370,9 @@ class P2pNcclEngine:
 
         self.recv(comm, tensor, rank ^ 1, self.recv_stream)
 
+        quant_meta = cast(dict[str, Any] | None, data.get("quant_meta"))
+        tensor = self._maybe_dequantize_tensor(tensor, quant_meta)
+
         return tensor
 
     def listen_for_requests(self):
@@ -402,6 +410,8 @@ class P2pNcclEngine:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote_address.decode()]
                     self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    quant_meta = cast(dict[str, Any] | None, data.get("quant_meta"))
+                    tensor = self._maybe_dequantize_tensor(tensor, quant_meta)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if self.buffer_size + tensor_size > self.buffer_size_threshold:
                         # Store Tensor in memory pool
@@ -503,7 +513,8 @@ class P2pNcclEngine:
         if item.remote_address not in self.socks:
             self.create_connect(item.remote_address)
 
-        tensor = item.tensor
+        tensor = item.tensor.to(self.device)
+        tensor, quant_meta = self._quantize_tensor_for_send(tensor)
 
         sock = self.socks[item.remote_address]
         comm, rank = self.comms[item.remote_address]
@@ -513,6 +524,8 @@ class P2pNcclEngine:
             "shape": tensor.shape,
             "dtype": str(tensor.dtype).replace("torch.", ""),
         }
+        if quant_meta is not None:
+            data["quant_meta"] = quant_meta
         sock.send(msgpack.dumps(data))
 
         response = sock.recv()
@@ -530,7 +543,7 @@ class P2pNcclEngine:
             )
             return False
 
-        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
+        self.send(comm, tensor, rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self.have_sent_tensor_id(item.tensor_id)
@@ -585,6 +598,42 @@ class P2pNcclEngine:
         while True:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
+
+    def _quantize_tensor_for_send(
+        self, tensor: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, Any] | None]:
+        if not self.enable_kv_quantization:
+            return tensor, None
+
+        abs_max = tensor.abs().max()
+        max_value = abs_max.item() if abs_max.numel() > 0 else 0.0
+        if max_value == 0:
+            scale = 1.0
+        else:
+            scale = float(max_value / 127.0)
+            if scale == 0:
+                scale = 1.0
+
+        q_tensor = torch.clamp(torch.round(tensor / scale), -128, 127).to(torch.int8)
+        quant_meta = {
+            "scale": scale,
+            "orig_dtype": str(tensor.dtype).replace("torch.", ""),
+        }
+        return q_tensor, quant_meta
+
+    def _maybe_dequantize_tensor(
+        self, tensor: torch.Tensor, quant_meta: dict[str, Any] | None
+    ) -> torch.Tensor:
+        if not quant_meta:
+            return tensor
+
+        scale = float(quant_meta.get("scale", 1.0))
+        if scale == 0.0:
+            scale = 1.0
+        orig_dtype = getattr(torch, quant_meta["orig_dtype"])
+        dequant = tensor.to(orig_dtype)
+        dequant.mul_(scale)
+        return dequant
 
     def send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
