@@ -85,7 +85,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -1290,6 +1290,8 @@ class DeepseekV2Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        self.aux_hidden_state_layers = tuple[int, ...]()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1325,10 +1327,14 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
-            )
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+            start=self.start_layer,
+        ):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1336,6 +1342,8 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1381,7 +1389,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1459,6 +1467,13 @@ class DeepseekV2ForCausalLM(
                 self.moe_layers.append(layer.mlp.experts)
 
         self.extract_moe_parameters(example_moe)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
