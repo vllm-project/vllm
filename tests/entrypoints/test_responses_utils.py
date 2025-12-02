@@ -5,6 +5,8 @@ import pytest
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
     Content,
     ResponseReasoningItem,
@@ -101,3 +103,22 @@ class TestResponsesUtils:
         )
         with pytest.raises(ValueError):
             construct_chat_message_with_tool_call(item)
+
+        output_item = ResponseOutputMessage(
+            id="msg_bf585bbbe3d500e0",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="dongyi",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+
+        formatted_item = construct_chat_message_with_tool_call(output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == "dongyi"

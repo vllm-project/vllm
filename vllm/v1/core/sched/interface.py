@@ -152,10 +152,16 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
         """Reset the prefix cache for KV cache.
 
         This is particularly required when the model weights are live-updated.
+
+        Args:
+            reset_running_requests: If True, all the running requests will be
+                preempted and moved to the waiting queue. Otherwise, this method
+                will only reset the KV prefix cache when there is no running request
+                taking KV cache.
         """
         raise NotImplementedError
 
