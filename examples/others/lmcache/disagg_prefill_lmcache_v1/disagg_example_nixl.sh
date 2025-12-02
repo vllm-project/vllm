@@ -139,7 +139,7 @@ main() {
     vllm bench serve --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 30 --burstiness 100 --request-rate 1 | tee benchmark.log
+        --num-prompts 30 --max-concurrency 10 --request-rate 1 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
