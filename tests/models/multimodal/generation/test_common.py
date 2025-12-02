@@ -32,7 +32,7 @@ from ....conftest import (
 from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
-from .vlm_utils.case_filtering import get_model_type_cases, get_parametrized_options
+from .vlm_utils.case_filtering import get_parametrized_options
 from .vlm_utils.types import (
     CustomTestOptions,
     ExpandableVLMTestArgs,
@@ -948,20 +948,24 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 # - video
 # - audio
 # - custom inputs
-@pytest.mark.parametrize("model_type", list(VLM_TEST_SETTINGS.keys()))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.NO_INPUTS,
+        create_new_process_for_each_test=False,
+    ),
+)
 def test_models_initialization(
     model_type: str,
+    test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
 ):
     model_test_info = VLM_TEST_SETTINGS[model_type]
-    test_cases = get_model_type_cases(
-        model_type, model_test_info, VLMTestType.NO_INPUTS
-    )
-    assert len(test_cases) == 1, "There should be only one initialization test case"
     runners.run_model_initialization_test(
         model_test_info=model_test_info,
-        test_case=test_cases[0],
+        test_case=test_case,
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
