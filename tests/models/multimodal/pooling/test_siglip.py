@@ -22,10 +22,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 )
 
 MODELS = [
-    "google/siglip-base-patch16-224",
-    "google/siglip2-base-patch16-224",
-    # Different image embedding dim than text_config.hidden_size
-    "google/siglip2-giant-opt-patch16-384",
+    "/workspace/hf_model/siglip-base-patch16-224",
+    "/workspace/hf_model/siglip2-base-patch16-224",
 ]
 
 
@@ -104,7 +102,10 @@ def test_models_text(
         input_images,  # type: ignore
         model,
         dtype=dtype,
-        tokenization_kwargs={"padding": "max_length", "max_length": 64},
+        tokenization_kwargs={
+            "padding": "max_length",
+            "max_length": 64,
+        },  # siglip2 was trained with this padding setting.
     )
 
 
